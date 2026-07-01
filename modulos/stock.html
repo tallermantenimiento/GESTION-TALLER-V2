@@ -6627,230 +6627,88 @@ function LDH_closeMaintenanceModal(){
 </script>
 
 
-<!-- ===== LDH STOCK CANTIDADES ESTRICTAS EN FILA + MOVIMIENTOS v1 ===== -->
+
+
+<!-- ===== LDH STOCK: CANTIDAD DIRECTA ESTABLE v4 ===== -->
 <script>
 (function(){
-  if(window.__LDH_STOCK_QTY_STRICT_ROW_V1) return;
-  window.__LDH_STOCK_QTY_STRICT_ROW_V1 = true;
-
-  const KEY = 'ldh_v2_company_stock_v1';
-  function n(v){ const x = Number(v || 0); return Number.isFinite(x) ? x : 0; }
-  function ss(v){ return String(v == null ? '' : v); }
-  function readDB(){ try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }catch(e){ return null; } }
-  function writeDB(d){ try{ if(d){ d.updatedAt = new Date().toISOString(); localStorage.setItem(KEY, JSON.stringify(d)); } }catch(e){} }
-  function rowKey(companyId, materialId){ return ss(companyId) + '|' + ss(materialId); }
-  function moveSign(t){
-    t = ss(t || 'entrada').toLowerCase();
-    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return 0;
-    if(t === 'salida' || t === 'ajuste_neg' || t === 'consumo' || t === 'out') return -1;
-    return 1;
-  }
-  function movementSum(d, companyId, materialId){
-    let total = 0, count = 0;
-    (Array.isArray(d && d.movements) ? d.movements : []).forEach(m => {
-      if(ss(m && m.companyId) !== ss(companyId)) return;
-      if(ss(m && (m.materialId || m.matId)) !== ss(materialId)) return;
-      const sign = moveSign(m && (m.type || m.tipo));
-      if(!sign) return;
-      total += sign * n(m && (m.qty || m.cantidad));
-      count++;
-    });
-    return {total, count};
-  }
-  function strictSyncPhysicalFields(d){
-    if(!d || typeof d !== 'object') return false;
-    d.stock = Array.isArray(d.stock) ? d.stock : [];
-    d.movements = Array.isArray(d.movements) ? d.movements : [];
-    let changed = false;
-    d.stock.forEach(st => {
-      if(!st) return;
-      const res = movementSum(d, st.companyId, st.materialId);
-      if(res.count > 0){
-        const val = res.total;
-        ['physicalQty','qtyPhysical','fisico','realQty','stockFisico'].forEach(k => {
-          if(n(st[k]) !== val){ st[k] = val; changed = true; }
-        });
-        if(st.physicalSource !== 'movements'){ st.physicalSource = 'movements'; changed = true; }
-        if(n(st.physicalMovementCount) !== res.count){ st.physicalMovementCount = res.count; changed = true; }
-      }else{
-        const fallback = n(st.physicalQty ?? st.qtyPhysical ?? st.fisico ?? st.realQty ?? st.stockFisico ?? st.qty ?? st.cantidad ?? 0);
-        ['physicalQty','qtyPhysical','fisico','realQty','stockFisico'].forEach(k => {
-          if(n(st[k]) !== fallback){ st[k] = fallback; changed = true; }
-        });
-        if(!st.physicalSource){ st.physicalSource = 'row'; changed = true; }
-      }
-    });
-    if(changed) d.updatedAt = new Date().toISOString();
-    return changed;
-  }
-  window.__ldhStockSyncPhysicalFields = function(){
-    const d = readDB();
-    if(!d) return false;
-    const changed = strictSyncPhysicalFields(d);
-    if(changed) writeDB(d);
-    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:cantidad_fisica_en_fila'); }catch(e){}
-    try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){}
-    return changed;
-  };
-
-  function installRealStock(){
-    if(typeof window.realStock !== 'function') return false;
-    if(window.realStock.__ldhQtyStrictRow) return true;
-    const oldReal = window.realStock;
-    window.realStock = function(companyId, materialId){
-      try{
-        const d = (typeof db !== 'undefined' && db) ? db : readDB();
-        if(d){
-          const res = movementSum(d, companyId, materialId);
-          if(res.count > 0) return res.total;
-          const st = (Array.isArray(d.stock) ? d.stock : []).find(x => ss(x && x.companyId) === ss(companyId) && ss(x && x.materialId) === ss(materialId));
-          if(st) return n(st.physicalQty ?? st.qtyPhysical ?? st.fisico ?? st.realQty ?? st.stockFisico ?? st.qty ?? st.cantidad ?? 0);
-        }
-      }catch(e){}
-      return oldReal.apply(this, arguments);
-    };
-    window.realStock.__ldhQtyStrictRow = true;
-    return true;
-  }
-
-  function forceUpload(reason){
-    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:cantidad'); }catch(e){}
-    setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){} }, 80);
-    setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){} }, 700);
-    setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){} }, 1800);
-  }
-
-  function patchSave(){
-    if(typeof window.save !== 'function') return false;
-    if(window.save.__ldhQtyStrictRow) return true;
-    const oldSave = window.save;
-    window.save = function(){
-      try{ if(typeof db !== 'undefined' && db) strictSyncPhysicalFields(db); }catch(e){}
-      const r = oldSave.apply(this, arguments);
-      try{ window.__ldhStockSyncPhysicalFields(); }catch(e){}
-      forceUpload('stock:save_cantidad');
-      return r;
-    };
-    window.save.__ldhQtyStrictRow = true;
-    return true;
-  }
-
-  function patchSaveMove(){
-    if(typeof window.saveMove !== 'function') return false;
-    if(window.saveMove.__ldhQtyStrictRow) return true;
-    const oldMove = window.saveMove;
-    window.saveMove = function(type){
-      const r = oldMove.apply(this, arguments);
-      setTimeout(()=>{
-        try{ if(typeof db !== 'undefined' && db){ strictSyncPhysicalFields(db); localStorage.setItem(KEY, JSON.stringify(db)); } }catch(e){}
-        try{ window.__ldhStockSyncPhysicalFields(); }catch(e){}
-        try{ if(typeof render === 'function') render(); }catch(e){}
-        forceUpload('stock:movimiento_cantidad_estricta');
-      }, 120);
-      return r;
-    };
-    window.saveMove.__ldhQtyStrictRow = true;
-    return true;
-  }
-
-  function patchSaveMaterial(){
-    if(typeof window.saveMaterial !== 'function') return false;
-    if(window.saveMaterial.__ldhQtyStrictRow) return true;
-    const oldMat = window.saveMaterial;
-    window.saveMaterial = function(){
-      const r = oldMat.apply(this, arguments);
-      setTimeout(()=>{
-        try{ if(typeof db !== 'undefined' && db){ strictSyncPhysicalFields(db); localStorage.setItem(KEY, JSON.stringify(db)); } }catch(e){}
-        try{ window.__ldhStockSyncPhysicalFields(); }catch(e){}
-        try{ if(typeof render === 'function') render(); }catch(e){}
-        forceUpload('stock:material_cantidad_inicial_estricta');
-      }, 150);
-      return r;
-    };
-    window.saveMaterial.__ldhQtyStrictRow = true;
-    return true;
-  }
-
-  function boot(){
-    installRealStock(); patchSave(); patchSaveMove(); patchSaveMaterial();
-    try{ window.__ldhStockSyncPhysicalFields(); }catch(e){}
-    setTimeout(()=>{ try{ if(typeof load === 'function') load(); if(typeof render === 'function') render(); }catch(e){} }, 250);
-    if(!(installRealStock() && patchSave() && patchSaveMove() && patchSaveMaterial())) setTimeout(boot, 250);
-  }
-  boot();
-})();
-</script>
-
-
-
-<!-- ===== LDH STOCK CANTIDAD DIRECTA COMO FUENTE MAESTRA v2 ===== -->
-<script>
-(function(){
-  if(window.__LDH_STOCK_QTY_DIRECT_MASTER_V2) return;
-  window.__LDH_STOCK_QTY_DIRECT_MASTER_V2 = true;
+  if(window.__LDH_STOCK_QTY_DIRECT_STABLE_V4) return;
+  window.__LDH_STOCK_QTY_DIRECT_STABLE_V4 = true;
 
   const KEY = 'ldh_v2_company_stock_v1';
   const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','qty','cantidad'];
   function ss(v){ return String(v == null ? '' : v); }
   function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
-  function getDB(){
-    try{ if(typeof db !== 'undefined' && db) return db; }catch(e){}
-    try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }catch(e){ return null; }
-  }
-  function putDB(d){
-    try{
-      if(!d) return;
-      d.updatedAt = new Date().toISOString();
-      localStorage.setItem(KEY, JSON.stringify(d));
-    }catch(e){}
-  }
-  function rowOf(d, companyId, materialId){
-    return (Array.isArray(d && d.stock) ? d.stock : []).find(st => ss(st && st.companyId) === ss(companyId) && ss(st && st.materialId) === ss(materialId));
+  function arr(x){ return Array.isArray(x) ? x : []; }
+  function nowIso(){ return new Date().toISOString(); }
+  function currentDB(){ try{ if(typeof db !== 'undefined' && db) return db; }catch(e){} try{ return JSON.parse(localStorage.getItem(KEY)||'null'); }catch(e){ return null; } }
+  function storeDB(d){ try{ if(!d) return; d.updatedAt=nowIso(); localStorage.setItem(KEY, JSON.stringify(d)); }catch(e){} }
+  function getRow(d, companyId, materialId){ return arr(d && d.stock).find(st => ss(st && st.companyId)===ss(companyId) && ss(st && st.materialId)===ss(materialId)); }
+  function ensureRow(d, companyId, materialId){
+    if(!d) return null;
+    d.stock = arr(d.stock);
+    let st = getRow(d, companyId, materialId);
+    if(!st){
+      st = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId:companyId, materialId:materialId };
+      d.stock.push(st);
+    }
+    return st;
   }
   function hasDirectQty(st){
     if(!st) return false;
-    return QTY_FIELDS.some(k => st[k] !== undefined && st[k] !== null && st[k] !== '');
+    return QTY_FIELDS.some(k => Object.prototype.hasOwnProperty.call(st,k) && st[k] !== '' && st[k] != null && Number.isFinite(Number(st[k])));
   }
   function movementSum(d, companyId, materialId){
     let total = 0;
-    (Array.isArray(d && d.movements) ? d.movements : []).forEach(m => {
-      if(ss(m && m.companyId) !== ss(companyId)) return;
-      if(ss(m && (m.materialId || m.matId)) !== ss(materialId)) return;
+    arr(d && d.movements).forEach(m=>{
+      if(ss(m && m.companyId)!==ss(companyId)) return;
+      if(ss(m && (m.materialId || m.matId))!==ss(materialId)) return;
       const t = ss(m && (m.type || m.tipo || 'entrada')).toLowerCase();
       const q = n(m && (m.qty ?? m.cantidad));
       if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return;
-      if(t === 'salida' || t === 'ajuste_neg' || t === 'consumo' || t === 'out') total -= q;
+      if(t==='salida' || t==='ajuste_neg' || t==='consumo' || t==='out') total -= q;
       else total += q;
     });
     return total;
   }
-  function readQty(d, companyId, materialId){
-    const st = rowOf(d, companyId, materialId);
+  function readQtyFromRowOrMovements(d, companyId, materialId){
+    const st = getRow(d, companyId, materialId);
     if(st && hasDirectQty(st)){
       for(const k of QTY_FIELDS){
-        if(st[k] !== undefined && st[k] !== null && st[k] !== '') return n(st[k]);
+        if(Object.prototype.hasOwnProperty.call(st,k) && st[k] !== '' && st[k] != null && Number.isFinite(Number(st[k]))) return n(st[k]);
       }
     }
     return movementSum(d, companyId, materialId);
   }
-  function writeQty(d, companyId, materialId, value){
-    if(!d) return false;
-    d.stock = Array.isArray(d.stock) ? d.stock : [];
-    let st = rowOf(d, companyId, materialId);
-    if(!st){
-      st = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId, materialId };
-      d.stock.push(st);
-    }
+  function setQty(d, companyId, materialId, value){
+    const st = ensureRow(d, companyId, materialId);
+    if(!st) return false;
     const val = n(value);
-    QTY_FIELDS.forEach(k => { st[k] = val; });
-    st.physicalSource = 'direct_master';
-    st.physicalUpdatedAt = new Date().toISOString();
-    d.updatedAt = new Date().toISOString();
+    QTY_FIELDS.forEach(k => st[k] = val);
+    st.physicalSource = 'direct_stable';
+    st.physicalUpdatedAt = nowIso();
+    st.physicalManualMaster = true;
     return true;
   }
-  function upload(reason){
-    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:cantidad_directa'); }catch(e){}
-    [60, 350, 900, 1800].forEach(ms => setTimeout(()=>{
+  function migrateMissingOnly(){
+    const d = currentDB();
+    if(!d) return false;
+    let changed = false;
+    arr(d.stock).forEach(st=>{
+      if(!st || !st.companyId || !st.materialId) return;
+      if(hasDirectQty(st)) return;
+      const val = movementSum(d, st.companyId, st.materialId);
+      QTY_FIELDS.forEach(k => st[k] = val);
+      st.physicalSource = 'migrated_from_movements_once';
+      st.physicalUpdatedAt = nowIso();
+      changed = true;
+    });
+    if(changed) storeDB(d);
+    return changed;
+  }
+  function syncNow(reason){
+    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:cantidad_directa_estable'); }catch(e){}
+    [80, 350, 900, 1800].forEach(ms => setTimeout(()=>{
       try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){}
     }, ms));
   }
@@ -6858,18 +6716,49 @@ function LDH_closeMaintenanceModal(){
 
   function patchRealStock(){
     if(typeof window.realStock !== 'function') return false;
-    if(window.realStock.__ldhQtyDirectMasterV2) return true;
+    if(window.realStock.__ldhDirectStableV4) return true;
     const old = window.realStock;
     window.realStock = function(companyId, materialId){
-      try{ return readQty(getDB(), companyId, materialId); }catch(e){ return old.apply(this, arguments); }
+      try{
+        const d = currentDB();
+        if(d) return readQtyFromRowOrMovements(d, companyId, materialId);
+      }catch(e){}
+      return old.apply(this, arguments);
     };
-    window.realStock.__ldhQtyDirectMasterV2 = true;
+    window.realStock.__ldhDirectStableV4 = true;
     return true;
   }
 
-  function patchMove(){
+  function patchSaveMaterial(){
+    if(typeof window.saveMaterial !== 'function') return false;
+    if(window.saveMaterial.__ldhDirectStableV4) return true;
+    const old = window.saveMaterial;
+    window.saveMaterial = function(){
+      let initial = 0, companyId = '', beforeIds = new Set();
+      try{
+        initial = n(document.getElementById('matInitial') && document.getElementById('matInitial').value);
+        companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
+        arr(currentDB() && currentDB().materials).forEach(m => beforeIds.add(ss(m && m.id)));
+      }catch(e){}
+      const ret = old.apply(this, arguments);
+      [40, 220, 700].forEach(ms => setTimeout(()=>{
+        try{
+          const d = currentDB();
+          const created = arr(d && d.materials).find(m => !beforeIds.has(ss(m && m.id)));
+          if(companyId && created && setQty(d, companyId, created.id, initial)){
+            storeDB(d); repaint(); syncNow('stock:material_cantidad_inicial_directa_estable');
+          }
+        }catch(e){}
+      }, ms));
+      return ret;
+    };
+    window.saveMaterial.__ldhDirectStableV4 = true;
+    return true;
+  }
+
+  function patchSaveMove(){
     if(typeof window.saveMove !== 'function') return false;
-    if(window.saveMove.__ldhQtyDirectMasterV2) return true;
+    if(window.saveMove.__ldhDirectStableV4) return true;
     const old = window.saveMove;
     window.saveMove = function(type){
       let companyId = '', materialId = '', qty = 0, before = 0, sign = 1;
@@ -6877,237 +6766,41 @@ function LDH_closeMaintenanceModal(){
         companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
         materialId = ss(document.getElementById('moveMat') && document.getElementById('moveMat').value);
         qty = n(document.getElementById('moveQty') && document.getElementById('moveQty').value);
-        sign = (ss(type).toLowerCase() === 'salida') ? -1 : 1;
-        before = readQty(getDB(), companyId, materialId);
+        sign = ss(type).toLowerCase()==='salida' ? -1 : 1;
+        before = readQtyFromRowOrMovements(currentDB(), companyId, materialId);
       }catch(e){}
       const ret = old.apply(this, arguments);
       if(companyId && materialId && qty > 0){
-        const target = before + sign * qty;
-        [20, 180, 520, 1200].forEach(ms => setTimeout(()=>{
+        const target = before + (sign * qty);
+        [20, 120, 400, 1000].forEach(ms => setTimeout(()=>{
           try{
-            const d = getDB();
-            if(writeQty(d, companyId, materialId, target)){
-              putDB(d);
+            const d = currentDB();
+            if(setQty(d, companyId, materialId, target)){
+              storeDB(d);
+              try{ if(typeof save === 'function') save(); }catch(e){}
               repaint();
-              upload('stock:entrada_salida_cantidad_directa');
+              syncNow('stock:entrada_salida_cantidad_directa_estable');
             }
-          }catch(e){ console.warn('No se pudo fijar cantidad directa', e); }
+          }catch(e){ console.warn('No se pudo fijar cantidad directa estable', e); }
         }, ms));
       }
       return ret;
     };
-    window.saveMove.__ldhQtyDirectMasterV2 = true;
-    return true;
-  }
-
-  function patchMaterial(){
-    if(typeof window.saveMaterial !== 'function') return false;
-    if(window.saveMaterial.__ldhQtyDirectMasterV2) return true;
-    const old = window.saveMaterial;
-    window.saveMaterial = function(){
-      let initial = 0, companyId = '', beforeIds = new Set();
-      try{
-        initial = n(document.getElementById('matInitial') && document.getElementById('matInitial').value);
-        companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
-        const d = getDB();
-        (Array.isArray(d && d.materials) ? d.materials : []).forEach(m => beforeIds.add(ss(m && m.id)));
-      }catch(e){}
-      const ret = old.apply(this, arguments);
-      [60, 260, 800].forEach(ms => setTimeout(()=>{
-        try{
-          const d = getDB();
-          const mats = Array.isArray(d && d.materials) ? d.materials : [];
-          const created = mats.find(m => !beforeIds.has(ss(m && m.id)));
-          if(companyId && created && writeQty(d, companyId, created.id, initial)){
-            putDB(d); repaint(); upload('stock:material_cantidad_inicial_directa');
-          }
-        }catch(e){}
-      }, ms));
-      return ret;
-    };
-    window.saveMaterial.__ldhQtyDirectMasterV2 = true;
+    window.saveMove.__ldhDirectStableV4 = true;
     return true;
   }
 
   function boot(){
-    const ok = patchRealStock() & patchMove() & patchMaterial();
+    migrateMissingOnly();
+    const ok = patchRealStock() && patchSaveMaterial() && patchSaveMove();
     if(!ok) setTimeout(boot, 200);
   }
   boot();
-  window.__ldhStockFixQtyDirectNow = function(companyId, materialId, value){
-    const d = getDB();
-    const ok = writeQty(d, companyId || (typeof activeCompany !== 'undefined' ? activeCompany : ''), materialId, value);
-    if(ok){ putDB(d); repaint(); upload('stock:fix_manual_cantidad_directa'); }
-    return ok;
-  };
-})();
-</script>
-
-
-
-<!-- ===== LDH STOCK: CANTIDAD DESDE MOVIMIENTOS AL ENTRAR Y ANTES DE SUMAR v3 ===== -->
-<script>
-(function(){
-  if(window.__LDH_STOCK_QTY_FROM_MOVEMENTS_BEFORE_MOVE_V3) return;
-  window.__LDH_STOCK_QTY_FROM_MOVEMENTS_BEFORE_MOVE_V3 = true;
-
-  const KEY = 'ldh_v2_company_stock_v1';
-  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','qty','cantidad'];
-  function ss(v){ return String(v == null ? '' : v); }
-  function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
-  function getDB(){
-    try{ if(typeof db !== 'undefined' && db) return db; }catch(e){}
-    try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }catch(e){ return null; }
-  }
-  function putDB(d){
-    try{
-      if(!d) return;
-      d.updatedAt = new Date().toISOString();
-      localStorage.setItem(KEY, JSON.stringify(d));
-    }catch(e){}
-  }
-  function moveQty(m){ return n(m && (m.qty ?? m.cantidad)); }
-  function moveSign(m){
-    const t = ss(m && (m.type || m.tipo || 'entrada')).toLowerCase();
-    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return 0;
-    if(t === 'salida' || t === 'ajuste_neg' || t === 'consumo' || t === 'out') return -1;
-    return 1;
-  }
-  function movementSum(d, companyId, materialId){
-    let total = 0;
-    (Array.isArray(d && d.movements) ? d.movements : []).forEach(m => {
-      if(ss(m && m.companyId) !== ss(companyId)) return;
-      if(ss(m && (m.materialId || m.matId)) !== ss(materialId)) return;
-      total += moveSign(m) * moveQty(m);
-    });
-    return total;
-  }
-  function rowOf(d, companyId, materialId){
-    return (Array.isArray(d && d.stock) ? d.stock : []).find(st => ss(st && st.companyId) === ss(companyId) && ss(st && st.materialId) === ss(materialId));
-  }
-  function setRowQty(d, companyId, materialId, val){
-    if(!d) return false;
-    d.stock = Array.isArray(d.stock) ? d.stock : [];
-    let st = rowOf(d, companyId, materialId);
-    if(!st){
-      st = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId, materialId };
-      d.stock.push(st);
-    }
-    QTY_FIELDS.forEach(k => st[k] = n(val));
-    st.physicalSource = 'movements_master';
-    st.physicalUpdatedAt = new Date().toISOString();
-    return true;
-  }
-  function syncAllRowsFromMovements(d){
-    if(!d) return false;
-    let changed = false;
-    const stock = Array.isArray(d.stock) ? d.stock : [];
-    stock.forEach(st => {
-      if(!st || !st.companyId || !st.materialId) return;
-      const val = movementSum(d, st.companyId, st.materialId);
-      const cur = n(st.physicalQty ?? st.qtyPhysical ?? st.fisico ?? st.realQty ?? st.stockFisico ?? st.qty ?? st.cantidad ?? 0);
-      if(cur !== val || st.physicalSource !== 'movements_master'){
-        setRowQty(d, st.companyId, st.materialId, val);
-        changed = true;
-      }
-    });
-    if(changed){ d.updatedAt = new Date().toISOString(); putDB(d); }
-    return changed;
-  }
-  function syncOneFromMovements(companyId, materialId){
-    const d = getDB();
-    if(!d || !companyId || !materialId) return 0;
-    const val = movementSum(d, companyId, materialId);
-    setRowQty(d, companyId, materialId, val);
-    d.updatedAt = new Date().toISOString();
-    putDB(d);
-    return val;
-  }
-  function upload(reason){
-    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:cantidad_movimientos_master'); }catch(e){}
-    [80, 500, 1400, 2600].forEach(ms => setTimeout(()=>{
-      try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){}
-    }, ms));
-  }
-  function repaint(){ try{ if(typeof render === 'function') render(); }catch(e){} }
-
-  function patchRealStock(){
-    if(typeof window.realStock !== 'function') return false;
-    if(window.realStock.__ldhMovementsMasterV3) return true;
-    const old = window.realStock;
-    window.realStock = function(companyId, materialId){
-      try{
-        const d = getDB();
-        if(d) return movementSum(d, companyId, materialId);
-      }catch(e){}
-      return old.apply(this, arguments);
-    };
-    window.realStock.__ldhMovementsMasterV3 = true;
-    return true;
-  }
-
-  function patchSaveMove(){
-    if(typeof window.saveMove !== 'function') return false;
-    if(window.saveMove.__ldhMovementsMasterV3) return true;
-    const old = window.saveMove;
-    window.saveMove = function(type){
-      let companyId='', materialId='';
-      try{
-        companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
-        const el = document.getElementById('moveMat');
-        materialId = ss(el && el.value);
-        // Antes de llamar a los parches anteriores, fijamos la cantidad actual real desde movimientos.
-        // Esto evita que al entrar de nuevo lea 0/1 desde campos directos antiguos.
-        if(companyId && materialId) syncOneFromMovements(companyId, materialId);
-      }catch(e){}
-      const ret = old.apply(this, arguments);
-      // Despues de que el movimiento se haya grabado, volvemos a fijar la fila desde movimientos.
-      [60, 220, 650, 1500, 3000].forEach(ms => setTimeout(()=>{
-        try{
-          if(companyId && materialId){ syncOneFromMovements(companyId, materialId); }
-          else { syncAllRowsFromMovements(getDB()); }
-          repaint();
-          upload('stock:movimiento_cantidad_movimientos_master');
-        }catch(e){}
-      }, ms));
-      return ret;
-    };
-    window.saveMove.__ldhMovementsMasterV3 = true;
-    return true;
-  }
-
-  function patchLoadAndRender(){
-    if(typeof window.load === 'function' && !window.load.__ldhMovementsMasterV3){
-      const oldLoad = window.load;
-      window.load = function(){
-        const ret = oldLoad.apply(this, arguments);
-        try{ syncAllRowsFromMovements(getDB()); }catch(e){}
-        return ret;
-      };
-      window.load.__ldhMovementsMasterV3 = true;
-    }
-    if(typeof window.render === 'function' && !window.render.__ldhMovementsMasterV3){
-      const oldRender = window.render;
-      window.render = function(){
-        try{ syncAllRowsFromMovements(getDB()); }catch(e){}
-        return oldRender.apply(this, arguments);
-      };
-      window.render.__ldhMovementsMasterV3 = true;
-    }
-  }
-
-  function boot(){
-    try{ syncAllRowsFromMovements(getDB()); }catch(e){}
-    patchRealStock();
-    patchLoadAndRender();
-    patchSaveMove();
-    repaint();
-    if(!(patchRealStock() && patchSaveMove())) setTimeout(boot, 250);
-  }
-  boot();
-  window.__ldhStockRecalcularCantidadesDesdeMovimientos = function(){
-    const ok = syncAllRowsFromMovements(getDB());
-    repaint(); upload('stock:recalcular_cantidades_desde_movimientos');
+  window.__ldhStockQtyDirectStableNow = function(companyId, materialId, value){
+    const d = currentDB();
+    const cid = companyId || (typeof activeCompany !== 'undefined' ? activeCompany : '');
+    const ok = setQty(d, cid, materialId, value);
+    if(ok){ storeDB(d); repaint(); syncNow('stock:cantidad_directa_manual'); }
     return ok;
   };
 })();
