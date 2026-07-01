@@ -5748,11 +5748,11 @@ function LDH_closeMaintenanceModal(){
 </script>
 
 
-<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
+<!-- ===== LDH STOCK SYNC DOCUMENTO PROPIO FIRESTORE v7 LAST-WRITER + BORRADOS ===== -->
 <script type="module">
 (async function(){
-  if (window.__LDH_STOCK_DOC_SYNC_INSTALLED) return;
-  window.__LDH_STOCK_DOC_SYNC_INSTALLED = true;
+  if (window.__LDH_STOCK_DOC_SYNC_V7_INSTALLED) return;
+  window.__LDH_STOCK_DOC_SYNC_V7_INSTALLED = true;
   window.__CLOUD_SYNC_DISABLE_LEGACY = true;
 
   const firebaseConfig = {
@@ -5782,9 +5782,11 @@ function LDH_closeMaintenanceModal(){
   const CHUNK = 750000;
   const CLIENT_KEY = "LDH_STOCK_SYNC_CLIENT_ID";
   const LAST_REV_KEY = "LDH_STOCK_SYNC_LAST_REV";
+  const KEY_STOCK = "ldh_v2_company_stock_v1";
+  const KEY_DELETED = "LDH_STOCK_DELETED_ITEMS_V1";
   const STOCK_KEYS = [
-    "ldh_v2_company_stock_v1",
-    "taller_stock_v3_data",
+    KEY_STOCK,
+    KEY_DELETED,
     "LDH_STOCK_PROTECTED_MANUAL_V1",
     "ldh_company_master_v1",
     "ldh_company_master_ping"
@@ -5799,8 +5801,6 @@ function LDH_closeMaintenanceModal(){
   let lastLocalDirtyAt = 0;
   let lastUserActivity = 0;
   let lastHash = "";
-
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   function clientId(){
     try{
@@ -5818,7 +5818,7 @@ function LDH_closeMaintenanceModal(){
   function write(k,v){ try{ if(v === null || typeof v === "undefined") localStorage.removeItem(k); else localStorage.setItem(k, String(v)); }catch(e){} }
   function parseJSON(raw, fb){ try{ return JSON.parse(raw || ""); }catch(e){ return fb; } }
   function now(){ return new Date().toISOString(); }
-  function norm(v){ return String(v || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
+  function toMs(v){ const t = Date.parse(String(v || "")); return Number.isFinite(t) ? t : 0; }
 
   function fastHash(str){
     let h = 2166136261;
@@ -5829,9 +5829,53 @@ function LDH_closeMaintenanceModal(){
     return String(h >>> 0) + ":" + str.length;
   }
 
-  function stripStockSamplesFromDB(obj){
-    const d = parseJSON(typeof obj === "string" ? obj : JSON.stringify(obj || {}), null);
-    if(!d || typeof d !== "object") return obj;
+  function readDeleted(){
+    const arr = parseJSON(read(KEY_DELETED), []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function saveDeleted(arr){
+    write(KEY_DELETED, JSON.stringify(Array.isArray(arr) ? arr : []));
+  }
+  function markDeletedMaterial(materialId, companyId, materialName){
+    materialId = String(materialId || "").trim();
+    companyId = String(companyId || "").trim();
+    if(!materialId || !companyId) return;
+    const arr = readDeleted();
+    const key = companyId + "|" + materialId;
+    const filtered = arr.filter(x => String(x?.companyId||"") + "|" + String(x?.materialId||"") !== key);
+    filtered.push({ materialId, companyId, materialName:String(materialName||""), deletedAt:now(), clientId:CLIENT_ID });
+    saveDeleted(filtered.slice(-500));
+  }
+  window.LDH_stockMarkDeletedMaterial = markDeletedMaterial;
+
+  function applyDeletedToDB(db){
+    if(!db || typeof db !== "object") return db;
+    const dels = readDeleted();
+    if(!Array.isArray(dels) || !dels.length) return db;
+    const exact = new Set(dels.map(x => String(x?.companyId||"") + "|" + String(x?.materialId||"")).filter(x=>x !== "|"));
+    function isDel(x){ return exact.has(String(x?.companyId||x?.empresaId||"") + "|" + String(x?.materialId||x?.matId||x?.toMaterialId||"")); }
+    db.stock = (Array.isArray(db.stock) ? db.stock : []).filter(x => !exact.has(String(x?.companyId||"") + "|" + String(x?.materialId||"")));
+    db.movements = (Array.isArray(db.movements) ? db.movements : []).filter(x => !exact.has(String(x?.companyId||"") + "|" + String(x?.materialId||"")));
+    db.reservations = (Array.isArray(db.reservations) ? db.reservations : []).filter(x => !exact.has(String(x?.companyId||"") + "|" + String(x?.materialId||"")));
+    db.reservationDebts = (Array.isArray(db.reservationDebts) ? db.reservationDebts : []).filter(x => !exact.has(String(x?.companyId||"") + "|" + String(x?.materialId||"")));
+    db.assignments = (Array.isArray(db.assignments) ? db.assignments : []).filter(x => {
+      const a = String(x?.companyId||"") + "|" + String(x?.materialId||"");
+      const b = String(x?.toCompanyId||"") + "|" + String(x?.toMaterialId||x?.materialId||"");
+      return !exact.has(a) && !exact.has(b);
+    });
+    const usedMats = new Set();
+    (db.stock||[]).forEach(x=>{ if(x?.materialId) usedMats.add(String(x.materialId)); });
+    (db.movements||[]).forEach(x=>{ if(x?.materialId) usedMats.add(String(x.materialId)); });
+    (db.reservations||[]).forEach(x=>{ if(x?.materialId) usedMats.add(String(x.materialId)); });
+    (db.assignments||[]).forEach(x=>{ if(x?.materialId) usedMats.add(String(x.materialId)); if(x?.toMaterialId) usedMats.add(String(x.toMaterialId)); });
+    (db.reservationDebts||[]).forEach(x=>{ if(x?.materialId) usedMats.add(String(x.materialId)); });
+    db.materials = (Array.isArray(db.materials) ? db.materials : []).filter(m => usedMats.has(String(m?.id||"")) || !(dels.some(d=>String(d?.materialId||"") === String(m?.id||""))));
+    return db;
+  }
+
+  function stripSamplesFromDBRaw(raw){
+    const d = parseJSON(raw, null);
+    if(!d || typeof d !== "object") return raw;
     const sampleMaterialIds = new Set();
     if(Array.isArray(d.materials)){
       d.materials = d.materials.filter(m=>{
@@ -5840,29 +5884,17 @@ function LDH_closeMaintenanceModal(){
         return !isSample;
       });
     }
-    if(Array.isArray(d.stock)){
-      d.stock = d.stock.filter(x=>!(x && (x.sample === true || sampleMaterialIds.has(String(x.materialId || "")))));
-    }
-    if(Array.isArray(d.movements)){
-      d.movements = d.movements.filter(x=>{
-        if(!x) return false;
-        if(sampleMaterialIds.has(String(x.materialId || ""))) return false;
-        if(/muestra/i.test(String(x.note || x.nota || x.reason || ""))) return false;
-        return true;
-      });
-    }
-    ["jobs","reservations","assignments","reservationDebts"].forEach(k=>{
-      if(Array.isArray(d[k])) d[k] = d[k].filter(x=>!(x && x.sample === true));
-    });
+    if(Array.isArray(d.stock)) d.stock = d.stock.filter(x=>!(x && (x.sample === true || sampleMaterialIds.has(String(x.materialId || "")))));
+    if(Array.isArray(d.movements)) d.movements = d.movements.filter(x=> x && !x.sample && !sampleMaterialIds.has(String(x.materialId || "")) && !/muestra/i.test(String(x.note || x.nota || x.reason || "")));
+    ["jobs","reservations","assignments","reservationDebts"].forEach(k=>{ if(Array.isArray(d[k])) d[k] = d[k].filter(x=>!(x && x.sample === true)); });
     d.sampleLoaded = false;
+    applyDeletedToDB(d);
     return JSON.stringify(d);
   }
 
-  function sanitizeStockStorage(all){
+  function sanitizeStorage(all){
     const out = Object.assign({}, all || {});
-    if(out["ldh_v2_company_stock_v1"]){
-      out["ldh_v2_company_stock_v1"] = stripStockSamplesFromDB(out["ldh_v2_company_stock_v1"]);
-    }
+    if(out[KEY_STOCK]) out[KEY_STOCK] = stripSamplesFromDBRaw(out[KEY_STOCK]);
     return out;
   }
 
@@ -5872,11 +5904,11 @@ function LDH_closeMaintenanceModal(){
       const v = read(k);
       if(v !== null && typeof v !== "undefined") all[k] = v;
     });
-    return sanitizeStockStorage(all);
+    return sanitizeStorage(all);
   }
 
   function hasLocalStock(){
-    const raw = read("ldh_v2_company_stock_v1");
+    const raw = read(KEY_STOCK);
     if(!raw || String(raw).length < 20) return false;
     const db = parseJSON(raw, null);
     if(!db) return false;
@@ -5886,82 +5918,9 @@ function LDH_closeMaintenanceModal(){
            (Array.isArray(db.companies) && db.companies.length > 0);
   }
 
-  function identityMaterial(x){
-    return String(x?.id || x?.materialId || (norm(x?.name || x?.nombre) + "|" + norm(x?.type || x?.tipo) + "|" + norm(x?.family || x?.familia)));
-  }
-
-  function mergeArray(remoteArr, localArr, keyFn){
-    const out = [];
-    const pos = new Map();
-    function put(x, preferLocal){
-      if(!x || typeof x !== "object") return;
-      const k = keyFn(x) || ("idx_" + out.length + "_" + Math.random());
-      if(pos.has(k)){
-        const old = out[pos.get(k)] || {};
-        out[pos.get(k)] = preferLocal ? Object.assign({}, old, x) : Object.assign({}, x, old);
-      }else{
-        pos.set(k, out.length);
-        out.push(Object.assign({}, x));
-      }
-    }
-    (Array.isArray(remoteArr) ? remoteArr : []).forEach(x=>put(x, false));
-    (Array.isArray(localArr) ? localArr : []).forEach(x=>put(x, true));
-    return out;
-  }
-
-  function sanitizeManualStock(db){
-    if(!db || typeof db !== "object") return db;
-    db.companies = Array.isArray(db.companies) ? db.companies : [];
-    db.materials = Array.isArray(db.materials) ? db.materials : [];
-    db.stock = Array.isArray(db.stock) ? db.stock : [];
-    db.movements = Array.isArray(db.movements) ? db.movements : [];
-    db.jobs = Array.isArray(db.jobs) ? db.jobs : [];
-    db.reservations = Array.isArray(db.reservations) ? db.reservations : [];
-    db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
-    db.reservationDebts = Array.isArray(db.reservationDebts) ? db.reservationDebts : [];
-
-    const manualIds = new Set(db.materials.filter(m => m && (m.createdFromStockManual || m.manualStockOnly)).map(m => String(m.id || "")).filter(Boolean));
-    if(manualIds.size){
-      // Un material creado manualmente en Stock no debe heredar asignaciones antiguas por coincidencia de texto.
-      db.assignments = db.assignments.filter(a => !manualIds.has(String(a?.materialId || a?.matId || "")));
-      db.reservations = db.reservations.filter(a => !manualIds.has(String(a?.materialId || a?.matId || "")));
-      db.reservationDebts = db.reservationDebts.filter(a => !manualIds.has(String(a?.materialId || a?.matId || "")));
-    }
-    return db;
-  }
-
-  function mergeStockDB(remoteRaw, localRaw){
-    const r = sanitizeManualStock(parseJSON(remoteRaw, null));
-    const l = sanitizeManualStock(parseJSON(localRaw, null));
-    if(!r && !l) return null;
-    if(!r) return JSON.stringify(l);
-    if(!l) return JSON.stringify(r);
-
-    const m = Object.assign({}, r, l);
-    m.companies = mergeArray(r.companies, l.companies, x => String(x?.id || x?.companyId || x?.code || x?.codigo || norm(x?.name || x?.nombre)));
-    m.materials = mergeArray(r.materials, l.materials, identityMaterial);
-    m.stock = mergeArray(r.stock, l.stock, x => String(x?.id || ((x?.companyId || x?.empresaId || "") + "|" + (x?.materialId || x?.matId || ""))));
-    m.movements = mergeArray(r.movements, l.movements, x => String(x?.id || [x?.companyId,x?.materialId,x?.type,x?.tipo,x?.qty,x?.cantidad,x?.date,x?.fecha,x?.note,x?.obs].map(v=>String(v||"")).join("|")));
-    m.jobs = mergeArray(r.jobs, l.jobs, x => String(x?.id || x?.ref || x?.reference || x?.referencia || ""));
-    m.reservations = mergeArray(r.reservations, l.reservations, x => String(x?.id || [x?.companyId,x?.materialId,x?.jobId,x?.qty,x?.date].map(v=>String(v||"")).join("|")));
-    m.assignments = mergeArray(r.assignments, l.assignments, x => String(x?.id || [x?.companyId,x?.materialId,x?.jobId,x?.qty,x?.date,x?.source].map(v=>String(v||"")).join("|")));
-    m.reservationDebts = mergeArray(r.reservationDebts, l.reservationDebts, x => String(x?.id || [x?.companyId,x?.materialId,x?.jobId,x?.qty,x?.date].map(v=>String(v||"")).join("|")));
-    m.updatedAt = now();
-    sanitizeManualStock(m);
-    return JSON.stringify(m);
-  }
-
-  function mergeStockStorage(remoteAll, localAll){
-    remoteAll = sanitizeStockStorage(remoteAll || {});
-    localAll = sanitizeStockStorage(localAll || {});
-    const out = Object.assign({}, remoteAll || {}, localAll || {});
-    out["ldh_v2_company_stock_v1"] = mergeStockDB(remoteAll?.["ldh_v2_company_stock_v1"], localAll?.["ldh_v2_company_stock_v1"]);
-    if(!out["ldh_v2_company_stock_v1"]){ delete out["ldh_v2_company_stock_v1"]; }
-    // Mantener compatibilidad con módulos antiguos que miran taller_stock_v3_data.
-    if(localAll?.["taller_stock_v3_data"] || remoteAll?.["taller_stock_v3_data"]){
-      out["taller_stock_v3_data"] = localAll?.["taller_stock_v3_data"] || remoteAll?.["taller_stock_v3_data"];
-    }
-    return out;
+  function stockUpdatedAt(all){
+    const db = parseJSON((all || {})[KEY_STOCK], null);
+    return toMs(db?.updatedAt || db?.updated_at || db?.modifiedAt);
   }
 
   async function readRemoteStock(){
@@ -5976,11 +5935,11 @@ function LDH_closeMaintenanceModal(){
       if(!cSnap.exists()) throw new Error("Falta chunk stock " + i);
       json += cSnap.data().part || "";
     }
-    return { meta, all: sanitizeStockStorage(JSON.parse(json)) };
+    return { meta, all: sanitizeStorage(JSON.parse(json)) };
   }
 
   async function writeRemoteStock(all, forceRevision){
-    all = sanitizeStockStorage(all || {});
+    all = sanitizeStorage(all || {});
     const json = JSON.stringify(all || {});
     const total = Math.max(1, Math.ceil(json.length / CHUNK));
     const revision = forceRevision || (Date.now().toString(36) + "_" + CLIENT_ID);
@@ -5991,12 +5950,13 @@ function LDH_closeMaintenanceModal(){
     await setDoc(doc(fsdb, ...META_PATH), {
       updatedAt: serverTimestamp(),
       updatedAtLocal: now(),
+      stockUpdatedAt: stockUpdatedAt(all) || Date.now(),
       revision,
       clientId: CLIENT_ID,
       totalChunks: total,
       totalBytes: json.length,
       totalKeys: Object.keys(all || {}).length,
-      mode: "GESTION_TALLER_V2_STOCK_DOCUMENTO_PROPIO"
+      mode: "GESTION_TALLER_V2_STOCK_DOCUMENTO_PROPIO_V7"
     }, { merge:false });
     try{ sessionStorage.setItem(LAST_REV_KEY, revision); }catch(e){}
     lastHash = fastHash(json);
@@ -6005,23 +5965,23 @@ function LDH_closeMaintenanceModal(){
   }
 
   function applyLocalStock(all, opts){
-    all = sanitizeStockStorage(all || {});
+    all = sanitizeStorage(all || {});
     opts = opts || {};
     applyingRemote = true;
     try{
-      Object.entries(all || {}).forEach(([k,v])=>{ if(STOCK_KEYS.includes(k)) write(k,v); });
+      // Documento Stock es la fuente maestra: reemplaza las claves de Stock.
+      STOCK_KEYS.forEach(k=>{
+        if(Object.prototype.hasOwnProperty.call(all, k)) write(k, all[k]);
+        else if(k !== KEY_DELETED) write(k, null);
+      });
       try{
         if(typeof load === "function") load();
-        if(typeof render === "function") render();
         if(typeof refreshSelectors === "function") refreshSelectors();
+        if(typeof render === "function") render();
       }catch(e){ console.warn("StockSync: no se pudo refrescar pantalla", e); }
-
-      // En Stock algunas listas se construyen al cargar la pagina y no siempre
-      // refrescan bien solo con render(). Si el cambio viene de otro PC/navegador,
-      // recargamos la pagina cuando no hay formulario en edicion para que se vea al momento.
       if(opts.reloadAfterApply && !isEditing()){
         setTimeout(()=>{
-          try{ location.replace(location.pathname + "?v=stock-doc-sync-ui-" + Date.now()); }catch(e){ location.reload(); }
+          try{ location.replace(location.pathname + "?v=stock-v7-" + Date.now()); }catch(e){ location.reload(); }
         }, 250);
       }
     }finally{
@@ -6044,11 +6004,7 @@ function LDH_closeMaintenanceModal(){
     if(!hasLocalStock()) return { skipped:true, reason:"empty_stock" };
     saving = true;
     try{
-      let localAll = collectStockStorage();
-      try{
-        const remote = await readRemoteStock();
-        if(remote && remote.all) localAll = mergeStockStorage(remote.all, localAll);
-      }catch(e){ console.warn("StockSync: no se pudo leer remoto antes de subir", e); }
+      const localAll = collectStockStorage();
       const hash = fastHash(JSON.stringify(localAll));
       if(!force && !localDirty && hash === lastHash) return { skipped:true, reason:"no_changes" };
       const res = await writeRemoteStock(localAll);
@@ -6062,26 +6018,19 @@ function LDH_closeMaintenanceModal(){
   async function restoreStockNow(){
     if(!auth.currentUser) return { skipped:true, reason:"no_user" };
     if(saving) return { skipped:true, reason:"saving" };
-    applyingRemote = true;
-    try{
-      const remote = await readRemoteStock();
-      if(!remote || !remote.all) return { skipped:true, reason:"no_remote_stock" };
-      let all = remote.all;
-      if(hasLocalStock()) all = mergeStockStorage(remote.all, collectStockStorage());
-      applyLocalStock(all);
-      try{ sessionStorage.setItem(LAST_REV_KEY, remote.meta.revision || ""); }catch(e){}
-      console.log("✅ StockSync: stock restaurado desde Firestore propio", { revision: remote.meta.revision });
-      return { revision: remote.meta.revision, keys:Object.keys(all).length };
-    }finally{
-      applyingRemote = false;
-    }
+    const remote = await readRemoteStock();
+    if(!remote || !remote.all) return { skipped:true, reason:"no_remote_stock" };
+    applyLocalStock(remote.all, { reloadAfterApply:false });
+    try{ sessionStorage.setItem(LAST_REV_KEY, remote.meta.revision || ""); }catch(e){}
+    console.log("✅ StockSync: stock restaurado desde Firestore propio", { revision: remote.meta.revision });
+    return { revision: remote.meta.revision, keys:Object.keys(remote.all).length };
   }
 
   function scheduleStockBackup(reason){
     if(!started || applyingRemote) return;
     markDirty(reason);
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(()=>syncStockNow(true).catch(e=>console.warn("❌ StockSync backup ERROR", e)), 700);
+    saveTimer = setTimeout(()=>syncStockNow(true).catch(e=>console.warn("❌ StockSync backup ERROR", e)), 500);
   }
 
   if(!window.__LDH_STOCK_STORAGE_PATCHED){
@@ -6101,20 +6050,50 @@ function LDH_closeMaintenanceModal(){
     };
   }
 
+  // Registrar borrados de material para que una copia remota antigua no los resucite.
+  function patchDeleteMaterial(){
+    if(typeof window.deleteMaterialFromCompany !== "function" || window.deleteMaterialFromCompany.__ldhStockV7Wrapped) return false;
+    const oldDelete = window.deleteMaterialFromCompany;
+    window.deleteMaterialFromCompany = function(materialId){
+      const companyId = String(window.activeCompany || (typeof activeCompany !== "undefined" ? activeCompany : "") || "");
+      let materialName = "";
+      try{ materialName = (typeof materialById === "function" ? materialById(materialId)?.name : "") || ""; }catch(e){}
+      const beforeRaw = read(KEY_STOCK);
+      const ret = oldDelete.apply(this, arguments);
+      setTimeout(()=>{
+        try{
+          const after = parseJSON(read(KEY_STOCK), {});
+          const still = (after.stock||[]).some(s => String(s.companyId||"") === companyId && String(s.materialId||"") === String(materialId||""));
+          const before = parseJSON(beforeRaw, {});
+          const had = (before.stock||[]).some(s => String(s.companyId||"") === companyId && String(s.materialId||"") === String(materialId||""));
+          if(had && !still){
+            markDeletedMaterial(materialId, companyId, materialName);
+            // Reaplicar borrados sobre la DB cargada y subir inmediatamente.
+            const db0 = parseJSON(read(KEY_STOCK), null);
+            if(db0){ write(KEY_STOCK, JSON.stringify(applyDeletedToDB(db0))); }
+            markDirty("deleteMaterialFromCompany");
+            syncStockNow(true).catch(e=>console.warn("❌ StockSync delete upload ERROR", e));
+          }
+        }catch(e){ console.warn("StockSync: no se pudo registrar borrado", e); }
+      }, 120);
+      return ret;
+    };
+    window.deleteMaterialFromCompany.__ldhStockV7Wrapped = true;
+    return true;
+  }
+  (function waitPatch(){ if(!patchDeleteMaterial()) setTimeout(waitPatch, 200); })();
+
   async function applyRemoteRevision(rev){
     if(!rev || saving || applyingRemote) return;
-    if(localDirty && Date.now() - lastLocalDirtyAt < 8000){
-      console.log("⏸️ StockSync: cambio remoto aplazado, subo stock local primero");
+    if(localDirty && Date.now() - lastLocalDirtyAt < 5000){
+      console.log("⏸️ StockSync: remoto aplazado; subo cambio local primero");
       await syncStockNow(true);
       return;
     }
     const remote = await readRemoteStock();
     if(!remote || !remote.all) return;
-    let all = remote.all;
-    if(hasLocalStock()) all = mergeStockStorage(remote.all, collectStockStorage());
-    applyLocalStock(all, { reloadAfterApply:true });
+    applyLocalStock(remote.all, { reloadAfterApply:true });
     try{ sessionStorage.setItem(LAST_REV_KEY, rev); }catch(e){}
-    if(localDirty){ await syncStockNow(true); }
     console.log("⬇️ StockSync: aplicado cambio remoto de stock", rev);
   }
 
@@ -6124,7 +6103,9 @@ function LDH_closeMaintenanceModal(){
     const ae = document.activeElement;
     const tag = ae && ae.tagName ? ae.tagName.toLowerCase() : "";
     if(ae && (tag === "input" || tag === "textarea" || tag === "select" || ae.isContentEditable)) return true;
-    if(Date.now() - lastUserActivity < 5000) return true;
+    if(Date.now() - lastUserActivity < 3500) return true;
+    const modal = document.querySelector('.modal,.modal-backdrop,#modal,[role="dialog"]');
+    if(modal && getComputedStyle(modal).display !== 'none') return true;
     return false;
   }
 
@@ -6136,10 +6117,12 @@ function LDH_closeMaintenanceModal(){
     try{ remote = await readRemoteStock(); }catch(e){ console.warn("StockSync: remoto no disponible todavía", e); }
 
     if(remote && remote.all){
-      if(hasLocalStock()){
-        const merged = mergeStockStorage(remote.all, collectStockStorage());
-        applyLocalStock(merged);
-        await writeRemoteStock(merged);
+      const localAll = collectStockStorage();
+      const localTime = hasLocalStock() ? stockUpdatedAt(localAll) : 0;
+      const remoteTime = stockUpdatedAt(remote.all) || Number(remote.meta.stockUpdatedAt || 0) || 0;
+      // Si este navegador tiene un Stock más nuevo, lo hacemos maestro. Si no, Firestore manda.
+      if(hasLocalStock() && localTime > remoteTime + 1000){
+        await writeRemoteStock(localAll);
       }else{
         applyLocalStock(remote.all);
       }
@@ -6156,15 +6139,15 @@ function LDH_closeMaintenanceModal(){
         const lastRev = sessionStorage.getItem(LAST_REV_KEY) || "";
         if(!rev || meta.clientId === CLIENT_ID || rev === lastRev) return;
         if(isEditing()){
-          setTimeout(()=>applyRemoteRevision(rev).catch(e=>console.warn("❌ StockSync delayed ERROR", e)), 4500);
+          setTimeout(()=>applyRemoteRevision(rev).catch(e=>console.warn("❌ StockSync delayed ERROR", e)), 3500);
           return;
         }
         await applyRemoteRevision(rev);
       }catch(e){ console.warn("❌ StockSync snapshot ERROR", e); }
     });
 
-    setInterval(()=>{ if(started && localDirty) syncStockNow(true).catch(e=>console.warn("❌ StockSync periodic ERROR", e)); }, 2500);
-    console.log("🔁 StockSync documento propio activo:", firebaseConfig.projectId, META_PATH.join("/"));
+    setInterval(()=>{ if(started && localDirty) syncStockNow(true).catch(e=>console.warn("❌ StockSync periodic ERROR", e)); }, 2000);
+    console.log("🔁 StockSync v7 documento propio activo:", firebaseConfig.projectId, META_PATH.join("/"));
   }
 
   function stopStockSync(){
