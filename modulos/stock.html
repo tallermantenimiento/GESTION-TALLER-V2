@@ -7353,5 +7353,306 @@ function LDH_closeMaintenanceModal(){
 })();
 </script>
 
+
+
+<!-- ===== LDH STOCK: CANTIDAD MAESTRA MULTI-PC v13 ===== -->
+<script type="module">
+(async function(){
+  if(window.__LDH_STOCK_QTY_MULTI_PC_V13) return;
+  window.__LDH_STOCK_QTY_MULTI_PC_V13 = true;
+
+  const KEY = 'ldh_v2_company_stock_v1';
+  const LOCAL_QTY_KEY = 'LDH_STOCK_QTY_MASTER_V13_LOCAL';
+  const LEDGER_KEY = '__ldhPhysicalQtyMaster';
+  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'];
+  const CLIENT_KEY = 'LDH_STOCK_QTY_CLIENT_V13';
+
+  function s(v){ return String(v == null ? '' : v); }
+  function n(v){ const x = Number(String(v ?? '').replace(',', '.')); return Number.isFinite(x) ? x : 0; }
+  function arr(v){ return Array.isArray(v) ? v : []; }
+  function now(){ return new Date().toISOString(); }
+  function ms(v){ const t = Date.parse(s(v)); return Number.isFinite(t) ? t : 0; }
+  function key(companyId, materialId){ return s(companyId) + '|' + s(materialId); }
+  function parse(raw, fb){ try{ return raw ? JSON.parse(raw) : fb; }catch(e){ return fb; } }
+  function readDB(){ try{ if(typeof db !== 'undefined' && db) return db; }catch(e){} return parse(localStorage.getItem(KEY), {}) || {}; }
+  function writeDB(d){
+    try{
+      if(!d || typeof d !== 'object') return;
+      d.updatedAt = now();
+      localStorage.setItem(KEY, JSON.stringify(d));
+      try{ if(typeof db !== 'undefined' && db && db !== d){ Object.keys(db).forEach(k=>delete db[k]); Object.assign(db,d); } }catch(e){}
+    }catch(e){}
+  }
+  function ensure(d){
+    if(!d || typeof d !== 'object') d = {};
+    d.materials = arr(d.materials);
+    d.stock = arr(d.stock);
+    d.movements = arr(d.movements);
+    d[LEDGER_KEY] = d[LEDGER_KEY] && typeof d[LEDGER_KEY] === 'object' ? d[LEDGER_KEY] : {};
+    return d;
+  }
+  function row(d, companyId, materialId){
+    d = ensure(d);
+    return d.stock.find(r => s(r && r.companyId) === s(companyId) && s(r && (r.materialId || r.matId)) === s(materialId));
+  }
+  function hasMaterialOrRow(d, companyId, materialId){
+    d = ensure(d);
+    return !!row(d, companyId, materialId) || d.materials.some(m => s(m && m.id) === s(materialId));
+  }
+  function readLocalMap(){ const x = parse(localStorage.getItem(LOCAL_QTY_KEY), {}); return x && typeof x === 'object' ? x : {}; }
+  function writeLocalMap(map){ try{ localStorage.setItem(LOCAL_QTY_KEY, JSON.stringify(map || {})); }catch(e){} }
+  function clientId(){
+    try{
+      let v = localStorage.getItem(CLIENT_KEY);
+      if(!v){ v = 'qty_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2); localStorage.setItem(CLIENT_KEY, v); }
+      return v;
+    }catch(e){ return 'qty_' + Math.random().toString(36).slice(2); }
+  }
+  const CLIENT_ID = clientId();
+
+  function readQty(d, companyId, materialId){
+    d = ensure(d);
+    const kk = key(companyId, materialId);
+    const local = readLocalMap()[kk];
+    const led = d[LEDGER_KEY][kk];
+    if(local && Number.isFinite(Number(local.qty)) && ms(local.updatedAt) >= ms(led && led.updatedAt)) return n(local.qty);
+    if(led && Number.isFinite(Number(led.qty))) return n(led.qty);
+    const r = row(d, companyId, materialId);
+    if(r){
+      for(const f of QTY_FIELDS){
+        if(Object.prototype.hasOwnProperty.call(r,f) && r[f] !== '' && r[f] != null && Number.isFinite(Number(r[f]))) return n(r[f]);
+      }
+    }
+    return 0;
+  }
+  function setQtyLocal(d, companyId, materialId, qty, source, stamp){
+    d = ensure(d);
+    companyId = s(companyId); materialId = s(materialId);
+    if(!companyId || !materialId) return d;
+    if(!hasMaterialOrRow(d, companyId, materialId)) return d;
+    const val = n(qty);
+    const ts = stamp || now();
+    let r = row(d, companyId, materialId);
+    if(!r){ r = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId, materialId }; d.stock.push(r); }
+    QTY_FIELDS.forEach(f => r[f] = val);
+    r.physicalQty = val; r.fisico = val; r.cantidad = val; r.qty = val;
+    r.physicalManualMaster = true;
+    r.physicalSource = source || 'qty_multi_pc_v13';
+    r.physicalUpdatedAt = ts;
+    d[LEDGER_KEY][key(companyId, materialId)] = { companyId, materialId, qty:val, updatedAt:ts, source:source || 'qty_multi_pc_v13', clientId:CLIENT_ID };
+    d.updatedAt = ts;
+    const map = readLocalMap();
+    const old = map[key(companyId, materialId)];
+    if(!old || ms(ts) >= ms(old.updatedAt)){
+      map[key(companyId, materialId)] = { companyId, materialId, qty:val, updatedAt:ts, source:source || 'qty_multi_pc_v13', clientId:CLIENT_ID };
+      writeLocalMap(map);
+    }
+    return d;
+  }
+  function applyQtyMapToDB(items, reason){
+    items = items && typeof items === 'object' ? items : {};
+    const d = readDB();
+    let changed = false;
+    Object.entries(items).forEach(([kk, it])=>{
+      if(!it) return;
+      const companyId = s(it.companyId || kk.split('|')[0]);
+      const materialId = s(it.materialId || kk.split('|')[1]);
+      if(!companyId || !materialId) return;
+      if(!hasMaterialOrRow(d, companyId, materialId)) return;
+      const current = (ensure(d)[LEDGER_KEY] || {})[key(companyId, materialId)];
+      if(!current || ms(it.updatedAt) >= ms(current.updatedAt)){
+        setQtyLocal(d, companyId, materialId, it.qty, it.source || reason || 'qty_remote_v13', it.updatedAt || now());
+        changed = true;
+      }
+    });
+    if(changed){
+      writeDB(d);
+      try{ if(typeof render === 'function') render(); }catch(e){}
+      try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:qty_multi_pc_applied'); }catch(e){}
+    }
+    return changed;
+  }
+
+  // Protege este ordenador: si Stock remoto antiguo se aplica al entrar, reinyecta las cantidades locales pendientes.
+  if(!Storage.prototype.__ldhQtyMultiPCV13SetItem){
+    Storage.prototype.__ldhQtyMultiPCV13SetItem = true;
+    const oldSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(k, v){
+      try{
+        if(this === localStorage && s(k) === KEY){
+          const incoming = parse(s(v || '{}'), {});
+          applyQtyMapToObject(incoming, readLocalMap(), 'qty_local_guard_v13');
+          v = JSON.stringify(incoming);
+        }
+      }catch(e){}
+      return oldSet.call(this, k, v);
+    };
+  }
+  function applyQtyMapToObject(d, items, source){
+    d = ensure(d);
+    items = items && typeof items === 'object' ? items : {};
+    Object.entries(items).forEach(([kk, it])=>{
+      if(!it) return;
+      const companyId = s(it.companyId || kk.split('|')[0]);
+      const materialId = s(it.materialId || kk.split('|')[1]);
+      if(!companyId || !materialId) return;
+      if(!hasMaterialOrRow(d, companyId, materialId)) return;
+      const cur = d[LEDGER_KEY][key(companyId, materialId)];
+      if(!cur || ms(it.updatedAt) >= ms(cur.updatedAt)) setQtyLocal(d, companyId, materialId, it.qty, source || it.source || 'qty_guard_v13', it.updatedAt || now());
+    });
+    return d;
+  }
+
+  let qtyDocRef = null;
+  let remoteReady = false;
+  async function ensureFirebase(){
+    try{
+      if(window.__FIREBASE__ && window.__FIREBASE__.db && window.__FIREBASE__.doc && window.__FIREBASE__.setDoc) return window.__FIREBASE__;
+      const firebaseConfig = {
+        apiKey: 'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
+        authDomain: 'gestion-taller-v2.firebaseapp.com',
+        projectId: 'gestion-taller-v2',
+        storageBucket: 'gestion-taller-v2.firebasestorage.app',
+        messagingSenderId: '888590823508',
+        appId: '1:888590823508:web:6dfd420a3e7ac17d647dc1'
+      };
+      const { initializeApp, getApps, getApp } = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+      const { getAuth } = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+      const { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp } = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+      const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+      window.__FIREBASE__ = Object.assign({}, window.__FIREBASE__ || {}, { app, auth:getAuth(app), db:getFirestore(app), doc, getDoc, setDoc, onSnapshot, serverTimestamp });
+      return window.__FIREBASE__;
+    }catch(e){ console.warn('Qty v13: Firebase no disponible', e); return null; }
+  }
+  async function uploadQtyItem(companyId, materialId, qty, stamp){
+    try{
+      const fb = await ensureFirebase();
+      if(!fb || !fb.auth || !fb.auth.currentUser) return false;
+      qtyDocRef = qtyDocRef || fb.doc(fb.db, 'taller_data', 'stock_qty_master');
+      const kk = key(companyId, materialId);
+      const item = { companyId:s(companyId), materialId:s(materialId), qty:n(qty), updatedAt:stamp || now(), source:'qty_multi_pc_v13', clientId:CLIENT_ID };
+      await fb.setDoc(qtyDocRef, { items:{ [kk]: item }, updatedAtLocal:now(), updatedAt: fb.serverTimestamp ? fb.serverTimestamp() : now(), clientId:CLIENT_ID, mode:'stock_qty_multi_pc_v13' }, { merge:true });
+      return true;
+    }catch(e){ console.warn('Qty v13: no se pudo subir cantidad', e); return false; }
+  }
+  async function uploadLocalMap(){
+    try{
+      const fb = await ensureFirebase();
+      if(!fb || !fb.auth || !fb.auth.currentUser) return false;
+      const items = readLocalMap();
+      if(!Object.keys(items).length) return true;
+      qtyDocRef = qtyDocRef || fb.doc(fb.db, 'taller_data', 'stock_qty_master');
+      await fb.setDoc(qtyDocRef, { items, updatedAtLocal:now(), updatedAt: fb.serverTimestamp ? fb.serverTimestamp() : now(), clientId:CLIENT_ID, mode:'stock_qty_multi_pc_v13_full' }, { merge:true });
+      return true;
+    }catch(e){ console.warn('Qty v13: no se pudo subir mapa local', e); return false; }
+  }
+  async function startQtyRemote(){
+    if(remoteReady) return;
+    const fb = await ensureFirebase();
+    if(!fb || !fb.auth) return;
+    const boot = async()=>{
+      if(!fb.auth.currentUser) return;
+      remoteReady = true;
+      qtyDocRef = qtyDocRef || fb.doc(fb.db, 'taller_data', 'stock_qty_master');
+      try{
+        const snap = await fb.getDoc(qtyDocRef);
+        if(snap.exists()) applyQtyMapToDB((snap.data() || {}).items || {}, 'qty_remote_boot_v13');
+        await uploadLocalMap();
+      }catch(e){ console.warn('Qty v13: arranque remoto fallido', e); }
+      try{
+        fb.onSnapshot(qtyDocRef, snap=>{
+          try{ if(snap.exists()) applyQtyMapToDB((snap.data() || {}).items || {}, 'qty_remote_live_v13'); }catch(e){}
+        });
+      }catch(e){}
+    };
+    try{
+      if(fb.auth.currentUser) boot();
+      else if(fb.onAuthStateChanged) fb.onAuthStateChanged(fb.auth, u=>{ if(u) boot(); });
+    }catch(e){}
+  }
+
+  function syncStockSoon(reason){
+    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:qty_multi_pc_v13'); }catch(e){}
+    [80,250,700,1600,3500].forEach(t=>setTimeout(()=>{
+      try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){}
+    }, t));
+  }
+  function patchRealStock(){
+    if(typeof window.realStock !== 'function') return false;
+    if(window.realStock.__ldhQtyMultiPCV13) return true;
+    const old = window.realStock;
+    window.realStock = function(companyId, materialId){
+      try{ return readQty(readDB(), companyId, materialId); }catch(e){ return old.apply(this, arguments); }
+    };
+    window.realStock.__ldhQtyMultiPCV13 = true;
+    return true;
+  }
+  function patchSaveMove(){
+    if(typeof window.saveMove !== 'function') return false;
+    if(window.saveMove.__ldhQtyMultiPCV13) return true;
+    const old = window.saveMove;
+    window.saveMove = function(type){
+      const companyId = s((typeof activeCompany !== 'undefined' && activeCompany) ? activeCompany : window.activeCompany || '');
+      const materialId = s(document.getElementById('moveMat') && document.getElementById('moveMat').value);
+      const q = n(document.getElementById('moveQty') && document.getElementById('moveQty').value);
+      const before = readQty(readDB(), companyId, materialId);
+      const target = Math.max(0, before + (s(type).toLowerCase()==='salida' ? -q : q));
+      const stamp = now();
+      const ret = old.apply(this, arguments);
+      if(companyId && materialId && q > 0){
+        [10,80,250,700].forEach(t=>setTimeout(()=>{
+          const d = readDB();
+          setQtyLocal(d, companyId, materialId, target, 'save_move_multi_pc_v13', stamp);
+          writeDB(d);
+          try{ if(typeof render === 'function') render(); }catch(e){}
+        }, t));
+        uploadQtyItem(companyId, materialId, target, stamp);
+        setTimeout(()=>uploadQtyItem(companyId, materialId, target, stamp), 900);
+        syncStockSoon('stock:save_move_multi_pc_v13');
+      }
+      return ret;
+    };
+    window.saveMove.__ldhQtyMultiPCV13 = true;
+    return true;
+  }
+  function patchSaveMaterial(){
+    if(typeof window.saveMaterial !== 'function') return false;
+    if(window.saveMaterial.__ldhQtyMultiPCV13) return true;
+    const old = window.saveMaterial;
+    window.saveMaterial = function(){
+      const companyId = s((typeof activeCompany !== 'undefined' && activeCompany) ? activeCompany : window.activeCompany || '');
+      const initial = n(document.getElementById('matInitial') && document.getElementById('matInitial').value);
+      const before = new Set(arr(readDB().materials).map(m=>s(m && m.id)));
+      const ret = old.apply(this, arguments);
+      setTimeout(()=>{
+        const d = readDB();
+        const created = arr(d.materials).find(m=>!before.has(s(m && m.id)));
+        if(created && companyId){
+          const stamp = now();
+          setQtyLocal(d, companyId, created.id, initial, 'save_material_multi_pc_v13', stamp);
+          writeDB(d);
+          uploadQtyItem(companyId, created.id, initial, stamp);
+          syncStockSoon('stock:save_material_multi_pc_v13');
+        }
+      }, 120);
+      return ret;
+    };
+    window.saveMaterial.__ldhQtyMultiPCV13 = true;
+    return true;
+  }
+
+  function boot(){
+    try{ applyQtyMapToDB(readLocalMap(), 'qty_local_boot_v13'); }catch(e){}
+    const ok = patchRealStock() && patchSaveMove() && patchSaveMaterial();
+    if(!ok) setTimeout(boot, 150);
+  }
+  boot();
+  startQtyRemote();
+  window.addEventListener('pagehide', ()=>{ try{ uploadLocalMap(); }catch(e){} });
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'hidden') try{ uploadLocalMap(); }catch(e){} });
+  window.__ldhStockQtyMultiPCSyncNow = uploadLocalMap;
+})();
+</script>
+
 </body>
 </html>
