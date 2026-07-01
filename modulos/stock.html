@@ -6781,5 +6781,167 @@ function LDH_closeMaintenanceModal(){
 })();
 </script>
 
+
+
+<!-- ===== LDH STOCK CANTIDAD DIRECTA COMO FUENTE MAESTRA v2 ===== -->
+<script>
+(function(){
+  if(window.__LDH_STOCK_QTY_DIRECT_MASTER_V2) return;
+  window.__LDH_STOCK_QTY_DIRECT_MASTER_V2 = true;
+
+  const KEY = 'ldh_v2_company_stock_v1';
+  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','qty','cantidad'];
+  function ss(v){ return String(v == null ? '' : v); }
+  function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
+  function getDB(){
+    try{ if(typeof db !== 'undefined' && db) return db; }catch(e){}
+    try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }catch(e){ return null; }
+  }
+  function putDB(d){
+    try{
+      if(!d) return;
+      d.updatedAt = new Date().toISOString();
+      localStorage.setItem(KEY, JSON.stringify(d));
+    }catch(e){}
+  }
+  function rowOf(d, companyId, materialId){
+    return (Array.isArray(d && d.stock) ? d.stock : []).find(st => ss(st && st.companyId) === ss(companyId) && ss(st && st.materialId) === ss(materialId));
+  }
+  function hasDirectQty(st){
+    if(!st) return false;
+    return QTY_FIELDS.some(k => st[k] !== undefined && st[k] !== null && st[k] !== '');
+  }
+  function movementSum(d, companyId, materialId){
+    let total = 0;
+    (Array.isArray(d && d.movements) ? d.movements : []).forEach(m => {
+      if(ss(m && m.companyId) !== ss(companyId)) return;
+      if(ss(m && (m.materialId || m.matId)) !== ss(materialId)) return;
+      const t = ss(m && (m.type || m.tipo || 'entrada')).toLowerCase();
+      const q = n(m && (m.qty ?? m.cantidad));
+      if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return;
+      if(t === 'salida' || t === 'ajuste_neg' || t === 'consumo' || t === 'out') total -= q;
+      else total += q;
+    });
+    return total;
+  }
+  function readQty(d, companyId, materialId){
+    const st = rowOf(d, companyId, materialId);
+    if(st && hasDirectQty(st)){
+      for(const k of QTY_FIELDS){
+        if(st[k] !== undefined && st[k] !== null && st[k] !== '') return n(st[k]);
+      }
+    }
+    return movementSum(d, companyId, materialId);
+  }
+  function writeQty(d, companyId, materialId, value){
+    if(!d) return false;
+    d.stock = Array.isArray(d.stock) ? d.stock : [];
+    let st = rowOf(d, companyId, materialId);
+    if(!st){
+      st = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId, materialId };
+      d.stock.push(st);
+    }
+    const val = n(value);
+    QTY_FIELDS.forEach(k => { st[k] = val; });
+    st.physicalSource = 'direct_master';
+    st.physicalUpdatedAt = new Date().toISOString();
+    d.updatedAt = new Date().toISOString();
+    return true;
+  }
+  function upload(reason){
+    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:cantidad_directa'); }catch(e){}
+    [60, 350, 900, 1800].forEach(ms => setTimeout(()=>{
+      try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){}
+    }, ms));
+  }
+  function repaint(){ try{ if(typeof render === 'function') render(); }catch(e){} }
+
+  function patchRealStock(){
+    if(typeof window.realStock !== 'function') return false;
+    if(window.realStock.__ldhQtyDirectMasterV2) return true;
+    const old = window.realStock;
+    window.realStock = function(companyId, materialId){
+      try{ return readQty(getDB(), companyId, materialId); }catch(e){ return old.apply(this, arguments); }
+    };
+    window.realStock.__ldhQtyDirectMasterV2 = true;
+    return true;
+  }
+
+  function patchMove(){
+    if(typeof window.saveMove !== 'function') return false;
+    if(window.saveMove.__ldhQtyDirectMasterV2) return true;
+    const old = window.saveMove;
+    window.saveMove = function(type){
+      let companyId = '', materialId = '', qty = 0, before = 0, sign = 1;
+      try{
+        companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
+        materialId = ss(document.getElementById('moveMat') && document.getElementById('moveMat').value);
+        qty = n(document.getElementById('moveQty') && document.getElementById('moveQty').value);
+        sign = (ss(type).toLowerCase() === 'salida') ? -1 : 1;
+        before = readQty(getDB(), companyId, materialId);
+      }catch(e){}
+      const ret = old.apply(this, arguments);
+      if(companyId && materialId && qty > 0){
+        const target = before + sign * qty;
+        [20, 180, 520, 1200].forEach(ms => setTimeout(()=>{
+          try{
+            const d = getDB();
+            if(writeQty(d, companyId, materialId, target)){
+              putDB(d);
+              repaint();
+              upload('stock:entrada_salida_cantidad_directa');
+            }
+          }catch(e){ console.warn('No se pudo fijar cantidad directa', e); }
+        }, ms));
+      }
+      return ret;
+    };
+    window.saveMove.__ldhQtyDirectMasterV2 = true;
+    return true;
+  }
+
+  function patchMaterial(){
+    if(typeof window.saveMaterial !== 'function') return false;
+    if(window.saveMaterial.__ldhQtyDirectMasterV2) return true;
+    const old = window.saveMaterial;
+    window.saveMaterial = function(){
+      let initial = 0, companyId = '', beforeIds = new Set();
+      try{
+        initial = n(document.getElementById('matInitial') && document.getElementById('matInitial').value);
+        companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
+        const d = getDB();
+        (Array.isArray(d && d.materials) ? d.materials : []).forEach(m => beforeIds.add(ss(m && m.id)));
+      }catch(e){}
+      const ret = old.apply(this, arguments);
+      [60, 260, 800].forEach(ms => setTimeout(()=>{
+        try{
+          const d = getDB();
+          const mats = Array.isArray(d && d.materials) ? d.materials : [];
+          const created = mats.find(m => !beforeIds.has(ss(m && m.id)));
+          if(companyId && created && writeQty(d, companyId, created.id, initial)){
+            putDB(d); repaint(); upload('stock:material_cantidad_inicial_directa');
+          }
+        }catch(e){}
+      }, ms));
+      return ret;
+    };
+    window.saveMaterial.__ldhQtyDirectMasterV2 = true;
+    return true;
+  }
+
+  function boot(){
+    const ok = patchRealStock() & patchMove() & patchMaterial();
+    if(!ok) setTimeout(boot, 200);
+  }
+  boot();
+  window.__ldhStockFixQtyDirectNow = function(companyId, materialId, value){
+    const d = getDB();
+    const ok = writeQty(d, companyId || (typeof activeCompany !== 'undefined' ? activeCompany : ''), materialId, value);
+    if(ok){ putDB(d); repaint(); upload('stock:fix_manual_cantidad_directa'); }
+    return ok;
+  };
+})();
+</script>
+
 </body>
 </html>
