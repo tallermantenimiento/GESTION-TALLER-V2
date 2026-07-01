@@ -6943,5 +6943,175 @@ function LDH_closeMaintenanceModal(){
 })();
 </script>
 
+
+
+<!-- ===== LDH STOCK: CANTIDAD DESDE MOVIMIENTOS AL ENTRAR Y ANTES DE SUMAR v3 ===== -->
+<script>
+(function(){
+  if(window.__LDH_STOCK_QTY_FROM_MOVEMENTS_BEFORE_MOVE_V3) return;
+  window.__LDH_STOCK_QTY_FROM_MOVEMENTS_BEFORE_MOVE_V3 = true;
+
+  const KEY = 'ldh_v2_company_stock_v1';
+  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','qty','cantidad'];
+  function ss(v){ return String(v == null ? '' : v); }
+  function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
+  function getDB(){
+    try{ if(typeof db !== 'undefined' && db) return db; }catch(e){}
+    try{ return JSON.parse(localStorage.getItem(KEY) || 'null'); }catch(e){ return null; }
+  }
+  function putDB(d){
+    try{
+      if(!d) return;
+      d.updatedAt = new Date().toISOString();
+      localStorage.setItem(KEY, JSON.stringify(d));
+    }catch(e){}
+  }
+  function moveQty(m){ return n(m && (m.qty ?? m.cantidad)); }
+  function moveSign(m){
+    const t = ss(m && (m.type || m.tipo || 'entrada')).toLowerCase();
+    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return 0;
+    if(t === 'salida' || t === 'ajuste_neg' || t === 'consumo' || t === 'out') return -1;
+    return 1;
+  }
+  function movementSum(d, companyId, materialId){
+    let total = 0;
+    (Array.isArray(d && d.movements) ? d.movements : []).forEach(m => {
+      if(ss(m && m.companyId) !== ss(companyId)) return;
+      if(ss(m && (m.materialId || m.matId)) !== ss(materialId)) return;
+      total += moveSign(m) * moveQty(m);
+    });
+    return total;
+  }
+  function rowOf(d, companyId, materialId){
+    return (Array.isArray(d && d.stock) ? d.stock : []).find(st => ss(st && st.companyId) === ss(companyId) && ss(st && st.materialId) === ss(materialId));
+  }
+  function setRowQty(d, companyId, materialId, val){
+    if(!d) return false;
+    d.stock = Array.isArray(d.stock) ? d.stock : [];
+    let st = rowOf(d, companyId, materialId);
+    if(!st){
+      st = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId, materialId };
+      d.stock.push(st);
+    }
+    QTY_FIELDS.forEach(k => st[k] = n(val));
+    st.physicalSource = 'movements_master';
+    st.physicalUpdatedAt = new Date().toISOString();
+    return true;
+  }
+  function syncAllRowsFromMovements(d){
+    if(!d) return false;
+    let changed = false;
+    const stock = Array.isArray(d.stock) ? d.stock : [];
+    stock.forEach(st => {
+      if(!st || !st.companyId || !st.materialId) return;
+      const val = movementSum(d, st.companyId, st.materialId);
+      const cur = n(st.physicalQty ?? st.qtyPhysical ?? st.fisico ?? st.realQty ?? st.stockFisico ?? st.qty ?? st.cantidad ?? 0);
+      if(cur !== val || st.physicalSource !== 'movements_master'){
+        setRowQty(d, st.companyId, st.materialId, val);
+        changed = true;
+      }
+    });
+    if(changed){ d.updatedAt = new Date().toISOString(); putDB(d); }
+    return changed;
+  }
+  function syncOneFromMovements(companyId, materialId){
+    const d = getDB();
+    if(!d || !companyId || !materialId) return 0;
+    const val = movementSum(d, companyId, materialId);
+    setRowQty(d, companyId, materialId, val);
+    d.updatedAt = new Date().toISOString();
+    putDB(d);
+    return val;
+  }
+  function upload(reason){
+    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:cantidad_movimientos_master'); }catch(e){}
+    [80, 500, 1400, 2600].forEach(ms => setTimeout(()=>{
+      try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){}
+    }, ms));
+  }
+  function repaint(){ try{ if(typeof render === 'function') render(); }catch(e){} }
+
+  function patchRealStock(){
+    if(typeof window.realStock !== 'function') return false;
+    if(window.realStock.__ldhMovementsMasterV3) return true;
+    const old = window.realStock;
+    window.realStock = function(companyId, materialId){
+      try{
+        const d = getDB();
+        if(d) return movementSum(d, companyId, materialId);
+      }catch(e){}
+      return old.apply(this, arguments);
+    };
+    window.realStock.__ldhMovementsMasterV3 = true;
+    return true;
+  }
+
+  function patchSaveMove(){
+    if(typeof window.saveMove !== 'function') return false;
+    if(window.saveMove.__ldhMovementsMasterV3) return true;
+    const old = window.saveMove;
+    window.saveMove = function(type){
+      let companyId='', materialId='';
+      try{
+        companyId = ss(typeof activeCompany !== 'undefined' ? activeCompany : window.activeCompany);
+        const el = document.getElementById('moveMat');
+        materialId = ss(el && el.value);
+        // Antes de llamar a los parches anteriores, fijamos la cantidad actual real desde movimientos.
+        // Esto evita que al entrar de nuevo lea 0/1 desde campos directos antiguos.
+        if(companyId && materialId) syncOneFromMovements(companyId, materialId);
+      }catch(e){}
+      const ret = old.apply(this, arguments);
+      // Despues de que el movimiento se haya grabado, volvemos a fijar la fila desde movimientos.
+      [60, 220, 650, 1500, 3000].forEach(ms => setTimeout(()=>{
+        try{
+          if(companyId && materialId){ syncOneFromMovements(companyId, materialId); }
+          else { syncAllRowsFromMovements(getDB()); }
+          repaint();
+          upload('stock:movimiento_cantidad_movimientos_master');
+        }catch(e){}
+      }, ms));
+      return ret;
+    };
+    window.saveMove.__ldhMovementsMasterV3 = true;
+    return true;
+  }
+
+  function patchLoadAndRender(){
+    if(typeof window.load === 'function' && !window.load.__ldhMovementsMasterV3){
+      const oldLoad = window.load;
+      window.load = function(){
+        const ret = oldLoad.apply(this, arguments);
+        try{ syncAllRowsFromMovements(getDB()); }catch(e){}
+        return ret;
+      };
+      window.load.__ldhMovementsMasterV3 = true;
+    }
+    if(typeof window.render === 'function' && !window.render.__ldhMovementsMasterV3){
+      const oldRender = window.render;
+      window.render = function(){
+        try{ syncAllRowsFromMovements(getDB()); }catch(e){}
+        return oldRender.apply(this, arguments);
+      };
+      window.render.__ldhMovementsMasterV3 = true;
+    }
+  }
+
+  function boot(){
+    try{ syncAllRowsFromMovements(getDB()); }catch(e){}
+    patchRealStock();
+    patchLoadAndRender();
+    patchSaveMove();
+    repaint();
+    if(!(patchRealStock() && patchSaveMove())) setTimeout(boot, 250);
+  }
+  boot();
+  window.__ldhStockRecalcularCantidadesDesdeMovimientos = function(){
+    const ok = syncAllRowsFromMovements(getDB());
+    repaint(); upload('stock:recalcular_cantidades_desde_movimientos');
+    return ok;
+  };
+})();
+</script>
+
 </body>
 </html>
