@@ -7122,5 +7122,236 @@ function LDH_closeMaintenanceModal(){
 })();
 </script>
 
+
+
+<!-- ===== LDH STOCK: CANTIDAD MAESTRA PERSISTENTE FINAL v12 ===== -->
+<script>
+(function(){
+  if(window.__LDH_STOCK_QTY_LEDGER_FINAL_V12) return;
+  window.__LDH_STOCK_QTY_LEDGER_FINAL_V12 = true;
+
+  const KEY = 'ldh_v2_company_stock_v1';
+  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'];
+  const LEDGER_KEY = '__ldhPhysicalQtyMaster';
+
+  function now(){ return new Date().toISOString(); }
+  function s(v){ return String(v == null ? '' : v); }
+  function num(v){ const x = Number(String(v ?? '').replace(',', '.')); return Number.isFinite(x) ? x : 0; }
+  function arr(v){ return Array.isArray(v) ? v : []; }
+  function readJSON(k, fb){ try{ const v=localStorage.getItem(k); return v ? JSON.parse(v) : fb; }catch(e){ return fb; } }
+  function writeRaw(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+  function k(companyId, materialId){ return s(companyId) + '|' + s(materialId); }
+  function ms(v){ const t = Date.parse(s(v)); return Number.isFinite(t) ? t : 0; }
+
+  function getDB(){
+    try{ if(typeof db !== 'undefined' && db) return db; }catch(e){}
+    return readJSON(KEY, {}) || {};
+  }
+  function getActiveCompany(){
+    try{ if(typeof activeCompany !== 'undefined' && activeCompany) return s(activeCompany); }catch(e){}
+    try{ if(window.activeCompany) return s(window.activeCompany); }catch(e){}
+    const d = getDB();
+    return s((arr(d.companies)[0] || {}).id || '');
+  }
+  function ensureArrays(d){
+    if(!d || typeof d !== 'object') d = {};
+    d.stock = arr(d.stock);
+    d.materials = arr(d.materials);
+    d.movements = arr(d.movements);
+    d[LEDGER_KEY] = d[LEDGER_KEY] && typeof d[LEDGER_KEY] === 'object' ? d[LEDGER_KEY] : {};
+    return d;
+  }
+  function row(d, companyId, materialId){
+    d = ensureArrays(d);
+    return d.stock.find(x=>s(x && x.companyId)===s(companyId) && s(x && (x.materialId || x.matId))===s(materialId));
+  }
+  function ensureRow(d, companyId, materialId){
+    d = ensureArrays(d);
+    let r = row(d, companyId, materialId);
+    if(!r){
+      r = { id:'st_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2), companyId:s(companyId), materialId:s(materialId) };
+      d.stock.push(r);
+    }
+    return r;
+  }
+  function readDirect(r){
+    if(!r) return null;
+    for(const f of QTY_FIELDS){
+      if(Object.prototype.hasOwnProperty.call(r, f) && r[f] !== '' && r[f] != null && Number.isFinite(Number(r[f]))) return num(r[f]);
+    }
+    return null;
+  }
+  function movementSum(d, companyId, materialId){
+    let total = 0;
+    arr(d && d.movements).forEach(m=>{
+      if(s(m && m.companyId)!==s(companyId)) return;
+      if(s(m && (m.materialId || m.matId))!==s(materialId)) return;
+      const t = s(m && (m.type || m.tipo || 'entrada')).toLowerCase();
+      const q = num(m && (m.qty ?? m.cantidad));
+      if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return;
+      if(t==='salida' || t==='ajuste_neg' || t==='consumo' || t==='out') total -= q;
+      else total += q;
+    });
+    return total;
+  }
+  function ledgerEntry(d, companyId, materialId){
+    d = ensureArrays(d);
+    return d[LEDGER_KEY][k(companyId, materialId)] || null;
+  }
+  function readQty(d, companyId, materialId){
+    d = ensureArrays(d);
+    const le = ledgerEntry(d, companyId, materialId);
+    if(le && Number.isFinite(Number(le.qty))) return num(le.qty);
+    const direct = readDirect(row(d, companyId, materialId));
+    if(direct !== null) return direct;
+    return movementSum(d, companyId, materialId);
+  }
+  function setQty(d, companyId, materialId, value, source){
+    d = ensureArrays(d);
+    companyId = s(companyId); materialId = s(materialId);
+    if(!companyId || !materialId) return d;
+    const val = num(value);
+    const stamp = now();
+    const r = ensureRow(d, companyId, materialId);
+    QTY_FIELDS.forEach(f=>r[f]=val);
+    r.physicalQty = val;
+    r.fisico = val;
+    r.cantidad = val;
+    r.qty = val;
+    r.physicalManualMaster = true;
+    r.physicalSource = source || 'qty_ledger_v12';
+    r.physicalUpdatedAt = stamp;
+    d[LEDGER_KEY][k(companyId, materialId)] = { companyId, materialId, qty:val, updatedAt:stamp, source:source || 'qty_ledger_v12' };
+    d.updatedAt = stamp;
+    return d;
+  }
+  function mergeLedger(base, incoming){
+    base = ensureArrays(base || {});
+    incoming = ensureArrays(incoming || {});
+    const out = Object.assign({}, incoming);
+    Object.keys(incoming).forEach(x=>{ if(Array.isArray(incoming[x])) out[x] = incoming[x].map(y=>Object.assign({}, y)); });
+    ensureArrays(out);
+    const merged = Object.assign({}, base[LEDGER_KEY] || {});
+    Object.entries(incoming[LEDGER_KEY] || {}).forEach(([kk, v])=>{
+      const old = merged[kk];
+      if(!old || ms(v && v.updatedAt) >= ms(old && old.updatedAt)) merged[kk] = v;
+    });
+    out[LEDGER_KEY] = merged;
+    Object.values(merged).forEach(v=>{
+      if(!v || !v.companyId || !v.materialId) return;
+      const existing = row(out, v.companyId, v.materialId);
+      const rowTime = ms(existing && existing.physicalUpdatedAt);
+      const ledTime = ms(v.updatedAt);
+      if(!existing || ledTime >= rowTime){ setQty(out, v.companyId, v.materialId, v.qty, v.source || 'qty_ledger_merge_v12'); }
+    });
+    return out;
+  }
+  function saveDB(d, reason){
+    d = ensureArrays(d);
+    d.updatedAt = now();
+    const raw = JSON.stringify(d);
+    writeRaw(KEY, raw);
+    try{
+      if(typeof db !== 'undefined' && db && db !== d){ Object.keys(db).forEach(x=>delete db[x]); Object.assign(db, d); }
+    }catch(e){}
+    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty(reason || 'stock:qty_ledger_v12'); }catch(e){}
+    [50,200,600,1400,3000].forEach(t=>setTimeout(()=>{
+      try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }
+      catch(e){}
+    }, t));
+  }
+  function applyLedgerToCurrent(reason){
+    const d = getDB();
+    const before = JSON.stringify(d && d[LEDGER_KEY] || {});
+    const out = mergeLedger(d, d);
+    if(JSON.stringify(out && out[LEDGER_KEY] || {}) !== before || JSON.stringify(out) !== JSON.stringify(d)) saveDB(out, reason || 'stock:apply_qty_ledger_v12');
+    return out;
+  }
+
+  // Evita que un remoto viejo pise cantidades locales mas nuevas al entrar/sincronizar.
+  if(!Storage.prototype.__ldhQtyLedgerV12SetItem){
+    Storage.prototype.__ldhQtyLedgerV12SetItem = true;
+    const oldSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value){
+      try{
+        if(this === localStorage && s(key) === KEY){
+          const current = readJSON(KEY, {});
+          const incoming = JSON.parse(s(value || '{}'));
+          value = JSON.stringify(mergeLedger(current, incoming));
+        }
+      }catch(e){}
+      return oldSet.call(this, key, value);
+    };
+  }
+
+  function patchRealStock(){
+    if(typeof window.realStock !== 'function') return false;
+    if(window.realStock.__ldhQtyLedgerV12) return true;
+    const old = window.realStock;
+    window.realStock = function(companyId, materialId){
+      try{ return readQty(getDB(), companyId, materialId); }catch(e){ return old.apply(this, arguments); }
+    };
+    window.realStock.__ldhQtyLedgerV12 = true;
+    return true;
+  }
+  function patchSaveMaterial(){
+    if(typeof window.saveMaterial !== 'function') return false;
+    if(window.saveMaterial.__ldhQtyLedgerV12) return true;
+    const old = window.saveMaterial;
+    window.saveMaterial = function(){
+      const companyId = getActiveCompany();
+      const initial = num(document.getElementById('matInitial') && document.getElementById('matInitial').value);
+      const before = new Set(arr(getDB().materials).map(m=>s(m && m.id)));
+      const ret = old.apply(this, arguments);
+      setTimeout(()=>{
+        try{
+          const d = getDB();
+          const created = arr(d.materials).find(m=>!before.has(s(m && m.id)));
+          if(created && companyId){ setQty(d, companyId, created.id, initial, 'create_material_initial_v12'); saveDB(d, 'stock:create_qty_ledger_v12'); }
+        }catch(e){}
+      }, 80);
+      return ret;
+    };
+    window.saveMaterial.__ldhQtyLedgerV12 = true;
+    return true;
+  }
+  function patchSaveMove(){
+    if(typeof window.saveMove !== 'function') return false;
+    if(window.saveMove.__ldhQtyLedgerV12) return true;
+    const old = window.saveMove;
+    window.saveMove = function(type){
+      const companyId = getActiveCompany();
+      const materialId = s(document.getElementById('moveMat') && document.getElementById('moveMat').value);
+      const q = num(document.getElementById('moveQty') && document.getElementById('moveQty').value);
+      const before = readQty(getDB(), companyId, materialId);
+      const sign = s(type).toLowerCase()==='salida' ? -1 : 1;
+      const target = Math.max(0, before + sign*q);
+      const ret = old.apply(this, arguments);
+      if(companyId && materialId && q > 0){
+        [20,120,400].forEach(t=>setTimeout(()=>{
+          try{
+            const d = getDB();
+            setQty(d, companyId, materialId, target, 'entrada_salida_ledger_v12');
+            saveDB(d, 'stock:move_qty_ledger_v12');
+            try{ if(typeof render === 'function') render(); }catch(e){}
+          }catch(e){ console.warn('No se pudo fijar cantidad ledger v12', e); }
+        }, t));
+      }
+      return ret;
+    };
+    window.saveMove.__ldhQtyLedgerV12 = true;
+    return true;
+  }
+
+  function boot(){
+    try{ applyLedgerToCurrent('stock:boot_qty_ledger_v12'); }catch(e){}
+    const ok = patchRealStock() && patchSaveMaterial() && patchSaveMove();
+    if(!ok) setTimeout(boot, 150);
+  }
+  boot();
+  window.__ldhStockQtyLedgerFixNow = function(){ const d = applyLedgerToCurrent('stock:manual_qty_ledger_v12'); try{ if(typeof render === 'function') render(); }catch(e){} return d && d[LEDGER_KEY]; };
+})();
+</script>
+
 </body>
 </html>
