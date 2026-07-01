@@ -6884,5 +6884,168 @@ function LDH_closeMaintenanceModal(){
 })();
 </script>
 
+
+
+<!-- ===== LDH STOCK HARD DELETE GUARD V9 FUENTE UNICA ===== -->
+<script>
+(function(){
+  if(window.__LDH_STOCK_HARD_DELETE_GUARD_V9) return;
+  window.__LDH_STOCK_HARD_DELETE_GUARD_V9 = true;
+
+  const KEY = 'ldh_v2_company_stock_v1';
+  const DEL = 'LDH_STOCK_DELETED_ITEMS_V1';
+  const PROT = 'LDH_STOCK_PROTECTED_MANUAL_V1';
+  const OLD = 'taller_stock_v3_data';
+
+  function now(){ return new Date().toISOString(); }
+  function arr(v){ return Array.isArray(v) ? v : []; }
+  function s(v){ return String(v == null ? '' : v); }
+  function readJSON(k, fb){ try{ const v=localStorage.getItem(k); return v ? JSON.parse(v) : fb; }catch(e){ return fb; } }
+  function writeJSON(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+
+  function normalizeDeleted(list){
+    const out=[]; const seen=new Set();
+    arr(list).forEach(x=>{
+      if(!x) return;
+      const mid=s(x.materialId || x.matId || x.id).trim();
+      if(!mid) return;
+      const cid=s(x.companyId || x.company || '*') || '*';
+      const key=mid; // borrado duro por ficha completa, no solo por empresa
+      if(seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        companyId: cid,
+        materialId: mid,
+        materialName: s(x.materialName || x.name || x.material || ''),
+        deletedAt: s(x.deletedAt || now()),
+        hardDelete: true,
+        finalDelete: true,
+        source: s(x.source || 'stock_hard_delete_guard_v9')
+      });
+    });
+    return out.slice(-3000);
+  }
+  function deletedList(){ return normalizeDeleted(readJSON(DEL, [])); }
+  function deletedIds(){ return new Set(deletedList().map(x=>s(x.materialId)).filter(Boolean)); }
+  function mergeDeletedIncoming(incomingRaw){
+    let incoming=[]; try{ incoming = normalizeDeleted(JSON.parse(incomingRaw || '[]')); }catch(e){ incoming=[]; }
+    const map=new Map();
+    deletedList().concat(incoming).forEach(x=>{ if(x && x.materialId) map.set(s(x.materialId), x); });
+    return JSON.stringify(Array.from(map.values()).slice(-3000));
+  }
+
+  function purgeDBObject(db, ids){
+    ids = ids || deletedIds();
+    if(!db || typeof db !== 'object' || !ids.size) return db;
+    db.materials = arr(db.materials).filter(x => !ids.has(s(x && x.id)));
+    db.stock = arr(db.stock).filter(x => !ids.has(s(x && (x.materialId || x.matId))));
+    db.movements = arr(db.movements).filter(x => !ids.has(s(x && (x.materialId || x.matId))));
+    db.reservations = arr(db.reservations).filter(x => !ids.has(s(x && (x.materialId || x.matId))));
+    db.reservationDebts = arr(db.reservationDebts).filter(x => !ids.has(s(x && (x.materialId || x.matId))));
+    db.assignments = arr(db.assignments).filter(x => !ids.has(s(x && (x.materialId || x.matId))) && !ids.has(s(x && (x.toMaterialId || x.toMatId))));
+    db.jobs = arr(db.jobs).map(j=>{
+      if(!j || typeof j !== 'object') return j;
+      ['materials','materiales','stock','items','lines','lineas'].forEach(f=>{
+        if(Array.isArray(j[f])) j[f] = j[f].filter(x => !ids.has(s(x && (x.materialId || x.matId || x.id))));
+      });
+      return j;
+    });
+    db.updatedAt = now();
+    db.hardDeleteGuardV9 = now();
+    return db;
+  }
+  function purgeLocal(){
+    const ids=deletedIds();
+    if(!ids.size) return false;
+    let changed=false;
+    try{
+      const db=readJSON(KEY, null);
+      if(db){
+        const before=JSON.stringify(db);
+        purgeDBObject(db, ids);
+        const after=JSON.stringify(db);
+        if(after!==before){ localStorage.setItem(KEY, after); try{ sessionStorage.setItem(KEY, after); }catch(e){} changed=true; }
+      }
+    }catch(e){}
+    try{
+      const prot=arr(readJSON(PROT, [])).filter(x=>!ids.has(s(x && (x.materialId || (x.material && x.material.id)))));
+      writeJSON(PROT, prot);
+    }catch(e){}
+    try{ localStorage.removeItem(OLD); sessionStorage.removeItem(OLD); }catch(e){}
+    return changed;
+  }
+  function addDeleted(materialId, name){
+    const mid=s(materialId).trim(); if(!mid) return;
+    const list=deletedList().filter(x=>s(x.materialId)!==mid);
+    list.push({companyId:'*', materialId:mid, materialName:s(name||''), deletedAt:now(), hardDelete:true, finalDelete:true, source:'stock_hard_delete_guard_v9'});
+    writeJSON(DEL, list);
+  }
+  async function uploadNow(){
+    try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:hard_delete_guard_v9'); }catch(e){}
+    for(const ms of [50,250,900,2200,5000]){
+      setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow === 'function') window.__ldhStockSyncNow(true); }catch(e){} }, ms);
+    }
+  }
+  function refresh(){
+    try{ if(typeof load === 'function') load(); }catch(e){}
+    try{ if(typeof refreshSelectors === 'function') refreshSelectors(); }catch(e){}
+    try{ if(typeof render === 'function') render(); }catch(e){}
+  }
+  function materialName(materialId){
+    try{ const d=readJSON(KEY, {}) || {}; const m=arr(d.materials).find(x=>s(x && x.id)===s(materialId)); return s(m && (m.name || m.nombre || m.material)); }catch(e){ return ''; }
+  }
+  function hardDelete(materialId, silent){
+    const mid=s(materialId).trim(); if(!mid) return false;
+    const name=materialName(mid) || mid;
+    if(!silent){
+      if(!confirm('¿Borrar definitivamente "' + name + '"?\n\nSe eliminará la ficha completa, stock, movimientos, reservas y deudas.')) return false;
+      if(!confirm('Confirmación final: no podrá reaparecer al sincronizar. ¿Continuar?')) return false;
+    }
+    addDeleted(mid, name);
+    purgeLocal();
+    refresh();
+    uploadNow();
+    return true;
+  }
+
+  // Blindaje: si Firestore o otra pestaña intenta escribir un Stock con material borrado, lo filtramos ANTES de guardarlo.
+  if(!Storage.prototype.__ldhHardDeleteGuardV9Patched){
+    Storage.prototype.__ldhHardDeleteGuardV9Patched = true;
+    const oldSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(k, v){
+      try{
+        if(this === localStorage && s(k) === DEL){
+          v = mergeDeletedIncoming(v);
+        }
+        if(this === localStorage && s(k) === KEY){
+          const ids = deletedIds();
+          if(ids.size){
+            const d = JSON.parse(String(v || '{}'));
+            v = JSON.stringify(purgeDBObject(d, ids));
+          }
+        }
+      }catch(e){}
+      return oldSet.call(this, k, v);
+    };
+  }
+
+  function installDeleteOverride(){
+    if(typeof window.deleteMaterialFromCompany !== 'function') return false;
+    if(window.deleteMaterialFromCompany.__ldhHardDeleteGuardV9) return true;
+    window.deleteMaterialFromCompany = function(materialId){ return hardDelete(materialId, false); };
+    window.deleteMaterialFromCompany.__ldhHardDeleteGuardV9 = true;
+    return true;
+  }
+
+  // Re-aplicar al cargar por si el material viene de una revision remota anterior.
+  setTimeout(()=>{ try{ purgeLocal(); refresh(); }catch(e){} }, 100);
+  setInterval(()=>{ try{ purgeLocal(); }catch(e){} }, 2500);
+  (function boot(){ if(!installDeleteOverride()) setTimeout(boot, 150); })();
+
+  window.__ldhStockHardDeleteMaterial = hardDelete;
+  window.__ldhStockHardPurgeNow = function(){ const c=purgeLocal(); refresh(); uploadNow(); return c; };
+})();
+</script>
+
 </body>
 </html>
