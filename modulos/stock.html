@@ -1374,6 +1374,66 @@ const uid=prefix=>prefix+'_'+Math.random().toString(36).slice(2,9)+Date.now().to
 const fmt=n=>Number(n||0).toLocaleString('es-ES',{maximumFractionDigits:2});
 const now=()=>new Date().toISOString();
 
+const LDH_STOCK_PROTECTED_KEY = 'LDH_STOCK_PROTECTED_MANUAL_V1';
+function LDH_readProtectedStock(){
+  try{ const x = JSON.parse(localStorage.getItem(LDH_STOCK_PROTECTED_KEY)||'[]'); return Array.isArray(x)?x:[]; }catch(e){ return []; }
+}
+function LDH_writeProtectedStock(arr){
+  try{ localStorage.setItem(LDH_STOCK_PROTECTED_KEY, JSON.stringify(Array.isArray(arr)?arr:[])); }catch(e){}
+}
+function LDH_protectManualStockMaterial(materialId, companyId){
+  try{
+    const mat = (db.materials||[]).find(x=>String(x.id)===String(materialId));
+    const stockRows = (db.stock||[]).filter(x=>String(x.materialId)===String(materialId) && (!companyId || String(x.companyId)===String(companyId)));
+    const moves = (db.movements||[]).filter(x=>String(x.materialId)===String(materialId) && (!companyId || String(x.companyId)===String(companyId)));
+    if(!mat) return;
+    const arr = LDH_readProtectedStock().filter(x=>String(x.materialId||'')!==String(materialId));
+    arr.push({
+      materialId:String(materialId),
+      companyId:String(companyId||''),
+      savedAt:now(),
+      material:Object.assign({}, mat, {createdFromStockManual:true, manualStockOnly:true}),
+      stock:stockRows.map(x=>Object.assign({}, x, {createdFromStockManual:true})),
+      movements:moves.map(x=>Object.assign({}, x))
+    });
+    LDH_writeProtectedStock(arr);
+  }catch(e){ console.warn('No se pudo proteger material manual', e); }
+}
+function LDH_applyProtectedStockToDB(){
+  try{
+    const arr = LDH_readProtectedStock();
+    if(!arr.length || !db) return false;
+    db.materials = Array.isArray(db.materials) ? db.materials : [];
+    db.stock = Array.isArray(db.stock) ? db.stock : [];
+    db.movements = Array.isArray(db.movements) ? db.movements : [];
+    let changed = false;
+    arr.forEach(item=>{
+      if(!item || !item.material) return;
+      const mid = String(item.materialId || item.material.id || '');
+      if(!mid) return;
+      if(!db.materials.some(x=>String(x.id)===mid)){
+        db.materials.push(Object.assign({}, item.material, {id:mid, createdFromStockManual:true, manualStockOnly:true}));
+        changed = true;
+      }
+      (Array.isArray(item.stock)?item.stock:[]).forEach(st=>{
+        const exists = db.stock.some(x=>String(x.id||'')===String(st.id||'') || (String(x.companyId||'')===String(st.companyId||'') && String(x.materialId||'')===mid));
+        if(!exists){ db.stock.push(Object.assign({}, st, {materialId:mid, createdFromStockManual:true})); changed = true; }
+      });
+      (Array.isArray(item.movements)?item.movements:[]).forEach(mv=>{
+        const exists = db.movements.some(x=>String(x.id||'')===String(mv.id||''));
+        if(!exists){ db.movements.push(Object.assign({}, mv, {materialId:mid})); changed = true; }
+      });
+    });
+    if(changed){
+      db.updatedAt = now();
+      try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
+      try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:protegido_restaurado'); }catch(e){}
+      setTimeout(()=>{ try{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }catch(e){} }, 250);
+    }
+    return changed;
+  }catch(e){ console.warn('No se pudo aplicar protección de stock', e); return false; }
+}
+
 function blankDB(){return {version:'2.0-stock-empresa',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],sampleLoaded:false,updatedAt:now()};}
 function save(){
   db.updatedAt=now();
@@ -1425,6 +1485,7 @@ function load(){
   db.reservations = Array.isArray(db.reservations) ? db.reservations : [];
   db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
   db.reservationDebts = Array.isArray(db.reservationDebts) ? db.reservationDebts : [];
+  try{ LDH_applyProtectedStockToDB(); }catch(e){}
   if(!db.companies?.length) loadSample(false);
   activeCompany=activeCompany||db.companies[0]?.id||'';
 normalizeBlackIron();
@@ -3120,7 +3181,7 @@ function deleteCompany(){
 }
 
 function openMaterialModal(){openModal('Crear material para empresa',`<div class="grid2"><div class="field"><label>Nombre material</label><input id="matName" placeholder="40x40x1.5"></div><div class="field"><label>Tipo</label><select id="matType"><option value="hierro">Hierro</option><option value="pintura">Pintura</option></select></div></div><div class="grid3"><div class="field"><label>Familia</label><input id="matFamily" placeholder="Perfilería hierro negro"></div><div class="field"><label>Unidad</label><input id="matUnit" placeholder="barras / botes 4L"></div><div class="field"><label>Mínimo</label><input id="matMin" type="number" value="0"></div></div><div class="grid2"><div class="field"><label>Stock inicial</label><input id="matInitial" type="number" value="0"></div><div class="field"><label>Ubicación</label><input id="matLocation" placeholder="Zona / rack"></div></div>`,`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ok" onclick="saveMaterial()">Crear</button>`);$('matType').value=activeType;}
-function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now(),manualStockOnly:true});db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim(),createdFromStockManual:true,createdAt:now()});const initial=Number($('matInitial').value||0);if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));save(); try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material'); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 80); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 1200); }catch(e){} closeModal();setType($('matType').value);render();}
+function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now(),manualStockOnly:true});db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim(),createdFromStockManual:true,createdAt:now()});const initial=Number($('matInitial').value||0);if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));try{LDH_protectManualStockMaterial(id, activeCompany);}catch(e){}save(); try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material_protegido'); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 80); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 1200); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 3000); }catch(e){} closeModal();setType($('matType').value);render();}
 function materialOptions(selected){return db.stock.filter(s=>s.companyId===activeCompany).map(s=>materialById(s.materialId)).filter(m=>m&&m.type===activeType).map(m=>`<option value="${m.id}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}
 
 /* === LDH: Entrada de Stock -> Preparación OK automático + bloqueo por pintura === */
@@ -5688,8 +5749,8 @@ function LDH_closeMaintenanceModal(){
 <!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
 <script type="module">
 (async function(){
-  if (window.__LDH_LIVE_SYNC_INSTALLED) return;
-  window.__LDH_LIVE_SYNC_INSTALLED = true;
+  if (window.__LDH_STOCK_DOC_SYNC_INSTALLED) return;
+  window.__LDH_STOCK_DOC_SYNC_INSTALLED = true;
   window.__CLOUD_SYNC_DISABLE_LEGACY = true;
 
   const firebaseConfig = {
@@ -5707,150 +5768,55 @@ function LDH_closeMaintenanceModal(){
 
   const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
   const auth = window.__FIREBASE__?.auth || getAuth(app);
-  const db = window.__FIREBASE__?.db || getFirestore(app);
+  const fsdb = window.__FIREBASE__?.db || getFirestore(app);
 
   window.__FIREBASE__ = Object.assign({}, window.__FIREBASE__ || {}, {
-    app, auth, db,
+    app, auth, db: fsdb,
     onAuthStateChanged, signInWithEmailAndPassword, signOut,
     doc, getDoc, setDoc, onSnapshot, serverTimestamp
   });
 
-  const DOC_ID = "backup_main";
-  const CHUNK = 800000;
-  const CLIENT_ID_KEY = "LDH_LIVE_CLIENT_ID";
-  const LAST_REV_KEY = "LDH_LIVE_LAST_REV";
-  const IGNORE_PREFIX = "__LDH_LIVE_";
+  const META_PATH = ["taller_data", "stock"];
+  const CHUNK = 750000;
+  const CLIENT_KEY = "LDH_STOCK_SYNC_CLIENT_ID";
+  const LAST_REV_KEY = "LDH_STOCK_SYNC_LAST_REV";
+  const STOCK_KEYS = [
+    "ldh_v2_company_stock_v1",
+    "taller_stock_v3_data",
+    "LDH_STOCK_PROTECTED_MANUAL_V1",
+    "ldh_company_master_v1",
+    "ldh_company_master_ping"
+  ];
 
   let unsubscribe = null;
-  let saveTimer = null;
-  let saving = false;
-  let restoring = false;
   let started = false;
-  let lastHash = "";
-  let pendingRemoteRev = "";
-  let pendingRemoteTimer = null;
-  let lastUserActivity = 0;
+  let saving = false;
+  let applyingRemote = false;
+  let saveTimer = null;
   let localDirty = false;
   let lastLocalDirtyAt = 0;
+  let lastUserActivity = 0;
+  let lastHash = "";
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  function sid(){
+  function clientId(){
     try{
-      let v = sessionStorage.getItem(CLIENT_ID_KEY);
+      let v = sessionStorage.getItem(CLIENT_KEY);
       if(!v){
-        v = "c_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2);
-        sessionStorage.setItem(CLIENT_ID_KEY, v);
+        v = "stock_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2);
+        sessionStorage.setItem(CLIENT_KEY, v);
       }
       return v;
-    }catch(e){ return "c_" + Math.random().toString(36).slice(2); }
+    }catch(e){ return "stock_" + Math.random().toString(36).slice(2); }
   }
-  const CLIENT_ID = sid();
+  const CLIENT_ID = clientId();
 
-  function getStoreItem(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
-
-  function hasUsefulLocalData(){
-    try{
-      const raw = getStoreItem("TallerFlowDB");
-      if(raw && String(raw).length > 50){
-        try{
-          const obj = JSON.parse(raw);
-          if(obj && Array.isArray(obj.concepts) && obj.concepts.length > 0) return true;
-          if(obj && Array.isArray(obj.deliveryCompanies) && obj.deliveryCompanies.length > 0) return true;
-        }catch(e){}
-        if(String(raw).length > 5000) return true;
-      }
-      const stock = getStoreItem("taller_stock_v3_data");
-      if(stock && String(stock).length > 100) return true;
-      const companyStock = getStoreItem("ldh_v2_company_stock_v1");
-      if(companyStock && String(companyStock).length > 100) return true;
-      const tools = getStoreItem("tool_loans_db_v14_lib");
-      if(tools && String(tools).length > 100) return true;
-      for(let i=0;i<localStorage.length;i++){
-        const k = localStorage.key(i) || "";
-        if(k.indexOf("prep_") === 0 || k === "ldh_db") return true;
-      }
-      return false;
-    }catch(e){ return false; }
-  }
-
-
-
-  function parseSafeJSON(raw, fallback){
-    try{ return JSON.parse(raw || ""); }catch(e){ return fallback; }
-  }
-
-  function normKey(v){ return String(v || "").trim().toLowerCase(); }
-
-  function mergeArrayByIdentity(remoteArr, localArr, keyFn){
-    const out = [];
-    const pos = new Map();
-    function add(x){
-      if(!x || typeof x !== "object") return;
-      const k = keyFn(x) || ("idx_" + out.length + "_" + Math.random());
-      if(pos.has(k)) out[pos.get(k)] = Object.assign({}, out[pos.get(k)], x);
-      else { pos.set(k, out.length); out.push(x); }
-    }
-    (Array.isArray(remoteArr) ? remoteArr : []).forEach(add);
-    (Array.isArray(localArr) ? localArr : []).forEach(add);
-    return out;
-  }
-
-  function mergeStockPayload(remoteRaw, localRaw){
-    const r = parseSafeJSON(remoteRaw, null);
-    const l = parseSafeJSON(localRaw, null);
-    if(!r && !l) return localRaw || remoteRaw || null;
-    if(!r) return localRaw;
-    if(!l) return remoteRaw;
-    const m = Object.assign({}, r, l);
-    m.companies = mergeArrayByIdentity(r.companies, l.companies, x => x.id || x.companyId || x.code || x.codigo || x.name || x.nombre);
-    m.materials = mergeArrayByIdentity(r.materials, l.materials, x => x.id || x.materialId || (normKey(x.name || x.nombre) + "|" + normKey(x.type || x.tipo) + "|" + normKey(x.family || x.familia)));
-    m.stock = mergeArrayByIdentity(r.stock, l.stock, x => x.id || ((x.companyId || x.empresaId || "") + "|" + (x.materialId || x.matId || "")));
-    m.movements = mergeArrayByIdentity(r.movements, l.movements, x => x.id || [x.companyId,x.materialId,x.type,x.tipo,x.qty,x.cantidad,x.date,x.fecha,x.note,x.obs].map(v=>String(v||"")).join("|"));
-    m.jobs = mergeArrayByIdentity(r.jobs, l.jobs, x => x.id || x.ref || x.reference || x.referencia);
-    m.reservations = mergeArrayByIdentity(r.reservations, l.reservations, x => x.id || [x.companyId,x.materialId,x.jobId,x.qty,x.date].map(v=>String(v||"")).join("|"));
-    m.assignments = mergeArrayByIdentity(r.assignments, l.assignments, x => x.id || [x.companyId,x.materialId,x.jobId,x.qty,x.date,x.source].map(v=>String(v||"")).join("|"));
-    m.reservationDebts = mergeArrayByIdentity(r.reservationDebts, l.reservationDebts, x => x.id || [x.companyId,x.materialId,x.jobId,x.qty,x.date].map(v=>String(v||"")).join("|"));
-    m.updatedAt = (l.updatedAt && r.updatedAt) ? (String(l.updatedAt) > String(r.updatedAt) ? l.updatedAt : r.updatedAt) : (l.updatedAt || r.updatedAt || new Date().toISOString());
-    return JSON.stringify(m);
-  }
-
-  function mergeLocalIntoRemoteStorage(remoteAll, localAll){
-    const merged = Object.assign({}, remoteAll || {}, localAll || {});
-    const stockKeys = ["ldh_v2_company_stock_v1", "taller_stock_v3_data"];
-    stockKeys.forEach(k=>{
-      if((remoteAll && remoteAll[k]) || (localAll && localAll[k])) merged[k] = mergeStockPayload(remoteAll && remoteAll[k], localAll && localAll[k]);
-    });
-    return merged;
-  }
-
-  async function readRemoteStorage(docId = DOC_ID){
-    const metaSnap = await getDoc(doc(db, "backups", docId));
-    if(!metaSnap.exists()) return null;
-    const meta = metaSnap.data() || {};
-    const total = meta.totalChunks || 0;
-    if(!total) return null;
-    let json = "";
-    for(let i=0;i<total;i++){
-      const cSnap = await getDoc(doc(db, "backups", docId, "chunks", String(i)));
-      if(!cSnap.exists()) return null;
-      json += cSnap.data().part || "";
-    }
-    return { meta, all: JSON.parse(json) };
-  }
-
-  function collectLocalStorage(){
-    const all = {};
-    for(let i=0;i<localStorage.length;i++){
-      const k = localStorage.key(i);
-      if(!k) continue;
-      if(k.indexOf("firebase:") === 0) continue;
-      if(k.indexOf(IGNORE_PREFIX) === 0) continue;
-      if(k === CLIENT_ID_KEY || k === LAST_REV_KEY) continue;
-      all[k] = localStorage.getItem(k);
-    }
-    return all;
-  }
+  function read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+  function write(k,v){ try{ if(v === null || typeof v === "undefined") localStorage.removeItem(k); else localStorage.setItem(k, String(v)); }catch(e){} }
+  function parseJSON(raw, fb){ try{ return JSON.parse(raw || ""); }catch(e){ return fb; } }
+  function now(){ return new Date().toISOString(); }
+  function norm(v){ return String(v || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
 
   function fastHash(str){
     let h = 2166136261;
@@ -5861,244 +5827,315 @@ function LDH_closeMaintenanceModal(){
     return String(h >>> 0) + ":" + str.length;
   }
 
-  function markLocalDirty(reason){
-    if(restoring) return;
+  function collectStockStorage(){
+    const all = {};
+    STOCK_KEYS.forEach(k=>{
+      const v = read(k);
+      if(v !== null && typeof v !== "undefined") all[k] = v;
+    });
+    return all;
+  }
+
+  function hasLocalStock(){
+    const raw = read("ldh_v2_company_stock_v1");
+    if(!raw || String(raw).length < 20) return false;
+    const db = parseJSON(raw, null);
+    if(!db) return false;
+    return (Array.isArray(db.materials) && db.materials.length > 0) ||
+           (Array.isArray(db.stock) && db.stock.length > 0) ||
+           (Array.isArray(db.movements) && db.movements.length > 0) ||
+           (Array.isArray(db.companies) && db.companies.length > 0);
+  }
+
+  function identityMaterial(x){
+    return String(x?.id || x?.materialId || (norm(x?.name || x?.nombre) + "|" + norm(x?.type || x?.tipo) + "|" + norm(x?.family || x?.familia)));
+  }
+
+  function mergeArray(remoteArr, localArr, keyFn){
+    const out = [];
+    const pos = new Map();
+    function put(x, preferLocal){
+      if(!x || typeof x !== "object") return;
+      const k = keyFn(x) || ("idx_" + out.length + "_" + Math.random());
+      if(pos.has(k)){
+        const old = out[pos.get(k)] || {};
+        out[pos.get(k)] = preferLocal ? Object.assign({}, old, x) : Object.assign({}, x, old);
+      }else{
+        pos.set(k, out.length);
+        out.push(Object.assign({}, x));
+      }
+    }
+    (Array.isArray(remoteArr) ? remoteArr : []).forEach(x=>put(x, false));
+    (Array.isArray(localArr) ? localArr : []).forEach(x=>put(x, true));
+    return out;
+  }
+
+  function sanitizeManualStock(db){
+    if(!db || typeof db !== "object") return db;
+    db.companies = Array.isArray(db.companies) ? db.companies : [];
+    db.materials = Array.isArray(db.materials) ? db.materials : [];
+    db.stock = Array.isArray(db.stock) ? db.stock : [];
+    db.movements = Array.isArray(db.movements) ? db.movements : [];
+    db.jobs = Array.isArray(db.jobs) ? db.jobs : [];
+    db.reservations = Array.isArray(db.reservations) ? db.reservations : [];
+    db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
+    db.reservationDebts = Array.isArray(db.reservationDebts) ? db.reservationDebts : [];
+
+    const manualIds = new Set(db.materials.filter(m => m && (m.createdFromStockManual || m.manualStockOnly)).map(m => String(m.id || "")).filter(Boolean));
+    if(manualIds.size){
+      // Un material creado manualmente en Stock no debe heredar asignaciones antiguas por coincidencia de texto.
+      db.assignments = db.assignments.filter(a => !manualIds.has(String(a?.materialId || a?.matId || "")));
+      db.reservations = db.reservations.filter(a => !manualIds.has(String(a?.materialId || a?.matId || "")));
+      db.reservationDebts = db.reservationDebts.filter(a => !manualIds.has(String(a?.materialId || a?.matId || "")));
+    }
+    return db;
+  }
+
+  function mergeStockDB(remoteRaw, localRaw){
+    const r = sanitizeManualStock(parseJSON(remoteRaw, null));
+    const l = sanitizeManualStock(parseJSON(localRaw, null));
+    if(!r && !l) return null;
+    if(!r) return JSON.stringify(l);
+    if(!l) return JSON.stringify(r);
+
+    const m = Object.assign({}, r, l);
+    m.companies = mergeArray(r.companies, l.companies, x => String(x?.id || x?.companyId || x?.code || x?.codigo || norm(x?.name || x?.nombre)));
+    m.materials = mergeArray(r.materials, l.materials, identityMaterial);
+    m.stock = mergeArray(r.stock, l.stock, x => String(x?.id || ((x?.companyId || x?.empresaId || "") + "|" + (x?.materialId || x?.matId || ""))));
+    m.movements = mergeArray(r.movements, l.movements, x => String(x?.id || [x?.companyId,x?.materialId,x?.type,x?.tipo,x?.qty,x?.cantidad,x?.date,x?.fecha,x?.note,x?.obs].map(v=>String(v||"")).join("|")));
+    m.jobs = mergeArray(r.jobs, l.jobs, x => String(x?.id || x?.ref || x?.reference || x?.referencia || ""));
+    m.reservations = mergeArray(r.reservations, l.reservations, x => String(x?.id || [x?.companyId,x?.materialId,x?.jobId,x?.qty,x?.date].map(v=>String(v||"")).join("|")));
+    m.assignments = mergeArray(r.assignments, l.assignments, x => String(x?.id || [x?.companyId,x?.materialId,x?.jobId,x?.qty,x?.date,x?.source].map(v=>String(v||"")).join("|")));
+    m.reservationDebts = mergeArray(r.reservationDebts, l.reservationDebts, x => String(x?.id || [x?.companyId,x?.materialId,x?.jobId,x?.qty,x?.date].map(v=>String(v||"")).join("|")));
+    m.updatedAt = now();
+    sanitizeManualStock(m);
+    return JSON.stringify(m);
+  }
+
+  function mergeStockStorage(remoteAll, localAll){
+    const out = Object.assign({}, remoteAll || {}, localAll || {});
+    out["ldh_v2_company_stock_v1"] = mergeStockDB(remoteAll?.["ldh_v2_company_stock_v1"], localAll?.["ldh_v2_company_stock_v1"]);
+    if(!out["ldh_v2_company_stock_v1"]){ delete out["ldh_v2_company_stock_v1"]; }
+    // Mantener compatibilidad con módulos antiguos que miran taller_stock_v3_data.
+    if(localAll?.["taller_stock_v3_data"] || remoteAll?.["taller_stock_v3_data"]){
+      out["taller_stock_v3_data"] = localAll?.["taller_stock_v3_data"] || remoteAll?.["taller_stock_v3_data"];
+    }
+    return out;
+  }
+
+  async function readRemoteStock(){
+    const metaSnap = await getDoc(doc(fsdb, ...META_PATH));
+    if(!metaSnap.exists()) return null;
+    const meta = metaSnap.data() || {};
+    const total = Number(meta.totalChunks || 0);
+    if(!total) return null;
+    let json = "";
+    for(let i=0;i<total;i++){
+      const cSnap = await getDoc(doc(fsdb, ...META_PATH, "chunks", String(i)));
+      if(!cSnap.exists()) throw new Error("Falta chunk stock " + i);
+      json += cSnap.data().part || "";
+    }
+    return { meta, all: JSON.parse(json) };
+  }
+
+  async function writeRemoteStock(all, forceRevision){
+    const json = JSON.stringify(all || {});
+    const total = Math.max(1, Math.ceil(json.length / CHUNK));
+    const revision = forceRevision || (Date.now().toString(36) + "_" + CLIENT_ID);
+    for(let i=0;i<total;i++){
+      const part = json.slice(i * CHUNK, (i + 1) * CHUNK);
+      await setDoc(doc(fsdb, ...META_PATH, "chunks", String(i)), { i, part, revision });
+    }
+    await setDoc(doc(fsdb, ...META_PATH), {
+      updatedAt: serverTimestamp(),
+      updatedAtLocal: now(),
+      revision,
+      clientId: CLIENT_ID,
+      totalChunks: total,
+      totalBytes: json.length,
+      totalKeys: Object.keys(all || {}).length,
+      mode: "GESTION_TALLER_V2_STOCK_DOCUMENTO_PROPIO"
+    }, { merge:false });
+    try{ sessionStorage.setItem(LAST_REV_KEY, revision); }catch(e){}
+    lastHash = fastHash(json);
+    localDirty = false;
+    return { revision, totalChunks: total, totalBytes: json.length, totalKeys: Object.keys(all || {}).length };
+  }
+
+  function applyLocalStock(all){
+    applyingRemote = true;
+    try{
+      Object.entries(all || {}).forEach(([k,v])=>{ if(STOCK_KEYS.includes(k)) write(k,v); });
+      try{
+        if(typeof load === "function") load();
+        if(typeof render === "function") render();
+        if(typeof refreshSelectors === "function") refreshSelectors();
+      }catch(e){ console.warn("StockSync: no se pudo refrescar pantalla", e); }
+    }finally{
+      applyingRemote = false;
+    }
+  }
+
+  function markDirty(reason){
+    if(applyingRemote) return;
     localDirty = true;
     lastLocalDirtyAt = Date.now();
-    try{ sessionStorage.setItem("__LDH_LIVE_DIRTY_AT", String(lastLocalDirtyAt)); }catch(e){}
-    if(reason) console.log("🟡 LiveSync: cambio local", reason);
+    if(reason) console.log("🟡 StockSync cambio local:", reason);
   }
-  window.__ldhMarkLocalDirty = markLocalDirty;
+  window.__ldhMarkLocalDirty = markDirty;
 
-  async function liveBackupToFirestore(docId = DOC_ID, force = false){
-    if(typeof docId === "boolean"){ force = docId; docId = DOC_ID; }
-    if(restoring && !force) return { skipped:true, reason:"restoring" };
+  async function syncStockNow(force = true){
+    if(typeof force !== "boolean") force = true;
     if(!auth.currentUser) return { skipped:true, reason:"no_user" };
-    if(!hasUsefulLocalData()) return { skipped:true, reason:"empty_local" };
-
-    if(saving){
-      if(!force) return { skipped:true, reason:"busy" };
-      let guard = 0;
-      while(saving && guard < 60){ await sleep(100); guard++; }
-      if(saving) return { skipped:true, reason:"busy_timeout" };
-    }
-
-    let all = collectLocalStorage();
-    try{
-      const remote = await readRemoteStorage(docId);
-      if(remote && remote.all) all = mergeLocalIntoRemoteStorage(remote.all, all);
-    }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar con remoto antes de subir", e); }
-    const json = JSON.stringify(all);
-    const hash = fastHash(json);
-    if(!force && hash === lastHash && !localDirty) return { skipped:true, reason:"no_changes" };
-
+    if(saving) return { skipped:true, reason:"busy" };
+    if(!hasLocalStock()) return { skipped:true, reason:"empty_stock" };
     saving = true;
     try{
-      const total = Math.max(1, Math.ceil(json.length / CHUNK));
-      const revision = Date.now().toString(36) + "_" + CLIENT_ID;
-      for(let i=0;i<total;i++){
-        const part = json.slice(i * CHUNK, (i + 1) * CHUNK);
-        await setDoc(doc(db, "backups", docId, "chunks", String(i)), { i, part, revision });
-      }
-      await setDoc(doc(db, "backups", docId), {
-        updatedAt: serverTimestamp(),
-        createdAt: serverTimestamp(),
-        revision,
-        clientId: CLIENT_ID,
-        totalChunks: total,
-        totalBytes: json.length,
-        totalKeys: Object.keys(all).length,
-        mode: "GESTION_TALLER_V2_LIVE_SYNC_V4_MERGE_STOCK"
-      }, { merge:false });
-      lastHash = hash;
-      localDirty = false;
-      pendingRemoteRev = "";
-      try{ sessionStorage.setItem(LAST_REV_KEY, revision); }catch(e){}
-      console.log("✅ LiveSync: subido a Firestore", { totalChunks:total, totalKeys:Object.keys(all).length, totalBytes:json.length, revision });
-      return { docId, totalChunks:total, totalBytes:json.length, totalKeys:Object.keys(all).length, revision };
+      let localAll = collectStockStorage();
+      try{
+        const remote = await readRemoteStock();
+        if(remote && remote.all) localAll = mergeStockStorage(remote.all, localAll);
+      }catch(e){ console.warn("StockSync: no se pudo leer remoto antes de subir", e); }
+      const hash = fastHash(JSON.stringify(localAll));
+      if(!force && !localDirty && hash === lastHash) return { skipped:true, reason:"no_changes" };
+      const res = await writeRemoteStock(localAll);
+      console.log("✅ StockSync: stock subido a Firestore propio", res);
+      return res;
     }finally{
       saving = false;
     }
   }
 
-  async function liveRestoreFromFirestore(docId = DOC_ID){
-    if(restoring) return { skipped:true, reason:"restoring" };
-    restoring = true;
+  async function restoreStockNow(){
+    if(!auth.currentUser) return { skipped:true, reason:"no_user" };
+    if(saving) return { skipped:true, reason:"saving" };
+    applyingRemote = true;
     try{
-      const metaSnap = await getDoc(doc(db, "backups", docId));
-      if(!metaSnap.exists()) throw new Error("No existe backup en Firestore: " + docId);
-      const meta = metaSnap.data() || {};
-      const total = meta.totalChunks || 0;
-      if(!total) throw new Error("Backup sin chunks: " + docId);
-      let json = "";
-      for(let i=0;i<total;i++){
-        const cSnap = await getDoc(doc(db, "backups", docId, "chunks", String(i)));
-        if(!cSnap.exists()) throw new Error("Falta chunk " + i);
-        json += cSnap.data().part || "";
-      }
-      let all = JSON.parse(json);
-      try{
-        const current = collectLocalStorage();
-        all = mergeLocalIntoRemoteStorage(all, current);
-      }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar local al restaurar", e); }
-      localStorage.clear();
-      for(const [k,v] of Object.entries(all)) localStorage.setItem(k, v);
-      try{ sessionStorage.setItem(LAST_REV_KEY, meta.revision || ""); }catch(e){}
-      lastHash = fastHash(JSON.stringify(collectLocalStorage()));
-      localDirty = false;
-      console.log("✅ LiveSync: restaurado desde Firestore", { keys:Object.keys(all).length, revision:meta.revision });
-      return { docId, keys:Object.keys(all).length, revision:meta.revision };
+      const remote = await readRemoteStock();
+      if(!remote || !remote.all) return { skipped:true, reason:"no_remote_stock" };
+      let all = remote.all;
+      if(hasLocalStock()) all = mergeStockStorage(remote.all, collectStockStorage());
+      applyLocalStock(all);
+      try{ sessionStorage.setItem(LAST_REV_KEY, remote.meta.revision || ""); }catch(e){}
+      console.log("✅ StockSync: stock restaurado desde Firestore propio", { revision: remote.meta.revision });
+      return { revision: remote.meta.revision, keys:Object.keys(all).length };
     }finally{
-      restoring = false;
+      applyingRemote = false;
     }
   }
 
-  function scheduleLiveBackup(reason){
-    if(!started || restoring) return;
-    markLocalDirty(reason);
-    if(pendingRemoteRev){
-      console.log("⏸️ LiveSync: remoto pendiente aplazado por cambio local", { reason, pendingRemoteRev });
-      pendingRemoteRev = "";
-      clearTimeout(pendingRemoteTimer);
-      pendingRemoteTimer = null;
-    }
+  function scheduleStockBackup(reason){
+    if(!started || applyingRemote) return;
+    markDirty(reason);
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 650);
+    saveTimer = setTimeout(()=>syncStockNow(true).catch(e=>console.warn("❌ StockSync backup ERROR", e)), 700);
   }
 
-  if(!window.__LDH_LIVE_STORAGE_PATCHED){
-    window.__LDH_LIVE_STORAGE_PATCHED = true;
+  if(!window.__LDH_STOCK_STORAGE_PATCHED){
+    window.__LDH_STOCK_STORAGE_PATCHED = true;
     const p = Storage.prototype;
     const oldSet = p.setItem;
     const oldRemove = p.removeItem;
-    const oldClear = p.clear;
-    p.setItem = function(k,v){ const r = oldSet.apply(this, arguments); if(this === localStorage && String(k||"").indexOf(IGNORE_PREFIX)!==0) scheduleLiveBackup("setItem:" + k); return r; };
-    p.removeItem = function(k){ const r = oldRemove.apply(this, arguments); if(this === localStorage && String(k||"").indexOf(IGNORE_PREFIX)!==0) scheduleLiveBackup("removeItem:" + k); return r; };
-    p.clear = function(){ const r = oldClear.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("clear"); return r; };
+    p.setItem = function(k,v){
+      const r = oldSet.apply(this, arguments);
+      if(this === localStorage && STOCK_KEYS.includes(String(k || ""))) scheduleStockBackup("setItem:" + k);
+      return r;
+    };
+    p.removeItem = function(k){
+      const r = oldRemove.apply(this, arguments);
+      if(this === localStorage && STOCK_KEYS.includes(String(k || ""))) scheduleStockBackup("removeItem:" + k);
+      return r;
+    };
   }
 
-  async function flushLiveBackupBeforeLeave(){
-    try{
-      clearTimeout(saveTimer);
-      if(started && auth.currentUser && !restoring){
-        await liveBackupToFirestore(DOC_ID, true);
-      }
-    }catch(e){ console.warn("⚠️ LiveSync: flush al salir no completado", e); }
-  }
-  try{
-    window.addEventListener("pagehide", ()=>{ flushLiveBackupBeforeLeave(); });
-    document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden") flushLiveBackupBeforeLeave(); });
-  }catch(e){}
-
-  function markUserActivity(){ lastUserActivity = Date.now(); }
-  ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{ try{ window.addEventListener(ev, markUserActivity, true); }catch(e){} });
-
-  function elementVisible(el){
-    try{
-      const st = getComputedStyle(el);
-      if(st.display === "none" || st.visibility === "hidden" || Number(st.opacity) === 0) return false;
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    }catch(e){ return false; }
+  async function applyRemoteRevision(rev){
+    if(!rev || saving || applyingRemote) return;
+    if(localDirty && Date.now() - lastLocalDirtyAt < 8000){
+      console.log("⏸️ StockSync: cambio remoto aplazado, subo stock local primero");
+      await syncStockNow(true);
+      return;
+    }
+    const remote = await readRemoteStock();
+    if(!remote || !remote.all) return;
+    let all = remote.all;
+    if(hasLocalStock()) all = mergeStockStorage(remote.all, collectStockStorage());
+    applyLocalStock(all);
+    try{ sessionStorage.setItem(LAST_REV_KEY, rev); }catch(e){}
+    if(localDirty){ await syncStockNow(true); }
+    console.log("⬇️ StockSync: aplicado cambio remoto de stock", rev);
   }
 
-  function hasOpenModalOrEditor(){
-    try{
-      const selectors = ['[role="dialog"]', '.modal', '.dialog', '.popup', '.overlay', '.drawer', '#modal', '#dlg', '[id*="modal" i]', '[class*="modal" i]', '[class*="dialog" i]'];
-      return selectors.some(sel => Array.from(document.querySelectorAll(sel)).some(elementVisible));
-    }catch(e){ return false; }
-  }
-
-  function isUserEditing(){
-    try{
-      const ae = document.activeElement;
-      const tag = ae && ae.tagName ? ae.tagName.toLowerCase() : "";
-      if(ae && (tag === "input" || tag === "textarea" || tag === "select" || ae.isContentEditable)) return true;
-      if(Date.now() - lastUserActivity < 12000) return true;
-      if(hasOpenModalOrEditor()) return true;
-      if(localDirty && Date.now() - lastLocalDirtyAt < 10000) return true;
-    }catch(e){}
+  function userActivity(){ lastUserActivity = Date.now(); }
+  ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{ try{ window.addEventListener(ev, userActivity, true); }catch(e){} });
+  function isEditing(){
+    const ae = document.activeElement;
+    const tag = ae && ae.tagName ? ae.tagName.toLowerCase() : "";
+    if(ae && (tag === "input" || tag === "textarea" || tag === "select" || ae.isContentEditable)) return true;
+    if(Date.now() - lastUserActivity < 5000) return true;
     return false;
   }
 
-  async function applyRemoteChange(rev){
-    if(!rev || restoring || saving) return;
-    if(localDirty){
-      console.log("⏸️ LiveSync: no aplico remoto porque hay cambio local pendiente; subo local primero", rev);
-      await liveBackupToFirestore(DOC_ID, true);
-      return;
-    }
-    if(isUserEditing()){
-      pendingRemoteRev = rev;
-      clearTimeout(pendingRemoteTimer);
-      pendingRemoteTimer = setTimeout(()=>{
-        if(pendingRemoteRev && !isUserEditing()){
-          const r = pendingRemoteRev; pendingRemoteRev = "";
-          applyRemoteChange(r).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e));
-        }else if(pendingRemoteRev){
-          pendingRemoteTimer = setTimeout(()=>applyRemoteChange(pendingRemoteRev).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e)), 6000);
-        }
-      }, 6000);
-      console.log("⏸️ LiveSync: cambio remoto aplazado porque hay formulario/edición abierta", rev);
-      return;
-    }
-    console.log("⬇️ LiveSync: cambio remoto detectado", rev);
-    await liveRestoreFromFirestore(DOC_ID);
-    setTimeout(()=>location.reload(), 350);
-  }
-
-  async function startLiveSync(){
+  async function startStockSync(){
     if(started) return;
     started = true;
-    window.__CLOUD_SYNC_DISABLE_LEGACY = true;
 
-    if(!hasUsefulLocalData()){
-      try{
-        await liveRestoreFromFirestore(DOC_ID);
-        setTimeout(()=>location.reload(), 300);
-        return;
-      }catch(e){ console.warn("⚠️ LiveSync: no se pudo auto-restaurar", e); }
-    }else{
-      try{ await liveBackupToFirestore(DOC_ID, true); }
-      catch(e){ console.warn("⚠️ LiveSync: no se pudo subir estado local inicial", e); }
+    let remote = null;
+    try{ remote = await readRemoteStock(); }catch(e){ console.warn("StockSync: remoto no disponible todavía", e); }
+
+    if(remote && remote.all){
+      if(hasLocalStock()){
+        const merged = mergeStockStorage(remote.all, collectStockStorage());
+        applyLocalStock(merged);
+        await writeRemoteStock(merged);
+      }else{
+        applyLocalStock(remote.all);
+      }
+    }else if(hasLocalStock()){
+      await syncStockNow(true);
     }
 
     if(unsubscribe) unsubscribe();
-    unsubscribe = onSnapshot(doc(db, "backups", DOC_ID), async (snap)=>{
+    unsubscribe = onSnapshot(doc(fsdb, ...META_PATH), async (snap)=>{
       try{
-        if(!snap.exists() || restoring || saving) return;
+        if(!snap.exists() || saving || applyingRemote) return;
         const meta = snap.data() || {};
         const rev = meta.revision || "";
         const lastRev = sessionStorage.getItem(LAST_REV_KEY) || "";
         if(!rev || meta.clientId === CLIENT_ID || rev === lastRev) return;
-        await applyRemoteChange(rev);
-      }catch(e){ console.warn("❌ LiveSync snapshot ERROR", e); }
+        if(isEditing()){
+          setTimeout(()=>applyRemoteRevision(rev).catch(e=>console.warn("❌ StockSync delayed ERROR", e)), 4500);
+          return;
+        }
+        await applyRemoteRevision(rev);
+      }catch(e){ console.warn("❌ StockSync snapshot ERROR", e); }
     });
 
-    try{
-      setInterval(()=>{ if(started && localDirty) liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync periodic ERROR", e)); }, 3000);
-    }catch(e){}
-
-    console.log("🔁 LiveSync v4 merge stock: activo", firebaseConfig.projectId);
+    setInterval(()=>{ if(started && localDirty) syncStockNow(true).catch(e=>console.warn("❌ StockSync periodic ERROR", e)); }, 2500);
+    console.log("🔁 StockSync documento propio activo:", firebaseConfig.projectId, META_PATH.join("/"));
   }
 
-  function stopLiveSync(){
+  function stopStockSync(){
     started = false;
     clearTimeout(saveTimer);
     if(unsubscribe){ unsubscribe(); unsubscribe = null; }
   }
 
-  onAuthStateChanged(auth, (user)=>{ if(user) startLiveSync(); else stopLiveSync(); });
+  try{
+    window.addEventListener("pagehide", ()=>{ try{ if(started && localDirty) syncStockNow(true); }catch(e){} });
+    document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden"){ try{ if(started && localDirty) syncStockNow(true); }catch(e){} } });
+  }catch(e){}
 
-  window.backupToFirestore = liveBackupToFirestore;
-  window.restoreFromFirestore = liveRestoreFromFirestore;
-  window.autoRestoreIfEmpty = liveRestoreFromFirestore;
-  window.__ldhAutoRestoreAfterLogin = liveRestoreFromFirestore;
-  window.__ldhLiveSyncNow = liveBackupToFirestore;
-  window.__ldhLiveRestoreNow = liveRestoreFromFirestore;
+  onAuthStateChanged(auth, user => { if(user) startStockSync(); else stopStockSync(); });
+
+  window.__ldhStockSyncNow = syncStockNow;
+  window.__ldhStockRestoreNow = restoreStockNow;
+  window.__ldhLiveSyncNow = syncStockNow;
+  window.__ldhLiveRestoreNow = restoreStockNow;
+  window.backupToFirestore = syncStockNow;
+  window.restoreFromFirestore = restoreStockNow;
 })();
 </script>
-<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
+<!-- ===== LDH STOCK SYNC DOCUMENTO PROPIO FIRESTORE ===== -->
 
 </body>
 </html>
