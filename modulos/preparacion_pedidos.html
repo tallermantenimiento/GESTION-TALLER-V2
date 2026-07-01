@@ -11913,7 +11913,7 @@ function LDH_prepVolverMenu(){
 </script>
 
 
-<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v1 ===== -->
+<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v2 SIN CIERRE FORMULARIOS ===== -->
 <script type="module">
 (async function(){
   if (window.__LDH_LIVE_SYNC_INSTALLED) return;
@@ -11954,6 +11954,9 @@ function LDH_prepVolverMenu(){
   let restoring = false;
   let started = false;
   let lastHash = "";
+  let pendingRemoteRev = "";
+  let pendingRemoteTimer = null;
+  let lastUserActivity = 0;
 
   function sid(){
     try{
@@ -12080,6 +12083,14 @@ function LDH_prepVolverMenu(){
 
   function scheduleLiveBackup(reason){
     if(!started || restoring || saving) return;
+    // Si hay un cambio remoto pendiente y el usuario acaba de guardar algo local,
+    // prima el trabajo local para no cerrar formularios ni pisar lo que está editando.
+    if(pendingRemoteRev){
+      console.log("⏸️ LiveSync: cambio remoto pendiente ignorado por cambio local", { reason, pendingRemoteRev });
+      pendingRemoteRev = "";
+      clearTimeout(pendingRemoteTimer);
+      pendingRemoteTimer = null;
+    }
     clearTimeout(saveTimer);
     saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 1800);
   }
@@ -12094,6 +12105,66 @@ function LDH_prepVolverMenu(){
     p.setItem = function(k,v){ const r = oldSet.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("setItem:" + k); return r; };
     p.removeItem = function(k){ const r = oldRemove.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("removeItem:" + k); return r; };
     p.clear = function(){ const r = oldClear.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("clear"); return r; };
+  }
+
+  function markUserActivity(){ lastUserActivity = Date.now(); }
+  ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{
+    try{ window.addEventListener(ev, markUserActivity, true); }catch(e){}
+  });
+
+  function elementVisible(el){
+    try{
+      const st = getComputedStyle(el);
+      if(st.display === "none" || st.visibility === "hidden" || Number(st.opacity) === 0) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }catch(e){ return false; }
+  }
+
+  function hasOpenModalOrEditor(){
+    try{
+      const selectors = [
+        '[role="dialog"]', '.modal', '.dialog', '.popup', '.overlay', '.drawer',
+        '#modal', '#dlg', '[id*="modal" i]', '[class*="modal" i]', '[class*="dialog" i]'
+      ];
+      return selectors.some(sel => Array.from(document.querySelectorAll(sel)).some(elementVisible));
+    }catch(e){ return false; }
+  }
+
+  function isUserEditing(){
+    try{
+      const ae = document.activeElement;
+      const tag = ae && ae.tagName ? ae.tagName.toLowerCase() : "";
+      if(ae && (tag === "input" || tag === "textarea" || tag === "select" || ae.isContentEditable)) return true;
+      if(Date.now() - lastUserActivity < 12000) return true;
+      if(hasOpenModalOrEditor()) return true;
+    }catch(e){}
+    return false;
+  }
+
+  async function applyRemoteChange(rev){
+    if(!rev || restoring || saving) return;
+    if(isUserEditing()){
+      pendingRemoteRev = rev;
+      clearTimeout(pendingRemoteTimer);
+      pendingRemoteTimer = setTimeout(()=>{
+        if(pendingRemoteRev && !isUserEditing()){
+          const r = pendingRemoteRev;
+          pendingRemoteRev = "";
+          applyRemoteChange(r).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e));
+        }else if(pendingRemoteRev){
+          // Sigue editando: reintentar más tarde sin cerrar el formulario.
+          const r = pendingRemoteRev;
+          pendingRemoteRev = "";
+          applyRemoteChange(r).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e));
+        }
+      }, 6000);
+      console.log("⏸️ LiveSync: cambio remoto aplazado porque hay formulario/edición abierta", rev);
+      return;
+    }
+    console.log("⬇️ LiveSync: cambio remoto detectado", rev);
+    await liveRestoreFromFirestore(DOC_ID);
+    setTimeout(()=>location.reload(), 350);
   }
 
   async function startLiveSync(){
@@ -12120,12 +12191,10 @@ function LDH_prepVolverMenu(){
         const rev = meta.revision || "";
         const lastRev = sessionStorage.getItem(LAST_REV_KEY) || "";
         if(!rev || meta.clientId === CLIENT_ID || rev === lastRev) return;
-        console.log("⬇️ LiveSync: cambio remoto detectado", rev);
-        await liveRestoreFromFirestore(DOC_ID);
-        setTimeout(()=>location.reload(), 350);
+        await applyRemoteChange(rev);
       }catch(e){ console.warn("❌ LiveSync snapshot ERROR", e); }
     });
-    console.log("🔁 LiveSync: activo en tiempo real", firebaseConfig.projectId);
+    console.log("🔁 LiveSync v2 sin cierre de formularios: activo", firebaseConfig.projectId);
   }
 
   function stopLiveSync(){
@@ -12147,6 +12216,6 @@ function LDH_prepVolverMenu(){
   window.__ldhLiveRestoreNow = liveRestoreFromFirestore;
 })();
 </script>
-<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v1 ===== -->
+<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v2 SIN CIERRE FORMULARIOS ===== -->
 
 </body></html>
