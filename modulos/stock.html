@@ -1486,7 +1486,9 @@ function load(){
   db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
   db.reservationDebts = Array.isArray(db.reservationDebts) ? db.reservationDebts : [];
   try{ LDH_applyProtectedStockToDB(); }catch(e){}
-  if(!db.companies?.length) loadSample(false);
+  // No cargar datos de muestra automáticamente en producción.
+  // Antes esto generaba 3 materiales demo en navegadores nuevos y después la sincronización los pisaba.
+  if(!db.companies?.length){ activeCompany=''; }
   activeCompany=activeCompany||db.companies[0]?.id||'';
 normalizeBlackIron();
 try{ sanearDeudasAntiguasPreparacion(); }catch(e){}
@@ -5827,13 +5829,50 @@ function LDH_closeMaintenanceModal(){
     return String(h >>> 0) + ":" + str.length;
   }
 
+  function stripStockSamplesFromDB(obj){
+    const d = parseJSON(typeof obj === "string" ? obj : JSON.stringify(obj || {}), null);
+    if(!d || typeof d !== "object") return obj;
+    const sampleMaterialIds = new Set();
+    if(Array.isArray(d.materials)){
+      d.materials = d.materials.filter(m=>{
+        const isSample = m && m.sample === true && /^mat_[hp]_/.test(String(m.id || ""));
+        if(isSample) sampleMaterialIds.add(String(m.id || ""));
+        return !isSample;
+      });
+    }
+    if(Array.isArray(d.stock)){
+      d.stock = d.stock.filter(x=>!(x && (x.sample === true || sampleMaterialIds.has(String(x.materialId || "")))));
+    }
+    if(Array.isArray(d.movements)){
+      d.movements = d.movements.filter(x=>{
+        if(!x) return false;
+        if(sampleMaterialIds.has(String(x.materialId || ""))) return false;
+        if(/muestra/i.test(String(x.note || x.nota || x.reason || ""))) return false;
+        return true;
+      });
+    }
+    ["jobs","reservations","assignments","reservationDebts"].forEach(k=>{
+      if(Array.isArray(d[k])) d[k] = d[k].filter(x=>!(x && x.sample === true));
+    });
+    d.sampleLoaded = false;
+    return JSON.stringify(d);
+  }
+
+  function sanitizeStockStorage(all){
+    const out = Object.assign({}, all || {});
+    if(out["ldh_v2_company_stock_v1"]){
+      out["ldh_v2_company_stock_v1"] = stripStockSamplesFromDB(out["ldh_v2_company_stock_v1"]);
+    }
+    return out;
+  }
+
   function collectStockStorage(){
     const all = {};
     STOCK_KEYS.forEach(k=>{
       const v = read(k);
       if(v !== null && typeof v !== "undefined") all[k] = v;
     });
-    return all;
+    return sanitizeStockStorage(all);
   }
 
   function hasLocalStock(){
@@ -5913,6 +5952,8 @@ function LDH_closeMaintenanceModal(){
   }
 
   function mergeStockStorage(remoteAll, localAll){
+    remoteAll = sanitizeStockStorage(remoteAll || {});
+    localAll = sanitizeStockStorage(localAll || {});
     const out = Object.assign({}, remoteAll || {}, localAll || {});
     out["ldh_v2_company_stock_v1"] = mergeStockDB(remoteAll?.["ldh_v2_company_stock_v1"], localAll?.["ldh_v2_company_stock_v1"]);
     if(!out["ldh_v2_company_stock_v1"]){ delete out["ldh_v2_company_stock_v1"]; }
@@ -5935,10 +5976,11 @@ function LDH_closeMaintenanceModal(){
       if(!cSnap.exists()) throw new Error("Falta chunk stock " + i);
       json += cSnap.data().part || "";
     }
-    return { meta, all: JSON.parse(json) };
+    return { meta, all: sanitizeStockStorage(JSON.parse(json)) };
   }
 
   async function writeRemoteStock(all, forceRevision){
+    all = sanitizeStockStorage(all || {});
     const json = JSON.stringify(all || {});
     const total = Math.max(1, Math.ceil(json.length / CHUNK));
     const revision = forceRevision || (Date.now().toString(36) + "_" + CLIENT_ID);
@@ -5963,6 +6005,7 @@ function LDH_closeMaintenanceModal(){
   }
 
   function applyLocalStock(all, opts){
+    all = sanitizeStockStorage(all || {});
     opts = opts || {};
     applyingRemote = true;
     try{
@@ -6145,7 +6188,7 @@ function LDH_closeMaintenanceModal(){
   window.restoreFromFirestore = restoreStockNow;
 })();
 </script>
-<!-- ===== LDH STOCK SYNC DOCUMENTO PROPIO FIRESTORE UI RELOAD OK ===== -->
+<!-- ===== LDH STOCK SYNC DOCUMENTO PROPIO FIRESTORE SIN MUESTRAS OK ===== -->
 
 </body>
 </html>
