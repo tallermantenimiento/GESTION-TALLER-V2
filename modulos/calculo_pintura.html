@@ -1850,7 +1850,7 @@ function configurarPendiente(idx){
 </div>
 
 
-<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v2 SIN CIERRE FORMULARIOS ===== -->
+<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v3 PRIORIDAD LOCAL ===== -->
 <script type="module">
 (async function(){
   if (window.__LDH_LIVE_SYNC_INSTALLED) return;
@@ -1884,7 +1884,8 @@ function configurarPendiente(idx){
   const CHUNK = 800000;
   const CLIENT_ID_KEY = "LDH_LIVE_CLIENT_ID";
   const LAST_REV_KEY = "LDH_LIVE_LAST_REV";
-  const SUPPRESS_MS = 2500;
+  const IGNORE_PREFIX = "__LDH_LIVE_";
+
   let unsubscribe = null;
   let saveTimer = null;
   let saving = false;
@@ -1894,6 +1895,10 @@ function configurarPendiente(idx){
   let pendingRemoteRev = "";
   let pendingRemoteTimer = null;
   let lastUserActivity = 0;
+  let localDirty = false;
+  let lastLocalDirtyAt = 0;
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   function sid(){
     try{
@@ -1907,9 +1912,8 @@ function configurarPendiente(idx){
   }
   const CLIENT_ID = sid();
 
-  function getStoreItem(k){
-    try{ return localStorage.getItem(k); }catch(e){ return null; }
-  }
+  function getStoreItem(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+
   function hasUsefulLocalData(){
     try{
       const raw = getStoreItem("TallerFlowDB");
@@ -1923,6 +1927,8 @@ function configurarPendiente(idx){
       }
       const stock = getStoreItem("taller_stock_v3_data");
       if(stock && String(stock).length > 100) return true;
+      const companyStock = getStoreItem("ldh_v2_company_stock_v1");
+      if(companyStock && String(companyStock).length > 100) return true;
       const tools = getStoreItem("tool_loans_db_v14_lib");
       if(tools && String(tools).length > 100) return true;
       for(let i=0;i<localStorage.length;i++){
@@ -1939,6 +1945,7 @@ function configurarPendiente(idx){
       const k = localStorage.key(i);
       if(!k) continue;
       if(k.indexOf("firebase:") === 0) continue;
+      if(k.indexOf(IGNORE_PREFIX) === 0) continue;
       if(k === CLIENT_ID_KEY || k === LAST_REV_KEY) continue;
       all[k] = localStorage.getItem(k);
     }
@@ -1954,15 +1961,32 @@ function configurarPendiente(idx){
     return String(h >>> 0) + ":" + str.length;
   }
 
-  async function liveBackupToFirestore(docId = DOC_ID){
-    if(restoring || saving) return { skipped:true, reason:"busy" };
+  function markLocalDirty(reason){
+    if(restoring) return;
+    localDirty = true;
+    lastLocalDirtyAt = Date.now();
+    try{ sessionStorage.setItem("__LDH_LIVE_DIRTY_AT", String(lastLocalDirtyAt)); }catch(e){}
+    if(reason) console.log("🟡 LiveSync: cambio local", reason);
+  }
+  window.__ldhMarkLocalDirty = markLocalDirty;
+
+  async function liveBackupToFirestore(docId = DOC_ID, force = false){
+    if(typeof docId === "boolean"){ force = docId; docId = DOC_ID; }
+    if(restoring && !force) return { skipped:true, reason:"restoring" };
     if(!auth.currentUser) return { skipped:true, reason:"no_user" };
     if(!hasUsefulLocalData()) return { skipped:true, reason:"empty_local" };
+
+    if(saving){
+      if(!force) return { skipped:true, reason:"busy" };
+      let guard = 0;
+      while(saving && guard < 60){ await sleep(100); guard++; }
+      if(saving) return { skipped:true, reason:"busy_timeout" };
+    }
 
     const all = collectLocalStorage();
     const json = JSON.stringify(all);
     const hash = fastHash(json);
-    if(hash === lastHash) return { skipped:true, reason:"no_changes" };
+    if(!force && hash === lastHash && !localDirty) return { skipped:true, reason:"no_changes" };
 
     saving = true;
     try{
@@ -1980,14 +2004,16 @@ function configurarPendiente(idx){
         totalChunks: total,
         totalBytes: json.length,
         totalKeys: Object.keys(all).length,
-        mode: "GESTION_TALLER_V2_LIVE_SYNC"
+        mode: "GESTION_TALLER_V2_LIVE_SYNC_V3_LOCAL_PRIORITY"
       }, { merge:false });
       lastHash = hash;
+      localDirty = false;
+      pendingRemoteRev = "";
       try{ sessionStorage.setItem(LAST_REV_KEY, revision); }catch(e){}
-      console.log("✅ LiveSync: subido a Firestore", { totalChunks:total, totalKeys:Object.keys(all).length, totalBytes:json.length });
+      console.log("✅ LiveSync: subido a Firestore", { totalChunks:total, totalKeys:Object.keys(all).length, totalBytes:json.length, revision });
       return { docId, totalChunks:total, totalBytes:json.length, totalKeys:Object.keys(all).length, revision };
     }finally{
-      setTimeout(()=>{ saving = false; }, SUPPRESS_MS);
+      saving = false;
     }
   }
 
@@ -2011,60 +2037,53 @@ function configurarPendiente(idx){
       for(const [k,v] of Object.entries(all)) localStorage.setItem(k, v);
       try{ sessionStorage.setItem(LAST_REV_KEY, meta.revision || ""); }catch(e){}
       lastHash = fastHash(JSON.stringify(collectLocalStorage()));
+      localDirty = false;
       console.log("✅ LiveSync: restaurado desde Firestore", { keys:Object.keys(all).length, revision:meta.revision });
       return { docId, keys:Object.keys(all).length, revision:meta.revision };
     }finally{
-      setTimeout(()=>{ restoring = false; }, SUPPRESS_MS);
+      restoring = false;
     }
   }
 
   function scheduleLiveBackup(reason){
-    if(!started || restoring || saving) return;
-    // Si hay un cambio remoto pendiente y el usuario acaba de guardar algo local,
-    // prima el trabajo local para no cerrar formularios ni pisar lo que está editando.
+    if(!started || restoring) return;
+    markLocalDirty(reason);
     if(pendingRemoteRev){
-      console.log("⏸️ LiveSync: cambio remoto pendiente ignorado por cambio local", { reason, pendingRemoteRev });
+      console.log("⏸️ LiveSync: remoto pendiente aplazado por cambio local", { reason, pendingRemoteRev });
       pendingRemoteRev = "";
       clearTimeout(pendingRemoteTimer);
       pendingRemoteTimer = null;
     }
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 1800);
+    saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 650);
   }
 
-  // Detectar cambios locales hechos por cualquier módulo que guarde en localStorage.
   if(!window.__LDH_LIVE_STORAGE_PATCHED){
     window.__LDH_LIVE_STORAGE_PATCHED = true;
     const p = Storage.prototype;
     const oldSet = p.setItem;
     const oldRemove = p.removeItem;
     const oldClear = p.clear;
-    p.setItem = function(k,v){ const r = oldSet.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("setItem:" + k); return r; };
-    p.removeItem = function(k){ const r = oldRemove.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("removeItem:" + k); return r; };
+    p.setItem = function(k,v){ const r = oldSet.apply(this, arguments); if(this === localStorage && String(k||"").indexOf(IGNORE_PREFIX)!==0) scheduleLiveBackup("setItem:" + k); return r; };
+    p.removeItem = function(k){ const r = oldRemove.apply(this, arguments); if(this === localStorage && String(k||"").indexOf(IGNORE_PREFIX)!==0) scheduleLiveBackup("removeItem:" + k); return r; };
     p.clear = function(){ const r = oldClear.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("clear"); return r; };
   }
 
-  // Al salir de un módulo, forzar subida antes de navegar si hay cambios locales pendientes.
-  // Especialmente importante en Stock: crear material y volver al menú no debe perder el alta.
   async function flushLiveBackupBeforeLeave(){
     try{
       clearTimeout(saveTimer);
       if(started && auth.currentUser && !restoring){
-        await liveBackupToFirestore(DOC_ID);
+        await liveBackupToFirestore(DOC_ID, true);
       }
     }catch(e){ console.warn("⚠️ LiveSync: flush al salir no completado", e); }
   }
   try{
     window.addEventListener("pagehide", ()=>{ flushLiveBackupBeforeLeave(); });
-    document.addEventListener("visibilitychange", ()=>{
-      if(document.visibilityState === "hidden") flushLiveBackupBeforeLeave();
-    });
+    document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden") flushLiveBackupBeforeLeave(); });
   }catch(e){}
 
   function markUserActivity(){ lastUserActivity = Date.now(); }
-  ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{
-    try{ window.addEventListener(ev, markUserActivity, true); }catch(e){}
-  });
+  ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{ try{ window.addEventListener(ev, markUserActivity, true); }catch(e){} });
 
   function elementVisible(el){
     try{
@@ -2077,10 +2096,7 @@ function configurarPendiente(idx){
 
   function hasOpenModalOrEditor(){
     try{
-      const selectors = [
-        '[role="dialog"]', '.modal', '.dialog', '.popup', '.overlay', '.drawer',
-        '#modal', '#dlg', '[id*="modal" i]', '[class*="modal" i]', '[class*="dialog" i]'
-      ];
+      const selectors = ['[role="dialog"]', '.modal', '.dialog', '.popup', '.overlay', '.drawer', '#modal', '#dlg', '[id*="modal" i]', '[class*="modal" i]', '[class*="dialog" i]'];
       return selectors.some(sel => Array.from(document.querySelectorAll(sel)).some(elementVisible));
     }catch(e){ return false; }
   }
@@ -2092,25 +2108,27 @@ function configurarPendiente(idx){
       if(ae && (tag === "input" || tag === "textarea" || tag === "select" || ae.isContentEditable)) return true;
       if(Date.now() - lastUserActivity < 12000) return true;
       if(hasOpenModalOrEditor()) return true;
+      if(localDirty && Date.now() - lastLocalDirtyAt < 10000) return true;
     }catch(e){}
     return false;
   }
 
   async function applyRemoteChange(rev){
     if(!rev || restoring || saving) return;
+    if(localDirty){
+      console.log("⏸️ LiveSync: no aplico remoto porque hay cambio local pendiente; subo local primero", rev);
+      await liveBackupToFirestore(DOC_ID, true);
+      return;
+    }
     if(isUserEditing()){
       pendingRemoteRev = rev;
       clearTimeout(pendingRemoteTimer);
       pendingRemoteTimer = setTimeout(()=>{
         if(pendingRemoteRev && !isUserEditing()){
-          const r = pendingRemoteRev;
-          pendingRemoteRev = "";
+          const r = pendingRemoteRev; pendingRemoteRev = "";
           applyRemoteChange(r).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e));
         }else if(pendingRemoteRev){
-          // Sigue editando: reintentar más tarde sin cerrar el formulario.
-          const r = pendingRemoteRev;
-          pendingRemoteRev = "";
-          applyRemoteChange(r).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e));
+          pendingRemoteTimer = setTimeout(()=>applyRemoteChange(pendingRemoteRev).catch(e=>console.warn("❌ LiveSync apply delayed ERROR", e)), 6000);
         }
       }, 6000);
       console.log("⏸️ LiveSync: cambio remoto aplazado porque hay formulario/edición abierta", rev);
@@ -2133,15 +2151,8 @@ function configurarPendiente(idx){
         return;
       }catch(e){ console.warn("⚠️ LiveSync: no se pudo auto-restaurar", e); }
     }else{
-      // IMPORTANTE: si este navegador ya tiene datos locales, primero subimos
-      // su estado actual antes de escuchar cambios remotos.
-      // Evita que un backup remoto anterior pise un material/concepto recién creado
-      // al salir al menú y volver a entrar.
-      try{
-        await liveBackupToFirestore(DOC_ID);
-      }catch(e){
-        console.warn("⚠️ LiveSync: no se pudo subir estado local inicial", e);
-      }
+      try{ await liveBackupToFirestore(DOC_ID, true); }
+      catch(e){ console.warn("⚠️ LiveSync: no se pudo subir estado local inicial", e); }
     }
 
     if(unsubscribe) unsubscribe();
@@ -2155,7 +2166,12 @@ function configurarPendiente(idx){
         await applyRemoteChange(rev);
       }catch(e){ console.warn("❌ LiveSync snapshot ERROR", e); }
     });
-    console.log("🔁 LiveSync v2 sin cierre de formularios: activo", firebaseConfig.projectId);
+
+    try{
+      setInterval(()=>{ if(started && localDirty) liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync periodic ERROR", e)); }, 3000);
+    }catch(e){}
+
+    console.log("🔁 LiveSync v3 prioridad local: activo", firebaseConfig.projectId);
   }
 
   function stopLiveSync(){
@@ -2164,10 +2180,7 @@ function configurarPendiente(idx){
     if(unsubscribe){ unsubscribe(); unsubscribe = null; }
   }
 
-  onAuthStateChanged(auth, (user)=>{
-    if(user) startLiveSync();
-    else stopLiveSync();
-  });
+  onAuthStateChanged(auth, (user)=>{ if(user) startLiveSync(); else stopLiveSync(); });
 
   window.backupToFirestore = liveBackupToFirestore;
   window.restoreFromFirestore = liveRestoreFromFirestore;
@@ -2177,7 +2190,7 @@ function configurarPendiente(idx){
   window.__ldhLiveRestoreNow = liveRestoreFromFirestore;
 })();
 </script>
-<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v2 SIN CIERRE FORMULARIOS ===== -->
+<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v3 PRIORIDAD LOCAL ===== -->
 
 </body>
 </html>
