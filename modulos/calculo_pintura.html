@@ -1849,5 +1849,242 @@ function configurarPendiente(idx){
   </div>
 </div>
 
+
+<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v1 ===== -->
+<script type="module">
+(async function(){
+  if (window.__LDH_LIVE_SYNC_INSTALLED) return;
+  window.__LDH_LIVE_SYNC_INSTALLED = true;
+  window.__CLOUD_SYNC_DISABLE_LEGACY = true;
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
+
+  const { initializeApp, getApps, getApp } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
+  const { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+  const { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+
+  const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+  const auth = window.__FIREBASE__?.auth || getAuth(app);
+  const db = window.__FIREBASE__?.db || getFirestore(app);
+
+  window.__FIREBASE__ = Object.assign({}, window.__FIREBASE__ || {}, {
+    app, auth, db,
+    onAuthStateChanged, signInWithEmailAndPassword, signOut,
+    doc, getDoc, setDoc, onSnapshot, serverTimestamp
+  });
+
+  const DOC_ID = "backup_main";
+  const CHUNK = 800000;
+  const CLIENT_ID_KEY = "LDH_LIVE_CLIENT_ID";
+  const LAST_REV_KEY = "LDH_LIVE_LAST_REV";
+  const SUPPRESS_MS = 2500;
+  let unsubscribe = null;
+  let saveTimer = null;
+  let saving = false;
+  let restoring = false;
+  let started = false;
+  let lastHash = "";
+
+  function sid(){
+    try{
+      let v = sessionStorage.getItem(CLIENT_ID_KEY);
+      if(!v){
+        v = "c_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2);
+        sessionStorage.setItem(CLIENT_ID_KEY, v);
+      }
+      return v;
+    }catch(e){ return "c_" + Math.random().toString(36).slice(2); }
+  }
+  const CLIENT_ID = sid();
+
+  function getStoreItem(k){
+    try{ return localStorage.getItem(k); }catch(e){ return null; }
+  }
+  function hasUsefulLocalData(){
+    try{
+      const raw = getStoreItem("TallerFlowDB");
+      if(raw && String(raw).length > 50){
+        try{
+          const obj = JSON.parse(raw);
+          if(obj && Array.isArray(obj.concepts) && obj.concepts.length > 0) return true;
+          if(obj && Array.isArray(obj.deliveryCompanies) && obj.deliveryCompanies.length > 0) return true;
+        }catch(e){}
+        if(String(raw).length > 5000) return true;
+      }
+      const stock = getStoreItem("taller_stock_v3_data");
+      if(stock && String(stock).length > 100) return true;
+      const tools = getStoreItem("tool_loans_db_v14_lib");
+      if(tools && String(tools).length > 100) return true;
+      for(let i=0;i<localStorage.length;i++){
+        const k = localStorage.key(i) || "";
+        if(k.indexOf("prep_") === 0 || k === "ldh_db") return true;
+      }
+      return false;
+    }catch(e){ return false; }
+  }
+
+  function collectLocalStorage(){
+    const all = {};
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if(!k) continue;
+      if(k.indexOf("firebase:") === 0) continue;
+      if(k === CLIENT_ID_KEY || k === LAST_REV_KEY) continue;
+      all[k] = localStorage.getItem(k);
+    }
+    return all;
+  }
+
+  function fastHash(str){
+    let h = 2166136261;
+    for(let i=0;i<str.length;i++){
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return String(h >>> 0) + ":" + str.length;
+  }
+
+  async function liveBackupToFirestore(docId = DOC_ID){
+    if(restoring || saving) return { skipped:true, reason:"busy" };
+    if(!auth.currentUser) return { skipped:true, reason:"no_user" };
+    if(!hasUsefulLocalData()) return { skipped:true, reason:"empty_local" };
+
+    const all = collectLocalStorage();
+    const json = JSON.stringify(all);
+    const hash = fastHash(json);
+    if(hash === lastHash) return { skipped:true, reason:"no_changes" };
+
+    saving = true;
+    try{
+      const total = Math.max(1, Math.ceil(json.length / CHUNK));
+      const revision = Date.now().toString(36) + "_" + CLIENT_ID;
+      for(let i=0;i<total;i++){
+        const part = json.slice(i * CHUNK, (i + 1) * CHUNK);
+        await setDoc(doc(db, "backups", docId, "chunks", String(i)), { i, part, revision });
+      }
+      await setDoc(doc(db, "backups", docId), {
+        updatedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        revision,
+        clientId: CLIENT_ID,
+        totalChunks: total,
+        totalBytes: json.length,
+        totalKeys: Object.keys(all).length,
+        mode: "GESTION_TALLER_V2_LIVE_SYNC"
+      }, { merge:false });
+      lastHash = hash;
+      try{ sessionStorage.setItem(LAST_REV_KEY, revision); }catch(e){}
+      console.log("✅ LiveSync: subido a Firestore", { totalChunks:total, totalKeys:Object.keys(all).length, totalBytes:json.length });
+      return { docId, totalChunks:total, totalBytes:json.length, totalKeys:Object.keys(all).length, revision };
+    }finally{
+      setTimeout(()=>{ saving = false; }, SUPPRESS_MS);
+    }
+  }
+
+  async function liveRestoreFromFirestore(docId = DOC_ID){
+    if(restoring) return { skipped:true, reason:"restoring" };
+    restoring = true;
+    try{
+      const metaSnap = await getDoc(doc(db, "backups", docId));
+      if(!metaSnap.exists()) throw new Error("No existe backup en Firestore: " + docId);
+      const meta = metaSnap.data() || {};
+      const total = meta.totalChunks || 0;
+      if(!total) throw new Error("Backup sin chunks: " + docId);
+      let json = "";
+      for(let i=0;i<total;i++){
+        const cSnap = await getDoc(doc(db, "backups", docId, "chunks", String(i)));
+        if(!cSnap.exists()) throw new Error("Falta chunk " + i);
+        json += cSnap.data().part || "";
+      }
+      const all = JSON.parse(json);
+      localStorage.clear();
+      for(const [k,v] of Object.entries(all)) localStorage.setItem(k, v);
+      try{ sessionStorage.setItem(LAST_REV_KEY, meta.revision || ""); }catch(e){}
+      lastHash = fastHash(JSON.stringify(collectLocalStorage()));
+      console.log("✅ LiveSync: restaurado desde Firestore", { keys:Object.keys(all).length, revision:meta.revision });
+      return { docId, keys:Object.keys(all).length, revision:meta.revision };
+    }finally{
+      setTimeout(()=>{ restoring = false; }, SUPPRESS_MS);
+    }
+  }
+
+  function scheduleLiveBackup(reason){
+    if(!started || restoring || saving) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 1800);
+  }
+
+  // Detectar cambios locales hechos por cualquier módulo que guarde en localStorage.
+  if(!window.__LDH_LIVE_STORAGE_PATCHED){
+    window.__LDH_LIVE_STORAGE_PATCHED = true;
+    const p = Storage.prototype;
+    const oldSet = p.setItem;
+    const oldRemove = p.removeItem;
+    const oldClear = p.clear;
+    p.setItem = function(k,v){ const r = oldSet.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("setItem:" + k); return r; };
+    p.removeItem = function(k){ const r = oldRemove.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("removeItem:" + k); return r; };
+    p.clear = function(){ const r = oldClear.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("clear"); return r; };
+  }
+
+  async function startLiveSync(){
+    if(started) return;
+    started = true;
+    window.__CLOUD_SYNC_DISABLE_LEGACY = true;
+
+    if(!hasUsefulLocalData()){
+      try{
+        await liveRestoreFromFirestore(DOC_ID);
+        setTimeout(()=>location.reload(), 300);
+        return;
+      }catch(e){ console.warn("⚠️ LiveSync: no se pudo auto-restaurar", e); }
+    }else{
+      // Subida inicial de seguridad con los datos locales actuales.
+      setTimeout(()=>scheduleLiveBackup("initial"), 1200);
+    }
+
+    if(unsubscribe) unsubscribe();
+    unsubscribe = onSnapshot(doc(db, "backups", DOC_ID), async (snap)=>{
+      try{
+        if(!snap.exists() || restoring || saving) return;
+        const meta = snap.data() || {};
+        const rev = meta.revision || "";
+        const lastRev = sessionStorage.getItem(LAST_REV_KEY) || "";
+        if(!rev || meta.clientId === CLIENT_ID || rev === lastRev) return;
+        console.log("⬇️ LiveSync: cambio remoto detectado", rev);
+        await liveRestoreFromFirestore(DOC_ID);
+        setTimeout(()=>location.reload(), 350);
+      }catch(e){ console.warn("❌ LiveSync snapshot ERROR", e); }
+    });
+    console.log("🔁 LiveSync: activo en tiempo real", firebaseConfig.projectId);
+  }
+
+  function stopLiveSync(){
+    started = false;
+    clearTimeout(saveTimer);
+    if(unsubscribe){ unsubscribe(); unsubscribe = null; }
+  }
+
+  onAuthStateChanged(auth, (user)=>{
+    if(user) startLiveSync();
+    else stopLiveSync();
+  });
+
+  window.backupToFirestore = liveBackupToFirestore;
+  window.restoreFromFirestore = liveRestoreFromFirestore;
+  window.autoRestoreIfEmpty = liveRestoreFromFirestore;
+  window.__ldhAutoRestoreAfterLogin = liveRestoreFromFirestore;
+  window.__ldhLiveSyncNow = liveBackupToFirestore;
+  window.__ldhLiveRestoreNow = liveRestoreFromFirestore;
+})();
+</script>
+<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v1 ===== -->
+
 </body>
 </html>
