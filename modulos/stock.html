@@ -1535,7 +1535,40 @@ function materialById(id){return db.materials.find(m=>m.id===id)}
 function companyById(id){return db.companies.find(c=>c.id===id)}
 function stockRow(companyId,materialId){return db.stock.find(s=>s.companyId===companyId&&s.materialId===materialId)}
 function jobById(id){return db.jobs.find(j=>j.id===id)}
-function realStock(companyId,materialId){
+
+/* LDH cantidad fisica maestra: la cantidad NO se recalcula al entrar desde movimientos.
+   Se guarda en la fila de stock y los movimientos quedan como historico. */
+const LDH_QTY_FIELDS_CORE = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'];
+function LDH_numCore(v){ const x=Number(v); return Number.isFinite(x)?x:0; }
+function LDH_hasDirectPhysical(st){
+  if(!st) return false;
+  return LDH_QTY_FIELDS_CORE.some(k => Object.prototype.hasOwnProperty.call(st,k) && st[k] !== '' && st[k] != null && Number.isFinite(Number(st[k])));
+}
+function LDH_getDirectPhysical(st){
+  if(!st) return null;
+  for(const k of LDH_QTY_FIELDS_CORE){
+    if(Object.prototype.hasOwnProperty.call(st,k) && st[k] !== '' && st[k] != null && Number.isFinite(Number(st[k]))) return LDH_numCore(st[k]);
+  }
+  return null;
+}
+function LDH_setDirectPhysical(companyId, materialId, value){
+  let st = stockRow(companyId, materialId);
+  if(!st){
+    st = {id:uid('st'), companyId:companyId, materialId:materialId};
+    db.stock.push(st);
+  }
+  const val = LDH_numCore(value);
+  LDH_QTY_FIELDS_CORE.forEach(k => st[k] = val);
+  st.physicalQty = val;
+  st.fisico = val;
+  st.cantidad = val;
+  st.qty = val;
+  st.physicalManualMaster = true;
+  st.physicalSource = 'stock_row_master';
+  st.physicalUpdatedAt = now();
+  return val;
+}
+function LDH_movementStock(companyId,materialId){
   return db.movements
    .filter(m=>m.companyId===companyId&&m.materialId===materialId)
    .reduce((a,m)=>{
@@ -1546,6 +1579,12 @@ function realStock(companyId,materialId){
       if(t==='salida'||t==='ajuste_neg'||t==='consumo'||t==='out') return a-q;
       return a+q;
     },0)
+}
+function realStock(companyId,materialId){
+  const st = stockRow(companyId, materialId);
+  const direct = LDH_getDirectPhysical(st);
+  if(direct !== null) return direct;
+  return LDH_movementStock(companyId, materialId);
 }
 
 function isAutoReceivedPrepReservation(r){
@@ -3286,7 +3325,7 @@ function deleteCompany(){
 }
 
 function openMaterialModal(){openModal('Crear material para empresa',`<div class="grid2"><div class="field"><label>Nombre material</label><input id="matName" placeholder="40x40x1.5"></div><div class="field"><label>Tipo</label><select id="matType"><option value="hierro">Hierro</option><option value="pintura">Pintura</option></select></div></div><div class="grid3"><div class="field"><label>Familia</label><input id="matFamily" placeholder="Perfilería hierro negro"></div><div class="field"><label>Unidad</label><input id="matUnit" placeholder="barras / botes 4L"></div><div class="field"><label>Mínimo</label><input id="matMin" type="number" value="0"></div></div><div class="grid2"><div class="field"><label>Stock inicial</label><input id="matInitial" type="number" value="0"></div><div class="field"><label>Ubicación</label><input id="matLocation" placeholder="Zona / rack"></div></div>`,`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ok" onclick="saveMaterial()">Crear</button>`);$('matType').value=activeType;}
-function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now(),manualStockOnly:true});db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim(),createdFromStockManual:true,createdAt:now()});const initial=Number($('matInitial').value||0);if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));try{LDH_protectManualStockMaterial(id, activeCompany);}catch(e){}save(); try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material_protegido'); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 80); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 1200); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 3000); }catch(e){} closeModal();setType($('matType').value);render();}
+function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now(),manualStockOnly:true});const initial=Number($('matInitial').value||0);db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim(),createdFromStockManual:true,createdAt:now(),physicalQty:initial,qtyPhysical:initial,fisico:initial,realQty:initial,stockFisico:initial,stockReal:initial,stockActual:initial,existencias:initial,actualQty:initial,qty:initial,cantidad:initial,physicalManualMaster:true,physicalSource:'stock_initial_master',physicalUpdatedAt:now()});if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));try{LDH_protectManualStockMaterial(id, activeCompany);}catch(e){}save(); try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material_protegido'); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 80); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 1200); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 3000); }catch(e){} closeModal();setType($('matType').value);render();}
 function materialOptions(selected){return db.stock.filter(s=>s.companyId===activeCompany).map(s=>materialById(s.materialId)).filter(m=>m&&m.type===activeType).map(m=>`<option value="${m.id}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}
 
 /* === LDH: Entrada de Stock -> Preparación OK automático + bloqueo por pintura === */
@@ -3540,6 +3579,11 @@ function quickJobFromMove(){
 function saveMove(type){
   const mat=$('moveMat').value,qty=Number($('moveQty').value||0);
   if(!mat||qty<=0)return alert('Cantidad incorrecta');
+
+  const baseFisico = realStock(activeCompany, mat);
+  const tipoMov = String(type||'entrada').toLowerCase();
+  const nuevoFisico = tipoMov==='salida' ? Math.max(0, baseFisico - qty) : baseFisico + qty;
+  LDH_setDirectPhysical(activeCompany, mat, nuevoFisico);
 
   db.movements.push(mv(activeCompany,mat,type,qty,$('moveNote').value.trim()));
 
@@ -6075,12 +6119,46 @@ function LDH_closeMaintenanceModal(){
     return { revision, totalChunks: total, totalBytes: json.length, totalKeys: Object.keys(all || {}).length };
   }
 
+  function mergePhysicalQuantitiesIntoRemoteAll(all){
+    try{
+      const localDB = parseJSON(read(KEY_STOCK), null);
+      const remoteDB = parseJSON((all || {})[KEY_STOCK], null);
+      if(!localDB || !remoteDB || !Array.isArray(localDB.stock) || !Array.isArray(remoteDB.stock)) return all;
+      const fields = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'];
+      function has(row){ return row && fields.some(k => Object.prototype.hasOwnProperty.call(row,k) && row[k] !== '' && row[k] != null && Number.isFinite(Number(row[k]))); }
+      function val(row){ for(const k of fields){ if(row && Object.prototype.hasOwnProperty.call(row,k) && row[k] !== '' && row[k] != null && Number.isFinite(Number(row[k]))) return Number(row[k]); } return 0; }
+      function t(row){ const x=Date.parse(String(row && row.physicalUpdatedAt || '')); return Number.isFinite(x)?x:0; }
+      const localMap = new Map();
+      localDB.stock.forEach(r=>{ if(r && r.companyId && r.materialId && has(r)) localMap.set(String(r.companyId)+'|'+String(r.materialId), r); });
+      let changed = false;
+      remoteDB.stock.forEach(r=>{
+        if(!r || !r.companyId || !r.materialId) return;
+        const l = localMap.get(String(r.companyId)+'|'+String(r.materialId));
+        if(!l) return;
+        const remoteHas = has(r);
+        const localNewer = t(l) && (!t(r) || t(l) > t(r));
+        if(!remoteHas || localNewer){
+          const q = val(l);
+          fields.forEach(k=>r[k]=q);
+          r.physicalQty=q; r.fisico=q; r.cantidad=q; r.qty=q;
+          r.physicalManualMaster=true;
+          r.physicalSource='preserved_local_on_remote_apply';
+          r.physicalUpdatedAt=l.physicalUpdatedAt || new Date().toISOString();
+          changed = true;
+        }
+      });
+      if(changed){ remoteDB.updatedAt = new Date().toISOString(); all[KEY_STOCK] = JSON.stringify(remoteDB); }
+    }catch(e){ console.warn('StockSync: no se pudo conservar cantidad fisica local', e); }
+    return all;
+  }
+
   function applyLocalStock(all, opts){
     all = sanitizeStorage(all || {});
+    all = mergePhysicalQuantitiesIntoRemoteAll(all);
     opts = opts || {};
     applyingRemote = true;
     try{
-      // Documento Stock es la fuente maestra: reemplaza las claves de Stock.
+      // Documento Stock es la fuente maestra: reemplaza las claves de Stock, conservando cantidad fisica mas nueva.
       STOCK_KEYS.forEach(k=>{
         if(Object.prototype.hasOwnProperty.call(all, k)) write(k, all[k]);
         else if(k !== KEY_DELETED) write(k, null);
@@ -6636,7 +6714,7 @@ function LDH_closeMaintenanceModal(){
   window.__LDH_STOCK_QTY_DIRECT_STABLE_V4 = true;
 
   const KEY = 'ldh_v2_company_stock_v1';
-  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','qty','cantidad'];
+  const QTY_FIELDS = ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'];
   function ss(v){ return String(v == null ? '' : v); }
   function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
   function arr(x){ return Array.isArray(x) ? x : []; }
