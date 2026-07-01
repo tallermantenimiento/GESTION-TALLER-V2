@@ -1829,7 +1829,7 @@ boot();
   });
 </script>
 
-<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v3 PRIORIDAD LOCAL ===== -->
+<!-- ===== LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
 <script type="module">
 (async function(){
   if (window.__LDH_LIVE_SYNC_INSTALLED) return;
@@ -1918,6 +1918,71 @@ boot();
     }catch(e){ return false; }
   }
 
+
+
+  function parseSafeJSON(raw, fallback){
+    try{ return JSON.parse(raw || ""); }catch(e){ return fallback; }
+  }
+
+  function normKey(v){ return String(v || "").trim().toLowerCase(); }
+
+  function mergeArrayByIdentity(remoteArr, localArr, keyFn){
+    const out = [];
+    const pos = new Map();
+    function add(x){
+      if(!x || typeof x !== "object") return;
+      const k = keyFn(x) || ("idx_" + out.length + "_" + Math.random());
+      if(pos.has(k)) out[pos.get(k)] = Object.assign({}, out[pos.get(k)], x);
+      else { pos.set(k, out.length); out.push(x); }
+    }
+    (Array.isArray(remoteArr) ? remoteArr : []).forEach(add);
+    (Array.isArray(localArr) ? localArr : []).forEach(add);
+    return out;
+  }
+
+  function mergeStockPayload(remoteRaw, localRaw){
+    const r = parseSafeJSON(remoteRaw, null);
+    const l = parseSafeJSON(localRaw, null);
+    if(!r && !l) return localRaw || remoteRaw || null;
+    if(!r) return localRaw;
+    if(!l) return remoteRaw;
+    const m = Object.assign({}, r, l);
+    m.companies = mergeArrayByIdentity(r.companies, l.companies, x => x.id || x.companyId || x.code || x.codigo || x.name || x.nombre);
+    m.materials = mergeArrayByIdentity(r.materials, l.materials, x => x.id || x.materialId || (normKey(x.name || x.nombre) + "|" + normKey(x.type || x.tipo) + "|" + normKey(x.family || x.familia)));
+    m.stock = mergeArrayByIdentity(r.stock, l.stock, x => x.id || ((x.companyId || x.empresaId || "") + "|" + (x.materialId || x.matId || "")));
+    m.movements = mergeArrayByIdentity(r.movements, l.movements, x => x.id || [x.companyId,x.materialId,x.type,x.tipo,x.qty,x.cantidad,x.date,x.fecha,x.note,x.obs].map(v=>String(v||"")).join("|"));
+    m.jobs = mergeArrayByIdentity(r.jobs, l.jobs, x => x.id || x.ref || x.reference || x.referencia);
+    m.reservations = mergeArrayByIdentity(r.reservations, l.reservations, x => x.id || [x.companyId,x.materialId,x.jobId,x.qty,x.date].map(v=>String(v||"")).join("|"));
+    m.assignments = mergeArrayByIdentity(r.assignments, l.assignments, x => x.id || [x.companyId,x.materialId,x.jobId,x.qty,x.date,x.source].map(v=>String(v||"")).join("|"));
+    m.reservationDebts = mergeArrayByIdentity(r.reservationDebts, l.reservationDebts, x => x.id || [x.companyId,x.materialId,x.jobId,x.qty,x.date].map(v=>String(v||"")).join("|"));
+    m.updatedAt = (l.updatedAt && r.updatedAt) ? (String(l.updatedAt) > String(r.updatedAt) ? l.updatedAt : r.updatedAt) : (l.updatedAt || r.updatedAt || new Date().toISOString());
+    return JSON.stringify(m);
+  }
+
+  function mergeLocalIntoRemoteStorage(remoteAll, localAll){
+    const merged = Object.assign({}, remoteAll || {}, localAll || {});
+    const stockKeys = ["ldh_v2_company_stock_v1", "taller_stock_v3_data"];
+    stockKeys.forEach(k=>{
+      if((remoteAll && remoteAll[k]) || (localAll && localAll[k])) merged[k] = mergeStockPayload(remoteAll && remoteAll[k], localAll && localAll[k]);
+    });
+    return merged;
+  }
+
+  async function readRemoteStorage(docId = DOC_ID){
+    const metaSnap = await getDoc(doc(db, "backups", docId));
+    if(!metaSnap.exists()) return null;
+    const meta = metaSnap.data() || {};
+    const total = meta.totalChunks || 0;
+    if(!total) return null;
+    let json = "";
+    for(let i=0;i<total;i++){
+      const cSnap = await getDoc(doc(db, "backups", docId, "chunks", String(i)));
+      if(!cSnap.exists()) return null;
+      json += cSnap.data().part || "";
+    }
+    return { meta, all: JSON.parse(json) };
+  }
+
   function collectLocalStorage(){
     const all = {};
     for(let i=0;i<localStorage.length;i++){
@@ -1962,7 +2027,11 @@ boot();
       if(saving) return { skipped:true, reason:"busy_timeout" };
     }
 
-    const all = collectLocalStorage();
+    let all = collectLocalStorage();
+    try{
+      const remote = await readRemoteStorage(docId);
+      if(remote && remote.all) all = mergeLocalIntoRemoteStorage(remote.all, all);
+    }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar con remoto antes de subir", e); }
     const json = JSON.stringify(all);
     const hash = fastHash(json);
     if(!force && hash === lastHash && !localDirty) return { skipped:true, reason:"no_changes" };
@@ -1983,7 +2052,7 @@ boot();
         totalChunks: total,
         totalBytes: json.length,
         totalKeys: Object.keys(all).length,
-        mode: "GESTION_TALLER_V2_LIVE_SYNC_V3_LOCAL_PRIORITY"
+        mode: "GESTION_TALLER_V2_LIVE_SYNC_V4_MERGE_STOCK"
       }, { merge:false });
       lastHash = hash;
       localDirty = false;
@@ -2011,7 +2080,11 @@ boot();
         if(!cSnap.exists()) throw new Error("Falta chunk " + i);
         json += cSnap.data().part || "";
       }
-      const all = JSON.parse(json);
+      let all = JSON.parse(json);
+      try{
+        const current = collectLocalStorage();
+        all = mergeLocalIntoRemoteStorage(all, current);
+      }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar local al restaurar", e); }
       localStorage.clear();
       for(const [k,v] of Object.entries(all)) localStorage.setItem(k, v);
       try{ sessionStorage.setItem(LAST_REV_KEY, meta.revision || ""); }catch(e){}
@@ -2150,7 +2223,7 @@ boot();
       setInterval(()=>{ if(started && localDirty) liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync periodic ERROR", e)); }, 3000);
     }catch(e){}
 
-    console.log("🔁 LiveSync v3 prioridad local: activo", firebaseConfig.projectId);
+    console.log("🔁 LiveSync v4 merge stock: activo", firebaseConfig.projectId);
   }
 
   function stopLiveSync(){
@@ -2169,7 +2242,7 @@ boot();
   window.__ldhLiveRestoreNow = liveRestoreFromFirestore;
 })();
 </script>
-<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v3 PRIORIDAD LOCAL ===== -->
+<!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
 
 </body>
 </html>
