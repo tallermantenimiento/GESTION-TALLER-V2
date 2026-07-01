@@ -1358,7 +1358,14 @@ html, body{
 </div>
 
 <script>
-function volverMenu(){ window.location.href = "../index.html"; }
+async function volverMenu(){
+  try{
+    if(typeof window.__ldhLiveSyncNow === 'function'){
+      await window.__ldhLiveSyncNow();
+    }
+  }catch(e){ console.warn('No se pudo sincronizar antes de volver al menú', e); }
+  window.location.href = "../index.html";
+}
 
 const KEY='ldh_v2_company_stock_v1';
 let db=null; let activeCompany=''; let activeType='hierro';
@@ -1782,6 +1789,11 @@ function _prepNormText(v){
 function _prepLineMaterialMatch(line, materialId){
   try{
     const m = materialById(materialId) || {};
+    const explicitLineId = String(line && (line.materialId || line.matId || line.stockMaterialId || line.linkedMaterialId || line.stockId || '') || '').trim();
+    if(m && m.createdFromStockManual && explicitLineId && explicitLineId === String(materialId)) return true;
+    // Materiales creados manualmente en Stock no deben heredar asignaciones antiguas
+    // por coincidencia de texto (ej. otro 40x40 recibido en una preparación vieja).
+    if(m && m.createdFromStockManual && !explicitLineId) return false;
     const matName = _prepNormText(m.name || m.nombre || m.material || materialId);
     const lineName = _prepNormText(line && (line.mat || line.material || line.name || ''));
     if(!matName || !lineName) return false;
@@ -3107,7 +3119,7 @@ function deleteCompany(){
 }
 
 function openMaterialModal(){openModal('Crear material para empresa',`<div class="grid2"><div class="field"><label>Nombre material</label><input id="matName" placeholder="40x40x1.5"></div><div class="field"><label>Tipo</label><select id="matType"><option value="hierro">Hierro</option><option value="pintura">Pintura</option></select></div></div><div class="grid3"><div class="field"><label>Familia</label><input id="matFamily" placeholder="Perfilería hierro negro"></div><div class="field"><label>Unidad</label><input id="matUnit" placeholder="barras / botes 4L"></div><div class="field"><label>Mínimo</label><input id="matMin" type="number" value="0"></div></div><div class="grid2"><div class="field"><label>Stock inicial</label><input id="matInitial" type="number" value="0"></div><div class="field"><label>Ubicación</label><input id="matLocation" placeholder="Zona / rack"></div></div>`,`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ok" onclick="saveMaterial()">Crear</button>`);$('matType').value=activeType;}
-function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud'});db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim()});const initial=Number($('matInitial').value||0);if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));save();closeModal();setType($('matType').value);render();}
+function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now()});db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim()});const initial=Number($('matInitial').value||0);if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));save(); try{ setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow(); }, 100); }catch(e){} closeModal();setType($('matType').value);render();}
 function materialOptions(selected){return db.stock.filter(s=>s.companyId===activeCompany).map(s=>materialById(s.materialId)).filter(m=>m&&m.type===activeType).map(m=>`<option value="${m.id}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}
 
 /* === LDH: Entrada de Stock -> Preparación OK automático + bloqueo por pintura === */
@@ -5866,6 +5878,23 @@ function LDH_closeMaintenanceModal(){
     p.clear = function(){ const r = oldClear.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("clear"); return r; };
   }
 
+  // Al salir de un módulo, forzar subida antes de navegar si hay cambios locales pendientes.
+  // Especialmente importante en Stock: crear material y volver al menú no debe perder el alta.
+  async function flushLiveBackupBeforeLeave(){
+    try{
+      clearTimeout(saveTimer);
+      if(started && auth.currentUser && !restoring){
+        await liveBackupToFirestore(DOC_ID);
+      }
+    }catch(e){ console.warn("⚠️ LiveSync: flush al salir no completado", e); }
+  }
+  try{
+    window.addEventListener("pagehide", ()=>{ flushLiveBackupBeforeLeave(); });
+    document.addEventListener("visibilitychange", ()=>{
+      if(document.visibilityState === "hidden") flushLiveBackupBeforeLeave();
+    });
+  }catch(e){}
+
   function markUserActivity(){ lastUserActivity = Date.now(); }
   ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{
     try{ window.addEventListener(ev, markUserActivity, true); }catch(e){}
@@ -5938,8 +5967,15 @@ function LDH_closeMaintenanceModal(){
         return;
       }catch(e){ console.warn("⚠️ LiveSync: no se pudo auto-restaurar", e); }
     }else{
-      // Subida inicial de seguridad con los datos locales actuales.
-      setTimeout(()=>scheduleLiveBackup("initial"), 1200);
+      // IMPORTANTE: si este navegador ya tiene datos locales, primero subimos
+      // su estado actual antes de escuchar cambios remotos.
+      // Evita que un backup remoto anterior pise un material/concepto recién creado
+      // al salir al menú y volver a entrar.
+      try{
+        await liveBackupToFirestore(DOC_ID);
+      }catch(e){
+        console.warn("⚠️ LiveSync: no se pudo subir estado local inicial", e);
+      }
     }
 
     if(unsubscribe) unsubscribe();

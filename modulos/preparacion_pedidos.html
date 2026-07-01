@@ -12107,6 +12107,23 @@ function LDH_prepVolverMenu(){
     p.clear = function(){ const r = oldClear.apply(this, arguments); if(this === localStorage) scheduleLiveBackup("clear"); return r; };
   }
 
+  // Al salir de un módulo, forzar subida antes de navegar si hay cambios locales pendientes.
+  // Especialmente importante en Stock: crear material y volver al menú no debe perder el alta.
+  async function flushLiveBackupBeforeLeave(){
+    try{
+      clearTimeout(saveTimer);
+      if(started && auth.currentUser && !restoring){
+        await liveBackupToFirestore(DOC_ID);
+      }
+    }catch(e){ console.warn("⚠️ LiveSync: flush al salir no completado", e); }
+  }
+  try{
+    window.addEventListener("pagehide", ()=>{ flushLiveBackupBeforeLeave(); });
+    document.addEventListener("visibilitychange", ()=>{
+      if(document.visibilityState === "hidden") flushLiveBackupBeforeLeave();
+    });
+  }catch(e){}
+
   function markUserActivity(){ lastUserActivity = Date.now(); }
   ["focusin","input","keydown","pointerdown","touchstart"].forEach(ev=>{
     try{ window.addEventListener(ev, markUserActivity, true); }catch(e){}
@@ -12179,8 +12196,15 @@ function LDH_prepVolverMenu(){
         return;
       }catch(e){ console.warn("⚠️ LiveSync: no se pudo auto-restaurar", e); }
     }else{
-      // Subida inicial de seguridad con los datos locales actuales.
-      setTimeout(()=>scheduleLiveBackup("initial"), 1200);
+      // IMPORTANTE: si este navegador ya tiene datos locales, primero subimos
+      // su estado actual antes de escuchar cambios remotos.
+      // Evita que un backup remoto anterior pise un material/concepto recién creado
+      // al salir al menú y volver a entrar.
+      try{
+        await liveBackupToFirestore(DOC_ID);
+      }catch(e){
+        console.warn("⚠️ LiveSync: no se pudo subir estado local inicial", e);
+      }
     }
 
     if(unsubscribe) unsubscribe();
