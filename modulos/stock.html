@@ -2869,6 +2869,7 @@ function LDH_cerrarHierroPasadoAPintura(){
 }
 
 function render(){
+  try{ captureFamilyOpenState(); }catch(e){}
   try{ LDH_cerrarHierroPasadoAPintura(); }catch(e){}
   try{ LDH_syncAutoReceivedReservationsByPaint(); }catch(e){}
   try{ sanearReservasAutoRecibidasComoAsignacion(); }catch(e){}
@@ -2897,7 +2898,64 @@ function render(){
 
 
 const FAMILY_ORDER_KEY = 'ldh_stock_family_order_v1';
+const FAMILY_OPEN_KEY = 'ldh_stock_family_open_v1';
 let draggedFamilyKey = null;
+let LDH_familyDragJustHappened = false;
+
+function familyOpenStorageKey(){
+  return String(activeCompany || '') + '|' + String(activeType || '');
+}
+
+function loadFamilyOpen(){
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_OPEN_KEY) || '{}') || {};
+    const arr = all[familyOpenStorageKey()];
+    return Array.isArray(arr) ? new Set(arr) : new Set();
+  }catch(e){
+    return new Set();
+  }
+}
+
+function saveFamilyOpenSet(set){
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_OPEN_KEY) || '{}') || {};
+    all[familyOpenStorageKey()] = Array.from(set || []);
+    localStorage.setItem(FAMILY_OPEN_KEY, JSON.stringify(all));
+  }catch(e){}
+}
+
+function captureFamilyOpenState(){
+  try{
+    const set = loadFamilyOpen();
+    document.querySelectorAll('.family-row[data-family-key] .family-details').forEach(det=>{
+      const row = det.closest('.family-row[data-family-key]');
+      const key = row && row.dataset ? row.dataset.familyKey : '';
+      if(!key) return;
+      if(det.open) set.add(key); else set.delete(key);
+    });
+    saveFamilyOpenSet(set);
+  }catch(e){}
+}
+
+function setFamilyOpenState(key, isOpen){
+  try{
+    const set = loadFamilyOpen();
+    if(isOpen) set.add(key); else set.delete(key);
+    saveFamilyOpenSet(set);
+  }catch(e){}
+}
+
+function familyDetailsToggle(el, key){
+  if(LDH_familyDragJustHappened) return;
+  setFamilyOpenState(key, !!(el && el.open));
+}
+
+function familySummaryClick(ev){
+  if(!LDH_familyDragJustHappened) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  setTimeout(()=>{ LDH_familyDragJustHappened = false; }, 80);
+}
 
 function familyOrderStorageKey(){
   return String(activeCompany || '') + '|' + String(activeType || '');
@@ -2964,8 +3022,10 @@ function familyDragLeave(ev){
 }
 
 function familyDragEnd(){
+  if(draggedFamilyKey) LDH_familyDragJustHappened = true;
   draggedFamilyKey = null;
   document.querySelectorAll('.family-row.family-dragging,.family-row.family-drag-over').forEach(el=>el.classList.remove('family-dragging','family-drag-over'));
+  setTimeout(()=>{ LDH_familyDragJustHappened = false; }, 250);
 }
 
 function familyDrop(ev, targetKey){
@@ -3012,12 +3072,14 @@ function familiaHTML(group){
   const safeId='fam_'+String(group.name).toLowerCase().replace(/[^a-z0-9]+/g,'_');
 
   const fKey = familyKey(group.name);
+  const isOpen = loadFamilyOpen().has(fKey);
+  const openAttr = isOpen ? ' open' : '';
 
   return `<tr class="family-row" data-family-key="${esc(fKey)}"><td colspan="11">
-    <details class="family-details" data-family="${esc(group.name)}">
-      <summary draggable="true" ondragstart="familyDragStart(event,'${esc(fKey)}')" ondragover="familyDragOver(event,'${esc(fKey)}')" ondragleave="familyDragLeave(event)" ondrop="familyDrop(event,'${esc(fKey)}')" ondragend="familyDragEnd(event)">
+    <details class="family-details" data-family="${esc(group.name)}" ontoggle="familyDetailsToggle(this,'${esc(fKey)}')"${openAttr}>
+      <summary onclick="familySummaryClick(event)" ondragover="familyDragOver(event,'${esc(fKey)}')" ondragleave="familyDragLeave(event)" ondrop="familyDrop(event,'${esc(fKey)}')">
         <span class="family-title">
-          <span class="family-drag-handle" title="Arrastra para ordenar familias">☰</span>
+          <span class="family-drag-handle" title="Arrastra para ordenar familias" draggable="true" ondragstart="familyDragStart(event,'${esc(fKey)}')" ondragend="familyDragEnd(event)" onclick="event.preventDefault();event.stopPropagation();">☰</span>
           <span class="family-name">${esc(group.name)}</span>
           <span class="family-count">${group.items.length} materiales</span>
         </span>
@@ -3094,6 +3156,8 @@ function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&l
 
 let draggedStockId=null;
 function stockDragStart(ev, stockId){
+  try{ captureFamilyOpenState(); }catch(e){}
+  try{ ev.stopPropagation(); }catch(e){}
   draggedStockId=stockId;
   ev.currentTarget.classList.add('dragging');
   try{ev.dataTransfer.effectAllowed='move';ev.dataTransfer.setData('text/plain',stockId);}catch(e){}
@@ -3111,6 +3175,8 @@ function stockDragEnd(ev){
 }
 function stockDrop(ev, targetStockId){
   ev.preventDefault();
+  try{ ev.stopPropagation(); }catch(e){}
+  try{ captureFamilyOpenState(); }catch(e){}
   document.querySelectorAll('tr.drag-over').forEach(el=>el.classList.remove('drag-over'));
   const sourceId=draggedStockId || (ev.dataTransfer&&ev.dataTransfer.getData('text/plain'));
   if(!sourceId || sourceId===targetStockId) return;
