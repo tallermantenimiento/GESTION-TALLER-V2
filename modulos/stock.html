@@ -6312,14 +6312,31 @@ function LDH_closeMaintenanceModal(){
 
   async function applyRemoteRevision(rev){
     if(!rev || saving || applyingRemote) return;
-    if(localDirty && Date.now() - lastLocalDirtyAt < 5000){
+
+    // Blindaje de altas/entradas recientes:
+    // Si este navegador acaba de crear o modificar stock, no dejamos que una foto remota antigua lo pise.
+    if(localDirty && Date.now() - lastLocalDirtyAt < 15000){
       console.log("⏸️ StockSync: remoto aplazado; subo cambio local primero");
       await syncStockNow(true);
       return;
     }
+
     const remote = await readRemoteStock();
     if(!remote || !remote.all) return;
-    applyLocalStock(remote.all, { reloadAfterApply:true });
+
+    const localAll = collectStockStorage();
+    const localTime = hasLocalStock() ? stockUpdatedAt(localAll) : 0;
+    const remoteTime = stockUpdatedAt(remote.all) || Number(remote.meta.stockUpdatedAt || 0) || 0;
+
+    // Si la copia local es mas nueva que la remota, la local gana y se vuelve a publicar.
+    // Esto evita el efecto: creo material -> entra snapshot viejo -> desaparece -> luego vuelve.
+    if(hasLocalStock() && localTime > remoteTime + 500){
+      console.log("🛡️ StockSync: remoto antiguo ignorado; se republica stock local", {localTime, remoteTime});
+      await writeRemoteStock(localAll);
+      return;
+    }
+
+    applyLocalStock(remote.all, { reloadAfterApply:false });
     try{ sessionStorage.setItem(LAST_REV_KEY, rev); }catch(e){}
     console.log("⬇️ StockSync: aplicado cambio remoto de stock", rev);
   }
