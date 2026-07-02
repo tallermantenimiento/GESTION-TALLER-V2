@@ -11664,4 +11664,266 @@ function LDH_prepVolverMenu(){
 })();
 </script>
 
+
+
+<script id="LDH_PREPARACION_LIVE_FORCE_POLL_V5">
+(function(){
+  "use strict";
+  if(window.__LDH_PREP_LIVE_FORCE_POLL_V5__) return;
+  window.__LDH_PREP_LIVE_FORCE_POLL_V5__ = true;
+
+  const COL="taller_data";
+  const DOC="preparacion";
+  const CLIENT_KEY="ldh_prep_client_id_v2";
+  const REV_KEY="ldh_prep_revs_v2";
+  const DEL_KEY="ldh_prep_deletes_v2";
+  const STATUS_ID="ldhPrepSyncStatusV5";
+  const GOOD_CONFIG={
+    apiKey:"AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain:"gestion-taller-v2.firebaseapp.com",
+    projectId:"gestion-taller-v2",
+    storageBucket:"gestion-taller-v2.firebasestorage.app",
+    messagingSenderId:"888590823508",
+    appId:"1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
+
+  let booted=false, applying=false, unsub=null, lastHash="", lastRemoteUpdated=0, pushTimer=null;
+
+  function cid(){
+    try{
+      let v=localStorage.getItem(CLIENT_KEY);
+      if(!v){ v="prep2_"+Math.random().toString(36).slice(2)+"_"+Date.now().toString(36); localStorage.setItem(CLIENT_KEY,v); }
+      return v;
+    }catch(e){ return "prep_unknown"; }
+  }
+  function isKey(k){
+    k=String(k||"");
+    return k.indexOf("prep_recepcion_")===0 ||
+           k.indexOf("prep_meta_")===0 ||
+           k.indexOf("prep_unassigned_")===0 ||
+           k==="ldh_preparacion_registry_v1" ||
+           k==="prep_stock_linkmap_v1" ||
+           k==="prep_last_import_ref" ||
+           k==="prep_focus_ref" ||
+           k==="prep_focus_hash_ref" ||
+           k==="prep_auto_open_ref" ||
+           k==="prep_estado_actual" ||
+           k==="prep_materiales" ||
+           k==="prep_pedido_payload" ||
+           k==="pedido_en_preparacion" ||
+           k==="latest_materials_v1";
+  }
+  function getS(k){
+    try{ const v=localStorage.getItem(k); if(v!==null && v!==undefined) return v; }catch(e){}
+    try{ const v=sessionStorage.getItem(k); if(v!==null && v!==undefined) return v; }catch(e){}
+    return null;
+  }
+  function setS(k,v){
+    try{ localStorage.setItem(k,v); return; }catch(e){}
+    try{ sessionStorage.setItem(k,v); }catch(e){}
+  }
+  function remS(k){
+    try{ localStorage.removeItem(k); }catch(e){}
+    try{ sessionStorage.removeItem(k); }catch(e){}
+  }
+  function readObj(k){ try{ return JSON.parse(localStorage.getItem(k)||"{}"); }catch(e){ return {}; } }
+  function writeObj(k,o){ try{ localStorage.setItem(k, JSON.stringify(o||{})); }catch(e){} }
+  function revs(){ return readObj(REV_KEY); }
+  function dels(){ return readObj(DEL_KEY); }
+  function status(t){
+    try{
+      let el=document.getElementById(STATUS_ID)||document.getElementById("ldhPrepSyncStatusV2")||document.getElementById("ldhPrepSyncStatus");
+      if(!el){
+        el=document.createElement("div"); el.id=STATUS_ID;
+        el.style.cssText="position:fixed;right:12px;bottom:10px;z-index:999999;background:#06131f;border:1px solid #164b63;color:#9fe8ff;border-radius:999px;padding:6px 10px;font:700 11px system-ui;box-shadow:0 0 12px rgba(0,0,0,.35)";
+        document.body.appendChild(el);
+      }
+      el.textContent=t;
+    }catch(e){}
+  }
+  function ensureFirebase(){
+    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
+    try{
+      let good=(firebase.apps||[]).find(a=>(a.options||{}).projectId===GOOD_CONFIG.projectId);
+      if(!good){
+        try{ good=firebase.initializeApp(GOOD_CONFIG,"prep_v5"); }
+        catch(e){ try{ if(!(firebase.apps||[]).length) good=firebase.initializeApp(GOOD_CONFIG); }catch(_){} }
+      }
+      window.firebaseConfig=GOOD_CONFIG;
+      return !!((firebase.apps||[]).length && firebase.firestore);
+    }catch(e){ return !!(firebase.apps && firebase.apps.length && firebase.firestore); }
+  }
+  function db(){
+    const good=(firebase.apps||[]).find(a=>(a.options||{}).projectId===GOOD_CONFIG.projectId);
+    try{ return good ? firebase.firestore(good) : firebase.firestore(); }catch(e){ return firebase.firestore(); }
+  }
+  function ref(){ return db().collection(COL).doc(DOC); }
+  async function auth(){ try{ if(firebase.auth && !firebase.auth().currentUser) await firebase.auth().signInAnonymously(); }catch(e){} }
+  function allKeys(){
+    const out=new Set();
+    try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(isKey(k)) out.add(k); } }catch(e){}
+    try{ for(let i=0;i<sessionStorage.length;i++){ const k=sessionStorage.key(i); if(isKey(k)) out.add(k); } }catch(e){}
+    return Array.from(out).sort();
+  }
+  function collect(){
+    const data={}, r=revs(), d=dels();
+    allKeys().forEach(k=>{
+      const v=getS(k);
+      if(v!==null && v!==undefined){ data[k]=v; if(!r[k]) r[k]=Date.now(); }
+    });
+    writeObj(REV_KEY,r);
+    return {schema:"prep_sync_v5", updatedAt:Date.now(), updatedBy:cid(), data, revs:r, deleted:d};
+  }
+  function hashPack(){
+    try{
+      const data={}; allKeys().forEach(k=>{ data[k]=getS(k); });
+      return JSON.stringify(data);
+    }catch(e){ return String(Date.now()); }
+  }
+  async function push(reason){
+    if(applying || !ensureFirebase()) return;
+    try{
+      const payload=collect(); payload.reason=String(reason||"");
+      await ref().set(payload,{merge:false});
+      lastRemoteUpdated=payload.updatedAt;
+      lastHash=hashPack();
+      status("Preparación nube conectada");
+    }catch(e){ console.warn("Prep V5 push",e); status("Preparación nube error"); }
+  }
+  function schedulePush(reason, delay){
+    if(applying || !booted) return;
+    clearTimeout(pushTimer);
+    pushTimer=setTimeout(()=>push(reason), delay==null?250:delay);
+  }
+  function applyRemote(remote){
+    if(!remote || !remote.data) return false;
+    const rdata=remote.data||{}, rr=remote.revs||{}, rd=remote.deleted||{};
+    const lr=revs(), ld=dels();
+    const keys=new Set([...allKeys(),...Object.keys(rdata),...Object.keys(rr),...Object.keys(rd),...Object.keys(lr),...Object.keys(ld)]);
+    let changed=false;
+    applying=true;
+    try{
+      keys.forEach(k=>{
+        if(!isKey(k)) return;
+        const localHas=getS(k)!==null;
+        const lset=Number(lr[k] || (localHas?1:0));
+        const rset=Number(rr[k] || (Object.prototype.hasOwnProperty.call(rdata,k)?1:0));
+        const ldel=Number(ld[k]||0), rdel=Number(rd[k]||0);
+        const bestDel=Math.max(ldel,rdel), bestSet=Math.max(lset,rset);
+        if(bestDel>=bestSet && bestDel>0){
+          if(localHas){ remS(k); changed=true; }
+          ld[k]=bestDel; lr[k]=Math.max(bestDel,lset,rset);
+          return;
+        }
+        if(rset>lset && Object.prototype.hasOwnProperty.call(rdata,k)){
+          if(getS(k)!==rdata[k]){ setS(k,rdata[k]); changed=true; }
+          lr[k]=rset; if(ld[k]) delete ld[k];
+        }
+      });
+      writeObj(REV_KEY,lr); writeObj(DEL_KEY,ld);
+    }finally{ applying=false; }
+    if(changed){ lastHash=hashPack(); refresh(true); }
+    return changed;
+  }
+  function refresh(remote){
+    setTimeout(function(){
+      try{
+        if(window.refActual && typeof abrirPedido==="function"){
+          const r=window.refActual;
+          try{ abrirPedido(r); }
+          catch(e){ try{ if(typeof renderTabla==="function") renderTabla(); }catch(_){} }
+        }else if(typeof cargarLista==="function") cargarLista();
+      }catch(e){}
+      try{ if(typeof cargarLista==="function") cargarLista(); }catch(e){}
+      try{ if(typeof renderTabla==="function" && window.refActual) renderTabla(); }catch(e){}
+    }, remote?80:0);
+  }
+  function markTouched(k, deleted){
+    if(applying || !isKey(k)) return;
+    const t=Date.now(), r=revs(), d=dels();
+    r[k]=t;
+    if(deleted) d[k]=t; else if(d[k]) delete d[k];
+    writeObj(REV_KEY,r); writeObj(DEL_KEY,d);
+    schedulePush((deleted?"del:":"set:")+k, 180);
+  }
+  function hookPrototype(){
+    if(window.__LDH_PREP_V5_STORAGE_PROTO_HOOKED__) return;
+    window.__LDH_PREP_V5_STORAGE_PROTO_HOOKED__=true;
+    try{
+      const oldSet=Storage.prototype.setItem;
+      const oldRemove=Storage.prototype.removeItem;
+      Storage.prototype.setItem=function(k,v){ const res=oldSet.apply(this,arguments); try{ if((this===localStorage||this===sessionStorage) && isKey(k)) markTouched(k,false); }catch(e){} return res; };
+      Storage.prototype.removeItem=function(k){ const res=oldRemove.apply(this,arguments); try{ if((this===localStorage||this===sessionStorage) && isKey(k)) markTouched(k,true); }catch(e){} return res; };
+    }catch(e){}
+  }
+  function wrap(name){
+    try{
+      const fn=window[name];
+      if(typeof fn!=="function" || fn.__ldhPrepV5Wrapped) return;
+      const w=function(){ const out=fn.apply(this,arguments); setTimeout(()=>{ markCurrentKeys(); schedulePush("fn:"+name,120); refresh(false); },20); return out; };
+      w.__ldhPrepV5Wrapped=true; window[name]=w;
+    }catch(e){}
+  }
+  function markCurrentKeys(){
+    try{
+      if(window.refActual){
+        const r=String(window.refActual);
+        ["prep_recepcion_"+r,"prep_meta_"+r,"prep_unassigned_"+r].forEach(k=>{ if(getS(k)!==null) markTouched(k,false); });
+      }
+    }catch(e){}
+  }
+  function installWraps(){
+    ["guardarEstadoLocal","saveMetaActual","updateNote","marcarTodoOk","recibirLinea","recibir","guardarTipoHierro","guardarUnidadesManual","mandarAFabricacion","eliminarPedido","abrirPedido","volverLista"].forEach(wrap);
+  }
+  function pollLocal(){
+    if(applying || !booted) return;
+    const h=hashPack();
+    if(lastHash && h!==lastHash){
+      lastHash=h;
+      markCurrentKeys();
+      schedulePush("poll_local",120);
+    }else if(!lastHash){ lastHash=h; }
+  }
+  async function pollRemote(){
+    if(!booted || applying || !ensureFirebase()) return;
+    try{
+      const snap=await ref().get(); if(!snap.exists) return;
+      const data=snap.data()||{}; const t=Number(data.updatedAt||0);
+      if(t && t!==lastRemoteUpdated && String(data.updatedBy||"")!==cid()){
+        lastRemoteUpdated=t; applyRemote(data); status("Preparación nube conectada");
+      }
+    }catch(e){}
+  }
+  async function boot(){
+    if(booted || !ensureFirebase()) return;
+    booted=true;
+    hookPrototype(); installWraps(); await auth(); status("Preparación nube conectando...");
+    try{
+      const snap=await ref().get();
+      if(snap.exists){ const data=snap.data()||{}; lastRemoteUpdated=Number(data.updatedAt||0); applyRemote(data); }
+      else await push("crear_preparacion_v5");
+      refresh(true);
+    }catch(e){ console.warn("Prep V5 initial",e); }
+    try{
+      if(unsub) unsub();
+      unsub=ref().onSnapshot(snap=>{
+        if(!snap.exists) return;
+        const data=snap.data()||{}; const t=Number(data.updatedAt||0);
+        if(t && t===lastRemoteUpdated) return;
+        lastRemoteUpdated=t||Date.now();
+        if(String(data.updatedBy||"")!==cid()) applyRemote(data);
+      }, e=>console.warn("Prep V5 snapshot",e));
+    }catch(e){}
+    setInterval(installWraps,1000);
+    setInterval(pollLocal,700);
+    setInterval(pollRemote,1800);
+    setTimeout(()=>{ lastHash=hashPack(); push("startup_v5"); },1200);
+  }
+  window.__ldhPrepSyncNow=function(reason){ return push(reason||"manual_v5"); };
+  window.__ldhPrepSyncV5Debug=function(){ return {cid:cid(), hash:lastHash, revs:revs(), dels:dels(), pack:collect()}; };
+  const iv=setInterval(()=>{ if(ensureFirebase()){ clearInterval(iv); boot(); } },300);
+  window.addEventListener("load",()=>setTimeout(boot,700));
+  document.addEventListener("DOMContentLoaded",()=>setTimeout(boot,700));
+})();
+</script>
 </body></html>
