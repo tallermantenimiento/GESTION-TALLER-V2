@@ -11326,4 +11326,156 @@ function LDH_prepVolverMenu(){
 })();
 </script>
 
+
+
+<script id="LDH_PREPARACION_LIVE_DETAIL_V3">
+(function(){
+  "use strict";
+  if(window.__LDH_PREP_LIVE_DETAIL_V3__) return;
+  window.__LDH_PREP_LIVE_DETAIL_V3__ = true;
+
+  const COL = "taller_data";
+  const DOC = "preparacion";
+  const CLIENT_KEY = "ldh_prep_client_id_v2";
+  const STATUS_ID = "ldhPrepLiveDetailNotice";
+  const GOOD_PROJECT = "gestion-taller-v2";
+  let liveUnsub = null;
+  let lastRemoteAt = 0;
+  let pushTimer = null;
+  let refreshTimer = null;
+
+  function cid(){
+    try{
+      let v = localStorage.getItem(CLIENT_KEY) || localStorage.getItem("ldh_prep_client_id_v1");
+      if(!v){ v = "prep2_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36); localStorage.setItem(CLIENT_KEY, v); }
+      return v;
+    }catch(e){ return "prep_unknown"; }
+  }
+  function hasFirebase(){ return !!(window.firebase && firebase.apps && firebase.apps.length && firebase.firestore); }
+  function getDb(){
+    try{
+      const app = (firebase.apps || []).find(a => (a.options||{}).projectId === GOOD_PROJECT) || firebase.apps[0];
+      return app ? firebase.firestore(app) : firebase.firestore();
+    }catch(e){ return firebase.firestore(); }
+  }
+  function docRef(){ return getDb().collection(COL).doc(DOC); }
+  function isDetailOpen(){
+    try{ if(window.refActual) return true; }catch(e){}
+    try{ if(document.querySelector("#detallePedido, .detalle-pedido, .modal.show, .pedido-detalle")) return true; }catch(e){}
+    return false;
+  }
+  function doRefresh(forceDetail){
+    try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
+    if(forceDetail || !isDetailOpen()){
+      try{ if(typeof renderTabla === "function" && window.refActual) renderTabla(); }catch(e){}
+    }
+    try{ if(typeof render === "function") render(); }catch(e){}
+  }
+  function showNotice(){
+    try{
+      let el = document.getElementById(STATUS_ID);
+      if(!el){
+        el = document.createElement("div");
+        el.id = STATUS_ID;
+        el.style.cssText = "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:999999;background:#0b2538;border:1px solid #38bdf8;color:#e8f8ff;border-radius:14px;padding:10px 14px;font:800 12px system-ui;box-shadow:0 10px 30px rgba(0,0,0,.45);display:flex;gap:10px;align-items:center";
+        el.innerHTML = '<span>Hay cambios nuevos en Preparación.</span><button type="button" id="ldhPrepLiveApply" style="border:1px solid #38bdf8;background:#075985;color:white;border-radius:10px;padding:7px 10px;font:800 12px system-ui;cursor:pointer">Actualizar pedido</button>';
+        document.body.appendChild(el);
+        const b = document.getElementById("ldhPrepLiveApply");
+        if(b) b.onclick = function(){ hideNotice(); doRefresh(true); };
+      }
+      el.style.display = "flex";
+    }catch(e){}
+  }
+  function hideNotice(){ try{ const el=document.getElementById(STATUS_ID); if(el) el.style.display="none"; }catch(e){} }
+  function schedulePush(reason, delay){
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(function(){
+      try{
+        if(typeof window.__ldhPrepSyncNow === "function") window.__ldhPrepSyncNow(reason || "live_detail");
+        else if(typeof window.cloudSaveNow === "function") window.cloudSaveNow();
+      }catch(e){}
+    }, delay || 180);
+  }
+  function scheduleRefreshFromRemote(){
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(function(){
+      if(isDetailOpen()) showNotice();
+      else { hideNotice(); doRefresh(false); }
+    }, 250);
+  }
+  function installRemoteListener(){
+    if(liveUnsub || !hasFirebase()) return;
+    try{
+      liveUnsub = docRef().onSnapshot(function(snap){
+        if(!snap.exists) return;
+        const data = snap.data() || {};
+        if(String(data.updatedBy||"") === cid()) return;
+        const t = Number(data.updatedAt || 0);
+        if(t && t === lastRemoteAt) return;
+        lastRemoteAt = t || Date.now();
+        scheduleRefreshFromRemote();
+      }, function(err){ console.warn("Prep live detail listener", err); });
+    }catch(e){ console.warn("Prep live detail install", e); }
+  }
+  function wrapFunction(name){
+    try{
+      const fn = window[name];
+      if(typeof fn !== "function" || fn.__ldhLiveWrapped) return;
+      const wrapped = function(){
+        const out = fn.apply(this, arguments);
+        schedulePush("live_wrap_" + name, 120);
+        return out;
+      };
+      wrapped.__ldhLiveWrapped = true;
+      window[name] = wrapped;
+    }catch(e){}
+  }
+  function installWrappers(){
+    [
+      "guardarEstadoLocal",
+      "saveMetaActual",
+      "guardarLinea",
+      "guardarUnidadesManual",
+      "guardarTipoHierro",
+      "guardarNuevoMaterial",
+      "updateNote",
+      "mandarAFabricacion",
+      "eliminarPedido"
+    ].forEach(wrapFunction);
+  }
+  function installInputPush(){
+    if(window.__LDH_PREP_LIVE_INPUT_PUSH__) return;
+    window.__LDH_PREP_LIVE_INPUT_PUSH__ = true;
+    const handler = function(ev){
+      try{
+        const t = ev.target;
+        if(!t) return;
+        const tag = String(t.tagName||"").toLowerCase();
+        if(tag !== "input" && tag !== "select" && tag !== "textarea" && !t.closest("button")) return;
+        if(!isDetailOpen()) return;
+        schedulePush("live_ui_change", 450);
+      }catch(e){}
+    };
+    document.addEventListener("change", handler, true);
+    document.addEventListener("input", handler, true);
+    document.addEventListener("click", function(ev){
+      try{ if(ev.target && ev.target.closest("button") && isDetailOpen()) schedulePush("live_button", 350); }catch(e){}
+    }, true);
+  }
+  function boot(){
+    installWrappers();
+    installInputPush();
+    installRemoteListener();
+    setTimeout(installWrappers, 1000);
+    setTimeout(installRemoteListener, 1200);
+  }
+  const iv = setInterval(function(){
+    installWrappers();
+    if(hasFirebase()){ installRemoteListener(); clearInterval(iv); }
+  }, 500);
+  window.addEventListener("load", function(){ setTimeout(boot, 700); setTimeout(boot, 2000); });
+  document.addEventListener("DOMContentLoaded", function(){ setTimeout(boot, 700); });
+})();
+</script>
+
 </body></html>
