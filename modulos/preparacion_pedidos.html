@@ -10914,50 +10914,68 @@ function LDH_prepVolverMenu(){
 </script>
 
 
-
-<script id="LDH_PREPARACION_SYNC_PROPIO_V1">
+<script id="LDH_PREPARACION_LIVE_SYNC_V6_AUTORITATIVO">
 (function(){
   "use strict";
-  if(window.__LDH_PREP_SYNC_PROPIO_V1__) return;
-  window.__LDH_PREP_SYNC_PROPIO_V1__ = true;
+  if(window.__LDH_PREP_LIVE_SYNC_V6__) return;
+  window.__LDH_PREP_LIVE_SYNC_V6__ = true;
 
   const COL = "taller_data";
   const DOC = "preparacion";
-  const CLIENT_KEY = "ldh_prep_client_id_v1";
-  const REVS_KEY = "ldh_prep_key_revs_v1";
-  const DEL_KEY = "ldh_prep_deleted_keys_v1";
-  const STATUS_ID = "ldhPrepSyncStatus";
-  const DEBOUNCE_MS = 600;
+  const CLIENT_KEY = "ldh_prep_client_id_v6";
+  const STATUS_ID = "ldhPrepSyncStatusV6";
+  const GOOD_CONFIG = {
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
 
-  let applyingRemote = false;
   let booted = false;
-  let timer = null;
+  let applyingRemote = false;
+  let pushTimer = null;
+  let renderTimer = null;
   let unsub = null;
+  let lastLocalHash = "";
+  let lastRemoteAt = 0;
+  let lastPushAt = 0;
 
   function cid(){
-    let v = localStorage.getItem(CLIENT_KEY);
-    if(!v){ v = "prep_" + Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem(CLIENT_KEY,v); }
-    return v;
-  }
-  function isKey(k){
-    k = String(k || "");
-    return k.indexOf("prep_recepcion_") === 0 ||
-           k.indexOf("prep_meta_") === 0 ||
-           k.indexOf("prep_unassigned_") === 0 ||
-           k === "ldh_preparacion_registry_v1" ||
-           k === "prep_stock_linkmap_v1" ||
-           k === "prep_last_import_ref" ||
-           k === "prep_focus_ref" ||
-           k === "prep_focus_hash_ref" ||
-           k === "prep_auto_open_ref";
-  }
-  function readJson(k, fb){ try{ return JSON.parse(localStorage.getItem(k) || ""); }catch(e){ return fb; } }
-  function writeJson(k,v){ try{ localStorage.setItem(k, JSON.stringify(v || {})); }catch(e){} }
-  function revs(){ return readJson(REVS_KEY, {}) || {}; }
-  function dels(){ return readJson(DEL_KEY, {}) || {}; }
-  function setStatus(txt){
     try{
-      let el = document.getElementById(STATUS_ID);
+      let v = localStorage.getItem(CLIENT_KEY);
+      if(!v){
+        v = "prep6_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36);
+        localStorage.setItem(CLIENT_KEY, v);
+      }
+      return v;
+    }catch(e){ return "prep6_unknown"; }
+  }
+
+  function isPrepKey(k){
+    k = String(k || "");
+    if(k.indexOf("prep_recepcion_") === 0) return true;
+    if(k.indexOf("prep_meta_") === 0) return true;
+    if(k.indexOf("prep_unassigned_") === 0) return true;
+    return [
+      "ldh_preparacion_registry_v1",
+      "prep_stock_linkmap_v1",
+      "prep_last_import_ref",
+      "prep_focus_ref",
+      "prep_focus_hash_ref",
+      "prep_auto_open_ref",
+      "prep_estado_actual",
+      "prep_materiales",
+      "prep_pedido_payload",
+      "pedido_en_preparacion",
+      "latest_materials_v1"
+    ].includes(k);
+  }
+
+  function status(txt){
+    try{
+      let el = document.getElementById(STATUS_ID) || document.getElementById("ldhPrepSyncStatusV5") || document.getElementById("ldhPrepSyncStatusV2") || document.getElementById("ldhPrepSyncStatus");
       if(!el){
         el = document.createElement("div");
         el.id = STATUS_ID;
@@ -10967,963 +10985,299 @@ function LDH_prepVolverMenu(){
       el.textContent = txt;
     }catch(e){}
   }
-  function collect(){
-    const data = {};
-    const r = revs();
-    for(let i=0;i<localStorage.length;i++){
-      const k = localStorage.key(i);
-      if(!isKey(k)) continue;
-      data[k] = localStorage.getItem(k);
-      if(!r[k]) r[k] = 1;
+
+  function ensureFirebase(){
+    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
+    try{
+      let good = (firebase.apps || []).find(a => (a.options || {}).projectId === GOOD_CONFIG.projectId);
+      if(!good){
+        try{ good = firebase.initializeApp(GOOD_CONFIG, "prep_v6"); }
+        catch(e){
+          try{ if(!(firebase.apps || []).length) good = firebase.initializeApp(GOOD_CONFIG); }catch(_){}
+        }
+      }
+      window.firebaseConfig = GOOD_CONFIG;
+      return !!((firebase.apps || []).length && firebase.firestore);
+    }catch(e){
+      return !!(firebase.apps && firebase.apps.length && firebase.firestore);
     }
-    writeJson(REVS_KEY, r);
-    return { data, revs:r, deleted:dels(), updatedAt: Date.now(), updatedBy: cid(), schema:"prep_sync_v1" };
   }
-  function markSet(k){
-    if(!isKey(k) || applyingRemote) return;
-    const now = Date.now();
-    const r = revs(); r[k] = now; writeJson(REVS_KEY, r);
-    const d = dels(); if(d[k]){ delete d[k]; writeJson(DEL_KEY, d); }
-    schedule("set:" + k);
+
+  function db(){
+    try{
+      const good = (firebase.apps || []).find(a => (a.options || {}).projectId === GOOD_CONFIG.projectId);
+      return good ? firebase.firestore(good) : firebase.firestore();
+    }catch(e){ return firebase.firestore(); }
   }
-  function markDel(k){
-    if(!isKey(k) || applyingRemote) return;
-    const now = Date.now();
-    const r = revs(); r[k] = now; writeJson(REVS_KEY, r);
-    const d = dels(); d[k] = now; writeJson(DEL_KEY, d);
-    schedule("del:" + k);
-  }
-  function fbOk(){ return !!(window.firebase && firebase.apps && firebase.apps.length && firebase.firestore); }
-  function docRef(){ return firebase.firestore().collection(COL).doc(DOC); }
+  function docRef(){ return db().collection(COL).doc(DOC); }
   async function ensureAuth(){
     try{ if(firebase.auth && !firebase.auth().currentUser) await firebase.auth().signInAnonymously(); }catch(e){}
   }
-  async function push(reason){
-    if(!fbOk()) return;
-    if(applyingRemote) return;
+
+  function storageKeys(store){
+    const out = [];
     try{
-      const payload = collect();
-      payload.reason = String(reason || "");
+      for(let i=0;i<store.length;i++){
+        const k = store.key(i);
+        if(isPrepKey(k)) out.push(k);
+      }
+    }catch(e){}
+    return out;
+  }
+
+  function getValue(k){
+    try{ const v = localStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
+    try{ const v = sessionStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
+    return null;
+  }
+
+  function setBoth(k, v){
+    try{ localStorage.setItem(k, v); }catch(e){}
+    try{ sessionStorage.setItem(k, v); }catch(e){}
+  }
+  function removeBoth(k){
+    try{ localStorage.removeItem(k); }catch(e){}
+    try{ sessionStorage.removeItem(k); }catch(e){}
+  }
+
+  function collectData(){
+    const keys = new Set();
+    storageKeys(localStorage).forEach(k => keys.add(k));
+    storageKeys(sessionStorage).forEach(k => keys.add(k));
+    const data = {};
+    Array.from(keys).sort().forEach(k => {
+      const v = getValue(k);
+      if(v !== null && v !== undefined) data[k] = v;
+    });
+    return data;
+  }
+
+  function stableHash(data){
+    try{
+      const keys = Object.keys(data || {}).sort();
+      let s = "";
+      keys.forEach(k => { s += k + "=" + String(data[k]).length + ":" + String(data[k]) + "\n"; });
+      return s;
+    }catch(e){ return String(Date.now()); }
+  }
+
+  function currentRef(){
+    try{ if(typeof refActual !== "undefined" && refActual) return String(refActual); }catch(e){}
+    try{ if(window.refActual) return String(window.refActual); }catch(e){}
+    try{ return new URL(location.href).searchParams.get("openRef") || ""; }catch(e){}
+    return "";
+  }
+
+  function refreshViews(forceDetail){
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(function(){
+      const ref = currentRef();
+      try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
+      if(ref){
+        if(forceDetail){
+          try{ if(typeof abrirPedido === "function") { abrirPedido(ref); return; } }catch(e){}
+        }
+        try{ if(typeof renderTabla === "function") renderTabla(); }catch(e){}
+      }
+      try{ if(typeof render === "function") render(); }catch(e){}
+    }, 120);
+  }
+
+  async function pushNow(reason){
+    if(applyingRemote || !booted || !ensureFirebase()) return;
+    try{
+      const data = collectData();
+      const h = stableHash(data);
+      lastLocalHash = h;
+      const payload = {
+        schema: "prep_live_sync_v6_authoritative",
+        updatedAt: Date.now(),
+        updatedBy: cid(),
+        reason: String(reason || ""),
+        data: data,
+        keys: Object.keys(data).sort()
+      };
       await docRef().set(payload, {merge:false});
-      setStatus("Preparación nube conectada");
-    }catch(e){ console.warn("Prep sync push error", e); setStatus("Preparación nube error"); }
+      lastPushAt = payload.updatedAt;
+      lastRemoteAt = Math.max(lastRemoteAt, payload.updatedAt);
+      status("Preparación nube conectada");
+    }catch(e){
+      console.warn("Prep V6 push", e);
+      status("Preparación nube error");
+    }
   }
-  function schedule(reason){
+
+  function schedulePush(reason, delay){
     if(applyingRemote || !booted) return;
-    clearTimeout(timer);
-    timer = setTimeout(()=>push(reason), DEBOUNCE_MS);
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(function(){ pushNow(reason || "change"); }, delay == null ? 350 : delay);
   }
+
   function applyRemote(remote){
     if(!remote || !remote.data) return false;
-    const localData = {};
-    for(let i=0;i<localStorage.length;i++){
-      const k = localStorage.key(i);
-      if(isKey(k)) localData[k] = localStorage.getItem(k);
-    }
-    const localRevs = revs();
-    const localDels = dels();
-    const remoteData = remote.data || {};
-    const remoteRevs = remote.revs || {};
-    const remoteDels = remote.deleted || {};
-    const keys = new Set([].concat(Object.keys(localData), Object.keys(remoteData), Object.keys(localRevs), Object.keys(remoteRevs), Object.keys(localDels), Object.keys(remoteDels)));
+    const rdata = remote.data || {};
+    const remoteHash = stableHash(rdata);
+    if(remoteHash === lastLocalHash) return false;
+
+    const all = new Set();
+    storageKeys(localStorage).forEach(k => all.add(k));
+    storageKeys(sessionStorage).forEach(k => all.add(k));
+    Object.keys(rdata).forEach(k => { if(isPrepKey(k)) all.add(k); });
+
     let changed = false;
     applyingRemote = true;
     try{
-      keys.forEach(function(k){
-        if(!isKey(k)) return;
-        const lr = Number(localRevs[k] || (Object.prototype.hasOwnProperty.call(localData,k) ? 1 : 0));
-        const rr = Number(remoteRevs[k] || (Object.prototype.hasOwnProperty.call(remoteData,k) ? 1 : 0));
-        const ld = Number(localDels[k] || 0);
-        const rd = Number(remoteDels[k] || 0);
-        const bestDel = Math.max(ld, rd);
-        const bestSet = Math.max(lr, rr);
-        if(bestDel > bestSet){
-          if(localStorage.getItem(k) !== null){ localStorage.removeItem(k); changed = true; }
-          localDels[k] = bestDel;
-          localRevs[k] = Math.max(lr, rr, bestDel);
-          return;
-        }
-        if(rr > lr && Object.prototype.hasOwnProperty.call(remoteData,k)){
-          if(localStorage.getItem(k) !== remoteData[k]){ localStorage.setItem(k, remoteData[k]); changed = true; }
-          localRevs[k] = rr;
-          if(localDels[k]) delete localDels[k];
-          return;
-        }
-        if(lr >= rr && Object.prototype.hasOwnProperty.call(localData,k)){
-          if(localDels[k] && lr >= localDels[k]) delete localDels[k];
+      Array.from(all).forEach(k => {
+        if(!isPrepKey(k)) return;
+        if(Object.prototype.hasOwnProperty.call(rdata, k)){
+          const v = String(rdata[k]);
+          if(getValue(k) !== v){ changed = true; }
+          setBoth(k, v);
+        }else{
+          if(getValue(k) !== null){ changed = true; }
+          removeBoth(k);
         }
       });
-      writeJson(REVS_KEY, localRevs);
-      writeJson(DEL_KEY, localDels);
-    }finally{ applyingRemote = false; }
-    if(changed) refreshUi();
+    }finally{
+      applyingRemote = false;
+    }
+    lastLocalHash = stableHash(collectData());
+    if(changed) refreshViews(true);
     return changed;
   }
-  function refreshUi(){
-    try{ if(typeof cargarLista === "function" && !window.refActual) cargarLista(); }catch(e){}
-    try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
-    try{ if(typeof renderTabla === "function" && window.refActual) renderTabla(); }catch(e){}
-  }
+
   function hookStorage(){
-    if(localStorage.__ldhPrepHooked) return;
-    try{ Object.defineProperty(localStorage,"__ldhPrepHooked",{value:true}); }catch(e){ localStorage.__ldhPrepHooked = true; }
-    const oldSet = localStorage.setItem.bind(localStorage);
-    const oldRemove = localStorage.removeItem.bind(localStorage);
-    localStorage.setItem = function(k,v){ const r = oldSet(k,v); markSet(k); return r; };
-    localStorage.removeItem = function(k){ const r = oldRemove(k); markDel(k); return r; };
+    if(window.__LDH_PREP_V6_STORAGE_HOOKED__) return;
+    window.__LDH_PREP_V6_STORAGE_HOOKED__ = true;
+    try{
+      const oldSet = Storage.prototype.setItem;
+      const oldRemove = Storage.prototype.removeItem;
+      Storage.prototype.setItem = function(k, v){
+        const out = oldSet.apply(this, arguments);
+        try{ if((this === localStorage || this === sessionStorage) && isPrepKey(k) && !applyingRemote) schedulePush("storage_set:" + k, 250); }catch(e){}
+        return out;
+      };
+      Storage.prototype.removeItem = function(k){
+        const out = oldRemove.apply(this, arguments);
+        try{ if((this === localStorage || this === sessionStorage) && isPrepKey(k) && !applyingRemote) schedulePush("storage_del:" + k, 250); }catch(e){}
+        return out;
+      };
+    }catch(e){}
   }
+
+  function wrapFunction(name){
+    try{
+      const fn = window[name];
+      if(typeof fn !== "function" || fn.__ldhPrepV6Wrapped) return;
+      const wrapped = function(){
+        const out = fn.apply(this, arguments);
+        setTimeout(function(){ schedulePush("fn:" + name, 120); refreshViews(false); }, 40);
+        return out;
+      };
+      wrapped.__ldhPrepV6Wrapped = true;
+      window[name] = wrapped;
+    }catch(e){}
+  }
+
+  function installWrappers(){
+    [
+      "guardarEstadoLocal","guardarPedido","guardar","saveMetaActual","guardarLinea",
+      "guardarUnidadesManual","guardarTipoHierro","updateNote","recibirLinea","recibir",
+      "marcarOk","marcarTodoOk","okTodo","mandarAFabricacion","eliminarPedido",
+      "abrirPedido","volverLista","crearPedido","importarPedido"
+    ].forEach(wrapFunction);
+  }
+
+  function installUiWatch(){
+    if(window.__LDH_PREP_V6_UI_WATCH__) return;
+    window.__LDH_PREP_V6_UI_WATCH__ = true;
+    ["input","change","blur","keyup","click"].forEach(function(evname){
+      document.addEventListener(evname, function(ev){
+        try{
+          const t = ev.target;
+          if(!t) return;
+          if(evname === "click" && !t.closest("button,[role=button],.btn,.pill,a")) return;
+          if(evname !== "click"){
+            const tag = String(t.tagName || "").toLowerCase();
+            if(tag !== "input" && tag !== "select" && tag !== "textarea") return;
+          }
+          schedulePush("ui:" + evname, evname === "input" ? 700 : 280);
+        }catch(e){}
+      }, true);
+    });
+  }
+
+  function pollLocal(){
+    if(applyingRemote || !booted) return;
+    const data = collectData();
+    const h = stableHash(data);
+    if(!lastLocalHash){ lastLocalHash = h; return; }
+    if(h !== lastLocalHash){
+      lastLocalHash = h;
+      schedulePush("poll_local", 180);
+    }
+  }
+
+  async function pollRemote(){
+    if(!booted || applyingRemote || !ensureFirebase()) return;
+    try{
+      const snap = await docRef().get();
+      if(!snap.exists) return;
+      const data = snap.data() || {};
+      const t = Number(data.updatedAt || 0);
+      if(t && t > lastRemoteAt && String(data.updatedBy || "") !== cid()){
+        lastRemoteAt = t;
+        applyRemote(data);
+        status("Preparación nube conectada");
+      }
+    }catch(e){}
+  }
+
   async function boot(){
-    if(booted) return;
-    if(!fbOk()) return;
+    if(booted || !ensureFirebase()) return;
     booted = true;
     hookStorage();
+    installWrappers();
+    installUiWatch();
     await ensureAuth();
-    setStatus("Preparación nube conectando...");
+    status("Preparación nube conectando...");
     try{
       const snap = await docRef().get();
       if(snap.exists){
-        const changed = applyRemote(snap.data() || {});
-        if(!changed){ refreshUi(); }
+        const data = snap.data() || {};
+        lastRemoteAt = Number(data.updatedAt || 0);
+        applyRemote(data);
       }else{
-        await push("crear_doc_preparacion");
+        await pushNow("crear_doc_v6");
       }
-    }catch(e){ console.warn("Prep sync initial error", e); }
+      lastLocalHash = stableHash(collectData());
+      refreshViews(true);
+    }catch(e){ console.warn("Prep V6 initial", e); }
     try{
       if(unsub) unsub();
       unsub = docRef().onSnapshot(function(snap){
         if(!snap.exists) return;
         const data = snap.data() || {};
-        if(String(data.updatedBy||"") === cid()) return;
-        applyRemote(data);
-        setStatus("Preparación nube conectada");
-      }, function(err){ console.warn("Prep sync snapshot error", err); setStatus("Preparación nube error"); });
-    }catch(e){}
-    setTimeout(()=>push("startup"), 1500);
-  }
-  window.__ldhPrepSyncNow = function(){ return push("manual"); };
-  const iv = setInterval(function(){
-    if(window.firebase && firebase.apps && firebase.apps.length && firebase.firestore){ clearInterval(iv); boot(); }
-  }, 400);
-  window.addEventListener("load", function(){ setTimeout(boot, 1000); });
-})();
-</script>
-
-
-
-<script id="LDH_PREPARACION_SYNC_PROPIO_V2_FIREBASE_FIX">
-(function(){
-  "use strict";
-  if(window.__LDH_PREP_SYNC_V2_FIREBASE_FIX__) return;
-  window.__LDH_PREP_SYNC_V2_FIREBASE_FIX__ = true;
-
-  const COL = "taller_data";
-  const DOC = "preparacion";
-  const CLIENT_KEY = "ldh_prep_client_id_v2";
-  const REV_KEY = "ldh_prep_revs_v2";
-  const DEL_KEY = "ldh_prep_deletes_v2";
-  const STATUS_ID = "ldhPrepSyncStatusV2";
-  const DEBOUNCE = 350;
-  let applying = false;
-  let booted = false;
-  let timer = null;
-  let unsub = null;
-
-  const GOOD_CONFIG = {
-    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
-    authDomain: "gestion-taller-v2.firebaseapp.com",
-    projectId: "gestion-taller-v2",
-    storageBucket: "gestion-taller-v2.firebasestorage.app",
-    messagingSenderId: "888590823508",
-    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
-  };
-
-  function cid(){
-    let v = localStorage.getItem(CLIENT_KEY);
-    if(!v){ v = "prep2_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36); localStorage.setItem(CLIENT_KEY, v); }
-    return v;
-  }
-  function isKey(k){
-    k = String(k || "");
-    return k.indexOf("prep_recepcion_") === 0 ||
-           k.indexOf("prep_meta_") === 0 ||
-           k.indexOf("prep_unassigned_") === 0 ||
-           k === "ldh_preparacion_registry_v1" ||
-           k === "prep_stock_linkmap_v1" ||
-           k === "prep_last_import_ref" ||
-           k === "prep_focus_ref" ||
-           k === "prep_focus_hash_ref" ||
-           k === "prep_auto_open_ref" ||
-           k === "prep_estado_actual" ||
-           k === "prep_materiales" ||
-           k === "prep_pedido_payload" ||
-           k === "pedido_en_preparacion" ||
-           k === "latest_materials_v1";
-  }
-  function readObj(k){ try{ return JSON.parse(localStorage.getItem(k) || "{}"); }catch(e){ return {}; } }
-  function writeObj(k,o){ try{ localStorage.setItem(k, JSON.stringify(o || {})); }catch(e){} }
-  function revs(){ return readObj(REV_KEY); }
-  function dels(){ return readObj(DEL_KEY); }
-  function now(){ return Date.now(); }
-  function status(t){
-    try{
-      let el = document.getElementById(STATUS_ID) || document.getElementById("ldhPrepSyncStatus");
-      if(!el){
-        el = document.createElement("div");
-        el.id = STATUS_ID;
-        el.style.cssText = "position:fixed;right:12px;bottom:10px;z-index:999999;background:#06131f;border:1px solid #164b63;color:#9fe8ff;border-radius:999px;padding:6px 10px;font:700 11px system-ui;box-shadow:0 0 12px rgba(0,0,0,.35)";
-        document.body.appendChild(el);
-      }
-      el.textContent = t;
-    }catch(e){}
-  }
-  function ensureFirebase(){
-    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
-    try{
-      let app = null;
-      if(firebase.apps && firebase.apps.length){
-        app = firebase.apps[0];
-        try{
-          const opt = app.options || {};
-          if(opt.projectId !== GOOD_CONFIG.projectId){
-            try{ firebase.initializeApp(GOOD_CONFIG, "prep_v2"); }catch(e){}
-          }
-        }catch(e){}
-      }else{
-        firebase.initializeApp(GOOD_CONFIG);
-      }
-      window.firebaseConfig = GOOD_CONFIG;
-      return true;
-    }catch(e){ console.warn("Prep V2 Firebase init", e); return !!(firebase.apps && firebase.apps.length); }
-  }
-  function db(){
-    try{
-      const named = (firebase.apps || []).find(a => (a.options||{}).projectId === GOOD_CONFIG.projectId);
-      return named ? firebase.firestore(named) : firebase.firestore();
-    }catch(e){ return firebase.firestore(); }
-  }
-  function ref(){ return db().collection(COL).doc(DOC); }
-  async function auth(){ try{ if(firebase.auth && !firebase.auth().currentUser) await firebase.auth().signInAnonymously(); }catch(e){} }
-  function collect(){
-    const data = {}, r = revs(), d = dels();
-    for(let i=0;i<localStorage.length;i++){
-      const k = localStorage.key(i);
-      if(!isKey(k)) continue;
-      data[k] = localStorage.getItem(k);
-      if(!r[k]) r[k] = 1;
-    }
-    writeObj(REV_KEY, r);
-    return {schema:"prep_sync_v2", updatedAt:now(), updatedBy:cid(), data:data, revs:r, deleted:d};
-  }
-  async function push(reason){
-    if(applying || !ensureFirebase()) return;
-    try{
-      const payload = collect();
-      payload.reason = String(reason || "");
-      await ref().set(payload, {merge:false});
-      status("Preparación nube conectada");
-    }catch(e){ console.warn("Prep V2 push", e); status("Preparación nube error"); }
-  }
-  function schedule(reason){
-    if(applying || !booted) return;
-    clearTimeout(timer);
-    timer = setTimeout(()=>push(reason), DEBOUNCE);
-  }
-  function markSet(k){
-    if(applying || !isKey(k)) return;
-    const r = revs(), d = dels(), t = now();
-    r[k] = t;
-    if(d[k]) delete d[k];
-    writeObj(REV_KEY,r); writeObj(DEL_KEY,d);
-    schedule("set:"+k);
-  }
-  function markDel(k){
-    if(applying || !isKey(k)) return;
-    const r = revs(), d = dels(), t = now();
-    d[k] = t;
-    r[k] = t;
-    writeObj(REV_KEY,r); writeObj(DEL_KEY,d);
-    schedule("del:"+k);
-  }
-  function applyRemote(remote){
-    if(!remote || !remote.data) return false;
-    const localData = {};
-    for(let i=0;i<localStorage.length;i++){
-      const k = localStorage.key(i);
-      if(isKey(k)) localData[k] = localStorage.getItem(k);
-    }
-    const lr = revs(), ld = dels();
-    const rd = remote.deleted || {}, rr = remote.revs || {}, rdata = remote.data || {};
-    const keys = new Set([...Object.keys(localData), ...Object.keys(rdata), ...Object.keys(lr), ...Object.keys(rr), ...Object.keys(ld), ...Object.keys(rd)]);
-    let changed = false;
-    applying = true;
-    try{
-      keys.forEach(k=>{
-        if(!isKey(k)) return;
-        const lset = Number(lr[k] || (Object.prototype.hasOwnProperty.call(localData,k) ? 1 : 0));
-        const rset = Number(rr[k] || (Object.prototype.hasOwnProperty.call(rdata,k) ? 1 : 0));
-        const ldel = Number(ld[k] || 0);
-        const rdel = Number(rd[k] || 0);
-        const bestDel = Math.max(ldel, rdel);
-        const bestSet = Math.max(lset, rset);
-        if(bestDel >= bestSet && bestDel > 0){
-          if(localStorage.getItem(k) !== null){ localStorage.removeItem(k); changed = true; }
-          ld[k] = bestDel;
-          lr[k] = Math.max(lset, rset, bestDel);
-          return;
-        }
-        if(rset > lset && Object.prototype.hasOwnProperty.call(rdata,k)){
-          if(localStorage.getItem(k) !== rdata[k]){ localStorage.setItem(k, rdata[k]); changed = true; }
-          lr[k] = rset;
-          if(ld[k]) delete ld[k];
-        }
-      });
-      writeObj(REV_KEY, lr); writeObj(DEL_KEY, ld);
-    }finally{ applying = false; }
-    if(changed) refresh();
-    return changed;
-  }
-  function refresh(){
-    try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
-    try{ if(typeof renderTabla === "function" && window.refActual) renderTabla(); }catch(e){}
-  }
-  function hook(){
-    if(window.__LDH_PREP_SYNC_V2_STORAGE_HOOKED__) return;
-    window.__LDH_PREP_SYNC_V2_STORAGE_HOOKED__ = true;
-    const oldSet = localStorage.setItem.bind(localStorage);
-    const oldRemove = localStorage.removeItem.bind(localStorage);
-    localStorage.setItem = function(k,v){ const res = oldSet(k,v); markSet(k); return res; };
-    localStorage.removeItem = function(k){ const res = oldRemove(k); markDel(k); return res; };
-    window.addEventListener("storage", ev=>{ if(ev && isKey(ev.key)) schedule("storage"); });
-  }
-  async function boot(){
-    if(booted) return;
-    if(!ensureFirebase()) return;
-    booted = true;
-    hook();
-    await auth();
-    status("Preparación nube conectando...");
-    try{
-      const snap = await ref().get();
-      if(snap.exists){ applyRemote(snap.data() || {}); refresh(); }
-      else await push("crear_preparacion_v2");
-    }catch(e){ console.warn("Prep V2 initial", e); }
-    try{
-      if(unsub) unsub();
-      unsub = ref().onSnapshot(snap=>{
-        if(!snap.exists) return;
-        const data = snap.data() || {};
-        if(String(data.updatedBy||"") === cid()) return;
+        const t = Number(data.updatedAt || 0);
+        if(t && t <= lastRemoteAt) return;
+        lastRemoteAt = t || Date.now();
+        if(String(data.updatedBy || "") === cid()) return;
         applyRemote(data);
         status("Preparación nube conectada");
-      }, e=>{ console.warn("Prep V2 snapshot", e); status("Preparación nube error"); });
+      }, function(e){ console.warn("Prep V6 snapshot", e); status("Preparación nube error"); });
     }catch(e){}
-    setTimeout(()=>push("startup"), 1200);
+    setInterval(installWrappers, 1000);
+    setInterval(pollLocal, 800);
+    setInterval(pollRemote, 2000);
   }
-  window.__ldhPrepSyncNow = function(){ return push("manual"); };
-  window.__ldhPrepSyncDebug = function(){ return {cid:cid(), revs:revs(), dels:dels(), collect:collect()}; };
-  const iv = setInterval(()=>{ if(window.firebase && firebase.firestore){ clearInterval(iv); boot(); } }, 300);
-  window.addEventListener("load", ()=>setTimeout(boot, 600));
-})();
-</script>
 
+  window.__ldhPrepSyncNow = function(reason){ return pushNow(reason || "manual_v6"); };
+  window.__ldhPrepSyncV6Debug = function(){ return {cid:cid(), lastLocalHash:lastLocalHash, lastRemoteAt:lastRemoteAt, data:collectData()}; };
 
-
-<script id="LDH_PREPARACION_LIVE_DETAIL_V3">
-(function(){
-  "use strict";
-  if(window.__LDH_PREP_LIVE_DETAIL_V3__) return;
-  window.__LDH_PREP_LIVE_DETAIL_V3__ = true;
-
-  const COL = "taller_data";
-  const DOC = "preparacion";
-  const CLIENT_KEY = "ldh_prep_client_id_v2";
-  const STATUS_ID = "ldhPrepLiveDetailNotice";
-  const GOOD_PROJECT = "gestion-taller-v2";
-  let liveUnsub = null;
-  let lastRemoteAt = 0;
-  let pushTimer = null;
-  let refreshTimer = null;
-
-  function cid(){
-    try{
-      let v = localStorage.getItem(CLIENT_KEY) || localStorage.getItem("ldh_prep_client_id_v1");
-      if(!v){ v = "prep2_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36); localStorage.setItem(CLIENT_KEY, v); }
-      return v;
-    }catch(e){ return "prep_unknown"; }
-  }
-  function hasFirebase(){ return !!(window.firebase && firebase.apps && firebase.apps.length && firebase.firestore); }
-  function getDb(){
-    try{
-      const app = (firebase.apps || []).find(a => (a.options||{}).projectId === GOOD_PROJECT) || firebase.apps[0];
-      return app ? firebase.firestore(app) : firebase.firestore();
-    }catch(e){ return firebase.firestore(); }
-  }
-  function docRef(){ return getDb().collection(COL).doc(DOC); }
-  function isDetailOpen(){
-    try{ if(window.refActual) return true; }catch(e){}
-    try{ if(document.querySelector("#detallePedido, .detalle-pedido, .modal.show, .pedido-detalle")) return true; }catch(e){}
-    return false;
-  }
-  function doRefresh(forceDetail){
-    try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
-    if(forceDetail || !isDetailOpen()){
-      try{ if(typeof renderTabla === "function" && window.refActual) renderTabla(); }catch(e){}
-    }
-    try{ if(typeof render === "function") render(); }catch(e){}
-  }
-  function showNotice(){
-    try{
-      let el = document.getElementById(STATUS_ID);
-      if(!el){
-        el = document.createElement("div");
-        el.id = STATUS_ID;
-        el.style.cssText = "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:999999;background:#0b2538;border:1px solid #38bdf8;color:#e8f8ff;border-radius:14px;padding:10px 14px;font:800 12px system-ui;box-shadow:0 10px 30px rgba(0,0,0,.45);display:flex;gap:10px;align-items:center";
-        el.innerHTML = '<span>Hay cambios nuevos en Preparación.</span><button type="button" id="ldhPrepLiveApply" style="border:1px solid #38bdf8;background:#075985;color:white;border-radius:10px;padding:7px 10px;font:800 12px system-ui;cursor:pointer">Actualizar pedido</button>';
-        document.body.appendChild(el);
-        const b = document.getElementById("ldhPrepLiveApply");
-        if(b) b.onclick = function(){ hideNotice(); doRefresh(true); };
-      }
-      el.style.display = "flex";
-    }catch(e){}
-  }
-  function hideNotice(){ try{ const el=document.getElementById(STATUS_ID); if(el) el.style.display="none"; }catch(e){} }
-  function schedulePush(reason, delay){
-    clearTimeout(pushTimer);
-    pushTimer = setTimeout(function(){
-      try{
-        if(typeof window.__ldhPrepSyncNow === "function") window.__ldhPrepSyncNow(reason || "live_detail");
-        else if(typeof window.cloudSaveNow === "function") window.cloudSaveNow();
-      }catch(e){}
-    }, delay || 180);
-  }
-  function scheduleRefreshFromRemote(){
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(function(){
-      if(isDetailOpen()) showNotice();
-      else { hideNotice(); doRefresh(false); }
-    }, 250);
-  }
-  function installRemoteListener(){
-    if(liveUnsub || !hasFirebase()) return;
-    try{
-      liveUnsub = docRef().onSnapshot(function(snap){
-        if(!snap.exists) return;
-        const data = snap.data() || {};
-        if(String(data.updatedBy||"") === cid()) return;
-        const t = Number(data.updatedAt || 0);
-        if(t && t === lastRemoteAt) return;
-        lastRemoteAt = t || Date.now();
-        scheduleRefreshFromRemote();
-      }, function(err){ console.warn("Prep live detail listener", err); });
-    }catch(e){ console.warn("Prep live detail install", e); }
-  }
-  function wrapFunction(name){
-    try{
-      const fn = window[name];
-      if(typeof fn !== "function" || fn.__ldhLiveWrapped) return;
-      const wrapped = function(){
-        const out = fn.apply(this, arguments);
-        schedulePush("live_wrap_" + name, 120);
-        return out;
-      };
-      wrapped.__ldhLiveWrapped = true;
-      window[name] = wrapped;
-    }catch(e){}
-  }
-  function installWrappers(){
-    [
-      "guardarEstadoLocal",
-      "saveMetaActual",
-      "guardarLinea",
-      "guardarUnidadesManual",
-      "guardarTipoHierro",
-      "guardarNuevoMaterial",
-      "updateNote",
-      "mandarAFabricacion",
-      "eliminarPedido"
-    ].forEach(wrapFunction);
-  }
-  function installInputPush(){
-    if(window.__LDH_PREP_LIVE_INPUT_PUSH__) return;
-    window.__LDH_PREP_LIVE_INPUT_PUSH__ = true;
-    const handler = function(ev){
-      try{
-        const t = ev.target;
-        if(!t) return;
-        const tag = String(t.tagName||"").toLowerCase();
-        if(tag !== "input" && tag !== "select" && tag !== "textarea" && !t.closest("button")) return;
-        if(!isDetailOpen()) return;
-        schedulePush("live_ui_change", 450);
-      }catch(e){}
-    };
-    document.addEventListener("change", handler, true);
-    document.addEventListener("input", handler, true);
-    document.addEventListener("click", function(ev){
-      try{ if(ev.target && ev.target.closest("button") && isDetailOpen()) schedulePush("live_button", 350); }catch(e){}
-    }, true);
-  }
-  function boot(){
-    installWrappers();
-    installInputPush();
-    installRemoteListener();
-    setTimeout(installWrappers, 1000);
-    setTimeout(installRemoteListener, 1200);
-  }
-  const iv = setInterval(function(){
-    installWrappers();
-    if(hasFirebase()){ installRemoteListener(); clearInterval(iv); }
-  }, 500);
-  window.addEventListener("load", function(){ setTimeout(boot, 700); setTimeout(boot, 2000); });
+  const iv = setInterval(function(){ if(ensureFirebase()){ clearInterval(iv); boot(); } }, 300);
+  window.addEventListener("load", function(){ setTimeout(boot, 700); });
   document.addEventListener("DOMContentLoaded", function(){ setTimeout(boot, 700); });
 })();
 </script>
 
-
-
-<script id="LDH_PREPARACION_LIVE_FORCE_V4">
-(function(){
-  "use strict";
-  if(window.__LDH_PREP_LIVE_FORCE_V4__) return;
-  window.__LDH_PREP_LIVE_FORCE_V4__ = true;
-
-  const COL = "taller_data";
-  const DOC = "preparacion";
-  const CLIENT_KEY = "ldh_prep_client_id_v2";
-  const GOOD_CONFIG = {
-    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
-    authDomain: "gestion-taller-v2.firebaseapp.com",
-    projectId: "gestion-taller-v2",
-    storageBucket: "gestion-taller-v2.firebasestorage.app",
-    messagingSenderId: "888590823508",
-    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
-  };
-  const NOTICE_ID = "ldhPrepForceNoticeV4";
-  let applying = false;
-  let unsub = null;
-  let lastSeen = 0;
-  let pushTimer = null;
-  let renderTimer = null;
-
-  function cid(){
-    try{
-      let v = localStorage.getItem(CLIENT_KEY);
-      if(!v){ v = "prep2_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36); localStorage.setItem(CLIENT_KEY,v); }
-      return v;
-    }catch(e){ return "prep_unknown"; }
-  }
-  function isKey(k){
-    k = String(k || "");
-    return k.indexOf("prep_recepcion_") === 0 ||
-           k.indexOf("prep_meta_") === 0 ||
-           k.indexOf("prep_unassigned_") === 0 ||
-           k === "ldh_preparacion_registry_v1" ||
-           k === "prep_stock_linkmap_v1" ||
-           k === "prep_last_import_ref" ||
-           k === "prep_focus_ref" ||
-           k === "prep_focus_hash_ref" ||
-           k === "prep_auto_open_ref" ||
-           k === "prep_estado_actual" ||
-           k === "prep_materiales" ||
-           k === "prep_pedido_payload" ||
-           k === "pedido_en_preparacion" ||
-           k === "latest_materials_v1";
-  }
-  function ensureFirebase(){
-    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
-    try{
-      if(!(firebase.apps && firebase.apps.length)) firebase.initializeApp(GOOD_CONFIG);
-      else if(!(firebase.apps || []).some(a => (a.options||{}).projectId === GOOD_CONFIG.projectId)){
-        try{ firebase.initializeApp(GOOD_CONFIG, "prep_force_v4"); }catch(e){}
-      }
-      return true;
-    }catch(e){ return !!(firebase.apps && firebase.apps.length && firebase.firestore); }
-  }
-  function db(){
-    const app = (firebase.apps || []).find(a => (a.options||{}).projectId === GOOD_CONFIG.projectId) || firebase.apps[0];
-    try{ return app ? firebase.firestore(app) : firebase.firestore(); }catch(e){ return firebase.firestore(); }
-  }
-  function ref(){ return db().collection(COL).doc(DOC); }
-  function activeEditing(){
-    try{
-      const el = document.activeElement;
-      if(!el) return false;
-      const tag = String(el.tagName||"").toLowerCase();
-      if(tag === "input" || tag === "textarea" || tag === "select") return true;
-      if(el.isContentEditable) return true;
-    }catch(e){}
-    return false;
-  }
-  function detailOpen(){
-    try{ if(window.refActual) return true; }catch(e){}
-    try{ if(document.querySelector("#detallePedido, .detalle-pedido, .pedido-detalle, .modal.show")) return true; }catch(e){}
-    return false;
-  }
-  function refreshViews(forceDetail){
-    clearTimeout(renderTimer);
-    renderTimer = setTimeout(function(){
-      try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
-      try{ if((forceDetail || !activeEditing()) && typeof renderTabla === "function" && window.refActual) renderTabla(); }catch(e){}
-      try{ if(typeof render === "function" && !activeEditing()) render(); }catch(e){}
-      try{ document.dispatchEvent(new CustomEvent("LDH_PREP_REMOTE_UPDATED", {detail:{forceDetail:!!forceDetail}})); }catch(e){}
-    }, 80);
-  }
-  function notice(){
-    try{
-      let el = document.getElementById(NOTICE_ID);
-      if(!el){
-        el = document.createElement("div");
-        el.id = NOTICE_ID;
-        el.style.cssText = "position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:999999;background:#0b2538;border:1px solid #38bdf8;color:#e8f8ff;border-radius:14px;padding:10px 14px;font:800 12px system-ui;box-shadow:0 10px 30px rgba(0,0,0,.45);display:flex;gap:10px;align-items:center";
-        el.innerHTML = '<span>Cambios nuevos en Preparación.</span><button type="button" id="ldhPrepForceApplyV4" style="border:1px solid #38bdf8;background:#075985;color:white;border-radius:10px;padding:7px 10px;font:800 12px system-ui;cursor:pointer">Actualizar ahora</button>';
-        document.body.appendChild(el);
-        const b = document.getElementById("ldhPrepForceApplyV4");
-        if(b) b.onclick = function(){ el.style.display = "none"; refreshViews(true); };
-      }
-      el.style.display = "flex";
-    }catch(e){}
-  }
-  function hideNotice(){ try{ const el=document.getElementById(NOTICE_ID); if(el) el.style.display="none"; }catch(e){} }
-  function applyRemoteSnapshot(remote){
-    if(!remote || !remote.data) return false;
-    const remoteData = remote.data || {};
-    const deleted = remote.deleted || {};
-    let changed = false;
-    applying = true;
-    try{
-      Object.keys(remoteData).forEach(function(k){
-        if(!isKey(k)) return;
-        const val = remoteData[k];
-        if(localStorage.getItem(k) !== val){ localStorage.setItem(k, val); changed = true; }
-      });
-      Object.keys(deleted).forEach(function(k){
-        if(!isKey(k)) return;
-        if(!Object.prototype.hasOwnProperty.call(remoteData,k) && localStorage.getItem(k) !== null){ localStorage.removeItem(k); changed = true; }
-      });
-    }finally{ applying = false; }
-    if(changed){
-      if(activeEditing() || detailOpen()) notice();
-      else { hideNotice(); refreshViews(false); }
-    }
-    return changed;
-  }
-  function schedulePush(reason){
-    if(applying) return;
-    clearTimeout(pushTimer);
-    pushTimer = setTimeout(function(){
-      try{
-        if(typeof window.__ldhPrepSyncNow === "function") window.__ldhPrepSyncNow(reason || "force_v4");
-      }catch(e){}
-    }, 250);
-  }
-  function installUiPush(){
-    if(window.__LDH_PREP_FORCE_UI_PUSH_V4__) return;
-    window.__LDH_PREP_FORCE_UI_PUSH_V4__ = true;
-    ["input","change","click","blur","keyup"].forEach(function(evname){
-      document.addEventListener(evname, function(ev){
-        try{
-          const t = ev.target;
-          if(!t) return;
-          if(evname === "click" && !t.closest("button,[role=button],.btn,.pill")) return;
-          if(!detailOpen() && evname !== "click") return;
-          schedulePush("ui_" + evname);
-        }catch(e){}
-      }, true);
-    });
-    ["guardarEstadoLocal","guardarPedido","guardar","guardarLinea","saveMetaActual","updateNote","recibirLinea","marcarOk","eliminarPedido","mandarAFabricacion"].forEach(function(name){
-      try{
-        const fn = window[name];
-        if(typeof fn !== "function" || fn.__ldhForceV4) return;
-        const wrapped = function(){
-          const out = fn.apply(this, arguments);
-          schedulePush("fn_" + name);
-          return out;
-        };
-        wrapped.__ldhForceV4 = true;
-        window[name] = wrapped;
-      }catch(e){}
-    });
-  }
-  function installSnapshot(){
-    if(unsub || !ensureFirebase()) return;
-    try{
-      unsub = ref().onSnapshot(function(snap){
-        if(!snap.exists) return;
-        const data = snap.data() || {};
-        const t = Number(data.updatedAt || 0);
-        if(t && t === lastSeen) return;
-        lastSeen = t || Date.now();
-        if(String(data.updatedBy||"") === cid()) return;
-        applyRemoteSnapshot(data);
-      }, function(e){ console.warn("Prep force V4 snapshot", e); });
-    }catch(e){ console.warn("Prep force V4 install", e); }
-  }
-  function boot(){ installUiPush(); installSnapshot(); setTimeout(installUiPush,800); setTimeout(installSnapshot,1200); }
-  const iv = setInterval(function(){ installUiPush(); if(ensureFirebase()){ installSnapshot(); clearInterval(iv); } }, 400);
-  window.addEventListener("load", function(){ setTimeout(boot,500); setTimeout(boot,1800); });
-  document.addEventListener("DOMContentLoaded", function(){ setTimeout(boot,500); });
-})();
-</script>
-
-
-
-<script id="LDH_PREPARACION_LIVE_FORCE_POLL_V5">
-(function(){
-  "use strict";
-  if(window.__LDH_PREP_LIVE_FORCE_POLL_V5__) return;
-  window.__LDH_PREP_LIVE_FORCE_POLL_V5__ = true;
-
-  const COL="taller_data";
-  const DOC="preparacion";
-  const CLIENT_KEY="ldh_prep_client_id_v2";
-  const REV_KEY="ldh_prep_revs_v2";
-  const DEL_KEY="ldh_prep_deletes_v2";
-  const STATUS_ID="ldhPrepSyncStatusV5";
-  const GOOD_CONFIG={
-    apiKey:"AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
-    authDomain:"gestion-taller-v2.firebaseapp.com",
-    projectId:"gestion-taller-v2",
-    storageBucket:"gestion-taller-v2.firebasestorage.app",
-    messagingSenderId:"888590823508",
-    appId:"1:888590823508:web:6dfd420a3e7ac17d647dc1"
-  };
-
-  let booted=false, applying=false, unsub=null, lastHash="", lastRemoteUpdated=0, pushTimer=null;
-
-  function cid(){
-    try{
-      let v=localStorage.getItem(CLIENT_KEY);
-      if(!v){ v="prep2_"+Math.random().toString(36).slice(2)+"_"+Date.now().toString(36); localStorage.setItem(CLIENT_KEY,v); }
-      return v;
-    }catch(e){ return "prep_unknown"; }
-  }
-  function isKey(k){
-    k=String(k||"");
-    return k.indexOf("prep_recepcion_")===0 ||
-           k.indexOf("prep_meta_")===0 ||
-           k.indexOf("prep_unassigned_")===0 ||
-           k==="ldh_preparacion_registry_v1" ||
-           k==="prep_stock_linkmap_v1" ||
-           k==="prep_last_import_ref" ||
-           k==="prep_focus_ref" ||
-           k==="prep_focus_hash_ref" ||
-           k==="prep_auto_open_ref" ||
-           k==="prep_estado_actual" ||
-           k==="prep_materiales" ||
-           k==="prep_pedido_payload" ||
-           k==="pedido_en_preparacion" ||
-           k==="latest_materials_v1";
-  }
-  function getS(k){
-    try{ const v=localStorage.getItem(k); if(v!==null && v!==undefined) return v; }catch(e){}
-    try{ const v=sessionStorage.getItem(k); if(v!==null && v!==undefined) return v; }catch(e){}
-    return null;
-  }
-  function setS(k,v){
-    try{ localStorage.setItem(k,v); return; }catch(e){}
-    try{ sessionStorage.setItem(k,v); }catch(e){}
-  }
-  function remS(k){
-    try{ localStorage.removeItem(k); }catch(e){}
-    try{ sessionStorage.removeItem(k); }catch(e){}
-  }
-  function readObj(k){ try{ return JSON.parse(localStorage.getItem(k)||"{}"); }catch(e){ return {}; } }
-  function writeObj(k,o){ try{ localStorage.setItem(k, JSON.stringify(o||{})); }catch(e){} }
-  function revs(){ return readObj(REV_KEY); }
-  function dels(){ return readObj(DEL_KEY); }
-  function status(t){
-    try{
-      let el=document.getElementById(STATUS_ID)||document.getElementById("ldhPrepSyncStatusV2")||document.getElementById("ldhPrepSyncStatus");
-      if(!el){
-        el=document.createElement("div"); el.id=STATUS_ID;
-        el.style.cssText="position:fixed;right:12px;bottom:10px;z-index:999999;background:#06131f;border:1px solid #164b63;color:#9fe8ff;border-radius:999px;padding:6px 10px;font:700 11px system-ui;box-shadow:0 0 12px rgba(0,0,0,.35)";
-        document.body.appendChild(el);
-      }
-      el.textContent=t;
-    }catch(e){}
-  }
-  function ensureFirebase(){
-    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
-    try{
-      let good=(firebase.apps||[]).find(a=>(a.options||{}).projectId===GOOD_CONFIG.projectId);
-      if(!good){
-        try{ good=firebase.initializeApp(GOOD_CONFIG,"prep_v5"); }
-        catch(e){ try{ if(!(firebase.apps||[]).length) good=firebase.initializeApp(GOOD_CONFIG); }catch(_){} }
-      }
-      window.firebaseConfig=GOOD_CONFIG;
-      return !!((firebase.apps||[]).length && firebase.firestore);
-    }catch(e){ return !!(firebase.apps && firebase.apps.length && firebase.firestore); }
-  }
-  function db(){
-    const good=(firebase.apps||[]).find(a=>(a.options||{}).projectId===GOOD_CONFIG.projectId);
-    try{ return good ? firebase.firestore(good) : firebase.firestore(); }catch(e){ return firebase.firestore(); }
-  }
-  function ref(){ return db().collection(COL).doc(DOC); }
-  async function auth(){ try{ if(firebase.auth && !firebase.auth().currentUser) await firebase.auth().signInAnonymously(); }catch(e){} }
-  function allKeys(){
-    const out=new Set();
-    try{ for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(isKey(k)) out.add(k); } }catch(e){}
-    try{ for(let i=0;i<sessionStorage.length;i++){ const k=sessionStorage.key(i); if(isKey(k)) out.add(k); } }catch(e){}
-    return Array.from(out).sort();
-  }
-  function collect(){
-    const data={}, r=revs(), d=dels();
-    allKeys().forEach(k=>{
-      const v=getS(k);
-      if(v!==null && v!==undefined){ data[k]=v; if(!r[k]) r[k]=Date.now(); }
-    });
-    writeObj(REV_KEY,r);
-    return {schema:"prep_sync_v5", updatedAt:Date.now(), updatedBy:cid(), data, revs:r, deleted:d};
-  }
-  function hashPack(){
-    try{
-      const data={}; allKeys().forEach(k=>{ data[k]=getS(k); });
-      return JSON.stringify(data);
-    }catch(e){ return String(Date.now()); }
-  }
-  async function push(reason){
-    if(applying || !ensureFirebase()) return;
-    try{
-      const payload=collect(); payload.reason=String(reason||"");
-      await ref().set(payload,{merge:false});
-      lastRemoteUpdated=payload.updatedAt;
-      lastHash=hashPack();
-      status("Preparación nube conectada");
-    }catch(e){ console.warn("Prep V5 push",e); status("Preparación nube error"); }
-  }
-  function schedulePush(reason, delay){
-    if(applying || !booted) return;
-    clearTimeout(pushTimer);
-    pushTimer=setTimeout(()=>push(reason), delay==null?250:delay);
-  }
-  function applyRemote(remote){
-    if(!remote || !remote.data) return false;
-    const rdata=remote.data||{}, rr=remote.revs||{}, rd=remote.deleted||{};
-    const lr=revs(), ld=dels();
-    const keys=new Set([...allKeys(),...Object.keys(rdata),...Object.keys(rr),...Object.keys(rd),...Object.keys(lr),...Object.keys(ld)]);
-    let changed=false;
-    applying=true;
-    try{
-      keys.forEach(k=>{
-        if(!isKey(k)) return;
-        const localHas=getS(k)!==null;
-        const lset=Number(lr[k] || (localHas?1:0));
-        const rset=Number(rr[k] || (Object.prototype.hasOwnProperty.call(rdata,k)?1:0));
-        const ldel=Number(ld[k]||0), rdel=Number(rd[k]||0);
-        const bestDel=Math.max(ldel,rdel), bestSet=Math.max(lset,rset);
-        if(bestDel>=bestSet && bestDel>0){
-          if(localHas){ remS(k); changed=true; }
-          ld[k]=bestDel; lr[k]=Math.max(bestDel,lset,rset);
-          return;
-        }
-        if(rset>lset && Object.prototype.hasOwnProperty.call(rdata,k)){
-          if(getS(k)!==rdata[k]){ setS(k,rdata[k]); changed=true; }
-          lr[k]=rset; if(ld[k]) delete ld[k];
-        }
-      });
-      writeObj(REV_KEY,lr); writeObj(DEL_KEY,ld);
-    }finally{ applying=false; }
-    if(changed){ lastHash=hashPack(); refresh(true); }
-    return changed;
-  }
-  function refresh(remote){
-    setTimeout(function(){
-      try{
-        if(window.refActual && typeof abrirPedido==="function"){
-          const r=window.refActual;
-          try{ abrirPedido(r); }
-          catch(e){ try{ if(typeof renderTabla==="function") renderTabla(); }catch(_){} }
-        }else if(typeof cargarLista==="function") cargarLista();
-      }catch(e){}
-      try{ if(typeof cargarLista==="function") cargarLista(); }catch(e){}
-      try{ if(typeof renderTabla==="function" && window.refActual) renderTabla(); }catch(e){}
-    }, remote?80:0);
-  }
-  function markTouched(k, deleted){
-    if(applying || !isKey(k)) return;
-    const t=Date.now(), r=revs(), d=dels();
-    r[k]=t;
-    if(deleted) d[k]=t; else if(d[k]) delete d[k];
-    writeObj(REV_KEY,r); writeObj(DEL_KEY,d);
-    schedulePush((deleted?"del:":"set:")+k, 180);
-  }
-  function hookPrototype(){
-    if(window.__LDH_PREP_V5_STORAGE_PROTO_HOOKED__) return;
-    window.__LDH_PREP_V5_STORAGE_PROTO_HOOKED__=true;
-    try{
-      const oldSet=Storage.prototype.setItem;
-      const oldRemove=Storage.prototype.removeItem;
-      Storage.prototype.setItem=function(k,v){ const res=oldSet.apply(this,arguments); try{ if((this===localStorage||this===sessionStorage) && isKey(k)) markTouched(k,false); }catch(e){} return res; };
-      Storage.prototype.removeItem=function(k){ const res=oldRemove.apply(this,arguments); try{ if((this===localStorage||this===sessionStorage) && isKey(k)) markTouched(k,true); }catch(e){} return res; };
-    }catch(e){}
-  }
-  function wrap(name){
-    try{
-      const fn=window[name];
-      if(typeof fn!=="function" || fn.__ldhPrepV5Wrapped) return;
-      const w=function(){ const out=fn.apply(this,arguments); setTimeout(()=>{ markCurrentKeys(); schedulePush("fn:"+name,120); refresh(false); },20); return out; };
-      w.__ldhPrepV5Wrapped=true; window[name]=w;
-    }catch(e){}
-  }
-  function markCurrentKeys(){
-    try{
-      if(window.refActual){
-        const r=String(window.refActual);
-        ["prep_recepcion_"+r,"prep_meta_"+r,"prep_unassigned_"+r].forEach(k=>{ if(getS(k)!==null) markTouched(k,false); });
-      }
-    }catch(e){}
-  }
-  function installWraps(){
-    ["guardarEstadoLocal","saveMetaActual","updateNote","marcarTodoOk","recibirLinea","recibir","guardarTipoHierro","guardarUnidadesManual","mandarAFabricacion","eliminarPedido","abrirPedido","volverLista"].forEach(wrap);
-  }
-  function pollLocal(){
-    if(applying || !booted) return;
-    const h=hashPack();
-    if(lastHash && h!==lastHash){
-      lastHash=h;
-      markCurrentKeys();
-      schedulePush("poll_local",120);
-    }else if(!lastHash){ lastHash=h; }
-  }
-  async function pollRemote(){
-    if(!booted || applying || !ensureFirebase()) return;
-    try{
-      const snap=await ref().get(); if(!snap.exists) return;
-      const data=snap.data()||{}; const t=Number(data.updatedAt||0);
-      if(t && t!==lastRemoteUpdated && String(data.updatedBy||"")!==cid()){
-        lastRemoteUpdated=t; applyRemote(data); status("Preparación nube conectada");
-      }
-    }catch(e){}
-  }
-  async function boot(){
-    if(booted || !ensureFirebase()) return;
-    booted=true;
-    hookPrototype(); installWraps(); await auth(); status("Preparación nube conectando...");
-    try{
-      const snap=await ref().get();
-      if(snap.exists){ const data=snap.data()||{}; lastRemoteUpdated=Number(data.updatedAt||0); applyRemote(data); }
-      else await push("crear_preparacion_v5");
-      refresh(true);
-    }catch(e){ console.warn("Prep V5 initial",e); }
-    try{
-      if(unsub) unsub();
-      unsub=ref().onSnapshot(snap=>{
-        if(!snap.exists) return;
-        const data=snap.data()||{}; const t=Number(data.updatedAt||0);
-        if(t && t===lastRemoteUpdated) return;
-        lastRemoteUpdated=t||Date.now();
-        if(String(data.updatedBy||"")!==cid()) applyRemote(data);
-      }, e=>console.warn("Prep V5 snapshot",e));
-    }catch(e){}
-    setInterval(installWraps,1000);
-    setInterval(pollLocal,700);
-    setInterval(pollRemote,1800);
-    setTimeout(()=>{ lastHash=hashPack(); push("startup_v5"); },1200);
-  }
-  window.__ldhPrepSyncNow=function(reason){ return push(reason||"manual_v5"); };
-  window.__ldhPrepSyncV5Debug=function(){ return {cid:cid(), hash:lastHash, revs:revs(), dels:dels(), pack:collect()}; };
-  const iv=setInterval(()=>{ if(ensureFirebase()){ clearInterval(iv); boot(); } },300);
-  window.addEventListener("load",()=>setTimeout(boot,700));
-  document.addEventListener("DOMContentLoaded",()=>setTimeout(boot,700));
-})();
-</script>
 </body></html>
