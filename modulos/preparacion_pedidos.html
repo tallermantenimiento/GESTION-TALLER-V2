@@ -11478,4 +11478,190 @@ function LDH_prepVolverMenu(){
 })();
 </script>
 
+
+
+<script id="LDH_PREPARACION_LIVE_FORCE_V4">
+(function(){
+  "use strict";
+  if(window.__LDH_PREP_LIVE_FORCE_V4__) return;
+  window.__LDH_PREP_LIVE_FORCE_V4__ = true;
+
+  const COL = "taller_data";
+  const DOC = "preparacion";
+  const CLIENT_KEY = "ldh_prep_client_id_v2";
+  const GOOD_CONFIG = {
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
+  const NOTICE_ID = "ldhPrepForceNoticeV4";
+  let applying = false;
+  let unsub = null;
+  let lastSeen = 0;
+  let pushTimer = null;
+  let renderTimer = null;
+
+  function cid(){
+    try{
+      let v = localStorage.getItem(CLIENT_KEY);
+      if(!v){ v = "prep2_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36); localStorage.setItem(CLIENT_KEY,v); }
+      return v;
+    }catch(e){ return "prep_unknown"; }
+  }
+  function isKey(k){
+    k = String(k || "");
+    return k.indexOf("prep_recepcion_") === 0 ||
+           k.indexOf("prep_meta_") === 0 ||
+           k.indexOf("prep_unassigned_") === 0 ||
+           k === "ldh_preparacion_registry_v1" ||
+           k === "prep_stock_linkmap_v1" ||
+           k === "prep_last_import_ref" ||
+           k === "prep_focus_ref" ||
+           k === "prep_focus_hash_ref" ||
+           k === "prep_auto_open_ref" ||
+           k === "prep_estado_actual" ||
+           k === "prep_materiales" ||
+           k === "prep_pedido_payload" ||
+           k === "pedido_en_preparacion" ||
+           k === "latest_materials_v1";
+  }
+  function ensureFirebase(){
+    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
+    try{
+      if(!(firebase.apps && firebase.apps.length)) firebase.initializeApp(GOOD_CONFIG);
+      else if(!(firebase.apps || []).some(a => (a.options||{}).projectId === GOOD_CONFIG.projectId)){
+        try{ firebase.initializeApp(GOOD_CONFIG, "prep_force_v4"); }catch(e){}
+      }
+      return true;
+    }catch(e){ return !!(firebase.apps && firebase.apps.length && firebase.firestore); }
+  }
+  function db(){
+    const app = (firebase.apps || []).find(a => (a.options||{}).projectId === GOOD_CONFIG.projectId) || firebase.apps[0];
+    try{ return app ? firebase.firestore(app) : firebase.firestore(); }catch(e){ return firebase.firestore(); }
+  }
+  function ref(){ return db().collection(COL).doc(DOC); }
+  function activeEditing(){
+    try{
+      const el = document.activeElement;
+      if(!el) return false;
+      const tag = String(el.tagName||"").toLowerCase();
+      if(tag === "input" || tag === "textarea" || tag === "select") return true;
+      if(el.isContentEditable) return true;
+    }catch(e){}
+    return false;
+  }
+  function detailOpen(){
+    try{ if(window.refActual) return true; }catch(e){}
+    try{ if(document.querySelector("#detallePedido, .detalle-pedido, .pedido-detalle, .modal.show")) return true; }catch(e){}
+    return false;
+  }
+  function refreshViews(forceDetail){
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(function(){
+      try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
+      try{ if((forceDetail || !activeEditing()) && typeof renderTabla === "function" && window.refActual) renderTabla(); }catch(e){}
+      try{ if(typeof render === "function" && !activeEditing()) render(); }catch(e){}
+      try{ document.dispatchEvent(new CustomEvent("LDH_PREP_REMOTE_UPDATED", {detail:{forceDetail:!!forceDetail}})); }catch(e){}
+    }, 80);
+  }
+  function notice(){
+    try{
+      let el = document.getElementById(NOTICE_ID);
+      if(!el){
+        el = document.createElement("div");
+        el.id = NOTICE_ID;
+        el.style.cssText = "position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:999999;background:#0b2538;border:1px solid #38bdf8;color:#e8f8ff;border-radius:14px;padding:10px 14px;font:800 12px system-ui;box-shadow:0 10px 30px rgba(0,0,0,.45);display:flex;gap:10px;align-items:center";
+        el.innerHTML = '<span>Cambios nuevos en Preparación.</span><button type="button" id="ldhPrepForceApplyV4" style="border:1px solid #38bdf8;background:#075985;color:white;border-radius:10px;padding:7px 10px;font:800 12px system-ui;cursor:pointer">Actualizar ahora</button>';
+        document.body.appendChild(el);
+        const b = document.getElementById("ldhPrepForceApplyV4");
+        if(b) b.onclick = function(){ el.style.display = "none"; refreshViews(true); };
+      }
+      el.style.display = "flex";
+    }catch(e){}
+  }
+  function hideNotice(){ try{ const el=document.getElementById(NOTICE_ID); if(el) el.style.display="none"; }catch(e){} }
+  function applyRemoteSnapshot(remote){
+    if(!remote || !remote.data) return false;
+    const remoteData = remote.data || {};
+    const deleted = remote.deleted || {};
+    let changed = false;
+    applying = true;
+    try{
+      Object.keys(remoteData).forEach(function(k){
+        if(!isKey(k)) return;
+        const val = remoteData[k];
+        if(localStorage.getItem(k) !== val){ localStorage.setItem(k, val); changed = true; }
+      });
+      Object.keys(deleted).forEach(function(k){
+        if(!isKey(k)) return;
+        if(!Object.prototype.hasOwnProperty.call(remoteData,k) && localStorage.getItem(k) !== null){ localStorage.removeItem(k); changed = true; }
+      });
+    }finally{ applying = false; }
+    if(changed){
+      if(activeEditing() || detailOpen()) notice();
+      else { hideNotice(); refreshViews(false); }
+    }
+    return changed;
+  }
+  function schedulePush(reason){
+    if(applying) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(function(){
+      try{
+        if(typeof window.__ldhPrepSyncNow === "function") window.__ldhPrepSyncNow(reason || "force_v4");
+      }catch(e){}
+    }, 250);
+  }
+  function installUiPush(){
+    if(window.__LDH_PREP_FORCE_UI_PUSH_V4__) return;
+    window.__LDH_PREP_FORCE_UI_PUSH_V4__ = true;
+    ["input","change","click","blur","keyup"].forEach(function(evname){
+      document.addEventListener(evname, function(ev){
+        try{
+          const t = ev.target;
+          if(!t) return;
+          if(evname === "click" && !t.closest("button,[role=button],.btn,.pill")) return;
+          if(!detailOpen() && evname !== "click") return;
+          schedulePush("ui_" + evname);
+        }catch(e){}
+      }, true);
+    });
+    ["guardarEstadoLocal","guardarPedido","guardar","guardarLinea","saveMetaActual","updateNote","recibirLinea","marcarOk","eliminarPedido","mandarAFabricacion"].forEach(function(name){
+      try{
+        const fn = window[name];
+        if(typeof fn !== "function" || fn.__ldhForceV4) return;
+        const wrapped = function(){
+          const out = fn.apply(this, arguments);
+          schedulePush("fn_" + name);
+          return out;
+        };
+        wrapped.__ldhForceV4 = true;
+        window[name] = wrapped;
+      }catch(e){}
+    });
+  }
+  function installSnapshot(){
+    if(unsub || !ensureFirebase()) return;
+    try{
+      unsub = ref().onSnapshot(function(snap){
+        if(!snap.exists) return;
+        const data = snap.data() || {};
+        const t = Number(data.updatedAt || 0);
+        if(t && t === lastSeen) return;
+        lastSeen = t || Date.now();
+        if(String(data.updatedBy||"") === cid()) return;
+        applyRemoteSnapshot(data);
+      }, function(e){ console.warn("Prep force V4 snapshot", e); });
+    }catch(e){ console.warn("Prep force V4 install", e); }
+  }
+  function boot(){ installUiPush(); installSnapshot(); setTimeout(installUiPush,800); setTimeout(installSnapshot,1200); }
+  const iv = setInterval(function(){ installUiPush(); if(ensureFirebase()){ installSnapshot(); clearInterval(iv); } }, 400);
+  window.addEventListener("load", function(){ setTimeout(boot,500); setTimeout(boot,1800); });
+  document.addEventListener("DOMContentLoaded", function(){ setTimeout(boot,500); });
+})();
+</script>
+
 </body></html>
