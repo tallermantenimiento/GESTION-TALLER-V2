@@ -1317,7 +1317,6 @@ html, body{
       <div class="section-title">Acciones</div>
       <button class="btn ok" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openMaterialModal()">+ Material</button>
       <button class="btn" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openCopyCatalogModal()">Copiar catálogo</button>
-      <button id="ldhSaveFamilyOrderBtn" class="btn" style="width:100%;justify-content:center;margin-bottom:8px" onclick="LDH_guardarOrdenFamiliasActual()">Guardar orden familias</button>
       <button class="btn" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openMoveModal('entrada')">+ Entrada</button>
       <button class="btn" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openReserveModal()">Reservar a trabajo</button>
 
@@ -2940,7 +2939,19 @@ function render(){
   $('activeCompanyPill').textContent='Empresa: '+(comp.name||'-');
   $('activeTypePill').textContent='Tipo: '+(activeType==='hierro'?'Hierro':'Pintura');
   const q=($('search')?.value||'').trim().toLowerCase();
-  const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q));
+  const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q)).sort((a,b)=>{
+    const order = loadFamilyOrder();
+    const pos = new Map(order.map((k,i)=>[familyKey(k),i]));
+    const af = familyKey(a.m.family || a.s.family || 'Sin familia');
+    const bf = familyKey(b.m.family || b.s.family || 'Sin familia');
+    const ap = pos.has(af) ? pos.get(af) : Number(a.s.familyOrder || a.m.familyOrder || 999999);
+    const bp = pos.has(bf) ? pos.get(bf) : Number(b.s.familyOrder || b.m.familyOrder || 999999);
+    if(ap !== bp) return ap - bp;
+    const am = Number(a.s.materialOrder || a.m.materialOrder || 999999);
+    const bm = Number(b.s.materialOrder || b.m.materialOrder || 999999);
+    if(am !== bm) return am - bm;
+    return String(a.m.name||'').localeCompare(String(b.m.name||''),'es',{sensitivity:'base'});
+  });
   let totalReal=0,totalReserved=0,totalAssigned=0,totalDebt=0,totalLent=0,low=0;
   rows.forEach(({s,m})=>{
     const r=realStock(activeCompany,m.id),rv=reservedStock(activeCompany,m.id),asg=assignedStock(activeCompany,m.id),debt=pendingDebt(activeCompany,m.id)+borrowedDebt(activeCompany,m.id),lent=lentDebt(activeCompany,m.id);
@@ -3029,80 +3040,133 @@ function LDH_familyRowsForOrder(){
   }catch(e){ return []; }
 }
 
+function LDH_orderAliasKeys(){
+  const cid = String(activeCompany || '').trim();
+  const typ = String(activeType || '').trim();
+  let cname = '';
+  try{
+    const c = companyById(activeCompany) || {};
+    cname = String(c.name || c.nombre || c.code || c.codigo || '').trim();
+  }catch(e){}
+  const normAlias = v => String(v||'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+  return Array.from(new Set([
+    cid + '|' + typ,
+    normAlias(cname) + '|' + typ,
+    cname + '|' + typ
+  ].filter(x=>x && !x.startsWith('|'))));
+}
+
+function LDH_readOrderStore(){
+  try{ return JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {}; }catch(e){ return {}; }
+}
+function LDH_writeOrderStore(store){
+  try{ localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(store || {})); }catch(e){}
+}
+function LDH_currentStockRows(){
+  try{
+    return (db.stock || [])
+      .filter(st => String(st.companyId || '') === String(activeCompany || ''))
+      .map((st, idx) => ({st, mat: materialById(st.materialId), idx}))
+      .filter(x => {
+        if(!x.mat) return false;
+        const t = String(x.mat.type || x.mat.tipo || x.mat.stockType || x.st.type || x.st.tipo || x.st.stockType || '').toLowerCase();
+        return t === String(activeType || '').toLowerCase();
+      });
+  }catch(e){ return []; }
+}
+
 function loadFamilyOrder(){
-  const key = familyOrderStorageKey();
-
-  // 1) PRIORIDAD MAXIMA: orden guardado por el usuario en este navegador.
-  // Este era el fallo: si el paquete remoto de Stock venia sin familyOrder,
-  // se imponia el orden fisico viejo y tapaba el orden que acababas de arrastrar.
+  // 1) Orden manual guardado localmente: máxima prioridad.
   try{
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    const arr = all[key];
-    if(Array.isArray(arr) && arr.length) return arr;
+    const store = LDH_readOrderStore();
+    for(const k of LDH_orderAliasKeys()){
+      if(Array.isArray(store[k]) && store[k].length) return store[k];
+    }
   }catch(e){}
 
-  // 2) Orden guardado dentro de la base sincronizada.
+  // 2) Orden sincronizado dentro de la base.
   try{
-    const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    const arr = cloudOrders[key];
-    if(Array.isArray(arr) && arr.length) return arr;
+    const fo = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+    for(const k of LDH_orderAliasKeys()){
+      if(Array.isArray(fo[k]) && fo[k].length) return fo[k];
+    }
   }catch(e){}
 
-  // 3) Orden guardado en filas/materiales, SOLO si existe familyOrder real.
+  // 3) Orden explícito guardado en filas/materiales.
   try{
     const fams = new Map();
-    let hasExplicit = false;
-    LDH_familyRowsForOrder().forEach(({st,mat,idx})=>{
-      const name = String(mat.family || st.family || 'Sin familia').trim() || 'Sin familia';
-      const fkey = familyKey(name);
-      const val = Number(st.familyOrder || mat.familyOrder);
-      if(Number.isFinite(val) && val > 0){
-        hasExplicit = true;
-        if(!fams.has(fkey) || val < fams.get(fkey)) fams.set(fkey, val);
+    LDH_currentStockRows().forEach(({st,mat})=>{
+      const key = familyKey(mat.family || st.family || 'Sin familia');
+      const v = Number(st.familyOrder || mat.familyOrder);
+      if(Number.isFinite(v) && v > 0){
+        if(!fams.has(key) || v < fams.get(key)) fams.set(key, v);
       }
     });
-    if(hasExplicit && fams.size){
-      return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
-    }
+    if(fams.size) return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
   }catch(e){}
 
   return [];
 }
 
 function saveFamilyOrder(order){
-  const key = familyOrderStorageKey();
-  const clean = Array.isArray(order) ? order.filter(Boolean) : [];
-  const orderMap = new Map(clean.map((k,i)=>[String(k), (i+1)*1000]));
+  const clean = (Array.isArray(order) ? order : []).map(familyKey).filter(Boolean);
+  if(!clean.length) return;
 
-  // Aplicar también el orden físico de las filas: esto evita que al reconstruir desde nube vuelva a orden alfabético.
-  LDH_applyFamilyOrderToPhysicalRows(clean);
-
-  // Guardar dentro de cada fila de stock. Es la parte que sí viaja con Firestore.
+  // Local: varias claves por si cambia id/nombre de empresa.
   try{
-    LDH_familyRowsForOrder().forEach(({st,mat})=>{
-      const famKey = familyKey(mat.family || st.family || 'Sin familia');
-      if(orderMap.has(famKey)){
-        st.familyOrder = orderMap.get(famKey);
-      }
-    });
+    const store = LDH_readOrderStore();
+    LDH_orderAliasKeys().forEach(k => { store[k] = clean; });
+    LDH_writeOrderStore(store);
   }catch(e){}
 
-  // Compatibilidad: guardar también mapa general y localStorage.
+  // Base sincronizada + orden por filas.
   try{
     if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
-    db.familyOrders[key] = clean;
-    db.updatedAt = now();
-  }catch(e){}
-  try{
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    all[key] = clean;
-    localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
-  }catch(e){}
+    LDH_orderAliasKeys().forEach(k => { db.familyOrders[k] = clean; });
 
+    const famPos = new Map(clean.map((k,i)=>[familyKey(k), (i+1)*1000]));
+    LDH_currentStockRows().forEach(({st,mat})=>{
+      const fk = familyKey(mat.family || st.family || 'Sin familia');
+      if(!famPos.has(fk)) return;
+      const val = famPos.get(fk);
+      st.familyOrder = val;
+      st.familyOrderKey = fk;
+      st.familyOrderUpdatedAt = now();
+      if(mat){
+        mat.familyOrder = val;
+        mat.familyOrderKey = fk;
+        mat.familyOrderUpdatedAt = now();
+      }
+    });
+
+    // Reordenar físicamente db.stock para que también persista si alguna capa ignora familyOrder.
+    const original = db.stock || [];
+    const currentIds = new Set(LDH_currentStockRows().map(x=>String(x.st.id)));
+    const sortedCurrent = LDH_currentStockRows().map(x=>x.st).sort((a,b)=>{
+      const ma = materialById(a.materialId) || {};
+      const mb = materialById(b.materialId) || {};
+      const fa = famPos.has(familyKey(ma.family || a.family || 'Sin familia')) ? famPos.get(familyKey(ma.family || a.family || 'Sin familia')) : 999999;
+      const fb = famPos.has(familyKey(mb.family || b.family || 'Sin familia')) ? famPos.get(familyKey(mb.family || b.family || 'Sin familia')) : 999999;
+      if(fa !== fb) return fa - fb;
+      return Number(a.materialOrder || 999999) - Number(b.materialOrder || 999999);
+    });
+    let p = 0;
+    db.stock = original.map(st => currentIds.has(String(st.id)) ? (sortedCurrent[p++] || st) : st);
+
+    db.updatedAt = now();
+    localStorage.setItem(KEY, JSON.stringify(db));
+  }catch(e){ console.warn('No se pudo guardar orden familias en DB', e); }
+
+  try{ save(); }catch(e){}
+  try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:orden_familias_directo'); }catch(e){}
   try{
-    save();
-    if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:orden_familias_filas');
-    if(typeof window.__ldhStockSyncNow==='function') setTimeout(()=>window.__ldhStockSyncNow(true), 1200);
+    if(typeof window.__ldhStockSyncNow==='function'){
+      setTimeout(()=>window.__ldhStockSyncNow(true), 300);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 1800);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 5000);
+    }
   }catch(e){}
 }
 
@@ -3136,14 +3200,26 @@ function LDH_ensureFamilyOrderPersisted(){
 }
 
 function orderFamilies(groups){
-  LDH_ensureFamilyOrderPersisted();
+  groups = Array.isArray(groups) ? groups : [];
   const order = loadFamilyOrder();
-  const pos = new Map(order.map((k,i)=>[k,i]));
+  const pos = new Map(order.map((k,i)=>[familyKey(k), i]));
   return groups.sort((a,b)=>{
     const ak = familyKey(a.name), bk = familyKey(b.name);
     const ap = pos.has(ak) ? pos.get(ak) : 999999;
     const bp = pos.has(bk) ? pos.get(bk) : 999999;
     if(ap !== bp) return ap - bp;
+
+    // Si no hay orden manual para una familia nueva, mira el familyOrder guardado.
+    let ao = 999999, bo = 999999;
+    try{
+      LDH_currentStockRows().forEach(({st,mat})=>{
+        const fk = familyKey(mat.family || st.family || 'Sin familia');
+        if(fk === ak) ao = Math.min(ao, Number(st.familyOrder || mat.familyOrder || 999999));
+        if(fk === bk) bo = Math.min(bo, Number(st.familyOrder || mat.familyOrder || 999999));
+      });
+    }catch(e){}
+    if(ao !== bo) return ao - bo;
+
     return a.name.localeCompare(b.name,'es',{sensitivity:'base'});
   });
 }
@@ -3180,32 +3256,19 @@ function familyDragEnd(){
 
 function familyDrop(ev, targetKey){
   ev.preventDefault();
+  try{ ev.stopPropagation(); }catch(e){}
   const sourceKey = draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
   familyDragEnd();
   if(!sourceKey || sourceKey === targetKey) return;
 
-  const current = Array.from(document.querySelectorAll('.family-row[data-family-key]')).map(el=>el.dataset.familyKey);
-  const order = current.length ? current : loadFamilyOrder();
-  const without = order.filter(k=>k !== sourceKey);
-  const idx = without.indexOf(targetKey);
+  const current = Array.from(document.querySelectorAll('.family-row[data-family-key]')).map(el=>familyKey(el.dataset.familyKey));
+  const base = current.length ? current : loadFamilyOrder();
+  const without = base.filter(k=>familyKey(k) !== familyKey(sourceKey));
+  const idx = without.findIndex(k=>familyKey(k) === familyKey(targetKey));
   if(idx < 0) return;
-  without.splice(idx, 0, sourceKey);
-  try{
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    all[familyOrderStorageKey()] = without;
-    localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
-    localStorage.setItem('ldh_stock_family_order_last_v1', JSON.stringify({key:familyOrderStorageKey(),order:without,ts:Date.now()}));
-  }catch(e){}
+  without.splice(idx, 0, familyKey(sourceKey));
+
   saveFamilyOrder(without);
-  try{
-    localStorage.setItem(KEY, JSON.stringify(db));
-    if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:drag_familias_orden_final');
-    if(typeof window.__ldhStockSyncNow==='function'){
-      window.__ldhStockSyncNow(true);
-      setTimeout(()=>window.__ldhStockSyncNow(true), 1500);
-      setTimeout(()=>window.__ldhStockSyncNow(true), 5000);
-    }
-  }catch(e){}
   render();
 }
 
@@ -3350,15 +3413,19 @@ function stockDrop(ev, targetStockId){
   if(!source||!target) return;
   const sm=materialById(source.materialId), tm=materialById(target.materialId);
   if(source.companyId!==activeCompany || target.companyId!==activeCompany || !sm || !tm || sm.type!==activeType || tm.type!==activeType) return;
-  const from=db.stock.findIndex(x=>x.id===sourceId);
-  const to=db.stock.findIndex(x=>x.id===targetStockId);
-  if(from<0||to<0) return;
-  const [item]=db.stock.splice(from,1);
-  const newTo=db.stock.findIndex(x=>x.id===targetStockId);
-  db.stock.splice(newTo,0,item);
-  save(); render();
-}
 
+  const from=db.stock.findIndex(x=>x.id===sourceId);
+  if(from<0) return;
+  const [item]=db.stock.splice(from,1);
+  const to=db.stock.findIndex(x=>x.id===targetStockId);
+  if(to<0){ db.stock.push(item); } else { db.stock.splice(to,0,item); }
+
+  LDH_reindexMaterialOrder();
+  save();
+  try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:orden_materiales_drag'); }catch(e){}
+  try{ if(typeof window.__ldhStockSyncNow==='function') setTimeout(()=>window.__ldhStockSyncNow(true), 1000); }catch(e){}
+  render();
+}
 
 function moveStock(stockId,dir){
   const visible=db.stock.filter(s=>s.companyId===activeCompany).filter(s=>{const m=materialById(s.materialId);return m&&m.type===activeType;});
@@ -8140,183 +8207,91 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
 <script>console.log("✅ LDH orden familias v4 prioridad local activo");</script>
 
-<script id="LDH_FIX_ORDEN_FAMILIAS_DEFINITIVO_V5">
-(function(){
-  const ORDER_KEY = "ldh_stock_family_order_v5_definitivo";
 
-  function safeJSON(raw, fb){ try{return JSON.parse(raw||"");}catch(e){return fb;} }
-  function norm(v){
+
+
+<script>console.log("✅ LDH ORDEN DRAG DROP V7 directo activo");</script>
+
+<script id="LDH_DRAGDROP_AUTO_SAVE_NO_BOTON_V8">
+(function(){
+  function runLater(fn, ms){ try{ setTimeout(fn, ms||0); }catch(e){} }
+  function forceAutoSync(reason){
+    try{
+      if(typeof db !== "undefined"){
+        db.updatedAt = (typeof now === "function") ? now() : new Date().toISOString();
+        if(typeof KEY !== "undefined") localStorage.setItem(KEY, JSON.stringify(db));
+      }
+    }catch(e){}
+    try{ if(typeof save === "function") save(); }catch(e){}
+    try{ if(typeof window.__ldhMarkLocalDirty === "function") window.__ldhMarkLocalDirty(reason || "stock:dragdrop_auto"); }catch(e){}
+    try{
+      if(typeof window.__ldhStockSyncNow === "function"){
+        runLater(()=>window.__ldhStockSyncNow(true), 300);
+        runLater(()=>window.__ldhStockSyncNow(true), 1800);
+        runLater(()=>window.__ldhStockSyncNow(true), 5000);
+      }
+    }catch(e){}
+  }
+
+  function normFam(v){
+    try{
+      if(typeof familyKey === "function") return familyKey(v);
+    }catch(e){}
     return String(v||"").trim().toLowerCase()
       .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
       .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"") || "sin_familia";
   }
-  function esc(v){
-    return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  }
-  function companyObj(){
-    try{
-      if(typeof companyById === "function") return companyById(window.activeCompany || activeCompany) || {};
-    }catch(e){}
-    try{
-      return ((window.db||db).companies||[]).find(c=>String(c.id)===String(window.activeCompany||activeCompany)) || {};
-    }catch(e){}
-    return {};
-  }
-  function keyList(){
-    const cid = String((window.activeCompany || activeCompany || "")).trim();
-    const typ = String((window.activeType || activeType || "")).trim();
-    const c = companyObj();
-    const cname = norm(c.name || c.nombre || c.code || c.codigo || cid);
-    return [
-      cid + "|" + typ,
-      cname + "|" + typ
-    ].filter(Boolean);
-  }
-  function readStore(){
-    return safeJSON(localStorage.getItem(ORDER_KEY), {}) || {};
-  }
-  function writeStore(store){
-    try{ localStorage.setItem(ORDER_KEY, JSON.stringify(store||{})); }catch(e){}
-  }
-  function getSavedOrder(){
-    const store = readStore();
-    for(const k of keyList()){
-      if(Array.isArray(store[k]) && store[k].length) return store[k];
-    }
 
-    // Compatibilidad con intentos anteriores.
-    try{
-      const old = safeJSON(localStorage.getItem("ldh_stock_family_order_v1"), {}) || {};
-      for(const k of keyList()){
-        if(Array.isArray(old[k]) && old[k].length) return old[k];
-      }
-    }catch(e){}
-
-    try{
-      const k0 = keyList()[0];
-      const fo = ((window.db||db).familyOrders || {});
-      if(Array.isArray(fo[k0]) && fo[k0].length) return fo[k0];
-    }catch(e){}
-
-    return [];
-  }
-  function saveOrder(order){
-    order = (Array.isArray(order)?order:[]).map(norm).filter(Boolean);
-    if(!order.length) return;
-
-    const store = readStore();
-    keyList().forEach(k=>{ store[k] = order; });
-    writeStore(store);
-
-    try{
-      if(!(db.familyOrders && typeof db.familyOrders==="object")) db.familyOrders = {};
-      keyList().forEach(k=>{ db.familyOrders[k] = order; });
-      const om = new Map(order.map((x,i)=>[x,(i+1)*1000]));
-      (db.stock||[]).forEach(st=>{
-        if(String(st.companyId||"") !== String(activeCompany||"")) return;
-        const m = typeof materialById==="function" ? materialById(st.materialId) : null;
-        if(!m) return;
-        const t = String(m.type || m.tipo || m.stockType || st.type || st.tipo || st.stockType || "").toLowerCase();
-        if(t !== String(activeType||"").toLowerCase()) return;
-        const fk = norm(m.family || st.family || "Sin familia");
-        if(!om.has(fk)) return;
-        st.familyOrder = om.get(fk);
-        st.familyOrderKey = fk;
-        if(m){
-          m.familyOrder = om.get(fk);
-          m.familyOrderKey = fk;
-        }
-      });
-      db.updatedAt = (typeof now==="function") ? now() : new Date().toISOString();
-      localStorage.setItem((typeof KEY!=="undefined"?KEY:"ldh_v2_company_stock_v1"), JSON.stringify(db));
-    }catch(e){ console.warn("Orden familias v5: no se pudo grabar en db", e); }
-
-    try{ if(typeof save === "function") save(); }catch(e){}
-    try{ if(typeof window.__ldhMarkLocalDirty==="function") window.__ldhMarkLocalDirty("stock:orden_familias_v5_definitivo"); }catch(e){}
-    try{
-      if(typeof window.__ldhStockSyncNow==="function"){
-        setTimeout(()=>window.__ldhStockSyncNow(true), 300);
-        setTimeout(()=>window.__ldhStockSyncNow(true), 1800);
-      }
-    }catch(e){}
-    console.log("✅ Orden familias guardado V5", keyList(), order);
-  }
-
-  function domOrder(){
+  function currentFamilyOrder(){
     return Array.from(document.querySelectorAll(".family-row[data-family-key]"))
-      .map(el=>norm(el.dataset.familyKey))
+      .map(el => normFam(el.dataset.familyKey || ""))
       .filter(Boolean);
   }
 
-  const oldOrderFamilies = window.orderFamilies;
-  window.orderFamilies = function(groups){
-    groups = Array.isArray(groups) ? groups : [];
-    const order = getSavedOrder();
-    const pos = new Map(order.map((k,i)=>[norm(k),i]));
-    return groups.sort((a,b)=>{
-      const ak = norm(a && a.name), bk = norm(b && b.name);
-      const ap = pos.has(ak) ? pos.get(ak) : 999999;
-      const bp = pos.has(bk) ? pos.get(bk) : 999999;
-      if(ap !== bp) return ap - bp;
-      return String((a&&a.name)||"").localeCompare(String((b&&b.name)||""),"es",{sensitivity:"base"});
-    });
-  };
-
-  window.loadFamilyOrder = function(){ return getSavedOrder(); };
-  window.saveFamilyOrder = function(order){ saveOrder(order); };
-
-  window.familyDrop = function(ev, targetKey){
-    try{ ev.preventDefault(); ev.stopPropagation(); }catch(e){}
-    const sourceKey = norm(window.draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData("text/plain")));
-    targetKey = norm(targetKey);
-    try{ if(typeof familyDragEnd==="function") familyDragEnd(); }catch(e){}
-    if(!sourceKey || !targetKey || sourceKey===targetKey) return;
-
-    const current = domOrder();
-    const base = current.length ? current : getSavedOrder();
-    const without = base.filter(k=>norm(k)!==sourceKey);
-    const idx = without.findIndex(k=>norm(k)===targetKey);
-    if(idx < 0) return;
-    without.splice(idx, 0, sourceKey);
-    saveOrder(without);
-    try{ if(typeof render==="function") render(); }catch(e){}
-  };
-
-  window.LDH_guardarOrdenFamiliasActual = function(){
-    const order = domOrder();
-    if(!order.length) return alert("No se detectan familias visibles para guardar.");
-    saveOrder(order);
-    alert("Orden de familias guardado.");
-  };
-
-  function addButton(){
+  function reindexAllVisibleDragDrop(){
     try{
-      if(document.getElementById("ldhSaveFamilyOrderBtn")) return;
-      const anchor = Array.from(document.querySelectorAll("button")).find(b => String(b.textContent||"").includes("Copiar catálogo"))
-                || Array.from(document.querySelectorAll("button")).find(b => String(b.textContent||"").includes("+ Material"));
-      if(!anchor) return;
-      const btn = document.createElement("button");
-      btn.id = "ldhSaveFamilyOrderBtn";
-      btn.className = "btn";
-      btn.style.cssText = "width:100%;justify-content:center;margin-bottom:8px";
-      btn.textContent = "Guardar orden familias";
-      btn.onclick = window.LDH_guardarOrdenFamiliasActual;
-      anchor.insertAdjacentElement("afterend", btn);
+      const order = currentFamilyOrder();
+      if(order.length && typeof saveFamilyOrder === "function") saveFamilyOrder(order);
+    }catch(e){}
+
+    try{
+      if(typeof LDH_reindexMaterialOrder === "function") LDH_reindexMaterialOrder();
+    }catch(e){}
+
+    forceAutoSync("stock:dragdrop_auto_save_v8");
+  }
+
+  function wrap(name){
+    try{
+      const old = window[name] || (typeof globalThis !== "undefined" ? globalThis[name] : null);
+      if(typeof old !== "function" || old.__ldhAutoSaveV8) return;
+      const wrapped = function(){
+        const ret = old.apply(this, arguments);
+        runLater(reindexAllVisibleDragDrop, 80);
+        runLater(reindexAllVisibleDragDrop, 900);
+        return ret;
+      };
+      wrapped.__ldhAutoSaveV8 = true;
+      window[name] = wrapped;
+      try{ globalThis[name] = wrapped; }catch(e){}
     }catch(e){}
   }
 
-  const oldRender = window.render;
-  if(typeof oldRender === "function" && !oldRender.__ldhOrdenV5Wrapped){
-    window.render = function(){
-      const ret = oldRender.apply(this, arguments);
-      setTimeout(addButton, 0);
-      return ret;
-    };
-    window.render.__ldhOrdenV5Wrapped = true;
-  }
-  setTimeout(addButton, 500);
+  // Cubrimos todos los drag/drop existentes: familias y materiales.
+  wrap("familyDrop");
+  wrap("stockDrop");
+  wrap("moveStock");
 
-  console.log("✅ LDH orden familias DEFINITIVO V5 activo");
+  // Si algún drop no pasa por esas funciones, lo capturamos igualmente.
+  document.addEventListener("drop", function(ev){
+    const target = ev.target && ev.target.closest ? ev.target.closest(".family-row,.stock-table,tr") : null;
+    if(target){
+      runLater(reindexAllVisibleDragDrop, 250);
+      runLater(reindexAllVisibleDragDrop, 1200);
+    }
+  }, true);
+
+  console.log("✅ LDH drag/drop auto-save v8 activo, sin botón manual");
 })();
 </script>
 
