@@ -3129,7 +3129,10 @@ function familiaHTML(group){
   const safeId='fam_'+String(group.name).toLowerCase().replace(/[^a-z0-9]+/g,'_');
 
   const fKey = familyKey(group.name);
-  const isOpen = loadFamilyOpen().has(fKey);
+  // Para evitar la sensacion de que un material desaparece al crear/refrescar,
+  // las familias se muestran abiertas por defecto en Stock editable.
+  // El usuario puede plegarlas manualmente despues.
+  const isOpen = true;
   const openAttr = isOpen ? ' open' : '';
 
   return `<tr class="family-row" data-family-key="${esc(fKey)}"><td colspan="11">
@@ -3335,7 +3338,14 @@ function deleteCompany(){
 }
 
 function openMaterialModal(){openModal('Crear material para empresa',`<div class="grid2"><div class="field"><label>Nombre material</label><input id="matName" placeholder="40x40x1.5"></div><div class="field"><label>Tipo</label><select id="matType"><option value="hierro">Hierro</option><option value="pintura">Pintura</option></select></div></div><div class="grid3"><div class="field"><label>Familia</label><input id="matFamily" placeholder="Perfilería hierro negro"></div><div class="field"><label>Unidad</label><input id="matUnit" placeholder="barras / botes 4L"></div><div class="field"><label>Mínimo</label><input id="matMin" type="number" value="0"></div></div><div class="grid2"><div class="field"><label>Stock inicial</label><input id="matInitial" type="number" value="0"></div><div class="field"><label>Ubicación</label><input id="matLocation" placeholder="Zona / rack"></div></div>`,`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ok" onclick="saveMaterial()">Crear</button>`);$('matType').value=activeType;}
-function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now(),manualStockOnly:true});const initial=Number($('matInitial').value||0);db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim(),createdFromStockManual:true,createdAt:now(),physicalQty:initial,qtyPhysical:initial,fisico:initial,realQty:initial,stockFisico:initial,stockReal:initial,stockActual:initial,existencias:initial,actualQty:initial,qty:initial,cantidad:initial,physicalManualMaster:true,physicalSource:'stock_initial_master',physicalUpdatedAt:now()});if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));try{LDH_unmarkDeletedStockItem(activeCompany,id);}catch(e){}try{LDH_protectManualStockMaterial(id, activeCompany);}catch(e){}save(); try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material_protegido'); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 80); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 1200); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 3000); }catch(e){} closeModal();setType($('matType').value);render();}
+function saveMaterial(){const name=$('matName').value.trim();if(!name)return alert('Pon nombre');const id=uid('mat');db.materials.push({id,name,type:$('matType').value,family:$('matFamily').value.trim(),unit:$('matUnit').value.trim()||'ud',createdFromStockManual:true,createdAt:now(),manualStockOnly:true});const initial=Number($('matInitial').value||0);db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min:Number($('matMin').value||0),location:$('matLocation').value.trim(),createdFromStockManual:true,createdAt:now(),physicalQty:initial,qtyPhysical:initial,fisico:initial,realQty:initial,stockFisico:initial,stockReal:initial,stockActual:initial,existencias:initial,actualQty:initial,qty:initial,cantidad:initial,physicalManualMaster:true,physicalSource:'stock_initial_master',physicalUpdatedAt:now()});if(initial)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial'));try{LDH_unmarkDeletedStockItem(activeCompany,id);}catch(e){}try{LDH_protectManualStockMaterial(id, activeCompany);}catch(e){}save(); try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material_protegido'); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 80); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 1200); setTimeout(()=>{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }, 3000); }catch(e){} closeModal();setType($('matType').value);render();
+try{
+  db.updatedAt=now();
+  localStorage.setItem(KEY,JSON.stringify(db));
+  if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:crear_material_v17');
+  [150,800,2500,6000].forEach(ms=>setTimeout(()=>{try{if(typeof window.__ldhStockSyncNow==='function') window.__ldhStockSyncNow(true);}catch(e){}},ms));
+}catch(e){}
+}
 function materialOptions(selected){return db.stock.filter(s=>s.companyId===activeCompany).map(s=>materialById(s.materialId)).filter(m=>m&&m.type===activeType).map(m=>`<option value="${m.id}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}
 
 /* === LDH: Entrada de Stock -> Preparación OK automático + bloqueo por pintura === */
@@ -6116,6 +6126,38 @@ function LDH_closeMaintenanceModal(){
     return toMs(db?.updatedAt || db?.updated_at || db?.modifiedAt);
   }
 
+  function localHasMaterialRowsMissingInRemote(localAll, remoteAll){
+    try{
+      const ldb = parseJSON((localAll || {})[KEY_STOCK], null);
+      const rdb = parseJSON((remoteAll || {})[KEY_STOCK], null);
+      if(!ldb || !rdb) return false;
+      const lStock = Array.isArray(ldb.stock) ? ldb.stock : [];
+      const rStock = Array.isArray(rdb.stock) ? rdb.stock : [];
+      const lMats = Array.isArray(ldb.materials) ? ldb.materials : [];
+      const rMats = Array.isArray(rdb.materials) ? rdb.materials : [];
+      const rRows = new Set(rStock.map(r => String(r.companyId || '') + '|' + String(r.materialId || '')));
+      const rMatIds = new Set(rMats.map(m => String(m.id || '')));
+      const nowMs = Date.now();
+      function recent(x){
+        const t = Date.parse(String(x && (x.createdAt || x.updatedAt || x.modifiedAt || x.physicalUpdatedAt) || ''));
+        return Number.isFinite(t) && (nowMs - t) < 30 * 60 * 1000;
+      }
+      for(const r of lStock){
+        if(!r || !r.companyId || !r.materialId) continue;
+        const kk = String(r.companyId || '') + '|' + String(r.materialId || '');
+        if(!rRows.has(kk)){
+          const m = lMats.find(mm => String(mm.id || '') === String(r.materialId || ''));
+          if(recent(r) || recent(m)) return true;
+        }
+      }
+      for(const m of lMats){
+        if(!m || !m.id) continue;
+        if(!rMatIds.has(String(m.id)) && recent(m)) return true;
+      }
+    }catch(e){}
+    return false;
+  }
+
   async function readRemoteStock(){
     const metaSnap = await getDoc(doc(fsdb, ...META_PATH));
     if(!metaSnap.exists()) return null;
@@ -6328,10 +6370,11 @@ function LDH_closeMaintenanceModal(){
     const localTime = hasLocalStock() ? stockUpdatedAt(localAll) : 0;
     const remoteTime = stockUpdatedAt(remote.all) || Number(remote.meta.stockUpdatedAt || 0) || 0;
 
-    // Si la copia local es mas nueva que la remota, la local gana y se vuelve a publicar.
-    // Esto evita el efecto: creo material -> entra snapshot viejo -> desaparece -> luego vuelve.
-    if(hasLocalStock() && localTime > remoteTime + 500){
-      console.log("🛡️ StockSync: remoto antiguo ignorado; se republica stock local", {localTime, remoteTime});
+    // Si la copia local es mas nueva o tiene altas recientes que el remoto no trae,
+    // la local gana y se vuelve a publicar.
+    // Esto evita el efecto: creo material -> entra snapshot viejo -> desaparece.
+    if(hasLocalStock() && (localTime > remoteTime + 500 || localHasMaterialRowsMissingInRemote(localAll, remote.all))){
+      console.log("🛡️ StockSync: remoto antiguo/incompleto ignorado; se republica stock local", {localTime, remoteTime});
       await writeRemoteStock(localAll);
       return;
     }
@@ -6364,8 +6407,9 @@ function LDH_closeMaintenanceModal(){
       const localAll = collectStockStorage();
       const localTime = hasLocalStock() ? stockUpdatedAt(localAll) : 0;
       const remoteTime = stockUpdatedAt(remote.all) || Number(remote.meta.stockUpdatedAt || 0) || 0;
-      // Si este navegador tiene un Stock más nuevo, lo hacemos maestro. Si no, Firestore manda.
-      if(hasLocalStock() && localTime > remoteTime + 1000){
+      // Si este navegador tiene un Stock mas nuevo o contiene altas recientes que aun no estan en remoto,
+      // lo hacemos maestro. Si no, Firestore manda.
+      if(hasLocalStock() && (localTime > remoteTime + 1000 || localHasMaterialRowsMissingInRemote(localAll, remote.all))){
         await writeRemoteStock(localAll);
       }else{
         applyLocalStock(remote.all);
