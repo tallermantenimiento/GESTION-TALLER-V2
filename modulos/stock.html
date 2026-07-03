@@ -3019,49 +3019,76 @@ function familyOrderStorageKey(){
   return String(activeCompany || '') + '|' + String(activeType || '');
 }
 
-function loadFamilyOrder(){
-  const key = familyOrderStorageKey();
+function LDH_familyRowsForOrder(){
+  try{
+    return (db.stock||[])
+      .filter(st=>String(st.companyId||'')===String(activeCompany||''))
+      .map((st,idx)=>({st, mat: materialById(st.materialId), idx}))
+      .filter(x=>x.mat && String(x.mat.type||x.st.type||'')===String(activeType||''));
+  }catch(e){ return []; }
+}
 
-  // 1) Primero usar orden guardado en la base sincronizada.
-  // Así no se pierde al salir al menú, cambiar de navegador o restaurar desde nube.
+function loadFamilyOrder(){
+  // Fuente principal: familyOrder guardado en cada fila de stock.
+  // Esto persiste en nube porque forma parte del propio stock.
+  try{
+    const fams = new Map();
+    LDH_familyRowsForOrder().forEach(({st,mat,idx})=>{
+      const name = String(mat.family || st.family || 'Sin familia').trim() || 'Sin familia';
+      const key = familyKey(name);
+      const val = Number(st.familyOrder);
+      const order = Number.isFinite(val) && val > 0 ? val : 999999 + idx;
+      if(!fams.has(key) || order < fams.get(key)) fams.set(key, order);
+    });
+    if(fams.size){
+      return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
+    }
+  }catch(e){}
+
+  // Fallback antiguo: db.familyOrders/localStorage
+  const key = familyOrderStorageKey();
   try{
     const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
     const arr = cloudOrders[key];
     if(Array.isArray(arr)) return arr;
   }catch(e){}
-
-  // 2) Fallback antiguo: localStorage.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
     const arr = all[key];
     return Array.isArray(arr) ? arr : [];
-  }catch(e){
-    return [];
-  }
+  }catch(e){ return []; }
 }
 
 function saveFamilyOrder(order){
   const key = familyOrderStorageKey();
   const clean = Array.isArray(order) ? order.filter(Boolean) : [];
+  const orderMap = new Map(clean.map((k,i)=>[String(k), (i+1)*1000]));
 
-  // Guardar en base sincronizada.
+  // Guardar dentro de cada fila de stock. Es la parte que sí viaja con Firestore.
+  try{
+    LDH_familyRowsForOrder().forEach(({st,mat})=>{
+      const famKey = familyKey(mat.family || st.family || 'Sin familia');
+      if(orderMap.has(famKey)){
+        st.familyOrder = orderMap.get(famKey);
+      }
+    });
+  }catch(e){}
+
+  // Compatibilidad: guardar también mapa general y localStorage.
   try{
     if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
     db.familyOrders[key] = clean;
     db.updatedAt = now();
   }catch(e){}
-
-  // Mantener también copia local para compatibilidad.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
     all[key] = clean;
     localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
   }catch(e){}
 
-  // Publicar el cambio, pero sin saturar.
   try{
     save();
-    if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:orden_familias');
+    if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:orden_familias_filas');
     if(typeof window.__ldhStockSyncNow==='function') setTimeout(()=>window.__ldhStockSyncNow(true), 1200);
   }catch(e){}
 }
@@ -3075,17 +3102,24 @@ function familyKey(name){
 
 function LDH_ensureFamilyOrderPersisted(){
   try{
+    const rows = LDH_familyRowsForOrder();
+    if(!rows.length) return;
+    const hasRowOrder = rows.some(x=>Number(x.st.familyOrder)>0);
+    if(hasRowOrder) return;
+
     const key = familyOrderStorageKey();
-    const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    if(Array.isArray(cloudOrders[key])) return;
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    const arr = all[key];
-    if(Array.isArray(arr) && arr.length){
-      if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
-      db.familyOrders[key] = arr;
-      db.updatedAt = now();
-      save();
+    let arr = [];
+    try{
+      const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+      if(Array.isArray(cloudOrders[key])) arr = cloudOrders[key];
+    }catch(e){}
+    if(!arr.length){
+      try{
+        const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+        if(Array.isArray(all[key])) arr = all[key];
+      }catch(e){}
     }
+    if(arr.length) saveFamilyOrder(arr);
   }catch(e){}
 }
 
