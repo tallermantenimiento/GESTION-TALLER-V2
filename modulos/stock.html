@@ -3036,7 +3036,7 @@ function loadFamilyOrder(){
     LDH_familyRowsForOrder().forEach(({st,mat,idx})=>{
       const name = String(mat.family || st.family || 'Sin familia').trim() || 'Sin familia';
       const key = familyKey(name);
-      const val = Number(st.familyOrder);
+      const val = Number(st.familyOrder || mat.familyOrder);
       const order = Number.isFinite(val) && val > 0 ? val : 999999 + idx;
       if(!fams.has(key) || order < fams.get(key)) fams.set(key, order);
     });
@@ -3059,10 +3059,72 @@ function loadFamilyOrder(){
   }catch(e){ return []; }
 }
 
+
+function LDH_applyFamilyOrderToPhysicalRows(clean){
+  try{
+    clean = Array.isArray(clean) ? clean.filter(Boolean) : [];
+    if(!clean.length) return;
+    const orderMap = new Map(clean.map((k,i)=>[String(k), (i+1)*1000]));
+
+    const matches = (st)=>{
+      if(!st || String(st.companyId||'')!==String(activeCompany||'')) return false;
+      const m = materialById(st.materialId);
+      if(!m) return false;
+      const t = String(m.type || m.tipo || m.stockType || st.type || st.tipo || st.stockType || '').toLowerCase();
+      return t === String(activeType||'').toLowerCase();
+    };
+
+    const originalIndex = new Map();
+    (db.stock||[]).forEach((st,i)=>originalIndex.set(st.id, i));
+
+    const sorted = (db.stock||[])
+      .filter(matches)
+      .slice()
+      .sort((a,b)=>{
+        const ma = materialById(a.materialId) || {};
+        const mb = materialById(b.materialId) || {};
+        const ka = familyKey(ma.family || a.family || 'Sin familia');
+        const kb = familyKey(mb.family || b.family || 'Sin familia');
+        const pa = orderMap.has(ka) ? orderMap.get(ka) : 999999;
+        const pb = orderMap.has(kb) ? orderMap.get(kb) : 999999;
+        if(pa !== pb) return pa - pb;
+        return (originalIndex.get(a.id)||0) - (originalIndex.get(b.id)||0);
+      });
+
+    let k = 0;
+    db.stock = (db.stock||[]).map(st=>{
+      if(matches(st)) return sorted[k++] || st;
+      return st;
+    });
+
+    (db.stock||[]).forEach(st=>{
+      if(!matches(st)) return;
+      const m = materialById(st.materialId);
+      const fk = familyKey((m&&m.family) || st.family || 'Sin familia');
+      if(orderMap.has(fk)){
+        const val = orderMap.get(fk);
+        st.familyOrder = val;
+        st.familyOrderKey = fk;
+        st.familyOrderUpdatedAt = now();
+        if(m){
+          m.familyOrder = val;
+          m.familyOrderKey = fk;
+          m.familyOrderUpdatedAt = now();
+        }
+      }
+    });
+  }catch(e){
+    console.warn('No se pudo aplicar orden físico de familias', e);
+  }
+}
+
 function saveFamilyOrder(order){
   const key = familyOrderStorageKey();
   const clean = Array.isArray(order) ? order.filter(Boolean) : [];
   const orderMap = new Map(clean.map((k,i)=>[String(k), (i+1)*1000]));
+
+  // Aplicar también el orden físico de las filas: esto evita que al reconstruir desde nube vuelva a orden alfabético.
+  LDH_applyFamilyOrderToPhysicalRows(clean);
 
   // Guardar dentro de cada fila de stock. Es la parte que sí viaja con Firestore.
   try{
@@ -3179,6 +3241,15 @@ function familyDrop(ev, targetKey){
   if(idx < 0) return;
   without.splice(idx, 0, sourceKey);
   saveFamilyOrder(without);
+  try{
+    localStorage.setItem(KEY, JSON.stringify(db));
+    if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:drag_familias_orden_final');
+    if(typeof window.__ldhStockSyncNow==='function'){
+      window.__ldhStockSyncNow(true);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 1500);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 5000);
+    }
+  }catch(e){}
   render();
 }
 
@@ -8111,5 +8182,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 </script>
 
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
+<script>console.log("✅ LDH orden fisico familias v3 activo");</script>
 </body>
 </html>
