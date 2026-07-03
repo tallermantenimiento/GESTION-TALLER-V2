@@ -7714,5 +7714,74 @@ function LDH_closeMaintenanceModal(){
 })();
 </script>
 
+
+<!-- ===== LDH STOCK V22 ANTICUOTA DURO: UNA ESCRITURA AGRUPADA ===== -->
+<script>
+(function(){
+  if(window.__LDH_STOCK_V22_ANTICUOTA_DURO) return;
+  window.__LDH_STOCK_V22_ANTICUOTA_DURO = true;
+
+  const MIN_GAP = 60000; // maximo 1 subida por minuto
+  let lastRun = 0;
+  let running = false;
+  let pending = false;
+  let timer = null;
+  let original = null;
+
+  function now(){ return Date.now(); }
+
+  function install(){
+    if(typeof window.__ldhStockSyncNow !== 'function'){
+      setTimeout(install, 250);
+      return;
+    }
+    if(window.__ldhStockSyncNow.__ldhV22Wrapped) return;
+
+    original = window.__ldhStockSyncNow;
+
+    async function wrapped(force){
+      pending = true;
+
+      if(running){
+        return { skipped:true, reason:'v22_running_coalesced' };
+      }
+
+      const elapsed = now() - lastRun;
+      if(elapsed < MIN_GAP){
+        clearTimeout(timer);
+        timer = setTimeout(()=>wrapped(true), MIN_GAP - elapsed + 250);
+        return { skipped:true, reason:'v22_throttled', nextInMs: MIN_GAP - elapsed };
+      }
+
+      running = true;
+      pending = false;
+      lastRun = now();
+
+      try{
+        return await original.call(this, true);
+      }catch(e){
+        console.warn('StockSync v22: subida aplazada por error/cuota', e);
+        return { skipped:true, reason:'v22_error_or_quota', error:String(e && (e.code || e.message || e)) };
+      }finally{
+        running = false;
+        if(pending){
+          clearTimeout(timer);
+          timer = setTimeout(()=>wrapped(true), MIN_GAP + 250);
+        }
+      }
+    }
+
+    wrapped.__ldhV22Wrapped = true;
+    window.__ldhStockSyncNow = wrapped;
+    window.__ldhLiveSyncNow = wrapped;
+    window.backupToFirestore = wrapped;
+
+    console.log('✅ StockSync v22 anticuota duro activo: escrituras agrupadas cada 60s');
+  }
+
+  install();
+})();
+</script>
+
 </body>
 </html>
