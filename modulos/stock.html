@@ -3029,93 +3029,43 @@ function LDH_familyRowsForOrder(){
 }
 
 function loadFamilyOrder(){
-  // Fuente principal: familyOrder guardado en cada fila de stock.
-  // Esto persiste en nube porque forma parte del propio stock.
+  const key = familyOrderStorageKey();
+
+  // 1) PRIORIDAD MAXIMA: orden guardado por el usuario en este navegador.
+  // Este era el fallo: si el paquete remoto de Stock venia sin familyOrder,
+  // se imponia el orden fisico viejo y tapaba el orden que acababas de arrastrar.
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    const arr = all[key];
+    if(Array.isArray(arr) && arr.length) return arr;
+  }catch(e){}
+
+  // 2) Orden guardado dentro de la base sincronizada.
+  try{
+    const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+    const arr = cloudOrders[key];
+    if(Array.isArray(arr) && arr.length) return arr;
+  }catch(e){}
+
+  // 3) Orden guardado en filas/materiales, SOLO si existe familyOrder real.
   try{
     const fams = new Map();
+    let hasExplicit = false;
     LDH_familyRowsForOrder().forEach(({st,mat,idx})=>{
       const name = String(mat.family || st.family || 'Sin familia').trim() || 'Sin familia';
-      const key = familyKey(name);
+      const fkey = familyKey(name);
       const val = Number(st.familyOrder || mat.familyOrder);
-      const order = Number.isFinite(val) && val > 0 ? val : 999999 + idx;
-      if(!fams.has(key) || order < fams.get(key)) fams.set(key, order);
+      if(Number.isFinite(val) && val > 0){
+        hasExplicit = true;
+        if(!fams.has(fkey) || val < fams.get(fkey)) fams.set(fkey, val);
+      }
     });
-    if(fams.size){
+    if(hasExplicit && fams.size){
       return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
     }
   }catch(e){}
 
-  // Fallback antiguo: db.familyOrders/localStorage
-  const key = familyOrderStorageKey();
-  try{
-    const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    const arr = cloudOrders[key];
-    if(Array.isArray(arr)) return arr;
-  }catch(e){}
-  try{
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    const arr = all[key];
-    return Array.isArray(arr) ? arr : [];
-  }catch(e){ return []; }
-}
-
-
-function LDH_applyFamilyOrderToPhysicalRows(clean){
-  try{
-    clean = Array.isArray(clean) ? clean.filter(Boolean) : [];
-    if(!clean.length) return;
-    const orderMap = new Map(clean.map((k,i)=>[String(k), (i+1)*1000]));
-
-    const matches = (st)=>{
-      if(!st || String(st.companyId||'')!==String(activeCompany||'')) return false;
-      const m = materialById(st.materialId);
-      if(!m) return false;
-      const t = String(m.type || m.tipo || m.stockType || st.type || st.tipo || st.stockType || '').toLowerCase();
-      return t === String(activeType||'').toLowerCase();
-    };
-
-    const originalIndex = new Map();
-    (db.stock||[]).forEach((st,i)=>originalIndex.set(st.id, i));
-
-    const sorted = (db.stock||[])
-      .filter(matches)
-      .slice()
-      .sort((a,b)=>{
-        const ma = materialById(a.materialId) || {};
-        const mb = materialById(b.materialId) || {};
-        const ka = familyKey(ma.family || a.family || 'Sin familia');
-        const kb = familyKey(mb.family || b.family || 'Sin familia');
-        const pa = orderMap.has(ka) ? orderMap.get(ka) : 999999;
-        const pb = orderMap.has(kb) ? orderMap.get(kb) : 999999;
-        if(pa !== pb) return pa - pb;
-        return (originalIndex.get(a.id)||0) - (originalIndex.get(b.id)||0);
-      });
-
-    let k = 0;
-    db.stock = (db.stock||[]).map(st=>{
-      if(matches(st)) return sorted[k++] || st;
-      return st;
-    });
-
-    (db.stock||[]).forEach(st=>{
-      if(!matches(st)) return;
-      const m = materialById(st.materialId);
-      const fk = familyKey((m&&m.family) || st.family || 'Sin familia');
-      if(orderMap.has(fk)){
-        const val = orderMap.get(fk);
-        st.familyOrder = val;
-        st.familyOrderKey = fk;
-        st.familyOrderUpdatedAt = now();
-        if(m){
-          m.familyOrder = val;
-          m.familyOrderKey = fk;
-          m.familyOrderUpdatedAt = now();
-        }
-      }
-    });
-  }catch(e){
-    console.warn('No se pudo aplicar orden físico de familias', e);
-  }
+  return [];
 }
 
 function saveFamilyOrder(order){
@@ -3164,24 +3114,23 @@ function familyKey(name){
 
 function LDH_ensureFamilyOrderPersisted(){
   try{
-    const rows = LDH_familyRowsForOrder();
-    if(!rows.length) return;
-    const hasRowOrder = rows.some(x=>Number(x.st.familyOrder)>0);
-    if(hasRowOrder) return;
-
     const key = familyOrderStorageKey();
     let arr = [];
     try{
-      const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-      if(Array.isArray(cloudOrders[key])) arr = cloudOrders[key];
+      const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+      if(Array.isArray(all[key]) && all[key].length) arr = all[key];
     }catch(e){}
     if(!arr.length){
-      try{
-        const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-        if(Array.isArray(all[key])) arr = all[key];
-      }catch(e){}
+      const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+      if(Array.isArray(cloudOrders[key]) && cloudOrders[key].length) arr = cloudOrders[key];
     }
-    if(arr.length) saveFamilyOrder(arr);
+    if(arr.length){
+      try{
+        if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
+        db.familyOrders[key] = arr;
+      }catch(e){}
+      try{ LDH_applyFamilyOrderToPhysicalRows(arr); }catch(e){}
+    }
   }catch(e){}
 }
 
@@ -3240,6 +3189,12 @@ function familyDrop(ev, targetKey){
   const idx = without.indexOf(targetKey);
   if(idx < 0) return;
   without.splice(idx, 0, sourceKey);
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    all[familyOrderStorageKey()] = without;
+    localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
+    localStorage.setItem('ldh_stock_family_order_last_v1', JSON.stringify({key:familyOrderStorageKey(),order:without,ts:Date.now()}));
+  }catch(e){}
   saveFamilyOrder(without);
   try{
     localStorage.setItem(KEY, JSON.stringify(db));
@@ -8182,6 +8137,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 </script>
 
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
-<script>console.log("✅ LDH orden fisico familias v3 activo");</script>
+<script>console.log("✅ LDH orden familias v4 prioridad local activo");</script>
 </body>
 </html>
