@@ -2941,9 +2941,9 @@ function render(){
   const q=($('search')?.value||'').trim().toLowerCase();
   const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q)).sort((a,b)=>{
     const order = loadFamilyOrder();
-    const pos = new Map(order.map((k,i)=>[LDH_orderNorm(k),i]));
-    const af = LDH_orderNorm(a.m.family || a.s.family || 'Sin familia');
-    const bf = LDH_orderNorm(b.m.family || b.s.family || 'Sin familia');
+    const pos = new Map((order || []).map((k,i)=>[LDH_familyNorm(k),i]));
+    const af = LDH_familyNorm(a.m.family || a.s.family || 'Sin familia');
+    const bf = LDH_familyNorm(b.m.family || b.s.family || 'Sin familia');
     const ap = pos.has(af) ? pos.get(af) : Number(a.s.familyOrder || a.m.familyOrder || 999999);
     const bp = pos.has(bf) ? pos.get(bf) : Number(b.s.familyOrder || b.m.familyOrder || 999999);
     if(ap !== bp) return ap - bp;
@@ -3031,118 +3031,32 @@ function familyOrderStorageKey(){
   return String(activeCompany || '') + '|' + String(activeType || '');
 }
 
-function LDH_orderNorm(v){
-  return String(v || '').trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[^a-z0-9]+/g,'_')
-    .replace(/^_+|_+$/g,'') || 'sin_familia';
-}
-function LDH_orderKeys(){
-  const cid = String(activeCompany || '').trim();
-  const typ = String(activeType || '').trim();
-  let cname = '', ccode = '';
-  try{
-    const c = companyById(activeCompany) || {};
-    cname = String(c.name || c.nombre || '').trim();
-    ccode = String(c.code || c.codigo || '').trim();
-  }catch(e){}
-  return Array.from(new Set([
-    cid + '|' + typ,
-    LDH_orderNorm(cname) + '|' + typ,
-    LDH_orderNorm(ccode) + '|' + typ
-  ].filter(k => k && !k.startsWith('|'))));
-}
-function LDH_readOrderStore(){
-  try{ return JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {}; }catch(e){ return {}; }
-}
-function LDH_writeOrderStore(all){
-  try{ localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all || {})); }catch(e){}
-}
-function LDH_rowsForOrdering(){
-  try{
-    return (db.stock || [])
-      .filter(s => String(s.companyId || '') === String(activeCompany || ''))
-      .map((s, idx) => ({s, m: materialById(s.materialId), idx}))
-      .filter(x => x.m && String(x.m.type || x.s.type || '') === String(activeType || ''));
-  }catch(e){ return []; }
-}
-
 function loadFamilyOrder(){
-  // 1) Orden manual local, con alias por id/nombre/código empresa.
+  // Clave fuerte v11: prioridad total.
   try{
-    const all = LDH_readOrderStore();
-    for(const k of LDH_orderKeys()){
-      const arr = all[k];
-      if(Array.isArray(arr) && arr.length) return arr.map(LDH_orderNorm);
-    }
+    const arr = JSON.parse(localStorage.getItem(LDH_familyPersistKey()) || '[]');
+    if(Array.isArray(arr) && arr.length) return arr;
   }catch(e){}
 
-  // 2) Orden sincronizado dentro del DB.
+  // DB sincronizado.
   try{
     const fo = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    for(const k of LDH_orderKeys()){
-      const arr = fo[k];
-      if(Array.isArray(arr) && arr.length) return arr.map(LDH_orderNorm);
-    }
+    const a = fo[LDH_familyPersistKey()] || fo[familyOrderStorageKey()];
+    if(Array.isArray(a) && a.length) return a;
   }catch(e){}
 
-  // 3) Orden por filas si existe.
+  // Sistema anterior.
   try{
-    const fams = new Map();
-    LDH_rowsForOrdering().forEach(({s,m})=>{
-      const fk = LDH_orderNorm(m.family || s.family || 'Sin familia');
-      const val = Number(s.familyOrder || m.familyOrder);
-      if(Number.isFinite(val) && val > 0){
-        if(!fams.has(fk) || val < fams.get(fk)) fams.set(fk, val);
-      }
-    });
-    if(fams.size) return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
-  }catch(e){}
-
-  return [];
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    const arr = all[familyOrderStorageKey()];
+    return Array.isArray(arr) ? arr : [];
+  }catch(e){
+    return [];
+  }
 }
 
 function saveFamilyOrder(order){
-  const clean = (Array.isArray(order) ? order : []).map(LDH_orderNorm).filter(Boolean);
-  if(!clean.length) return;
-
-  // LocalStorage con varios alias.
-  try{
-    const all = LDH_readOrderStore();
-    LDH_orderKeys().forEach(k => { all[k] = clean; });
-    LDH_writeOrderStore(all);
-  }catch(e){}
-
-  // DB sincronizado + marcas en filas.
-  try{
-    if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
-    LDH_orderKeys().forEach(k => { db.familyOrders[k] = clean; });
-
-    const pos = new Map(clean.map((k,i)=>[LDH_orderNorm(k), (i+1)*1000]));
-    LDH_rowsForOrdering().forEach(({s,m})=>{
-      const fk = LDH_orderNorm(m.family || s.family || 'Sin familia');
-      if(!pos.has(fk)) return;
-      const val = pos.get(fk);
-      s.familyOrder = val;
-      s.familyOrderKey = fk;
-      s.familyOrderUpdatedAt = now();
-      m.familyOrder = val;
-      m.familyOrderKey = fk;
-      m.familyOrderUpdatedAt = now();
-    });
-
-    db.updatedAt = now();
-    localStorage.setItem(KEY, JSON.stringify(db));
-  }catch(e){ console.warn('No se pudo persistir orden de familias', e); }
-
-  try{ save(); }catch(e){}
-  try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:orden_familias_auto_v10'); }catch(e){}
-  try{
-    if(typeof window.__ldhStockSyncNow === 'function'){
-      setTimeout(()=>window.__ldhStockSyncNow(true), 600);
-      setTimeout(()=>window.__ldhStockSyncNow(true), 2500);
-    }
-  }catch(e){}
+  LDH_savePhysicalFamilyOrder(order);
 }
 
 function familyKey(name){
@@ -3154,12 +3068,28 @@ function familyKey(name){
 
 function orderFamilies(groups){
   const order = loadFamilyOrder();
-  const pos = new Map(order.map((k,i)=>[k,i]));
+  const pos = new Map((order || []).map((k,i)=>[LDH_familyNorm(k), i]));
   return groups.sort((a,b)=>{
-    const ak = familyKey(a.name), bk = familyKey(b.name);
+    const ak = LDH_familyNorm(a.name), bk = LDH_familyNorm(b.name);
     const ap = pos.has(ak) ? pos.get(ak) : 999999;
     const bp = pos.has(bk) ? pos.get(bk) : 999999;
     if(ap !== bp) return ap - bp;
+
+    let ao = 999999, bo = 999999;
+    try{
+      const arow = (db.stock || []).find(st => {
+        const m = materialById(st.materialId);
+        return st.companyId === activeCompany && m && m.type === activeType && LDH_familyNorm(m.family || st.family || 'Sin familia') === ak;
+      });
+      const brow = (db.stock || []).find(st => {
+        const m = materialById(st.materialId);
+        return st.companyId === activeCompany && m && m.type === activeType && LDH_familyNorm(m.family || st.family || 'Sin familia') === bk;
+      });
+      ao = Number(arow && arow.familyOrder || 999999);
+      bo = Number(brow && brow.familyOrder || 999999);
+    }catch(e){}
+    if(ao !== bo) return ao - bo;
+
     return a.name.localeCompare(b.name,'es',{sensitivity:'base'});
   });
 }
@@ -3194,19 +3124,121 @@ function familyDragEnd(){
   setTimeout(()=>{ LDH_familyDragJustHappened = false; }, 250);
 }
 
+
+function LDH_familyPersistKey(){
+  let cname = '';
+  try{
+    const c = companyById(activeCompany) || {};
+    cname = String(c.name || c.nombre || c.code || c.codigo || '').trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+  }catch(e){}
+  return 'ldh_stock_family_order_force_v11|' + String(activeCompany || '') + '|' + cname + '|' + String(activeType || '');
+}
+function LDH_familyNorm(v){
+  try{ return familyKey(v); }catch(e){}
+  return String(v || 'Sin familia').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'') || 'sin_familia';
+}
+function LDH_currentFamilyDomOrder(){
+  return Array.from(document.querySelectorAll('.family-row[data-family-key]'))
+    .map(el => LDH_familyNorm(el.dataset.familyKey))
+    .filter(Boolean);
+}
+function LDH_savePhysicalFamilyOrder(order){
+  order = (Array.isArray(order) ? order : []).map(LDH_familyNorm).filter(Boolean);
+  if(!order.length) return;
+
+  // 1) Guardado local directo, independiente de otras capas.
+  try{ localStorage.setItem(LDH_familyPersistKey(), JSON.stringify(order)); }catch(e){}
+
+  // 2) Guardado en el mapa histórico del módulo.
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    all[familyOrderStorageKey()] = order;
+    localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
+  }catch(e){}
+
+  // 3) Guardado dentro del DB y orden físico real de db.stock.
+  try{
+    if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
+    db.familyOrders[familyOrderStorageKey()] = order;
+    db.familyOrders[LDH_familyPersistKey()] = order;
+
+    const pos = new Map(order.map((k,i)=>[LDH_familyNorm(k), i]));
+
+    function rowFam(st){
+      const m = materialById(st.materialId) || {};
+      return LDH_familyNorm(m.family || st.family || 'Sin familia');
+    }
+    function isVisibleRow(st){
+      if(!st || String(st.companyId || '') !== String(activeCompany || '')) return false;
+      const m = materialById(st.materialId);
+      if(!m) return false;
+      return String(m.type || st.type || '') === String(activeType || '');
+    }
+
+    // Marcar familyOrder en filas y materiales.
+    (db.stock || []).forEach(st => {
+      if(!isVisibleRow(st)) return;
+      const fk = rowFam(st);
+      if(!pos.has(fk)) return;
+      const val = (pos.get(fk) + 1) * 1000;
+      st.familyOrder = val;
+      st.familyOrderKey = fk;
+      st.familyOrderUpdatedAt = now();
+      const m = materialById(st.materialId);
+      if(m){
+        m.familyOrder = val;
+        m.familyOrderKey = fk;
+        m.familyOrderUpdatedAt = now();
+      }
+    });
+
+    // Reordenar físicamente db.stock dejando intactas las filas de otras empresas/tipos.
+    const sortedVisible = (db.stock || []).filter(isVisibleRow).slice().sort((a,b)=>{
+      const pa = pos.has(rowFam(a)) ? pos.get(rowFam(a)) : 999999;
+      const pb = pos.has(rowFam(b)) ? pos.get(rowFam(b)) : 999999;
+      if(pa !== pb) return pa - pb;
+      return Number(a.materialOrder || 999999) - Number(b.materialOrder || 999999);
+    });
+
+    let p = 0;
+    db.stock = (db.stock || []).map(st => isVisibleRow(st) ? (sortedVisible[p++] || st) : st);
+
+    db.updatedAt = now();
+    localStorage.setItem(KEY, JSON.stringify(db));
+  }catch(e){ console.warn('No se pudo guardar orden físico de familias', e); }
+
+  // 4) Guardado + subida a Firebase.
+  try{ save(); }catch(e){}
+  try{ if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:orden_familias_fisico_v11'); }catch(e){}
+  try{
+    if(typeof window.__ldhStockSyncNow === 'function'){
+      setTimeout(()=>window.__ldhStockSyncNow(true), 500);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 2500);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 6000);
+    }
+  }catch(e){}
+}
+
+
 function familyDrop(ev, targetKey){
   ev.preventDefault();
+  try{ ev.stopPropagation(); }catch(e){}
   const sourceKey = draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
   familyDragEnd();
   if(!sourceKey || sourceKey === targetKey) return;
 
-  const current = Array.from(document.querySelectorAll('.family-row[data-family-key]')).map(el=>el.dataset.familyKey);
-  const order = current.length ? current : loadFamilyOrder();
-  const without = order.filter(k=>k !== sourceKey);
-  const idx = without.indexOf(targetKey);
+  const current = LDH_currentFamilyDomOrder();
+  const base = current.length ? current : loadFamilyOrder();
+  const without = base.filter(k => LDH_familyNorm(k) !== LDH_familyNorm(sourceKey));
+  const idx = without.findIndex(k => LDH_familyNorm(k) === LDH_familyNorm(targetKey));
   if(idx < 0) return;
-  without.splice(idx, 0, sourceKey);
-  saveFamilyOrder(without);
+  without.splice(idx, 0, LDH_familyNorm(sourceKey));
+
+  LDH_savePhysicalFamilyOrder(without);
   render();
 }
 
@@ -3357,23 +3389,6 @@ function stockDrop(ev, targetStockId){
   const [item]=db.stock.splice(from,1);
   const newTo=db.stock.findIndex(x=>x.id===targetStockId);
   db.stock.splice(newTo,0,item);
-  try{
-    const famCounters = {};
-    db.stock.filter(s=>s.companyId===activeCompany).forEach(s=>{
-      const m=materialById(s.materialId);
-      if(!m || m.type!==activeType) return;
-      const fk = LDH_orderNorm(m.family || s.family || 'Sin familia');
-      famCounters[fk] = (famCounters[fk] || 0) + 1;
-      s.materialOrder = famCounters[fk] * 1000;
-      s.materialOrderKey = fk;
-      s.materialOrderUpdatedAt = now();
-      m.materialOrder = s.materialOrder;
-      m.materialOrderKey = fk;
-      m.materialOrderUpdatedAt = now();
-    });
-    db.updatedAt = now();
-    localStorage.setItem(KEY, JSON.stringify(db));
-  }catch(e){}
   save(); render();
 }
 
@@ -8156,6 +8171,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 </script>
 
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
-<script>console.log("✅ LDH STOCK V10 DND ORIGINAL AUTO SIN BOTON");</script>
+<script>console.log("✅ LDH STOCK V11 FAMILIAS FISICO AUTO SIN BOTON");</script>
 </body>
 </html>
