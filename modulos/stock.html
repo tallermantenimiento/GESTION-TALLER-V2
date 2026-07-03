@@ -2940,17 +2940,14 @@ function render(){
   $('activeTypePill').textContent='Tipo: '+(activeType==='hierro'?'Hierro':'Pintura');
   const q=($('search')?.value||'').trim().toLowerCase();
   const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q)).sort((a,b)=>{
-    const fo = loadFamilyOrder();
-    const pos = new Map(fo.map((k,i)=>[familyKey(k), i]));
+    const order = loadFamilyOrder();
+    const pos = new Map(order.map((k,i)=>[familyKey(k),i]));
     const af = familyKey(a.m.family || a.s.family || 'Sin familia');
     const bf = familyKey(b.m.family || b.s.family || 'Sin familia');
     const ap = pos.has(af) ? pos.get(af) : Number(a.s.familyOrder || a.m.familyOrder || 999999);
     const bp = pos.has(bf) ? pos.get(bf) : Number(b.s.familyOrder || b.m.familyOrder || 999999);
     if(ap !== bp) return ap - bp;
-    const am = Number(a.s.materialOrder || a.m.materialOrder || 999999);
-    const bm = Number(b.s.materialOrder || b.m.materialOrder || 999999);
-    if(am !== bm) return am - bm;
-    return String(a.m.name || '').localeCompare(String(b.m.name || ''),'es',{sensitivity:'base'});
+    return 0;
   });
   let totalReal=0,totalReserved=0,totalAssigned=0,totalDebt=0,totalLent=0,low=0;
   rows.forEach(({s,m})=>{
@@ -3031,67 +3028,32 @@ function familyOrderStorageKey(){
   return String(activeCompany || '') + '|' + String(activeType || '');
 }
 
-function LDH_familyOrderAliases(){
-  const cid = String(activeCompany || '').trim();
-  const typ = String(activeType || '').trim();
-  let cname = '', ccode = '';
-  try{
-    const c = companyById(activeCompany) || {};
-    cname = String(c.name || c.nombre || '').trim();
-    ccode = String(c.code || c.codigo || '').trim();
-  }catch(e){}
-  const norm = v => String(v || '').trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
-  return Array.from(new Set([
-    cid + '|' + typ,
-    norm(cname) + '|' + typ,
-    norm(ccode) + '|' + typ
-  ].filter(k => k && !k.startsWith('|'))));
-}
-
-function LDH_rowsCurrentType(){
-  try{
-    return (db.stock || [])
-      .filter(s => String(s.companyId || '') === String(activeCompany || ''))
-      .map((s, idx) => ({s, m: materialById(s.materialId), idx}))
-      .filter(x => x.m && String(x.m.type || x.s.type || '') === String(activeType || ''));
-  }catch(e){ return []; }
-}
-
 function loadFamilyOrder(){
-  // 1) Local, including aliases. This preserves the order immediately after F5.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    for(const k of LDH_familyOrderAliases()){
-      const arr = all[k];
-      if(Array.isArray(arr) && arr.length) return arr;
-    }
     const arr = all[familyOrderStorageKey()];
     if(Array.isArray(arr) && arr.length) return arr;
   }catch(e){}
 
-  // 2) Synchronized inside the stock DB. This preserves the order after cloud restore/menu return.
   try{
     const fo = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    for(const k of LDH_familyOrderAliases()){
-      const arr = fo[k];
-      if(Array.isArray(arr) && arr.length) return arr;
-    }
     const arr = fo[familyOrderStorageKey()];
     if(Array.isArray(arr) && arr.length) return arr;
   }catch(e){}
 
-  // 3) familyOrder marks in rows/materials.
   try{
     const fams = new Map();
-    LDH_rowsCurrentType().forEach(({s,m})=>{
-      const fk = familyKey(m.family || s.family || 'Sin familia');
-      const val = Number(s.familyOrder || m.familyOrder);
-      if(Number.isFinite(val) && val > 0){
-        if(!fams.has(fk) || val < fams.get(fk)) fams.set(fk, val);
-      }
-    });
+    (db.stock||[])
+      .filter(st=>String(st.companyId||'')===String(activeCompany||''))
+      .forEach((st,idx)=>{
+        const m = materialById(st.materialId);
+        if(!m || String(m.type||st.type||'')!==String(activeType||'')) return;
+        const fk = familyKey(m.family || st.family || 'Sin familia');
+        const val = Number(st.familyOrder || m.familyOrder);
+        if(Number.isFinite(val) && val>0){
+          if(!fams.has(fk) || val < fams.get(fk)) fams.set(fk,val);
+        }
+      });
     if(fams.size) return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
   }catch(e){}
 
@@ -3099,47 +3061,14 @@ function loadFamilyOrder(){
 }
 
 function saveFamilyOrder(order){
-  const clean = (Array.isArray(order) ? order : []).map(familyKey).filter(Boolean);
-  if(!clean.length) return;
-
-  // Keep the old mechanism, but save aliases too.
   try{
+    order = (Array.isArray(order)?order:[]).map(familyKey).filter(Boolean);
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    all[familyOrderStorageKey()] = clean;
-    LDH_familyOrderAliases().forEach(k => { all[k] = clean; });
+    all[familyOrderStorageKey()] = order;
     localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
-  }catch(e){}
 
-  // Also persist inside the actual stock DB, without touching the original drag/drop handlers.
-  try{
     if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
-    db.familyOrders[familyOrderStorageKey()] = clean;
-    LDH_familyOrderAliases().forEach(k => { db.familyOrders[k] = clean; });
-
-    const pos = new Map(clean.map((k,i)=>[familyKey(k), (i+1)*1000]));
-    LDH_rowsCurrentType().forEach(({s,m})=>{
-      const fk = familyKey(m.family || s.family || 'Sin familia');
-      if(!pos.has(fk)) return;
-      const v = pos.get(fk);
-      s.familyOrder = v;
-      s.familyOrderKey = fk;
-      s.familyOrderUpdatedAt = now();
-      m.familyOrder = v;
-      m.familyOrderKey = fk;
-      m.familyOrderUpdatedAt = now();
-    });
-
-    db.updatedAt = now();
-    localStorage.setItem(KEY, JSON.stringify(db));
-  }catch(e){ console.warn('No se pudo guardar orden de familias en DB', e); }
-
-  try{
-    if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:orden_familias_v12');
-    if(typeof window.__ldhStockSyncNow === 'function'){
-      setTimeout(()=>window.__ldhStockSyncNow(true), 600);
-      setTimeout(()=>window.__ldhStockSyncNow(true), 2500);
-      setTimeout(()=>window.__ldhStockSyncNow(true), 6000);
-    }
+    db.familyOrders[familyOrderStorageKey()] = order;
   }catch(e){}
 }
 
@@ -3192,6 +3121,67 @@ function familyDragEnd(){
   setTimeout(()=>{ LDH_familyDragJustHappened = false; }, 250);
 }
 
+
+function LDH_applyPhysicalFamilyOrder(order){
+  order = (Array.isArray(order)?order:[]).map(familyKey).filter(Boolean);
+  if(!order.length) return;
+
+  const pos = new Map(order.map((k,i)=>[familyKey(k), i]));
+  const originalIndex = new Map((db.stock||[]).map((st,i)=>[st.id,i]));
+
+  function isVisible(st){
+    if(!st || String(st.companyId||'') !== String(activeCompany||'')) return false;
+    const m = materialById(st.materialId);
+    if(!m) return false;
+    return String(m.type||st.type||'') === String(activeType||'');
+  }
+  function famOf(st){
+    const m = materialById(st.materialId) || {};
+    return familyKey(m.family || st.family || 'Sin familia');
+  }
+
+  const visible = (db.stock||[]).filter(isVisible).slice().sort((a,b)=>{
+    const pa = pos.has(famOf(a)) ? pos.get(famOf(a)) : 999999;
+    const pb = pos.has(famOf(b)) ? pos.get(famOf(b)) : 999999;
+    if(pa !== pb) return pa - pb;
+    return (originalIndex.get(a.id)||0) - (originalIndex.get(b.id)||0);
+  });
+
+  let n = 0;
+  db.stock = (db.stock||[]).map(st => isVisible(st) ? (visible[n++] || st) : st);
+
+  (db.stock||[]).forEach(st=>{
+    if(!isVisible(st)) return;
+    const fk = famOf(st);
+    if(!pos.has(fk)) return;
+    const val = (pos.get(fk)+1)*1000;
+    st.familyOrder = val;
+    st.familyOrderKey = fk;
+    st.familyOrderUpdatedAt = now();
+    const m = materialById(st.materialId);
+    if(m){
+      m.familyOrder = val;
+      m.familyOrderKey = fk;
+      m.familyOrderUpdatedAt = now();
+    }
+  });
+
+  db.updatedAt = now();
+  try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
+}
+
+function LDH_forceDragDropSync(){
+  try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:dragdrop_fisico_v13'); }catch(e){}
+  try{
+    if(typeof window.__ldhStockSyncNow === 'function'){
+      window.__ldhStockSyncNow(true).catch?.(()=>{});
+      setTimeout(()=>window.__ldhStockSyncNow(true), 1500);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 5000);
+    }
+  }catch(e){}
+}
+
+
 function familyDrop(ev, targetKey){
   ev.preventDefault();
   const sourceKey = draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
@@ -3204,7 +3194,11 @@ function familyDrop(ev, targetKey){
   const idx = without.indexOf(targetKey);
   if(idx < 0) return;
   without.splice(idx, 0, sourceKey);
+
   saveFamilyOrder(without);
+  LDH_applyPhysicalFamilyOrder(without);
+  save();
+  LDH_forceDragDropSync();
   render();
 }
 
@@ -3355,24 +3349,6 @@ function stockDrop(ev, targetStockId){
   const [item]=db.stock.splice(from,1);
   const newTo=db.stock.findIndex(x=>x.id===targetStockId);
   db.stock.splice(newTo,0,item);
-  try{
-    const counters = {};
-    db.stock.filter(x=>x.companyId===activeCompany).forEach(x=>{
-      const mm = materialById(x.materialId);
-      if(!mm || mm.type!==activeType) return;
-      const fk = familyKey(mm.family || x.family || 'Sin familia');
-      counters[fk] = (counters[fk] || 0) + 1;
-      const ord = counters[fk] * 1000;
-      x.materialOrder = ord;
-      x.materialOrderKey = fk;
-      x.materialOrderUpdatedAt = now();
-      mm.materialOrder = ord;
-      mm.materialOrderKey = fk;
-      mm.materialOrderUpdatedAt = now();
-    });
-    db.updatedAt = now();
-    localStorage.setItem(KEY, JSON.stringify(db));
-  }catch(e){}
   save(); render();
 }
 
@@ -3389,24 +3365,6 @@ function moveStock(stockId,dir){
   const [item]=db.stock.splice(from,1);
   const newTo=db.stock.findIndex(x=>x.id===target.id);
   db.stock.splice(newTo,0,item);
-  try{
-    const counters = {};
-    db.stock.filter(x=>x.companyId===activeCompany).forEach(x=>{
-      const mm = materialById(x.materialId);
-      if(!mm || mm.type!==activeType) return;
-      const fk = familyKey(mm.family || x.family || 'Sin familia');
-      counters[fk] = (counters[fk] || 0) + 1;
-      const ord = counters[fk] * 1000;
-      x.materialOrder = ord;
-      x.materialOrderKey = fk;
-      x.materialOrderUpdatedAt = now();
-      mm.materialOrder = ord;
-      mm.materialOrderKey = fk;
-      mm.materialOrderUpdatedAt = now();
-    });
-    db.updatedAt = now();
-    localStorage.setItem(KEY, JSON.stringify(db));
-  }catch(e){}
   save(); render();
 }
 
@@ -8173,6 +8131,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 </script>
 
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
-<script>console.log("✅ LDH STOCK V12 PERSISTENCIA MINIMA SIN ROMPER DRAG");</script>
+<script>console.log("✅ LDH STOCK V13 DND FISICO SIN BOTON");</script>
 </body>
 </html>
