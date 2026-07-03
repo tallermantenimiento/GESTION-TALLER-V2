@@ -8138,5 +8138,186 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
 <script>console.log("✅ LDH orden familias v4 prioridad local activo");</script>
+
+<script id="LDH_FIX_ORDEN_FAMILIAS_DEFINITIVO_V5">
+(function(){
+  const ORDER_KEY = "ldh_stock_family_order_v5_definitivo";
+
+  function safeJSON(raw, fb){ try{return JSON.parse(raw||"");}catch(e){return fb;} }
+  function norm(v){
+    return String(v||"").trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"") || "sin_familia";
+  }
+  function esc(v){
+    return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+  function companyObj(){
+    try{
+      if(typeof companyById === "function") return companyById(window.activeCompany || activeCompany) || {};
+    }catch(e){}
+    try{
+      return ((window.db||db).companies||[]).find(c=>String(c.id)===String(window.activeCompany||activeCompany)) || {};
+    }catch(e){}
+    return {};
+  }
+  function keyList(){
+    const cid = String((window.activeCompany || activeCompany || "")).trim();
+    const typ = String((window.activeType || activeType || "")).trim();
+    const c = companyObj();
+    const cname = norm(c.name || c.nombre || c.code || c.codigo || cid);
+    return [
+      cid + "|" + typ,
+      cname + "|" + typ
+    ].filter(Boolean);
+  }
+  function readStore(){
+    return safeJSON(localStorage.getItem(ORDER_KEY), {}) || {};
+  }
+  function writeStore(store){
+    try{ localStorage.setItem(ORDER_KEY, JSON.stringify(store||{})); }catch(e){}
+  }
+  function getSavedOrder(){
+    const store = readStore();
+    for(const k of keyList()){
+      if(Array.isArray(store[k]) && store[k].length) return store[k];
+    }
+
+    // Compatibilidad con intentos anteriores.
+    try{
+      const old = safeJSON(localStorage.getItem("ldh_stock_family_order_v1"), {}) || {};
+      for(const k of keyList()){
+        if(Array.isArray(old[k]) && old[k].length) return old[k];
+      }
+    }catch(e){}
+
+    try{
+      const k0 = keyList()[0];
+      const fo = ((window.db||db).familyOrders || {});
+      if(Array.isArray(fo[k0]) && fo[k0].length) return fo[k0];
+    }catch(e){}
+
+    return [];
+  }
+  function saveOrder(order){
+    order = (Array.isArray(order)?order:[]).map(norm).filter(Boolean);
+    if(!order.length) return;
+
+    const store = readStore();
+    keyList().forEach(k=>{ store[k] = order; });
+    writeStore(store);
+
+    try{
+      if(!(db.familyOrders && typeof db.familyOrders==="object")) db.familyOrders = {};
+      keyList().forEach(k=>{ db.familyOrders[k] = order; });
+      const om = new Map(order.map((x,i)=>[x,(i+1)*1000]));
+      (db.stock||[]).forEach(st=>{
+        if(String(st.companyId||"") !== String(activeCompany||"")) return;
+        const m = typeof materialById==="function" ? materialById(st.materialId) : null;
+        if(!m) return;
+        const t = String(m.type || m.tipo || m.stockType || st.type || st.tipo || st.stockType || "").toLowerCase();
+        if(t !== String(activeType||"").toLowerCase()) return;
+        const fk = norm(m.family || st.family || "Sin familia");
+        if(!om.has(fk)) return;
+        st.familyOrder = om.get(fk);
+        st.familyOrderKey = fk;
+        if(m){
+          m.familyOrder = om.get(fk);
+          m.familyOrderKey = fk;
+        }
+      });
+      db.updatedAt = (typeof now==="function") ? now() : new Date().toISOString();
+      localStorage.setItem((typeof KEY!=="undefined"?KEY:"ldh_v2_company_stock_v1"), JSON.stringify(db));
+    }catch(e){ console.warn("Orden familias v5: no se pudo grabar en db", e); }
+
+    try{ if(typeof save === "function") save(); }catch(e){}
+    try{ if(typeof window.__ldhMarkLocalDirty==="function") window.__ldhMarkLocalDirty("stock:orden_familias_v5_definitivo"); }catch(e){}
+    try{
+      if(typeof window.__ldhStockSyncNow==="function"){
+        setTimeout(()=>window.__ldhStockSyncNow(true), 300);
+        setTimeout(()=>window.__ldhStockSyncNow(true), 1800);
+      }
+    }catch(e){}
+    console.log("✅ Orden familias guardado V5", keyList(), order);
+  }
+
+  function domOrder(){
+    return Array.from(document.querySelectorAll(".family-row[data-family-key]"))
+      .map(el=>norm(el.dataset.familyKey))
+      .filter(Boolean);
+  }
+
+  const oldOrderFamilies = window.orderFamilies;
+  window.orderFamilies = function(groups){
+    groups = Array.isArray(groups) ? groups : [];
+    const order = getSavedOrder();
+    const pos = new Map(order.map((k,i)=>[norm(k),i]));
+    return groups.sort((a,b)=>{
+      const ak = norm(a && a.name), bk = norm(b && b.name);
+      const ap = pos.has(ak) ? pos.get(ak) : 999999;
+      const bp = pos.has(bk) ? pos.get(bk) : 999999;
+      if(ap !== bp) return ap - bp;
+      return String((a&&a.name)||"").localeCompare(String((b&&b.name)||""),"es",{sensitivity:"base"});
+    });
+  };
+
+  window.loadFamilyOrder = function(){ return getSavedOrder(); };
+  window.saveFamilyOrder = function(order){ saveOrder(order); };
+
+  window.familyDrop = function(ev, targetKey){
+    try{ ev.preventDefault(); ev.stopPropagation(); }catch(e){}
+    const sourceKey = norm(window.draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData("text/plain")));
+    targetKey = norm(targetKey);
+    try{ if(typeof familyDragEnd==="function") familyDragEnd(); }catch(e){}
+    if(!sourceKey || !targetKey || sourceKey===targetKey) return;
+
+    const current = domOrder();
+    const base = current.length ? current : getSavedOrder();
+    const without = base.filter(k=>norm(k)!==sourceKey);
+    const idx = without.findIndex(k=>norm(k)===targetKey);
+    if(idx < 0) return;
+    without.splice(idx, 0, sourceKey);
+    saveOrder(without);
+    try{ if(typeof render==="function") render(); }catch(e){}
+  };
+
+  window.LDH_guardarOrdenFamiliasActual = function(){
+    const order = domOrder();
+    if(!order.length) return alert("No se detectan familias visibles para guardar.");
+    saveOrder(order);
+    alert("Orden de familias guardado.");
+  };
+
+  function addButton(){
+    try{
+      if(document.getElementById("ldhSaveFamilyOrderBtn")) return;
+      const anchor = Array.from(document.querySelectorAll("button")).find(b => String(b.textContent||"").includes("Copiar catálogo"))
+                || Array.from(document.querySelectorAll("button")).find(b => String(b.textContent||"").includes("+ Material"));
+      if(!anchor) return;
+      const btn = document.createElement("button");
+      btn.id = "ldhSaveFamilyOrderBtn";
+      btn.className = "btn";
+      btn.style.cssText = "width:100%;justify-content:center;margin-bottom:8px";
+      btn.textContent = "Guardar orden familias";
+      btn.onclick = window.LDH_guardarOrdenFamiliasActual;
+      anchor.insertAdjacentElement("afterend", btn);
+    }catch(e){}
+  }
+
+  const oldRender = window.render;
+  if(typeof oldRender === "function" && !oldRender.__ldhOrdenV5Wrapped){
+    window.render = function(){
+      const ret = oldRender.apply(this, arguments);
+      setTimeout(addButton, 0);
+      return ret;
+    };
+    window.render.__ldhOrdenV5Wrapped = true;
+  }
+  setTimeout(addButton, 500);
+
+  console.log("✅ LDH orden familias DEFINITIVO V5 activo");
+})();
+</script>
+
 </body>
 </html>
