@@ -3020,9 +3020,20 @@ function familyOrderStorageKey(){
 }
 
 function loadFamilyOrder(){
+  const key = familyOrderStorageKey();
+
+  // 1) Primero usar orden guardado en la base sincronizada.
+  // Así no se pierde al salir al menú, cambiar de navegador o restaurar desde nube.
+  try{
+    const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+    const arr = cloudOrders[key];
+    if(Array.isArray(arr)) return arr;
+  }catch(e){}
+
+  // 2) Fallback antiguo: localStorage.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    const arr = all[familyOrderStorageKey()];
+    const arr = all[key];
     return Array.isArray(arr) ? arr : [];
   }catch(e){
     return [];
@@ -3030,10 +3041,28 @@ function loadFamilyOrder(){
 }
 
 function saveFamilyOrder(order){
+  const key = familyOrderStorageKey();
+  const clean = Array.isArray(order) ? order.filter(Boolean) : [];
+
+  // Guardar en base sincronizada.
+  try{
+    if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
+    db.familyOrders[key] = clean;
+    db.updatedAt = now();
+  }catch(e){}
+
+  // Mantener también copia local para compatibilidad.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    all[familyOrderStorageKey()] = order;
+    all[key] = clean;
     localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
+  }catch(e){}
+
+  // Publicar el cambio, pero sin saturar.
+  try{
+    save();
+    if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:orden_familias');
+    if(typeof window.__ldhStockSyncNow==='function') setTimeout(()=>window.__ldhStockSyncNow(true), 1200);
   }catch(e){}
 }
 
@@ -3044,7 +3073,24 @@ function familyKey(name){
     .replace(/^_+|_+$/g,'') || 'sin_familia';
 }
 
+function LDH_ensureFamilyOrderPersisted(){
+  try{
+    const key = familyOrderStorageKey();
+    const cloudOrders = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+    if(Array.isArray(cloudOrders[key])) return;
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    const arr = all[key];
+    if(Array.isArray(arr) && arr.length){
+      if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
+      db.familyOrders[key] = arr;
+      db.updatedAt = now();
+      save();
+    }
+  }catch(e){}
+}
+
 function orderFamilies(groups){
+  LDH_ensureFamilyOrderPersisted();
   const order = loadFamilyOrder();
   const pos = new Map(order.map((k,i)=>[k,i]));
   return groups.sort((a,b)=>{
