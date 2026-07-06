@@ -2939,16 +2939,7 @@ function render(){
   $('activeCompanyPill').textContent='Empresa: '+(comp.name||'-');
   $('activeTypePill').textContent='Tipo: '+(activeType==='hierro'?'Hierro':'Pintura');
   const q=($('search')?.value||'').trim().toLowerCase();
-  const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q)).sort((a,b)=>{
-    const order = loadFamilyOrder();
-    const pos = new Map(order.map((k,i)=>[familyKey(k),i]));
-    const af = familyKey(a.m.family || a.s.family || 'Sin familia');
-    const bf = familyKey(b.m.family || b.s.family || 'Sin familia');
-    const ap = pos.has(af) ? pos.get(af) : Number(a.s.familyOrder || a.m.familyOrder || 999999);
-    const bp = pos.has(bf) ? pos.get(bf) : Number(b.s.familyOrder || b.m.familyOrder || 999999);
-    if(ap !== bp) return ap - bp;
-    return 0;
-  });
+  const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q));
   let totalReal=0,totalReserved=0,totalAssigned=0,totalDebt=0,totalLent=0,low=0;
   rows.forEach(({s,m})=>{
     const r=realStock(activeCompany,m.id),rv=reservedStock(activeCompany,m.id),asg=assignedStock(activeCompany,m.id),debt=pendingDebt(activeCompany,m.id)+borrowedDebt(activeCompany,m.id),lent=lentDebt(activeCompany,m.id);
@@ -3032,43 +3023,17 @@ function loadFamilyOrder(){
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
     const arr = all[familyOrderStorageKey()];
-    if(Array.isArray(arr) && arr.length) return arr;
-  }catch(e){}
-
-  try{
-    const fo = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    const arr = fo[familyOrderStorageKey()];
-    if(Array.isArray(arr) && arr.length) return arr;
-  }catch(e){}
-
-  try{
-    const fams = new Map();
-    (db.stock||[])
-      .filter(st=>String(st.companyId||'')===String(activeCompany||''))
-      .forEach((st,idx)=>{
-        const m = materialById(st.materialId);
-        if(!m || String(m.type||st.type||'')!==String(activeType||'')) return;
-        const fk = familyKey(m.family || st.family || 'Sin familia');
-        const val = Number(st.familyOrder || m.familyOrder);
-        if(Number.isFinite(val) && val>0){
-          if(!fams.has(fk) || val < fams.get(fk)) fams.set(fk,val);
-        }
-      });
-    if(fams.size) return Array.from(fams.entries()).sort((a,b)=>a[1]-b[1]).map(x=>x[0]);
-  }catch(e){}
-
-  return [];
+    return Array.isArray(arr) ? arr : [];
+  }catch(e){
+    return [];
+  }
 }
 
 function saveFamilyOrder(order){
   try{
-    order = (Array.isArray(order)?order:[]).map(familyKey).filter(Boolean);
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
     all[familyOrderStorageKey()] = order;
     localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
-
-    if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
-    db.familyOrders[familyOrderStorageKey()] = order;
   }catch(e){}
 }
 
@@ -3121,67 +3086,6 @@ function familyDragEnd(){
   setTimeout(()=>{ LDH_familyDragJustHappened = false; }, 250);
 }
 
-
-function LDH_applyPhysicalFamilyOrder(order){
-  order = (Array.isArray(order)?order:[]).map(familyKey).filter(Boolean);
-  if(!order.length) return;
-
-  const pos = new Map(order.map((k,i)=>[familyKey(k), i]));
-  const originalIndex = new Map((db.stock||[]).map((st,i)=>[st.id,i]));
-
-  function isVisible(st){
-    if(!st || String(st.companyId||'') !== String(activeCompany||'')) return false;
-    const m = materialById(st.materialId);
-    if(!m) return false;
-    return String(m.type||st.type||'') === String(activeType||'');
-  }
-  function famOf(st){
-    const m = materialById(st.materialId) || {};
-    return familyKey(m.family || st.family || 'Sin familia');
-  }
-
-  const visible = (db.stock||[]).filter(isVisible).slice().sort((a,b)=>{
-    const pa = pos.has(famOf(a)) ? pos.get(famOf(a)) : 999999;
-    const pb = pos.has(famOf(b)) ? pos.get(famOf(b)) : 999999;
-    if(pa !== pb) return pa - pb;
-    return (originalIndex.get(a.id)||0) - (originalIndex.get(b.id)||0);
-  });
-
-  let n = 0;
-  db.stock = (db.stock||[]).map(st => isVisible(st) ? (visible[n++] || st) : st);
-
-  (db.stock||[]).forEach(st=>{
-    if(!isVisible(st)) return;
-    const fk = famOf(st);
-    if(!pos.has(fk)) return;
-    const val = (pos.get(fk)+1)*1000;
-    st.familyOrder = val;
-    st.familyOrderKey = fk;
-    st.familyOrderUpdatedAt = now();
-    const m = materialById(st.materialId);
-    if(m){
-      m.familyOrder = val;
-      m.familyOrderKey = fk;
-      m.familyOrderUpdatedAt = now();
-    }
-  });
-
-  db.updatedAt = now();
-  try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
-}
-
-function LDH_forceDragDropSync(){
-  try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:dragdrop_fisico_v13'); }catch(e){}
-  try{
-    if(typeof window.__ldhStockSyncNow === 'function'){
-      window.__ldhStockSyncNow(true).catch?.(()=>{});
-      setTimeout(()=>window.__ldhStockSyncNow(true), 1500);
-      setTimeout(()=>window.__ldhStockSyncNow(true), 5000);
-    }
-  }catch(e){}
-}
-
-
 function familyDrop(ev, targetKey){
   ev.preventDefault();
   const sourceKey = draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
@@ -3194,13 +3098,104 @@ function familyDrop(ev, targetKey){
   const idx = without.indexOf(targetKey);
   if(idx < 0) return;
   without.splice(idx, 0, sourceKey);
-
   saveFamilyOrder(without);
-  LDH_applyPhysicalFamilyOrder(without);
-  save();
-  LDH_forceDragDropSync();
   render();
 }
+
+
+/* === LDH: Orden persistente de materiales, replicando patrón de familias === */
+const MATERIAL_ORDER_KEY = 'ldh_stock_material_order_v1';
+
+function materialOrderStorageKey(famName){
+  return String(activeCompany || '') + '|' + String(activeType || '') + '|' + familyKey(famName || 'Sin familia');
+}
+
+function loadMaterialOrder(famName){
+  const key = materialOrderStorageKey(famName);
+  try{
+    const all = JSON.parse(localStorage.getItem(MATERIAL_ORDER_KEY) || '{}') || {};
+    const arr = all[key];
+    if(Array.isArray(arr) && arr.length) return arr;
+  }catch(e){}
+
+  try{
+    const all = db && db.materialOrders && typeof db.materialOrders === 'object' ? db.materialOrders : {};
+    const arr = all[key];
+    if(Array.isArray(arr) && arr.length) return arr;
+  }catch(e){}
+
+  return [];
+}
+
+function saveMaterialOrder(famName, order){
+  const key = materialOrderStorageKey(famName);
+  const clean = (Array.isArray(order) ? order : []).map(x=>String(x||'')).filter(Boolean);
+
+  try{
+    const all = JSON.parse(localStorage.getItem(MATERIAL_ORDER_KEY) || '{}') || {};
+    all[key] = clean;
+    localStorage.setItem(MATERIAL_ORDER_KEY, JSON.stringify(all));
+  }catch(e){}
+
+  try{
+    if(!db.materialOrders || typeof db.materialOrders !== 'object') db.materialOrders = {};
+    db.materialOrders[key] = clean;
+
+    const pos = new Map(clean.map((id,i)=>[String(id), (i+1)*1000]));
+    (db.stock || []).forEach(st=>{
+      if(String(st.companyId||'') !== String(activeCompany||'')) return;
+      const m = materialById(st.materialId);
+      if(!m || String(m.type||st.type||'') !== String(activeType||'')) return;
+      const fk = familyKey(m.family || st.family || 'Sin familia');
+      if(fk !== familyKey(famName || 'Sin familia')) return;
+      const sid = String(st.id || '');
+      const mid = String(st.materialId || '');
+      const val = pos.has(sid) ? pos.get(sid) : (pos.has(mid) ? pos.get(mid) : null);
+      if(!val) return;
+      st.materialOrder = val;
+      st.materialOrderKey = fk;
+      st.materialOrderUpdatedAt = now();
+      m.materialOrder = val;
+      m.materialOrderKey = fk;
+      m.materialOrderUpdatedAt = now();
+    });
+
+    db.updatedAt = now();
+    localStorage.setItem(KEY, JSON.stringify(db));
+  }catch(e){}
+
+  try{
+    if(typeof window.__ldhMarkLocalDirty === 'function') window.__ldhMarkLocalDirty('stock:orden_materiales');
+    if(typeof window.__ldhStockSyncNow === 'function'){
+      setTimeout(()=>window.__ldhStockSyncNow(true), 600);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 2500);
+    }
+  }catch(e){}
+}
+
+function orderMaterialItemsForFamily(famName, items){
+  items = Array.isArray(items) ? items : [];
+  const order = loadMaterialOrder(famName);
+  const pos = new Map(order.map((id,i)=>[String(id), i]));
+
+  return items.sort((a,b)=>{
+    const as = a && a.s ? a.s : {};
+    const bs = b && b.s ? b.s : {};
+    const am = a && a.m ? a.m : {};
+    const bm = b && b.m ? b.m : {};
+
+    const ap = pos.has(String(as.id)) ? pos.get(String(as.id))
+             : pos.has(String(as.materialId)) ? pos.get(String(as.materialId))
+             : Number(as.materialOrder || am.materialOrder || 999999);
+    const bp = pos.has(String(bs.id)) ? pos.get(String(bs.id))
+             : pos.has(String(bs.materialId)) ? pos.get(String(bs.materialId))
+             : Number(bs.materialOrder || bm.materialOrder || 999999);
+
+    if(ap !== bp) return ap - bp;
+    return String(am.name || '').localeCompare(String(bm.name || ''),'es',{sensitivity:'base'});
+  });
+}
+
 
 function familiasHTML(rows){
   const groups=new Map();
@@ -3226,7 +3221,8 @@ function familiaHTML(group){
     real+=r; res+=rv; asg+=a; free+=Math.max(0,r-rv-a-l);
   });
 
-  const body=group.items.map(({s,m})=>rowHTML(s,m)).join('');
+  const sortedItems=orderMaterialItemsForFamily(group.name, group.items);
+  const body=sortedItems.map(({s,m})=>rowHTML(s,m)).join('');
   const safeId='fam_'+String(group.name).toLowerCase().replace(/[^a-z0-9]+/g,'_');
 
   const fKey = familyKey(group.name);
@@ -3308,7 +3304,7 @@ function rowHTML(s,m){
        </div>`
     : '<span class="muted">Sin reservas/deudas</span>';
 
-  return `<tr draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv)}</td><td class="num">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="openMoveModal('entrada','${m.id}')">+ Entrada</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
+  return `<tr data-stock-id="${esc(s.id)}" draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv)}</td><td class="num">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="openMoveModal('entrada','${m.id}')">+ Entrada</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
@@ -3349,6 +3345,15 @@ function stockDrop(ev, targetStockId){
   const [item]=db.stock.splice(from,1);
   const newTo=db.stock.findIndex(x=>x.id===targetStockId);
   db.stock.splice(newTo,0,item);
+  try{
+    const famName = (tm && (tm.family || tm.familia)) || (sm && (sm.family || sm.familia)) || 'Sin familia';
+    const order = db.stock
+      .filter(x=>x.companyId===activeCompany)
+      .map(x=>({st:x, mat:materialById(x.materialId)}))
+      .filter(x=>x.mat && x.mat.type===activeType && familyKey(x.mat.family||x.st.family||'Sin familia')===familyKey(famName))
+      .map(x=>x.st.id);
+    saveMaterialOrder(famName, order);
+  }catch(e){}
   save(); render();
 }
 
@@ -3365,6 +3370,17 @@ function moveStock(stockId,dir){
   const [item]=db.stock.splice(from,1);
   const newTo=db.stock.findIndex(x=>x.id===target.id);
   db.stock.splice(newTo,0,item);
+  try{
+    const movedStock = db.stock.find(x=>x.id===stockId) || {};
+    const m0 = materialById(movedStock.materialId);
+    const famName = (m0 && (m0.family || m0.familia)) || 'Sin familia';
+    const order = db.stock
+      .filter(x=>x.companyId===activeCompany)
+      .map(x=>({st:x, mat:materialById(x.materialId)}))
+      .filter(x=>x.mat && x.mat.type===activeType && familyKey(x.mat.family||x.st.family||'Sin familia')===familyKey(famName))
+      .map(x=>x.st.id);
+    saveMaterialOrder(famName, order);
+  }catch(e){}
   save(); render();
 }
 
@@ -8131,6 +8147,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 </script>
 
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
-<script>console.log("✅ LDH STOCK V13 DND FISICO SIN BOTON");</script>
+<script>console.log("✅ LDH STOCK MATERIALES ORDEN COMO FAMILIAS V14");</script>
 </body>
 </html>
