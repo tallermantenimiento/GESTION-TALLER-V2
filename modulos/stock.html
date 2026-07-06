@@ -3537,20 +3537,21 @@ function LDH_catalogTargetDuplicateMap(companyId){
 }
 function openCopyCatalogModal(){
   if(!(db.companies||[]).length) return alert('No hay empresas.');
-  if(!activeCompany) return alert('Selecciona empresa destino.');
-  const sourceOptions=(db.companies||[])
-    .filter(c=>String(c.id)!==String(activeCompany))
+  if((db.companies||[]).length < 2) return alert('Necesitas al menos dos empresas para copiar catálogo.');
+
+  const companyOptions=(db.companies||[])
     .map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.code||c.id)}</option>`).join('');
-  if(!sourceOptions) return alert('No hay otra empresa origen para copiar.');
-  const target=companyById(activeCompany)||{};
+
   openModal('Copiar catálogo entre empresas',
-    `<div class="field">
-      <label>Empresa origen</label>
-      <select id="copySource" onchange="renderCopyCatalogList()">${sourceOptions}</select>
-    </div>
-    <div class="field">
-      <label>Empresa destino</label>
-      <input value="${esc(target.name||target.code||activeCompany)}" disabled>
+    `<div class="grid2">
+      <div class="field">
+        <label>Empresa origen</label>
+        <select id="copySource" onchange="renderCopyCatalogList()">${companyOptions}</select>
+      </div>
+      <div class="field">
+        <label>Empresa destino</label>
+        <select id="copyTarget" onchange="renderCopyCatalogList()">${companyOptions}</select>
+      </div>
     </div>
     <div class="grid2">
       <div class="field">
@@ -3578,21 +3579,40 @@ function openCopyCatalogModal(){
       <label><input type="checkbox" id="copyUpdateExisting"> Actualizar duplicados</label>
     </div>
     <div class="note" style="margin:10px 0">
-      Por defecto copia solo el catálogo: material, familia, unidad, tipo y orden. Las cantidades entran a 0.
+      Por defecto copia solo catálogo: material, familia, unidad, tipo y orden. Las cantidades entran a 0.
     </div>
     <div id="copyList" style="max-height:42vh;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px"></div>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button>
      <button class="btn ok" onclick="copyCatalogSelected()">Copiar selección</button>`);
+
+  // Valores por defecto:
+  // - Origen: primera empresa distinta de la activa si existe, o primera.
+  // - Destino: empresa activa actual.
+  const sourceSel = $('copySource');
+  const targetSel = $('copyTarget');
+  if(targetSel) targetSel.value = activeCompany || ((db.companies||[])[0]&&db.companies[0].id) || '';
+  if(sourceSel){
+    const firstOther = (db.companies||[]).find(c=>String(c.id)!==String(targetSel&&targetSel.value));
+    sourceSel.value = (firstOther && firstOther.id) || ((db.companies||[])[0]&&db.companies[0].id) || '';
+  }
   renderCopyCatalogList();
 }
+
 function renderCopyCatalogList(){
   const source=$('copySource')&&$('copySource').value;
+  const target=$('copyTarget')&&$('copyTarget').value;
   const type=$('copyType')&&$('copyType').value || activeType;
   const mode=$('copyMode')&&$('copyMode').value || 'families';
   const box=$('copyList');
   if(!box||!source) return;
-  const rows=LDH_catalogRowsForCompany(source,type);
+  if(source && target && String(source)===String(target)){
+    box.innerHTML='<div class="empty">Origen y destino son la misma empresa. Elige otra empresa destino.</div>';
+    return;
+  }
+
+  const rows=LDH_sortCatalogRowsLikeSource(LDH_catalogRowsForCompany(source,type), source);
   if(!rows.length){ box.innerHTML='<div class="empty">La empresa origen no tiene materiales para ese tipo.</div>'; return; }
+
   const groups=new Map();
   rows.forEach(x=>{
     const fam=String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia';
@@ -3601,7 +3621,6 @@ function renderCopyCatalogList(){
     groups.get(key).items.push(x);
   });
   const html=Array.from(groups.values()).map(g=>{
-    const famId='fam_'+LDH_copyNorm(g.name).replace(/[^a-z0-9]+/g,'_');
     const famCheck = mode==='materials' ? '' : `<label style="display:block;font-weight:900;margin:6px 0;color:#fbbf24"><input type="checkbox" class="copyFam" value="${esc(g.name)}" checked> ${esc(g.name)} <span class="muted">(${g.items.length})</span></label>`;
     const items = mode==='families' ? '' : `<div style="padding-left:18px">${g.items.map(x=>{
       const t=LDH_materialType(x.mat,x.st);
@@ -3611,107 +3630,14 @@ function renderCopyCatalogList(){
   }).join('');
   box.innerHTML=html;
 }
-function LDH_companyAliasesForOrder(companyId, typ){
-  companyId = String(companyId||'');
-  typ = String(typ||'');
-  let c = null;
-  try{ c = (db.companies||[]).find(x=>String(x.id||'')===companyId) || null; }catch(e){}
-  const norm = v => String(v||'').trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
-  return Array.from(new Set([
-    companyId + '|' + typ,
-    norm(c && (c.name||c.nombre)) + '|' + typ,
-    norm(c && (c.code||c.codigo)) + '|' + typ
-  ].filter(k=>k && !k.startsWith('|'))));
-}
-function LDH_readFamilyOrderFor(companyId, typ){
-  const keys = LDH_companyAliasesForOrder(companyId, typ);
-  try{
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    for(const k of keys){ if(Array.isArray(all[k]) && all[k].length) return all[k].map(familyKey); }
-  }catch(e){}
-  try{
-    const all = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
-    for(const k of keys){ if(Array.isArray(all[k]) && all[k].length) return all[k].map(familyKey); }
-  }catch(e){}
-  return [];
-}
-function LDH_writeFamilyOrderFor(companyId, typ, order){
-  order = (Array.isArray(order)?order:[]).map(familyKey).filter(Boolean);
-  if(!order.length) return;
-  const keys = LDH_companyAliasesForOrder(companyId, typ);
-  try{
-    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    keys.forEach(k=>{ all[k]=order; });
-    localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
-  }catch(e){}
-  try{
-    if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
-    keys.forEach(k=>{ db.familyOrders[k]=order; });
-  }catch(e){}
-}
-function LDH_materialOrderKeyFor(companyId, typ, famName){
-  return String(companyId||'') + '|' + String(typ||'') + '|' + familyKey(famName||'Sin familia');
-}
-function LDH_readMaterialOrderFor(companyId, typ, famName){
-  const key = LDH_materialOrderKeyFor(companyId, typ, famName);
-  try{
-    const all = JSON.parse(localStorage.getItem(typeof MATERIAL_ORDER_KEY!=='undefined' ? MATERIAL_ORDER_KEY : 'ldh_stock_material_order_v1') || '{}') || {};
-    if(Array.isArray(all[key]) && all[key].length) return all[key].map(String);
-  }catch(e){}
-  try{
-    const all = db && db.materialOrders && typeof db.materialOrders === 'object' ? db.materialOrders : {};
-    if(Array.isArray(all[key]) && all[key].length) return all[key].map(String);
-  }catch(e){}
-  return [];
-}
-function LDH_writeMaterialOrderFor(companyId, typ, famName, order){
-  order = (Array.isArray(order)?order:[]).map(x=>String(x||'')).filter(Boolean);
-  if(!order.length) return;
-  const key = LDH_materialOrderKeyFor(companyId, typ, famName);
-  try{
-    const storageKey = typeof MATERIAL_ORDER_KEY!=='undefined' ? MATERIAL_ORDER_KEY : 'ldh_stock_material_order_v1';
-    const all = JSON.parse(localStorage.getItem(storageKey) || '{}') || {};
-    all[key]=order;
-    localStorage.setItem(storageKey, JSON.stringify(all));
-  }catch(e){}
-  try{
-    if(!db.materialOrders || typeof db.materialOrders !== 'object') db.materialOrders = {};
-    db.materialOrders[key]=order;
-  }catch(e){}
-}
-function LDH_catalogSourceOrderPosition(companyId, typ, famName, stockId, materialId, fallback){
-  const arr = LDH_readMaterialOrderFor(companyId, typ, famName);
-  let p = arr.indexOf(String(stockId||''));
-  if(p < 0) p = arr.indexOf(String(materialId||''));
-  return p >= 0 ? p : (Number(fallback)||999999);
-}
-function LDH_sortCatalogRowsLikeSource(rows, sourceCompanyId){
-  rows = Array.isArray(rows) ? rows.slice() : [];
-  return rows.sort((a,b)=>{
-    const ta = LDH_materialType(a.mat,a.st), tb = LDH_materialType(b.mat,b.st);
-    if(ta !== tb) return ta.localeCompare(tb,'es');
-    const fa = String(a.mat.family||a.mat.familia||a.mat.grp||'Sin familia').trim() || 'Sin familia';
-    const fb = String(b.mat.family||b.mat.familia||b.mat.grp||'Sin familia').trim() || 'Sin familia';
-    const fo = LDH_readFamilyOrderFor(sourceCompanyId, ta);
-    const fpos = new Map(fo.map((k,i)=>[familyKey(k),i]));
-    const fpa = fpos.has(familyKey(fa)) ? fpos.get(familyKey(fa)) : Number(a.st.familyOrder||a.mat.familyOrder||999999);
-    const fpb = fpos.has(familyKey(fb)) ? fpos.get(familyKey(fb)) : Number(b.st.familyOrder||b.mat.familyOrder||999999);
-    if(fpa !== fpb) return fpa - fpb;
-    const ma = LDH_catalogSourceOrderPosition(sourceCompanyId, ta, fa, a.st.id, a.st.materialId, a.st.materialOrder||a.mat.materialOrder||a.idx);
-    const mb = LDH_catalogSourceOrderPosition(sourceCompanyId, tb, fb, b.st.id, b.st.materialId, b.st.materialOrder||b.mat.materialOrder||b.idx);
-    if(ma !== mb) return ma - mb;
-    return String(a.mat.name||'').localeCompare(String(b.mat.name||''),'es',{sensitivity:'base'});
-  });
-}
 
 function copyCatalogSelected(){
   const source=$('copySource')&&$('copySource').value;
+  const targetCompany=($('copyTarget')&&$('copyTarget').value) || activeCompany;
   const type=$('copyType')&&$('copyType').value || activeType;
   const mode=$('copyMode')&&$('copyMode').value || 'families';
-  if(!source||!activeCompany) return alert('Falta empresa origen o destino.');
-  if(String(source)===String(activeCompany)) return alert('Origen y destino no pueden ser la misma empresa.');
+  if(!source||!targetCompany) return alert('Falta empresa origen o destino.');
+  if(String(source)===String(targetCompany)) return alert('Origen y destino no pueden ser la misma empresa.');
 
   const keepMin=!!($('copyMin')&&$('copyMin').checked);
   const keepLocation=!!($('copyLocation')&&$('copyLocation').checked);
@@ -3729,7 +3655,7 @@ function copyCatalogSelected(){
   rows = LDH_sortCatalogRowsLikeSource(rows, source);
   if(!rows.length) return alert('No hay nada seleccionado para copiar.');
 
-  const dupMap=LDH_catalogTargetDuplicateMap(activeCompany);
+  const dupMap=LDH_catalogTargetDuplicateMap(targetCompany);
   let created=0, skipped=0, updated=0;
   const nowVal=now();
   const copiedByType = {};
@@ -3802,7 +3728,7 @@ function copyCatalogSelected(){
 
     db.stock.push({
       id:newStockId,
-      companyId:activeCompany,
+      companyId:targetCompany,
       materialId:newMatId,
       type:matType,
       tipo:matType,
@@ -3835,8 +3761,8 @@ function copyCatalogSelected(){
     });
     newIdsBySource[String(srcStock.id||srcMat.id||idx)] = newStockId;
     copiedMaterialOrders[matOrderKey].push(newStockId);
-    try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany,newMatId); }catch(e){}
-    try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(newMatId, activeCompany); }catch(e){}
+    try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(targetCompany,newMatId); }catch(e){}
+    try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(newMatId, targetCompany); }catch(e){}
     created++;
   });
 
@@ -3851,25 +3777,25 @@ function copyCatalogSelected(){
     const selected = copiedByType[matType] || [];
     let finalOrder = sourceOrder.length ? sourceOrder.filter(f=>selected.includes(familyKey(f))) : selected;
     selected.forEach(f=>{ if(!finalOrder.includes(f)) finalOrder.push(f); });
-    LDH_writeFamilyOrderFor(activeCompany, matType, finalOrder);
+    LDH_writeFamilyOrderFor(targetCompany, matType, finalOrder);
   });
 
   // Copiar orden de materiales por familia.
   Object.keys(copiedMaterialOrders).forEach(k=>{
     const [matType, famKey] = k.split('|');
     const famName = rows.map(x=>String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia').find(f=>familyKey(f)===famKey) || famKey;
-    LDH_writeMaterialOrderFor(activeCompany, matType, famName, copiedMaterialOrders[k]);
+    LDH_writeMaterialOrderFor(targetCompany, matType, famName, copiedMaterialOrders[k]);
   });
 
   db.updatedAt=now();
   localStorage.setItem(KEY, JSON.stringify(db));
-  try{ (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).forEach(st=>{ try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){} }); }catch(e){}
+  try{ (db.stock||[]).filter(st=>String(st.companyId)===String(targetCompany) && st.createdFromCatalogCopy).forEach(st=>{ try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, targetCompany); }catch(e){} }); }catch(e){}
   try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:copiar_catalogo_persistente_ordenado'); }catch(e){}
   try{ save(); }catch(e){}
   try{
     // Proteger las fichas copiadas contra restauraciones remotas antiguas.
-    (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).slice(-Math.max(50, created+updated+5)).forEach(st=>{
-      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){}
+    (db.stock||[]).filter(st=>String(st.companyId)===String(targetCompany) && st.createdFromCatalogCopy).slice(-Math.max(50, created+updated+5)).forEach(st=>{
+      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, targetCompany); }catch(e){}
     });
   }catch(e){}
   try{
@@ -3881,6 +3807,8 @@ function copyCatalogSelected(){
     }
   }catch(e){}
   closeModal();
+  activeCompany = targetCompany;
+  try{ refreshSelectors(); }catch(e){}
   setType(type==='all'?activeType:type);
   render();
   alert('Copia terminada. Creados: '+created+' · Actualizados: '+updated+' · Omitidos por duplicado: '+skipped);
@@ -8361,5 +8289,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH STOCK MATERIALES ORDEN COMO FAMILIAS V14");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO PERSISTENTE ORDEN V15");</script>
 <script>console.log("✅ LDH STOCK V16 PERSISTENCIA EDICION COPIA");</script>
+<script>console.log("✅ LDH STOCK COPIAR CATALOGO DESTINO SELECT V17");</script>
 </body>
 </html>
