@@ -1494,7 +1494,7 @@ function LDH_applyProtectedStockToDB(){
 
     if(changed){
       db.updatedAt = now();
-      try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
+      try{ LDH_safePersistStockDB('direct_set'); }catch(e){}
       try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:protegido_restaurado_actualizado'); }catch(e){}
       setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow==='function') window.__ldhStockSyncNow(true); }catch(e){} }, 1200);
     }
@@ -1503,9 +1503,86 @@ function LDH_applyProtectedStockToDB(){
 }
 
 function blankDB(){return {version:'2.0-stock-empresa',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],sampleLoaded:false,updatedAt:now()};}
+
+function LDH_compactStockDBForQuota(){
+  try{
+    db.materials = Array.isArray(db.materials) ? db.materials : [];
+    db.stock = Array.isArray(db.stock) ? db.stock : [];
+    db.movements = Array.isArray(db.movements) ? db.movements : [];
+
+    const usedMatIds = new Set((db.stock||[]).map(st=>String(st.materialId||'')).filter(Boolean));
+    db.materials = db.materials.filter(m=>usedMatIds.has(String(m.id||'')));
+
+    // Quitar duplicados exactos por empresa + tipo + familia + nombre, conservando el último.
+    const seen = new Map();
+    const keepStockIds = new Set();
+    for(let i=(db.stock||[]).length-1;i>=0;i--){
+      const st = db.stock[i];
+      const m = db.materials.find(mm=>String(mm.id||'')===String(st.materialId||''));
+      if(!m){ continue; }
+      const typ = String(m.type||m.tipo||m.stockType||st.type||st.tipo||st.stockType||'').toLowerCase();
+      const fam = String(m.family||m.familia||st.family||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+      const name = String(m.name||m.nombre||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+      const key = String(st.companyId||'')+'|'+typ+'|'+fam+'|'+name;
+      if(!seen.has(key)){
+        seen.set(key, true);
+        keepStockIds.add(String(st.id||''));
+      }
+    }
+    db.stock = db.stock.filter(st=>keepStockIds.has(String(st.id||'')));
+    const usedAfter = new Set((db.stock||[]).map(st=>String(st.materialId||'')).filter(Boolean));
+    db.materials = db.materials.filter(m=>usedAfter.has(String(m.id||'')));
+
+    // Reducir campos redundantes de cantidad si todos son el mismo valor.
+    const qtyFields = ['qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','cantidad'];
+    db.stock.forEach(st=>{
+      const base = Number(st.physicalQty ?? st.qty ?? 0);
+      qtyFields.forEach(k=>{
+        if(Object.prototype.hasOwnProperty.call(st,k) && Number(st[k]||0) === base) delete st[k];
+      });
+      if(!Object.prototype.hasOwnProperty.call(st,'physicalQty')) st.physicalQty = base;
+      if(!Object.prototype.hasOwnProperty.call(st,'qty')) st.qty = base;
+      delete st.protectedStockSnapshot;
+      delete st.familyOrderUpdatedAt;
+      delete st.materialOrderUpdatedAt;
+    });
+    db.materials.forEach(m=>{
+      delete m.protectedStockSnapshot;
+      delete m.familyOrderUpdatedAt;
+      delete m.materialOrderUpdatedAt;
+    });
+
+    // Limitar movimientos muy antiguos si el navegador está al límite.
+    if(db.movements.length > 800){
+      db.movements = db.movements.slice(-800);
+    }
+
+    db.updatedAt = now();
+  }catch(e){ console.warn('No se pudo compactar DB stock', e); }
+}
+
+function LDH_safePersistStockDB(reason){
+  db.updatedAt = now();
+  try{
+    LDH_safePersistStockDB('direct_set');
+    return true;
+  }catch(e){
+    console.warn('Stock local excede cuota, compactando...', e);
+    try{ LDH_compactStockDBForQuota(); }catch(_){}
+    try{
+      LDH_safePersistStockDB('direct_set');
+      return true;
+    }catch(e2){
+      console.error('No se pudo guardar Stock ni compactando', e2);
+      alert('No se puede guardar porque el navegador tiene el almacenamiento lleno. Se ha compactado el Stock, vuelve a pulsar copiar una vez más. Si se repite, abre Stock en modo normal y borra histórico antiguo.');
+      return false;
+    }
+  }
+}
+
+
 function save(){
-  db.updatedAt=now();
-  localStorage.setItem(KEY,JSON.stringify(db));
+  if(!LDH_safePersistStockDB('save_core')) return;
   try{ LDH_publishCompanyMaster(); }catch(e){}
   try{
     if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:save_core');
@@ -3190,7 +3267,7 @@ function saveMaterialOrder(famName, order){
     });
 
     db.updatedAt = now();
-    localStorage.setItem(KEY, JSON.stringify(db));
+    LDH_safePersistStockDB('direct_set');
   }catch(e){}
 
   try{
@@ -3741,7 +3818,7 @@ function copyCatalogSelected(){
 
     activeCompany=targetCompany;
     db.updatedAt=now();
-    localStorage.setItem(KEY, JSON.stringify(db));
+    if(!LDH_safePersistStockDB('copy_catalog')) return;
     try{ save(); }catch(e){ console.warn('save falló tras copiar', e); }
     try{
       db.stock.filter(st=>String(st.companyId)===String(targetCompany) && st.createdFromCatalogCopy).forEach(st=>{
@@ -4336,7 +4413,7 @@ function saveEditMaterial(materialId){
   }
 
   db.updatedAt = now();
-  localStorage.setItem(KEY, JSON.stringify(db));
+  LDH_safePersistStockDB('direct_set');
   try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany, materialId); }catch(e){}
   try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(materialId, activeCompany); }catch(e){}
 
@@ -8244,5 +8321,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH STOCK COPIA CATALOGO PERSISTENTE ORDEN V15");</script>
 <script>console.log("✅ LDH STOCK V16 PERSISTENCIA EDICION COPIA");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO SIMPLE V22");</script>
+<script>console.log("✅ LDH STOCK COPIA CATALOGO V23 COMPACTA CUOTA");</script>
 </body>
 </html>
