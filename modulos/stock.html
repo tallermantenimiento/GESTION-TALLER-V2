@@ -1504,6 +1504,39 @@ function LDH_applyProtectedStockToDB(){
 
 function blankDB(){return {version:'2.0-stock-empresa',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],sampleLoaded:false,updatedAt:now()};}
 
+function LDH_clearHeavyLocalStorageForQuota(){
+  // Limpieza de emergencia: estas claves son auxiliares, no son el Stock maestro.
+  // La que más pesa suele ser la protección de copias/altas, porque duplica materiales enteros.
+  const heavyKeys = [
+    'LDH_STOCK_PROTECTED_MANUAL_V1',
+    'LDH_STOCK_DELETED_ITEMS_V1',
+    'ldh_stock_material_order_v1',
+    'ldh_stock_family_open_v2_manual'
+  ];
+  heavyKeys.forEach(k=>{
+    try{ localStorage.removeItem(k); }catch(e){}
+  });
+
+  // Limpiar backups/temporales antiguos del propio taller que pueden ocupar cuota.
+  try{
+    const toDelete=[];
+    for(let i=0;i<localStorage.length;i++){
+      const k=localStorage.key(i)||'';
+      if(
+        /^backup/i.test(k) ||
+        /demo/i.test(k) ||
+        /snapshot/i.test(k) ||
+        /debug/i.test(k) ||
+        /old/i.test(k) ||
+        /before/i.test(k)
+      ){
+        toDelete.push(k);
+      }
+    }
+    toDelete.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
+  }catch(e){}
+}
+
 function LDH_compactStockDBForQuota(){
   try{
     db.materials = Array.isArray(db.materials) ? db.materials : [];
@@ -1519,7 +1552,7 @@ function LDH_compactStockDBForQuota(){
     for(let i=(db.stock||[]).length-1;i>=0;i--){
       const st = db.stock[i];
       const m = db.materials.find(mm=>String(mm.id||'')===String(st.materialId||''));
-      if(!m){ continue; }
+      if(!m) continue;
       const typ = String(m.type||m.tipo||m.stockType||st.type||st.tipo||st.stockType||'').toLowerCase();
       const fam = String(m.family||m.familia||st.family||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
       const name = String(m.name||m.nombre||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
@@ -1533,7 +1566,7 @@ function LDH_compactStockDBForQuota(){
     const usedAfter = new Set((db.stock||[]).map(st=>String(st.materialId||'')).filter(Boolean));
     db.materials = db.materials.filter(m=>usedAfter.has(String(m.id||'')));
 
-    // Reducir campos redundantes de cantidad si todos son el mismo valor.
+    // Reducir campos redundantes.
     const qtyFields = ['qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','cantidad'];
     db.stock.forEach(st=>{
       const base = Number(st.physicalQty ?? st.qty ?? 0);
@@ -1545,38 +1578,75 @@ function LDH_compactStockDBForQuota(){
       delete st.protectedStockSnapshot;
       delete st.familyOrderUpdatedAt;
       delete st.materialOrderUpdatedAt;
+      delete st.physicalUpdatedAt;
+      delete st.updatedAt;
     });
     db.materials.forEach(m=>{
       delete m.protectedStockSnapshot;
       delete m.familyOrderUpdatedAt;
       delete m.materialOrderUpdatedAt;
+      delete m.updatedAt;
     });
 
-    // Limitar movimientos muy antiguos si el navegador está al límite.
-    if(db.movements.length > 800){
-      db.movements = db.movements.slice(-800);
+    // El histórico es lo más sacrificable para que no se bloquee el Stock.
+    if(db.movements.length > 150){
+      db.movements = db.movements.slice(-150);
     }
 
     db.updatedAt = now();
   }catch(e){ console.warn('No se pudo compactar DB stock', e); }
 }
 
+function LDH_makeMinimalStockDB(){
+  // Último recurso: mantener solo lo imprescindible para que el Stock siga funcionando.
+  return {
+    companies: Array.isArray(db.companies) ? db.companies : [],
+    materials: Array.isArray(db.materials) ? db.materials : [],
+    stock: Array.isArray(db.stock) ? db.stock : [],
+    movements: Array.isArray(db.movements) ? db.movements.slice(-50) : [],
+    jobs: Array.isArray(db.jobs) ? db.jobs.slice(-50) : [],
+    familyOrders: db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {},
+    materialOrders: db.materialOrders && typeof db.materialOrders === 'object' ? db.materialOrders : {},
+    updatedAt: now()
+  };
+}
+
+let __LDH_QUOTA_ALERT_SHOWN = false;
 function LDH_safePersistStockDB(reason){
   db.updatedAt = now();
+
   try{
     LDH_safePersistStockDB('direct_set');
     return true;
-  }catch(e){
-    console.warn('Stock local excede cuota, compactando...', e);
-    try{ LDH_compactStockDBForQuota(); }catch(_){}
-    try{
-      LDH_safePersistStockDB('direct_set');
-      return true;
-    }catch(e2){
-      console.error('No se pudo guardar Stock ni compactando', e2);
-      alert('No se puede guardar porque el navegador tiene el almacenamiento lleno. Se ha compactado el Stock, vuelve a pulsar copiar una vez más. Si se repite, abre Stock en modo normal y borra histórico antiguo.');
-      return false;
+  }catch(e1){
+    console.warn('Stock local excede cuota. Limpieza/compactación automática...', e1);
+  }
+
+  try{ LDH_clearHeavyLocalStorageForQuota(); }catch(e){}
+  try{ LDH_compactStockDBForQuota(); }catch(e){}
+
+  try{
+    LDH_safePersistStockDB('direct_set');
+    return true;
+  }catch(e2){
+    console.warn('Sigue excediendo cuota. Guardando DB mínima...', e2);
+  }
+
+  try{
+    db = LDH_makeMinimalStockDB();
+    LDH_safePersistStockDB('direct_set');
+    if(!__LDH_QUOTA_ALERT_SHOWN){
+      __LDH_QUOTA_ALERT_SHOWN = true;
+      alert('Stock compactado por almacenamiento lleno. Se ha limpiado histórico/protecciones antiguas. Vuelve a copiar ahora.');
     }
+    return true;
+  }catch(e3){
+    console.error('No se pudo guardar ni con DB mínima', e3);
+    if(!__LDH_QUOTA_ALERT_SHOWN){
+      __LDH_QUOTA_ALERT_SHOWN = true;
+      alert('El navegador sigue sin espacio. Abre Configuración del sitio > Datos del sitio y limpia almacenamiento local de esta web, o prueba en una ventana normal sin incógnito.');
+    }
+    return false;
   }
 }
 
@@ -3712,6 +3782,7 @@ function LDH_copyCatalogKey(mat, st){
 
 function copyCatalogSelected(){
   try{
+    LDH_clearHeavyLocalStorageForQuota();
     const source=$('copySource')&&$('copySource').value;
     const targetCompany=($('copyTarget')&&$('copyTarget').value) || activeCompany;
     const type=$('copyType')&&$('copyType').value || activeType;
@@ -8322,5 +8393,25 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH STOCK V16 PERSISTENCIA EDICION COPIA");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO SIMPLE V22");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO V23 COMPACTA CUOTA");</script>
+
+<script id="LDH_QUOTA_NO_PROTECCION_PESADA_COPIAS_V24">
+(function(){
+  const oldProtect = window.LDH_protectManualStockMaterial;
+  window.LDH_protectManualStockMaterial = function(materialId, companyId){
+    try{
+      const m = (db.materials||[]).find(x=>String(x.id)===String(materialId));
+      if(m && m.createdFromCatalogCopy){
+        // No duplicar catálogo copiado en localStorage: llena la cuota.
+        return;
+      }
+    }catch(e){}
+    if(typeof oldProtect === 'function') return oldProtect.apply(this, arguments);
+  };
+  try{ localStorage.removeItem('LDH_STOCK_PROTECTED_MANUAL_V1'); }catch(e){}
+  console.log('✅ LDH cuota v24: sin protección pesada para copias de catálogo');
+})();
+</script>
+
+<script>console.log("✅ LDH STOCK V24 CUOTA SIN BUCLE");</script>
 </body>
 </html>
