@@ -3535,6 +3535,94 @@ function LDH_catalogTargetDuplicateMap(companyId){
     });
   return map;
 }
+function openCopyCatalogModal(){
+  if(!(db.companies||[]).length) return alert('No hay empresas.');
+  if((db.companies||[]).length < 2) return alert('Necesitas al menos dos empresas para copiar catálogo.');
+
+  const companyOptions=(db.companies||[])
+    .map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.code||c.id)}</option>`).join('');
+
+  openModal('Copiar catálogo entre empresas',
+    `<div class="grid2">
+      <div class="field">
+        <label>Empresa origen</label>
+        <select id="copySource" onchange="renderCopyCatalogList()">${companyOptions}</select>
+      </div>
+      <div class="field">
+        <label>Empresa destino</label>
+        <select id="copyTarget" onchange="renderCopyCatalogList()">${companyOptions}</select>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label>Tipo a copiar</label>
+        <select id="copyType" onchange="renderCopyCatalogList()">
+          <option value="${esc(activeType)}">${activeType==='pintura'?'Solo pintura':'Solo hierro'} (vista actual)</option>
+          <option value="all">Hierro y pintura</option>
+          <option value="hierro">Solo hierro</option>
+          <option value="pintura">Solo pintura</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Qué copiar</label>
+        <select id="copyMode" onchange="renderCopyCatalogList()">
+          <option value="families">Familias seleccionadas</option>
+          <option value="materials">Materiales seleccionados</option>
+          <option value="all">Todo lo visible</option>
+        </select>
+      </div>
+    </div>
+    <div class="copy-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0">
+      <label><input type="checkbox" id="copyMin" checked> Mantener mínimos</label>
+      <label><input type="checkbox" id="copyLocation"> Mantener ubicación</label>
+      <label><input type="checkbox" id="copyQty"> Copiar cantidades físicas</label>
+      <label><input type="checkbox" id="copyUpdateExisting"> Reparar/actualizar duplicados</label>
+    </div>
+    <div class="note" style="margin:10px 0">
+      Por defecto copia solo catálogo: material, familia, unidad, tipo y orden. Las cantidades entran a 0.
+    </div>
+    <div id="copyList" style="max-height:42vh;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px"></div>`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button>
+     <button class="btn ok" onclick="copyCatalogSelected()">Copiar selección</button>`);
+
+  const sourceSel = $('copySource');
+  const targetSel = $('copyTarget');
+  if(targetSel) targetSel.value = activeCompany || ((db.companies||[])[0]&&db.companies[0].id) || '';
+  if(sourceSel){
+    const firstOther = (db.companies||[]).find(c=>String(c.id)!==String(targetSel&&targetSel.value));
+    sourceSel.value = (firstOther && firstOther.id) || ((db.companies||[])[0]&&db.companies[0].id) || '';
+  }
+  renderCopyCatalogList();
+}
+
+function renderCopyCatalogList(){
+  const source=$('copySource')&&$('copySource').value;
+  const targetCompany=($('copyTarget')&&$('copyTarget').value) || activeCompany;
+  const type=$('copyType')&&$('copyType').value || activeType;
+  const mode=$('copyMode')&&$('copyMode').value || 'families';
+  const box=$('copyList');
+  if(!box||!source) return;
+  if(source && targetCompany && String(source)===String(targetCompany)){ box.innerHTML='<div class="empty">Origen y destino son la misma empresa. Elige otra empresa destino.</div>'; return; }
+  const rows=LDH_catalogRowsForCompany(source,type);
+  if(!rows.length){ box.innerHTML='<div class="empty">La empresa origen no tiene materiales para ese tipo.</div>'; return; }
+  const groups=new Map();
+  rows.forEach(x=>{
+    const fam=String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia';
+    const key=LDH_copyNorm(fam);
+    if(!groups.has(key)) groups.set(key,{name:fam,items:[]});
+    groups.get(key).items.push(x);
+  });
+  const html=Array.from(groups.values()).map(g=>{
+    const famId='fam_'+LDH_copyNorm(g.name).replace(/[^a-z0-9]+/g,'_');
+    const famCheck = mode==='materials' ? '' : `<label style="display:block;font-weight:900;margin:6px 0;color:#fbbf24"><input type="checkbox" class="copyFam" value="${esc(g.name)}" checked> ${esc(g.name)} <span class="muted">(${g.items.length})</span></label>`;
+    const items = mode==='families' ? '' : `<div style="padding-left:18px">${g.items.map(x=>{
+      const t=LDH_materialType(x.mat,x.st);
+      return `<label style="display:block;margin:5px 0"><input type="checkbox" class="copyMat" value="${esc(x.st.id)}" checked> ${esc(x.mat.name)} <span class="muted">· ${esc(t)} · ${esc(x.mat.unit||x.mat.unidad||'und')}</span></label>`;
+    }).join('')}</div>`;
+    return `<div style="border-bottom:1px solid rgba(148,163,184,.18);padding:6px 0">${famCheck}${items}</div>`;
+  }).join('');
+  box.innerHTML=html;
+}
 function LDH_companyAliasesForOrder(companyId, typ){
   companyId = String(companyId||'');
   typ = String(typ||'');
@@ -3630,104 +3718,6 @@ function LDH_sortCatalogRowsLikeSource(rows, sourceCompanyId){
   });
 }
 
-
-function openCopyCatalogModal(){
-  if(!(db.companies||[]).length) return alert('No hay empresas.');
-  if((db.companies||[]).length < 2) return alert('Necesitas al menos dos empresas para copiar catálogo.');
-
-  const companyOptions=(db.companies||[])
-    .map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.code||c.id)}</option>`).join('');
-
-  openModal('Copiar catálogo entre empresas',
-    `<div class="grid2">
-      <div class="field">
-        <label>Empresa origen</label>
-        <select id="copySource" onchange="renderCopyCatalogList()">${companyOptions}</select>
-      </div>
-      <div class="field">
-        <label>Empresa destino</label>
-        <select id="copyTarget" onchange="renderCopyCatalogList()">${companyOptions}</select>
-      </div>
-    </div>
-    <div class="grid2">
-      <div class="field">
-        <label>Tipo a copiar</label>
-        <select id="copyType" onchange="renderCopyCatalogList()">
-          <option value="${esc(activeType)}">${activeType==='pintura'?'Solo pintura':'Solo hierro'} (vista actual)</option>
-          <option value="all">Hierro y pintura</option>
-          <option value="hierro">Solo hierro</option>
-          <option value="pintura">Solo pintura</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>Qué copiar</label>
-        <select id="copyMode" onchange="renderCopyCatalogList()">
-          <option value="families">Familias seleccionadas</option>
-          <option value="materials">Materiales seleccionados</option>
-          <option value="all">Todo lo visible</option>
-        </select>
-      </div>
-    </div>
-    <div class="copy-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0">
-      <label><input type="checkbox" id="copyMin" checked> Mantener mínimos</label>
-      <label><input type="checkbox" id="copyLocation"> Mantener ubicación</label>
-      <label><input type="checkbox" id="copyQty"> Copiar cantidades físicas</label>
-      <label><input type="checkbox" id="copyUpdateExisting" checked> Reparar/actualizar duplicados</label>
-    </div>
-    <div class="note" style="margin:10px 0">
-      Por defecto copia solo catálogo: material, familia, unidad, tipo y orden. Las cantidades entran a 0.
-    </div>
-    <div id="copyList" style="max-height:42vh;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px"></div>`,
-    `<button class="btn" onclick="closeModal()">Cancelar</button>
-     <button class="btn ok" onclick="copyCatalogSelected()">Copiar selección</button>`);
-
-  // Valores por defecto:
-  // - Origen: primera empresa distinta de la activa si existe, o primera.
-  // - Destino: empresa activa actual.
-  const sourceSel = $('copySource');
-  const targetSel = $('copyTarget');
-  if(targetSel) targetSel.value = activeCompany || ((db.companies||[])[0]&&db.companies[0].id) || '';
-  if(sourceSel){
-    const firstOther = (db.companies||[]).find(c=>String(c.id)!==String(targetSel&&targetSel.value));
-    sourceSel.value = (firstOther && firstOther.id) || ((db.companies||[])[0]&&db.companies[0].id) || '';
-  }
-  renderCopyCatalogList();
-}
-
-function renderCopyCatalogList(){
-  const source=$('copySource')&&$('copySource').value;
-  const target=$('copyTarget')&&$('copyTarget').value;
-  const type=$('copyType')&&$('copyType').value || activeType;
-  const mode=$('copyMode')&&$('copyMode').value || 'families';
-  const box=$('copyList');
-  if(!box||!source) return;
-  if(source && target && String(source)===String(target)){
-    box.innerHTML='<div class="empty">Origen y destino son la misma empresa. Elige otra empresa destino.</div>';
-    return;
-  }
-
-  let rows=LDH_catalogRowsForCompany(source,type);
-  try{ rows=LDH_sortCatalogRowsLikeSource(rows, source); }catch(e){ console.warn('No se pudo ordenar origen, se usa orden actual', e); }
-  if(!rows.length){ box.innerHTML='<div class="empty">La empresa origen no tiene materiales para ese tipo.</div>'; return; }
-
-  const groups=new Map();
-  rows.forEach(x=>{
-    const fam=String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia';
-    const key=LDH_copyNorm(fam);
-    if(!groups.has(key)) groups.set(key,{name:fam,items:[]});
-    groups.get(key).items.push(x);
-  });
-  const html=Array.from(groups.values()).map(g=>{
-    const famCheck = mode==='materials' ? '' : `<label style="display:block;font-weight:900;margin:6px 0;color:#fbbf24"><input type="checkbox" class="copyFam" value="${esc(g.name)}" checked> ${esc(g.name)} <span class="muted">(${g.items.length})</span></label>`;
-    const items = mode==='families' ? '' : `<div style="padding-left:18px">${g.items.map(x=>{
-      const t=LDH_materialType(x.mat,x.st);
-      return `<label style="display:block;margin:5px 0"><input type="checkbox" class="copyMat" value="${esc(x.st.id)}" checked> ${esc(x.mat.name)} <span class="muted">· ${esc(t)} · ${esc(x.mat.unit||x.mat.unidad||'und')}</span></label>`;
-    }).join('')}</div>`;
-    return `<div style="border-bottom:1px solid rgba(148,163,184,.18);padding:6px 0">${famCheck}${items}</div>`;
-  }).join('');
-  box.innerHTML=html;
-}
-
 function copyCatalogSelected(){
   const source=$('copySource')&&$('copySource').value;
   const targetCompany=($('copyTarget')&&$('copyTarget').value) || activeCompany;
@@ -3735,6 +3725,7 @@ function copyCatalogSelected(){
   const mode=$('copyMode')&&$('copyMode').value || 'families';
   if(!source||!targetCompany) return alert('Falta empresa origen o destino.');
   if(String(source)===String(targetCompany)) return alert('Origen y destino no pueden ser la misma empresa.');
+  activeCompany = targetCompany;
 
   const keepMin=!!($('copyMin')&&$('copyMin').checked);
   const keepLocation=!!($('copyLocation')&&$('copyLocation').checked);
@@ -3749,10 +3740,10 @@ function copyCatalogSelected(){
     const ids=new Set(Array.from(document.querySelectorAll('.copyMat:checked')).map(x=>String(x.value)));
     rows=rows.filter(x=>ids.has(String(x.st.id)));
   }
-  try{ rows = LDH_sortCatalogRowsLikeSource(rows, source); }catch(e){ console.warn('No se pudo ordenar origen al copiar', e); }
+  rows = LDH_sortCatalogRowsLikeSource(rows, source);
   if(!rows.length) return alert('No hay nada seleccionado para copiar.');
 
-  const dupMap=LDH_catalogTargetDuplicateMap(targetCompany);
+  const dupMap=LDH_catalogTargetDuplicateMap(activeCompany);
   let created=0, skipped=0, updated=0;
   const nowVal=now();
   const copiedByType = {};
@@ -3774,9 +3765,8 @@ function copyCatalogSelected(){
     if(!copiedMaterialOrders[matOrderKey]) copiedMaterialOrders[matOrderKey] = [];
 
     if(existing){
-      // Si ya aparece como duplicado en destino, NO lo omitimos.
-      // Lo reparamos/actualizamos siempre para que quede visible y persistente.
-      existing.st.companyId = targetCompany;
+      // Duplicado en destino: se repara/actualiza siempre para que quede visible.
+      existing.st.companyId = activeCompany;
       existing.st.materialId = existing.m.id;
       existing.m.name = name;
       existing.m.type=matType; existing.m.tipo=matType; existing.m.stockType=matType;
@@ -3799,13 +3789,12 @@ function copyCatalogSelected(){
       existing.st.physicalManualMaster = true;
       if(keepMin) existing.st.min=Number(srcStock.min||0);
       if(keepLocation) existing.st.location=String(srcStock.location||'');
-      // Si no se ha pedido copiar cantidades, forzamos 0 como catálogo limpio.
       if(!copyQty){
         ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'].forEach(k=>existing.st[k]=0);
       }
       copiedMaterialOrders[matOrderKey].push(existing.st.id);
-      try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(targetCompany,existing.m.id); }catch(e){}
-      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(existing.m.id, targetCompany); }catch(e){}
+      try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany,existing.m.id); }catch(e){}
+      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(existing.m.id, activeCompany); }catch(e){}
       updated++;
       return;
     }
@@ -3843,7 +3832,7 @@ function copyCatalogSelected(){
 
     db.stock.push({
       id:newStockId,
-      companyId:targetCompany,
+      companyId:activeCompany,
       materialId:newMatId,
       type:matType,
       tipo:matType,
@@ -3876,8 +3865,8 @@ function copyCatalogSelected(){
     });
     newIdsBySource[String(srcStock.id||srcMat.id||idx)] = newStockId;
     copiedMaterialOrders[matOrderKey].push(newStockId);
-    try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(targetCompany,newMatId); }catch(e){}
-    try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(newMatId, targetCompany); }catch(e){}
+    try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany,newMatId); }catch(e){}
+    try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(newMatId, activeCompany); }catch(e){}
     created++;
   });
 
@@ -3892,25 +3881,25 @@ function copyCatalogSelected(){
     const selected = copiedByType[matType] || [];
     let finalOrder = sourceOrder.length ? sourceOrder.filter(f=>selected.includes(familyKey(f))) : selected;
     selected.forEach(f=>{ if(!finalOrder.includes(f)) finalOrder.push(f); });
-    LDH_writeFamilyOrderFor(targetCompany, matType, finalOrder);
+    LDH_writeFamilyOrderFor(activeCompany, matType, finalOrder);
   });
 
   // Copiar orden de materiales por familia.
   Object.keys(copiedMaterialOrders).forEach(k=>{
     const [matType, famKey] = k.split('|');
     const famName = rows.map(x=>String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia').find(f=>familyKey(f)===famKey) || famKey;
-    LDH_writeMaterialOrderFor(targetCompany, matType, famName, copiedMaterialOrders[k]);
+    LDH_writeMaterialOrderFor(activeCompany, matType, famName, copiedMaterialOrders[k]);
   });
 
   db.updatedAt=now();
   localStorage.setItem(KEY, JSON.stringify(db));
-  try{ (db.stock||[]).filter(st=>String(st.companyId)===String(targetCompany) && st.createdFromCatalogCopy).forEach(st=>{ try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, targetCompany); }catch(e){} }); }catch(e){}
+  try{ (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).forEach(st=>{ try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){} }); }catch(e){}
   try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:copiar_catalogo_persistente_ordenado'); }catch(e){}
   try{ save(); }catch(e){}
   try{
     // Proteger las fichas copiadas contra restauraciones remotas antiguas.
-    (db.stock||[]).filter(st=>String(st.companyId)===String(targetCompany) && st.createdFromCatalogCopy).slice(-Math.max(50, created+updated+5)).forEach(st=>{
-      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, targetCompany); }catch(e){}
+    (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).slice(-Math.max(50, created+updated+5)).forEach(st=>{
+      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){}
     });
   }catch(e){}
   try{
@@ -3922,10 +3911,8 @@ function copyCatalogSelected(){
     }
   }catch(e){}
   closeModal();
-  activeCompany = targetCompany;
   try{ refreshSelectors(); }catch(e){}
-  const nextType = (type==='all' ? (rows[0] ? LDH_materialType(rows[0].mat, rows[0].st) : activeType) : type);
-  setType(nextType);
+  setType(type==='all'?activeType:type);
   render();
   alert('Copia terminada. Creados: '+created+' · Reparados/actualizados: '+updated+' · Omitidos: '+skipped);
 }
@@ -8405,8 +8392,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH STOCK MATERIALES ORDEN COMO FAMILIAS V14");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO PERSISTENTE ORDEN V15");</script>
 <script>console.log("✅ LDH STOCK V16 PERSISTENCIA EDICION COPIA");</script>
-<script>console.log("✅ LDH STOCK COPIAR CATALOGO DESTINO SELECT V17");</script>
-<script>console.log("✅ LDH STOCK DESTINO SELECT V18 FIX LISTA");</script>
-<script>console.log("✅ LDH STOCK COPIA DUPLICADOS REPARA V19");</script>
+<script>console.log("✅ LDH STOCK COPIA MULTIDESTINO V20");</script>
 </body>
 </html>
