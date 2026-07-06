@@ -1446,28 +1446,57 @@ function LDH_applyProtectedStockToDB(){
     db.stock = Array.isArray(db.stock) ? db.stock : [];
     db.movements = Array.isArray(db.movements) ? db.movements : [];
     let changed = false;
+
     arr.forEach(item=>{
       if(!item || !item.material) return;
       const mid = String(item.materialId || item.material.id || '');
       if(!mid) return;
-      if(!db.materials.some(x=>String(x.id)===mid)){
-        db.materials.push(Object.assign({}, item.material, {id:mid, createdFromStockManual:true, manualStockOnly:true}));
+
+      const protectedMat = Object.assign({}, item.material, {
+        id:mid,
+        createdFromStockManual:true,
+        manualStockOnly:true,
+        protectedStockSnapshot:true
+      });
+
+      const mi = db.materials.findIndex(x=>String(x.id)===mid);
+      if(mi < 0){
+        db.materials.push(protectedMat);
+        changed = true;
+      }else{
+        // IMPORTANTE: actualizar también si ya existe.
+        // Esto hace que un cambio de nombre/familia editado no sea pisado por una foto antigua.
+        db.materials[mi] = Object.assign({}, db.materials[mi], protectedMat);
         changed = true;
       }
+
       (Array.isArray(item.stock)?item.stock:[]).forEach(st=>{
-        const exists = db.stock.some(x=>String(x.id||'')===String(st.id||'') || (String(x.companyId||'')===String(st.companyId||'') && String(x.materialId||'')===mid));
-        if(!exists){ db.stock.push(Object.assign({}, st, {materialId:mid, createdFromStockManual:true})); changed = true; }
+        const protectedStock = Object.assign({}, st, {
+          materialId:mid,
+          createdFromStockManual:true,
+          protectedStockSnapshot:true
+        });
+        const si = db.stock.findIndex(x=>String(x.id||'')===String(st.id||'') || (String(x.companyId||'')===String(st.companyId||'') && String(x.materialId||'')===mid));
+        if(si < 0){
+          db.stock.push(protectedStock);
+          changed = true;
+        }else{
+          db.stock[si] = Object.assign({}, db.stock[si], protectedStock);
+          changed = true;
+        }
       });
+
       (Array.isArray(item.movements)?item.movements:[]).forEach(mv=>{
         const exists = db.movements.some(x=>String(x.id||'')===String(mv.id||''));
         if(!exists){ db.movements.push(Object.assign({}, mv, {materialId:mid})); changed = true; }
       });
     });
+
     if(changed){
       db.updatedAt = now();
       try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
-      try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:protegido_restaurado'); }catch(e){}
-      setTimeout(()=>{ try{ if(typeof window.__ldhLiveSyncNow==='function') window.__ldhLiveSyncNow('backup_main', true); }catch(e){} }, 30000);
+      try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:protegido_restaurado_actualizado'); }catch(e){}
+      setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow==='function') window.__ldhStockSyncNow(true); }catch(e){} }, 1200);
     }
     return changed;
   }catch(e){ console.warn('No se pudo aplicar protección de stock', e); return false; }
@@ -3807,6 +3836,7 @@ function copyCatalogSelected(){
     newIdsBySource[String(srcStock.id||srcMat.id||idx)] = newStockId;
     copiedMaterialOrders[matOrderKey].push(newStockId);
     try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany,newMatId); }catch(e){}
+    try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(newMatId, activeCompany); }catch(e){}
     created++;
   });
 
@@ -3833,6 +3863,7 @@ function copyCatalogSelected(){
 
   db.updatedAt=now();
   localStorage.setItem(KEY, JSON.stringify(db));
+  try{ (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).forEach(st=>{ try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){} }); }catch(e){}
   try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:copiar_catalogo_persistente_ordenado'); }catch(e){}
   try{ save(); }catch(e){}
   try{
@@ -4396,14 +4427,25 @@ function saveEditMaterial(materialId){
   const name = $('editMatName').value.trim();
   if(!name) return alert('Pon nombre del material.');
 
+  const typ = $('editMatType').value || 'hierro';
   m.name = name;
-  m.type = $('editMatType').value || 'hierro';
+  m.type = typ;
+  m.tipo = typ;
+  m.stockType = typ;
   m.family = $('editMatFamily').value.trim();
   m.unit = $('editMatUnit').value.trim() || (m.type === 'hierro' ? 'barras' : 'ud');
+  m.updatedAt = now();
+  m.manualStockOnly = true;
+  m.editedFromStockManual = true;
 
   if(s){
+    s.type = typ;
+    s.tipo = typ;
+    s.stockType = typ;
     s.min = Number($('editMatMin').value || 0);
     s.location = $('editMatLocation').value.trim();
+    s.updatedAt = now();
+    s.editedFromStockManual = true;
   }
 
   if(m.type === 'hierro'){
@@ -4411,7 +4453,20 @@ function saveEditMaterial(materialId){
     m.family = String(m.family||'').replace(/galvanizada/gi,'hierro negro').replace(/galvanizado/gi,'negro');
   }
 
+  db.updatedAt = now();
+  localStorage.setItem(KEY, JSON.stringify(db));
+  try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany, materialId); }catch(e){}
+  try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(materialId, activeCompany); }catch(e){}
+
   save();
+  try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:editar_material_persistente'); }catch(e){}
+  try{
+    if(typeof window.__ldhStockSyncNow==='function'){
+      setTimeout(()=>window.__ldhStockSyncNow(true), 500);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 2500);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 8000);
+    }
+  }catch(e){}
   closeModal();
   setType(m.type);
   render();
@@ -8235,7 +8290,7 @@ function LDH_closeMaintenanceModal(){
   if(window.__LDH_STOCK_V22_ANTICUOTA_DURO) return;
   window.__LDH_STOCK_V22_ANTICUOTA_DURO = true;
 
-  const MIN_GAP = 180000; // maximo 1 subida cada 3 minutos
+  const MIN_GAP = 10000; // maximo 1 subida cada 10 segundos para que altas/copias/ediciones persistan
   let lastRun = 0;
   let running = false;
   let pending = false;
@@ -8290,7 +8345,7 @@ function LDH_closeMaintenanceModal(){
     window.__ldhLiveSyncNow = wrapped;
     window.backupToFirestore = wrapped;
 
-    console.log('✅ StockSync v22 anticuota duro activo: escrituras agrupadas cada 60s');
+    console.log('✅ StockSync v22 activo: escrituras agrupadas cada 10s');
   }
 
   install();
@@ -8305,5 +8360,6 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH Stock tipo fijo en altas: type/tipo/stockType en material y stock");</script>
 <script>console.log("✅ LDH STOCK MATERIALES ORDEN COMO FAMILIAS V14");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO PERSISTENTE ORDEN V15");</script>
+<script>console.log("✅ LDH STOCK V16 PERSISTENCIA EDICION COPIA");</script>
 </body>
 </html>
