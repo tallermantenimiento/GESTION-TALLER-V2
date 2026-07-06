@@ -1494,7 +1494,7 @@ function LDH_applyProtectedStockToDB(){
 
     if(changed){
       db.updatedAt = now();
-      try{ LDH_safePersistStockDB('direct_set'); }catch(e){}
+      try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
       try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:protegido_restaurado_actualizado'); }catch(e){}
       setTimeout(()=>{ try{ if(typeof window.__ldhStockSyncNow==='function') window.__ldhStockSyncNow(true); }catch(e){} }, 1200);
     }
@@ -1503,156 +1503,9 @@ function LDH_applyProtectedStockToDB(){
 }
 
 function blankDB(){return {version:'2.0-stock-empresa',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],sampleLoaded:false,updatedAt:now()};}
-
-function LDH_clearHeavyLocalStorageForQuota(){
-  // Limpieza de emergencia: estas claves son auxiliares, no son el Stock maestro.
-  // La que más pesa suele ser la protección de copias/altas, porque duplica materiales enteros.
-  const heavyKeys = [
-    'LDH_STOCK_PROTECTED_MANUAL_V1',
-    'LDH_STOCK_DELETED_ITEMS_V1',
-    'ldh_stock_material_order_v1',
-    'ldh_stock_family_open_v2_manual'
-  ];
-  heavyKeys.forEach(k=>{
-    try{ localStorage.removeItem(k); }catch(e){}
-  });
-
-  // Limpiar backups/temporales antiguos del propio taller que pueden ocupar cuota.
-  try{
-    const toDelete=[];
-    for(let i=0;i<localStorage.length;i++){
-      const k=localStorage.key(i)||'';
-      if(
-        /^backup/i.test(k) ||
-        /demo/i.test(k) ||
-        /snapshot/i.test(k) ||
-        /debug/i.test(k) ||
-        /old/i.test(k) ||
-        /before/i.test(k)
-      ){
-        toDelete.push(k);
-      }
-    }
-    toDelete.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
-  }catch(e){}
-}
-
-function LDH_compactStockDBForQuota(){
-  try{
-    db.materials = Array.isArray(db.materials) ? db.materials : [];
-    db.stock = Array.isArray(db.stock) ? db.stock : [];
-    db.movements = Array.isArray(db.movements) ? db.movements : [];
-
-    const usedMatIds = new Set((db.stock||[]).map(st=>String(st.materialId||'')).filter(Boolean));
-    db.materials = db.materials.filter(m=>usedMatIds.has(String(m.id||'')));
-
-    // Quitar duplicados exactos por empresa + tipo + familia + nombre, conservando el último.
-    const seen = new Map();
-    const keepStockIds = new Set();
-    for(let i=(db.stock||[]).length-1;i>=0;i--){
-      const st = db.stock[i];
-      const m = db.materials.find(mm=>String(mm.id||'')===String(st.materialId||''));
-      if(!m) continue;
-      const typ = String(m.type||m.tipo||m.stockType||st.type||st.tipo||st.stockType||'').toLowerCase();
-      const fam = String(m.family||m.familia||st.family||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
-      const name = String(m.name||m.nombre||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
-      const key = String(st.companyId||'')+'|'+typ+'|'+fam+'|'+name;
-      if(!seen.has(key)){
-        seen.set(key, true);
-        keepStockIds.add(String(st.id||''));
-      }
-    }
-    db.stock = db.stock.filter(st=>keepStockIds.has(String(st.id||'')));
-    const usedAfter = new Set((db.stock||[]).map(st=>String(st.materialId||'')).filter(Boolean));
-    db.materials = db.materials.filter(m=>usedAfter.has(String(m.id||'')));
-
-    // Reducir campos redundantes.
-    const qtyFields = ['qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','cantidad'];
-    db.stock.forEach(st=>{
-      const base = Number(st.physicalQty ?? st.qty ?? 0);
-      qtyFields.forEach(k=>{
-        if(Object.prototype.hasOwnProperty.call(st,k) && Number(st[k]||0) === base) delete st[k];
-      });
-      if(!Object.prototype.hasOwnProperty.call(st,'physicalQty')) st.physicalQty = base;
-      if(!Object.prototype.hasOwnProperty.call(st,'qty')) st.qty = base;
-      delete st.protectedStockSnapshot;
-      delete st.familyOrderUpdatedAt;
-      delete st.materialOrderUpdatedAt;
-      delete st.physicalUpdatedAt;
-      delete st.updatedAt;
-    });
-    db.materials.forEach(m=>{
-      delete m.protectedStockSnapshot;
-      delete m.familyOrderUpdatedAt;
-      delete m.materialOrderUpdatedAt;
-      delete m.updatedAt;
-    });
-
-    // El histórico es lo más sacrificable para que no se bloquee el Stock.
-    if(db.movements.length > 150){
-      db.movements = db.movements.slice(-150);
-    }
-
-    db.updatedAt = now();
-  }catch(e){ console.warn('No se pudo compactar DB stock', e); }
-}
-
-function LDH_makeMinimalStockDB(){
-  // Último recurso: mantener solo lo imprescindible para que el Stock siga funcionando.
-  return {
-    companies: Array.isArray(db.companies) ? db.companies : [],
-    materials: Array.isArray(db.materials) ? db.materials : [],
-    stock: Array.isArray(db.stock) ? db.stock : [],
-    movements: Array.isArray(db.movements) ? db.movements.slice(-50) : [],
-    jobs: Array.isArray(db.jobs) ? db.jobs.slice(-50) : [],
-    familyOrders: db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {},
-    materialOrders: db.materialOrders && typeof db.materialOrders === 'object' ? db.materialOrders : {},
-    updatedAt: now()
-  };
-}
-
-let __LDH_QUOTA_ALERT_SHOWN = false;
-function LDH_safePersistStockDB(reason){
-  db.updatedAt = now();
-
-  try{
-    LDH_safePersistStockDB('direct_set');
-    return true;
-  }catch(e1){
-    console.warn('Stock local excede cuota. Limpieza/compactación automática...', e1);
-  }
-
-  try{ LDH_clearHeavyLocalStorageForQuota(); }catch(e){}
-  try{ LDH_compactStockDBForQuota(); }catch(e){}
-
-  try{
-    LDH_safePersistStockDB('direct_set');
-    return true;
-  }catch(e2){
-    console.warn('Sigue excediendo cuota. Guardando DB mínima...', e2);
-  }
-
-  try{
-    db = LDH_makeMinimalStockDB();
-    LDH_safePersistStockDB('direct_set');
-    if(!__LDH_QUOTA_ALERT_SHOWN){
-      __LDH_QUOTA_ALERT_SHOWN = true;
-      alert('Stock compactado por almacenamiento lleno. Se ha limpiado histórico/protecciones antiguas. Vuelve a copiar ahora.');
-    }
-    return true;
-  }catch(e3){
-    console.error('No se pudo guardar ni con DB mínima', e3);
-    if(!__LDH_QUOTA_ALERT_SHOWN){
-      __LDH_QUOTA_ALERT_SHOWN = true;
-      alert('El navegador sigue sin espacio. Abre Configuración del sitio > Datos del sitio y limpia almacenamiento local de esta web, o prueba en una ventana normal sin incógnito.');
-    }
-    return false;
-  }
-}
-
-
 function save(){
-  if(!LDH_safePersistStockDB('save_core')) return;
+  db.updatedAt=now();
+  localStorage.setItem(KEY,JSON.stringify(db));
   try{ LDH_publishCompanyMaster(); }catch(e){}
   try{
     if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:save_core');
@@ -3337,7 +3190,7 @@ function saveMaterialOrder(famName, order){
     });
 
     db.updatedAt = now();
-    LDH_safePersistStockDB('direct_set');
+    localStorage.setItem(KEY, JSON.stringify(db));
   }catch(e){}
 
   try{
@@ -3684,21 +3537,20 @@ function LDH_catalogTargetDuplicateMap(companyId){
 }
 function openCopyCatalogModal(){
   if(!(db.companies||[]).length) return alert('No hay empresas.');
-  if((db.companies||[]).length < 2) return alert('Necesitas al menos dos empresas para copiar catálogo.');
-
-  const companyOptions=(db.companies||[])
+  if(!activeCompany) return alert('Selecciona empresa destino.');
+  const sourceOptions=(db.companies||[])
+    .filter(c=>String(c.id)!==String(activeCompany))
     .map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.code||c.id)}</option>`).join('');
-
+  if(!sourceOptions) return alert('No hay otra empresa origen para copiar.');
+  const target=companyById(activeCompany)||{};
   openModal('Copiar catálogo entre empresas',
-    `<div class="grid2">
-      <div class="field">
-        <label>Empresa origen</label>
-        <select id="copySource" onchange="renderCopyCatalogList()">${companyOptions}</select>
-      </div>
-      <div class="field">
-        <label>Empresa destino</label>
-        <select id="copyTarget" onchange="renderCopyCatalogList()">${companyOptions}</select>
-      </div>
+    `<div class="field">
+      <label>Empresa origen</label>
+      <select id="copySource" onchange="renderCopyCatalogList()">${sourceOptions}</select>
+    </div>
+    <div class="field">
+      <label>Empresa destino</label>
+      <input value="${esc(target.name||target.code||activeCompany)}" disabled>
     </div>
     <div class="grid2">
       <div class="field">
@@ -3723,39 +3575,24 @@ function openCopyCatalogModal(){
       <label><input type="checkbox" id="copyMin" checked> Mantener mínimos</label>
       <label><input type="checkbox" id="copyLocation"> Mantener ubicación</label>
       <label><input type="checkbox" id="copyQty"> Copiar cantidades físicas</label>
-      <label><input type="checkbox" id="copyReplace" checked> Sobrescribir coincidencias</label>
+      <label><input type="checkbox" id="copyUpdateExisting"> Actualizar duplicados</label>
     </div>
     <div class="note" style="margin:10px 0">
-      Copia catálogo limpio al destino. Si hay coincidencias por tipo + familia + nombre, las sustituye.
+      Por defecto copia solo el catálogo: material, familia, unidad, tipo y orden. Las cantidades entran a 0.
     </div>
     <div id="copyList" style="max-height:42vh;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:10px"></div>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button>
      <button class="btn ok" onclick="copyCatalogSelected()">Copiar selección</button>`);
-
-  const targetSel=$('copyTarget'), sourceSel=$('copySource');
-  if(targetSel) targetSel.value = activeCompany || ((db.companies||[])[0]&&db.companies[0].id) || '';
-  if(sourceSel){
-    const firstOther=(db.companies||[]).find(c=>String(c.id)!==String(targetSel&&targetSel.value));
-    sourceSel.value=(firstOther&&firstOther.id)||((db.companies||[])[0]&&db.companies[0].id)||'';
-  }
   renderCopyCatalogList();
 }
-
 function renderCopyCatalogList(){
   const source=$('copySource')&&$('copySource').value;
-  const target=$('copyTarget')&&$('copyTarget').value;
   const type=$('copyType')&&$('copyType').value || activeType;
   const mode=$('copyMode')&&$('copyMode').value || 'families';
   const box=$('copyList');
   if(!box||!source) return;
-  if(source && target && String(source)===String(target)){
-    box.innerHTML='<div class="empty">Origen y destino son la misma empresa. Elige otra empresa destino.</div>';
-    return;
-  }
-  let rows=LDH_catalogRowsForCompany(source,type);
-  try{ rows = LDH_sortCatalogRowsLikeSource(rows, source); }catch(e){}
+  const rows=LDH_catalogRowsForCompany(source,type);
   if(!rows.length){ box.innerHTML='<div class="empty">La empresa origen no tiene materiales para ese tipo.</div>'; return; }
-
   const groups=new Map();
   rows.forEach(x=>{
     const fam=String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia';
@@ -3763,7 +3600,8 @@ function renderCopyCatalogList(){
     if(!groups.has(key)) groups.set(key,{name:fam,items:[]});
     groups.get(key).items.push(x);
   });
-  box.innerHTML=Array.from(groups.values()).map(g=>{
+  const html=Array.from(groups.values()).map(g=>{
+    const famId='fam_'+LDH_copyNorm(g.name).replace(/[^a-z0-9]+/g,'_');
     const famCheck = mode==='materials' ? '' : `<label style="display:block;font-weight:900;margin:6px 0;color:#fbbf24"><input type="checkbox" class="copyFam" value="${esc(g.name)}" checked> ${esc(g.name)} <span class="muted">(${g.items.length})</span></label>`;
     const items = mode==='families' ? '' : `<div style="padding-left:18px">${g.items.map(x=>{
       const t=LDH_materialType(x.mat,x.st);
@@ -3771,149 +3609,281 @@ function renderCopyCatalogList(){
     }).join('')}</div>`;
     return `<div style="border-bottom:1px solid rgba(148,163,184,.18);padding:6px 0">${famCheck}${items}</div>`;
   }).join('');
+  box.innerHTML=html;
 }
-
-function LDH_copyCatalogKey(mat, st){
-  const t = LDH_materialType(mat, st);
-  const fam = LDH_copyNorm(mat.family||mat.familia||mat.grp||st.family||'Sin familia');
-  const name = LDH_copyNorm(mat.name||mat.nombre||'');
-  return t + '|' + fam + '|' + name;
+function LDH_companyAliasesForOrder(companyId, typ){
+  companyId = String(companyId||'');
+  typ = String(typ||'');
+  let c = null;
+  try{ c = (db.companies||[]).find(x=>String(x.id||'')===companyId) || null; }catch(e){}
+  const norm = v => String(v||'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+  return Array.from(new Set([
+    companyId + '|' + typ,
+    norm(c && (c.name||c.nombre)) + '|' + typ,
+    norm(c && (c.code||c.codigo)) + '|' + typ
+  ].filter(k=>k && !k.startsWith('|'))));
+}
+function LDH_readFamilyOrderFor(companyId, typ){
+  const keys = LDH_companyAliasesForOrder(companyId, typ);
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    for(const k of keys){ if(Array.isArray(all[k]) && all[k].length) return all[k].map(familyKey); }
+  }catch(e){}
+  try{
+    const all = db && db.familyOrders && typeof db.familyOrders === 'object' ? db.familyOrders : {};
+    for(const k of keys){ if(Array.isArray(all[k]) && all[k].length) return all[k].map(familyKey); }
+  }catch(e){}
+  return [];
+}
+function LDH_writeFamilyOrderFor(companyId, typ, order){
+  order = (Array.isArray(order)?order:[]).map(familyKey).filter(Boolean);
+  if(!order.length) return;
+  const keys = LDH_companyAliasesForOrder(companyId, typ);
+  try{
+    const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    keys.forEach(k=>{ all[k]=order; });
+    localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
+  }catch(e){}
+  try{
+    if(!db.familyOrders || typeof db.familyOrders !== 'object') db.familyOrders = {};
+    keys.forEach(k=>{ db.familyOrders[k]=order; });
+  }catch(e){}
+}
+function LDH_materialOrderKeyFor(companyId, typ, famName){
+  return String(companyId||'') + '|' + String(typ||'') + '|' + familyKey(famName||'Sin familia');
+}
+function LDH_readMaterialOrderFor(companyId, typ, famName){
+  const key = LDH_materialOrderKeyFor(companyId, typ, famName);
+  try{
+    const all = JSON.parse(localStorage.getItem(typeof MATERIAL_ORDER_KEY!=='undefined' ? MATERIAL_ORDER_KEY : 'ldh_stock_material_order_v1') || '{}') || {};
+    if(Array.isArray(all[key]) && all[key].length) return all[key].map(String);
+  }catch(e){}
+  try{
+    const all = db && db.materialOrders && typeof db.materialOrders === 'object' ? db.materialOrders : {};
+    if(Array.isArray(all[key]) && all[key].length) return all[key].map(String);
+  }catch(e){}
+  return [];
+}
+function LDH_writeMaterialOrderFor(companyId, typ, famName, order){
+  order = (Array.isArray(order)?order:[]).map(x=>String(x||'')).filter(Boolean);
+  if(!order.length) return;
+  const key = LDH_materialOrderKeyFor(companyId, typ, famName);
+  try{
+    const storageKey = typeof MATERIAL_ORDER_KEY!=='undefined' ? MATERIAL_ORDER_KEY : 'ldh_stock_material_order_v1';
+    const all = JSON.parse(localStorage.getItem(storageKey) || '{}') || {};
+    all[key]=order;
+    localStorage.setItem(storageKey, JSON.stringify(all));
+  }catch(e){}
+  try{
+    if(!db.materialOrders || typeof db.materialOrders !== 'object') db.materialOrders = {};
+    db.materialOrders[key]=order;
+  }catch(e){}
+}
+function LDH_catalogSourceOrderPosition(companyId, typ, famName, stockId, materialId, fallback){
+  const arr = LDH_readMaterialOrderFor(companyId, typ, famName);
+  let p = arr.indexOf(String(stockId||''));
+  if(p < 0) p = arr.indexOf(String(materialId||''));
+  return p >= 0 ? p : (Number(fallback)||999999);
+}
+function LDH_sortCatalogRowsLikeSource(rows, sourceCompanyId){
+  rows = Array.isArray(rows) ? rows.slice() : [];
+  return rows.sort((a,b)=>{
+    const ta = LDH_materialType(a.mat,a.st), tb = LDH_materialType(b.mat,b.st);
+    if(ta !== tb) return ta.localeCompare(tb,'es');
+    const fa = String(a.mat.family||a.mat.familia||a.mat.grp||'Sin familia').trim() || 'Sin familia';
+    const fb = String(b.mat.family||b.mat.familia||b.mat.grp||'Sin familia').trim() || 'Sin familia';
+    const fo = LDH_readFamilyOrderFor(sourceCompanyId, ta);
+    const fpos = new Map(fo.map((k,i)=>[familyKey(k),i]));
+    const fpa = fpos.has(familyKey(fa)) ? fpos.get(familyKey(fa)) : Number(a.st.familyOrder||a.mat.familyOrder||999999);
+    const fpb = fpos.has(familyKey(fb)) ? fpos.get(familyKey(fb)) : Number(b.st.familyOrder||b.mat.familyOrder||999999);
+    if(fpa !== fpb) return fpa - fpb;
+    const ma = LDH_catalogSourceOrderPosition(sourceCompanyId, ta, fa, a.st.id, a.st.materialId, a.st.materialOrder||a.mat.materialOrder||a.idx);
+    const mb = LDH_catalogSourceOrderPosition(sourceCompanyId, tb, fb, b.st.id, b.st.materialId, b.st.materialOrder||b.mat.materialOrder||b.idx);
+    if(ma !== mb) return ma - mb;
+    return String(a.mat.name||'').localeCompare(String(b.mat.name||''),'es',{sensitivity:'base'});
+  });
 }
 
 function copyCatalogSelected(){
-  try{
-    LDH_clearHeavyLocalStorageForQuota();
-    const source=$('copySource')&&$('copySource').value;
-    const targetCompany=($('copyTarget')&&$('copyTarget').value) || activeCompany;
-    const type=$('copyType')&&$('copyType').value || activeType;
-    const mode=$('copyMode')&&$('copyMode').value || 'families';
-    if(!source||!targetCompany) return alert('Falta empresa origen o destino.');
-    if(String(source)===String(targetCompany)) return alert('Origen y destino no pueden ser la misma empresa.');
+  const source=$('copySource')&&$('copySource').value;
+  const type=$('copyType')&&$('copyType').value || activeType;
+  const mode=$('copyMode')&&$('copyMode').value || 'families';
+  if(!source||!activeCompany) return alert('Falta empresa origen o destino.');
+  if(String(source)===String(activeCompany)) return alert('Origen y destino no pueden ser la misma empresa.');
 
-    const keepMin=!!($('copyMin')&&$('copyMin').checked);
-    const keepLocation=!!($('copyLocation')&&$('copyLocation').checked);
-    const copyQty=!!($('copyQty')&&$('copyQty').checked);
-    const replace=!!($('copyReplace')&&$('copyReplace').checked);
+  const keepMin=!!($('copyMin')&&$('copyMin').checked);
+  const keepLocation=!!($('copyLocation')&&$('copyLocation').checked);
+  const copyQty=!!($('copyQty')&&$('copyQty').checked);
+  const updateExisting=!!($('copyUpdateExisting')&&$('copyUpdateExisting').checked);
 
-    let rows=LDH_catalogRowsForCompany(source,type);
-    if(mode==='families'){
-      const fams=new Set(Array.from(document.querySelectorAll('.copyFam:checked')).map(x=>LDH_copyNorm(x.value)));
-      rows=rows.filter(x=>fams.has(LDH_copyNorm(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia')));
-    }else if(mode==='materials'){
-      const ids=new Set(Array.from(document.querySelectorAll('.copyMat:checked')).map(x=>String(x.value)));
-      rows=rows.filter(x=>ids.has(String(x.st.id)));
-    }
-    try{ rows = LDH_sortCatalogRowsLikeSource(rows, source); }catch(e){}
-    if(!rows.length) return alert('No hay nada seleccionado para copiar.');
-
-    db.materials = Array.isArray(db.materials) ? db.materials : [];
-    db.stock = Array.isArray(db.stock) ? db.stock : [];
-
-    const selectedKeys = new Set(rows.map(x=>LDH_copyCatalogKey(x.mat,x.st)));
-    const removedMatIds = new Set();
-
-    if(replace){
-      db.stock = db.stock.filter(st=>{
-        if(String(st.companyId||'')!==String(targetCompany)) return true;
-        const m=materialById(st.materialId);
-        if(!m) return true;
-        if(selectedKeys.has(LDH_copyCatalogKey(m,st))){
-          removedMatIds.add(String(st.materialId||''));
-          return false;
-        }
-        return true;
-      });
-      const stillUsed=new Set(db.stock.map(st=>String(st.materialId||'')));
-      db.materials=db.materials.filter(m=>!removedMatIds.has(String(m.id||'')) || stillUsed.has(String(m.id||'')));
-    }
-
-    const nowVal=now();
-    let created=0;
-    const familyOrderByType={};
-    const materialOrders={};
-
-    rows.forEach((x,idx)=>{
-      const srcMat=x.mat, srcStock=x.st;
-      const matType=LDH_materialType(srcMat,srcStock);
-      const fam=String(srcMat.family||srcMat.familia||srcMat.grp||'Sin familia').trim() || 'Sin familia';
-      const famKey=familyKey(fam);
-      const name=String(srcMat.name||srcMat.nombre||'Material').trim();
-      const unit=String(srcMat.unit||srcMat.unidad||'ud').trim() || 'ud';
-
-      if(!familyOrderByType[matType]) familyOrderByType[matType]=[];
-      if(!familyOrderByType[matType].includes(famKey)) familyOrderByType[matType].push(famKey);
-      const moKey=matType+'|'+famKey;
-      if(!materialOrders[moKey]) materialOrders[moKey]=[];
-
-      const newMatId=uid('mat');
-      const newStockId=uid('st');
-      const q=copyQty ? Number(
-        srcStock.physicalQty ?? srcStock.qtyPhysical ?? srcStock.fisico ?? srcStock.realQty ??
-        srcStock.stockFisico ?? srcStock.stockReal ?? srcStock.stockActual ?? srcStock.existencias ??
-        srcStock.actualQty ?? srcStock.qty ?? srcStock.cantidad ?? 0
-      ) : 0;
-      const familyOrder=(familyOrderByType[matType].indexOf(famKey)+1)*1000;
-      const materialOrder=(materialOrders[moKey].length+1)*1000;
-
-      db.materials.push({
-        id:newMatId,name,type:matType,tipo:matType,stockType:matType,family:fam,unit,
-        familyOrder,familyOrderKey:famKey,materialOrder,materialOrderKey:famKey,
-        createdFromCatalogCopy:true,copiedFromCompanyId:source,copiedFromMaterialId:srcMat.id,
-        createdAt:nowVal,updatedAt:nowVal,manualStockOnly:true
-      });
-      db.stock.push({
-        id:newStockId,companyId:targetCompany,materialId:newMatId,
-        type:matType,tipo:matType,stockType:matType,
-        familyOrder,familyOrderKey:famKey,materialOrder,materialOrderKey:famKey,
-        min:keepMin ? Number(srcStock.min||0) : 0,
-        location:keepLocation ? String(srcStock.location||'') : '',
-        createdFromCatalogCopy:true,copiedFromCompanyId:source,copiedFromStockId:srcStock.id,
-        createdAt:nowVal,updatedAt:nowVal,
-        physicalQty:q,qtyPhysical:q,fisico:q,realQty:q,stockFisico:q,stockReal:q,stockActual:q,existencias:q,actualQty:q,qty:q,cantidad:q,
-        physicalManualMaster:true,physicalSource:copyQty?'catalog_copy_qty':'catalog_copy_zero',physicalUpdatedAt:nowVal
-      });
-      materialOrders[moKey].push(newStockId);
-      try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(targetCompany,newMatId); }catch(e){}
-      created++;
-    });
-
-    Object.keys(familyOrderByType).forEach(matType=>{
-      const order=familyOrderByType[matType];
-      try{ LDH_writeFamilyOrderFor(targetCompany, matType, order); }catch(e){}
-    });
-    Object.keys(materialOrders).forEach(k=>{
-      const [matType,famKey]=k.split('|');
-      const famName=rows.map(x=>String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim()||'Sin familia').find(f=>familyKey(f)===famKey)||famKey;
-      try{ LDH_writeMaterialOrderFor(targetCompany, matType, famName, materialOrders[k]); }catch(e){}
-    });
-
-    activeCompany=targetCompany;
-    db.updatedAt=now();
-    if(!LDH_safePersistStockDB('copy_catalog')) return;
-    try{ save(); }catch(e){ console.warn('save falló tras copiar', e); }
-    try{
-      db.stock.filter(st=>String(st.companyId)===String(targetCompany) && st.createdFromCatalogCopy).forEach(st=>{
-        try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId,targetCompany); }catch(e){}
-      });
-    }catch(e){}
-    try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:copia_catalogo_v22'); }catch(e){}
-    try{
-      if(typeof window.__ldhStockSyncNow==='function'){
-        setTimeout(()=>window.__ldhStockSyncNow(true),500);
-        setTimeout(()=>window.__ldhStockSyncNow(true),2500);
-        setTimeout(()=>window.__ldhStockSyncNow(true),8000);
-      }
-    }catch(e){}
-    closeModal();
-    try{ refreshSelectors(); }catch(e){}
-    const nextType = type==='all' ? (rows[0] ? LDH_materialType(rows[0].mat,rows[0].st) : activeType) : type;
-    setType(nextType);
-    render();
-    alert('Copia terminada. Creados: '+created);
-  }catch(err){
-    console.error('ERROR copiar catálogo', err);
-    alert('Error al copiar catálogo: ' + (err && (err.message || err.code || err)));
+  let rows=LDH_catalogRowsForCompany(source,type);
+  if(mode==='families'){
+    const fams=new Set(Array.from(document.querySelectorAll('.copyFam:checked')).map(x=>LDH_copyNorm(x.value)));
+    rows=rows.filter(x=>fams.has(LDH_copyNorm(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia')));
+  }else if(mode==='materials'){
+    const ids=new Set(Array.from(document.querySelectorAll('.copyMat:checked')).map(x=>String(x.value)));
+    rows=rows.filter(x=>ids.has(String(x.st.id)));
   }
+  rows = LDH_sortCatalogRowsLikeSource(rows, source);
+  if(!rows.length) return alert('No hay nada seleccionado para copiar.');
+
+  const dupMap=LDH_catalogTargetDuplicateMap(activeCompany);
+  let created=0, skipped=0, updated=0;
+  const nowVal=now();
+  const copiedByType = {};
+  const copiedMaterialOrders = {};
+  const newIdsBySource = {};
+
+  rows.forEach((x,idx)=>{
+    const srcMat=x.mat, srcStock=x.st;
+    const matType=LDH_materialType(srcMat,srcStock);
+    const fam=String(srcMat.family||srcMat.familia||srcMat.grp||'Sin familia').trim() || 'Sin familia';
+    const famKey = familyKey(fam);
+    const name=String(srcMat.name||srcMat.nombre||'Material').trim();
+    const unit=String(srcMat.unit||srcMat.unidad||'ud').trim() || 'ud';
+    const key=matType+'|'+LDH_copyNorm(fam)+'|'+LDH_copyNorm(name);
+    const existing=dupMap.get(key);
+    if(!copiedByType[matType]) copiedByType[matType] = [];
+    if(!copiedByType[matType].includes(famKey)) copiedByType[matType].push(famKey);
+    const matOrderKey = matType + '|' + famKey;
+    if(!copiedMaterialOrders[matOrderKey]) copiedMaterialOrders[matOrderKey] = [];
+
+    if(existing){
+      if(updateExisting){
+        existing.m.type=matType; existing.m.tipo=matType; existing.m.stockType=matType;
+        existing.m.family=fam; existing.m.unit=unit;
+        existing.st.type=matType; existing.st.tipo=matType; existing.st.stockType=matType;
+        existing.st.familyOrder = (copiedByType[matType].indexOf(famKey)+1)*1000;
+        existing.m.familyOrder = existing.st.familyOrder;
+        existing.st.materialOrder = (copiedMaterialOrders[matOrderKey].length+1)*1000;
+        existing.m.materialOrder = existing.st.materialOrder;
+        if(keepMin) existing.st.min=Number(srcStock.min||0);
+        if(keepLocation) existing.st.location=String(srcStock.location||'');
+        copiedMaterialOrders[matOrderKey].push(existing.st.id);
+        updated++;
+      }else{
+        skipped++;
+      }
+      return;
+    }
+
+    const newMatId=uid('mat');
+    const newStockId=uid('st');
+    const q=copyQty ? Number(
+      srcStock.physicalQty ?? srcStock.qtyPhysical ?? srcStock.fisico ?? srcStock.realQty ??
+      srcStock.stockFisico ?? srcStock.stockReal ?? srcStock.stockActual ?? srcStock.existencias ??
+      srcStock.actualQty ?? srcStock.qty ?? srcStock.cantidad ?? 0
+    ) : 0;
+
+    const familyOrder = (copiedByType[matType].indexOf(famKey)+1)*1000;
+    const materialOrder = (copiedMaterialOrders[matOrderKey].length+1)*1000;
+
+    db.materials.push({
+      id:newMatId,
+      name,
+      type:matType,
+      tipo:matType,
+      stockType:matType,
+      family:fam,
+      unit,
+      familyOrder,
+      familyOrderKey:famKey,
+      materialOrder,
+      materialOrderKey:famKey,
+      createdFromCatalogCopy:true,
+      copiedFromCompanyId:source,
+      copiedFromMaterialId:srcMat.id,
+      createdAt:nowVal,
+      updatedAt:nowVal,
+      manualStockOnly:true
+    });
+
+    db.stock.push({
+      id:newStockId,
+      companyId:activeCompany,
+      materialId:newMatId,
+      type:matType,
+      tipo:matType,
+      stockType:matType,
+      familyOrder,
+      familyOrderKey:famKey,
+      materialOrder,
+      materialOrderKey:famKey,
+      min:keepMin ? Number(srcStock.min||0) : 0,
+      location:keepLocation ? String(srcStock.location||'') : '',
+      createdFromCatalogCopy:true,
+      copiedFromCompanyId:source,
+      copiedFromStockId:srcStock.id,
+      createdAt:nowVal,
+      updatedAt:nowVal,
+      physicalQty:q,
+      qtyPhysical:q,
+      fisico:q,
+      realQty:q,
+      stockFisico:q,
+      stockReal:q,
+      stockActual:q,
+      existencias:q,
+      actualQty:q,
+      qty:q,
+      cantidad:q,
+      physicalManualMaster:true,
+      physicalSource:copyQty?'catalog_copy_qty':'catalog_copy_zero',
+      physicalUpdatedAt:nowVal
+    });
+    newIdsBySource[String(srcStock.id||srcMat.id||idx)] = newStockId;
+    copiedMaterialOrders[matOrderKey].push(newStockId);
+    try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany,newMatId); }catch(e){}
+    try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(newMatId, activeCompany); }catch(e){}
+    created++;
+  });
+
+  if(!created && !updated && skipped){
+    alert('No se ha copiado nada: ya existían todos los materiales en la empresa destino.');
+    return;
+  }
+
+  // Copiar orden de familias del origen al destino, filtrando solo lo copiado.
+  Object.keys(copiedByType).forEach(matType=>{
+    const sourceOrder = LDH_readFamilyOrderFor(source, matType);
+    const selected = copiedByType[matType] || [];
+    let finalOrder = sourceOrder.length ? sourceOrder.filter(f=>selected.includes(familyKey(f))) : selected;
+    selected.forEach(f=>{ if(!finalOrder.includes(f)) finalOrder.push(f); });
+    LDH_writeFamilyOrderFor(activeCompany, matType, finalOrder);
+  });
+
+  // Copiar orden de materiales por familia.
+  Object.keys(copiedMaterialOrders).forEach(k=>{
+    const [matType, famKey] = k.split('|');
+    const famName = rows.map(x=>String(x.mat.family||x.mat.familia||x.mat.grp||'Sin familia').trim() || 'Sin familia').find(f=>familyKey(f)===famKey) || famKey;
+    LDH_writeMaterialOrderFor(activeCompany, matType, famName, copiedMaterialOrders[k]);
+  });
+
+  db.updatedAt=now();
+  localStorage.setItem(KEY, JSON.stringify(db));
+  try{ (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).forEach(st=>{ try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){} }); }catch(e){}
+  try{ if(typeof window.__ldhMarkLocalDirty==='function') window.__ldhMarkLocalDirty('stock:copiar_catalogo_persistente_ordenado'); }catch(e){}
+  try{ save(); }catch(e){}
+  try{
+    // Proteger las fichas copiadas contra restauraciones remotas antiguas.
+    (db.stock||[]).filter(st=>String(st.companyId)===String(activeCompany) && st.createdFromCatalogCopy).slice(-Math.max(50, created+updated+5)).forEach(st=>{
+      try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(st.materialId, activeCompany); }catch(e){}
+    });
+  }catch(e){}
+  try{
+    if(typeof window.__ldhStockSyncNow==='function'){
+      setTimeout(()=>window.__ldhStockSyncNow(true), 800);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 3000);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 8000);
+      setTimeout(()=>window.__ldhStockSyncNow(true), 20000);
+    }
+  }catch(e){}
+  closeModal();
+  setType(type==='all'?activeType:type);
+  render();
+  alert('Copia terminada. Creados: '+created+' · Actualizados: '+updated+' · Omitidos por duplicado: '+skipped);
 }
 
 function materialOptions(selected){return db.stock.filter(s=>s.companyId===activeCompany).map(s=>materialById(s.materialId)).filter(m=>m&&m.type===activeType).map(m=>`<option value="${m.id}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}
@@ -4484,7 +4454,7 @@ function saveEditMaterial(materialId){
   }
 
   db.updatedAt = now();
-  LDH_safePersistStockDB('direct_set');
+  localStorage.setItem(KEY, JSON.stringify(db));
   try{ if(typeof LDH_unmarkDeletedStockItem==='function') LDH_unmarkDeletedStockItem(activeCompany, materialId); }catch(e){}
   try{ if(typeof LDH_protectManualStockMaterial==='function') LDH_protectManualStockMaterial(materialId, activeCompany); }catch(e){}
 
@@ -6709,10 +6679,10 @@ function LDH_closeMaintenanceModal(){
     if(!raw || String(raw).length < 20) return false;
     const db = parseJSON(raw, null);
     if(!db) return false;
-    return (Array.isArray(db.materials) && db.materials.length > 0) ||
-           (Array.isArray(db.stock) && db.stock.length > 0) ||
-           (Array.isArray(db.movements) && db.movements.length > 0) ||
-           (Array.isArray(db.companies) && db.companies.length > 0);
+    // PROTECCION: no considerar valido un Stock que solo tenga empresas o movimientos.
+    // Eso evita subir a Firebase una foto vacia que borre todos los materiales.
+    return (Array.isArray(db.materials) && db.materials.length > 0) &&
+           (Array.isArray(db.stock) && db.stock.length > 0);
   }
 
   function stockUpdatedAt(all){
@@ -8391,27 +8361,70 @@ console.log("✅ LDH Stock v24: mismo diseño anterior conectado a gestion-talle
 <script>console.log("✅ LDH STOCK MATERIALES ORDEN COMO FAMILIAS V14");</script>
 <script>console.log("✅ LDH STOCK COPIA CATALOGO PERSISTENTE ORDEN V15");</script>
 <script>console.log("✅ LDH STOCK V16 PERSISTENCIA EDICION COPIA");</script>
-<script>console.log("✅ LDH STOCK COPIA CATALOGO SIMPLE V22");</script>
-<script>console.log("✅ LDH STOCK COPIA CATALOGO V23 COMPACTA CUOTA");</script>
 
-<script id="LDH_QUOTA_NO_PROTECCION_PESADA_COPIAS_V24">
+<script id="LDH_RECUPERACION_STOCK_V25_NO_SUBIR_VACIO">
 (function(){
-  const oldProtect = window.LDH_protectManualStockMaterial;
-  window.LDH_protectManualStockMaterial = function(materialId, companyId){
+  const KEY = 'ldh_v2_company_stock_v1';
+  function parse(raw, fb){ try{return JSON.parse(raw||'');}catch(e){return fb;} }
+  function localStockCount(){
+    const d = parse(localStorage.getItem(KEY), null);
+    if(!d) return {materials:0, stock:0, companies:0};
+    return {
+      materials: Array.isArray(d.materials)?d.materials.length:0,
+      stock: Array.isArray(d.stock)?d.stock.length:0,
+      companies: Array.isArray(d.companies)?d.companies.length:0
+    };
+  }
+  function isEmptyStock(){
+    const c = localStockCount();
+    return c.materials === 0 || c.stock === 0;
+  }
+  async function recoverFromFirestore(){
+    if(!isEmptyStock()){
+      alert('El Stock local no está vacío. Materiales: '+localStockCount().materials+' · filas: '+localStockCount().stock);
+      return;
+    }
+    if(typeof window.__ldhStockRestoreNow !== 'function'){
+      alert('La restauración desde Firebase aún no está lista. Espera 5 segundos y vuelve a probar.');
+      return;
+    }
     try{
-      const m = (db.materials||[]).find(x=>String(x.id)===String(materialId));
-      if(m && m.createdFromCatalogCopy){
-        // No duplicar catálogo copiado en localStorage: llena la cuota.
-        return;
+      const res = await window.__ldhStockRestoreNow();
+      console.log('Resultado recuperación Stock', res);
+      const c = localStockCount();
+      if(c.materials > 0 && c.stock > 0){
+        alert('Stock recuperado desde Firebase. Se recargará la página.');
+        location.reload();
+      }else{
+        alert('Firebase también devuelve el Stock vacío. No hagas más cambios. Hay que recuperar desde otro PC/tablet donde aún se vea el Stock.');
       }
-    }catch(e){}
-    if(typeof oldProtect === 'function') return oldProtect.apply(this, arguments);
-  };
-  try{ localStorage.removeItem('LDH_STOCK_PROTECTED_MANUAL_V1'); }catch(e){}
-  console.log('✅ LDH cuota v24: sin protección pesada para copias de catálogo');
+    }catch(e){
+      console.error(e);
+      alert('Error recuperando desde Firebase: '+(e && (e.message || e.code || e)));
+    }
+  }
+  window.LDH_RECUPERAR_STOCK_DESDE_FIREBASE = recoverFromFirestore;
+
+  // Añadir botón de recuperación solo si detecta Stock vacío.
+  function addRecoveryButton(){
+    if(!isEmptyStock()) return;
+    if(document.getElementById('ldhRecoverStockBtn')) return;
+    const btn=document.createElement('button');
+    btn.id='ldhRecoverStockBtn';
+    btn.className='btn';
+    btn.style.cssText='width:100%;justify-content:center;margin-bottom:8px;background:#7f1d1d;border-color:#ef4444';
+    btn.textContent='Recuperar Stock nube';
+    btn.onclick=recoverFromFirestore;
+    const anchor=Array.from(document.querySelectorAll('button')).find(b=>String(b.textContent||'').includes('+ Material'));
+    if(anchor) anchor.insertAdjacentElement('beforebegin', btn);
+  }
+  setTimeout(addRecoveryButton,1000);
+  setTimeout(addRecoveryButton,3000);
+
+  console.log('✅ LDH recuperación Stock v25 activa: no subir vacío + botón recuperar');
 })();
 </script>
 
-<script>console.log("✅ LDH STOCK V24 CUOTA SIN BUCLE");</script>
+<script>console.log("✅ LDH STOCK V25 RECUPERACION NO VACIO");</script>
 </body>
 </html>
