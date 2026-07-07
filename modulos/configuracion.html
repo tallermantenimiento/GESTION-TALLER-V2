@@ -4303,16 +4303,101 @@ _uaPill(item){
     _cfgStockLastGroupKey: '',
 
     _loadStockForConfig() {
-      // Intenta leer Stock desde el mismo storage que usan las tablets (taller_stock_v3_data)
-      try{
-        const raw = localStorage.getItem('taller_stock_v3_data');
-        if(!raw) return { ok:false, materials:[] };
-        const db = JSON.parse(raw);
-        const mats = Array.isArray(db.materials) ? db.materials : [];
-        return { ok:true, materials:mats };
-      }catch(e){
-        return { ok:false, materials:[] };
+      // Configuración es GENERAL: no filtra por empresa.
+      // Lee el Stock real nuevo y muestra un catálogo único por material.
+      // La empresa se resuelve después en Cálculo / Preparación.
+      const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\s+/g,' ').trim();
+      const nice = (v)=>String(v||'').trim();
+
+      const parse = (key)=>{
+        try{
+          const raw = localStorage.getItem(key);
+          if(!raw) return null;
+          const db = JSON.parse(raw);
+          if(!db || typeof db !== 'object') return null;
+          return db;
+        }catch(e){ return null; }
+      };
+
+      const db = parse('ldh_v2_company_stock_v1') || parse('taller_stock_v3_data');
+      if(!db) return { ok:false, materials:[], source:'sin stock' };
+
+      const rawMaterials = Array.isArray(db.materials) ? db.materials : [];
+      const rawStock = Array.isArray(db.stock) ? db.stock : [];
+
+      const byId = new Map();
+      rawMaterials.forEach((m,i)=>{
+        if(!m) return;
+        const id = nice(m.id || m.materialId || m.matId || ('mat_'+i));
+        if(!id) return;
+        byId.set(id, m);
+      });
+
+      const out = [];
+      const seen = new Map();
+
+      const pushMat = (mat, stockRow, idx)=>{
+        mat = mat || {};
+        stockRow = stockRow || {};
+        const id = nice(mat.id || stockRow.materialId || stockRow.matId || stockRow.id || ('mat_'+idx));
+        const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
+        if(!name) return;
+
+        const tipoRaw = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || '');
+        const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
+        const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || 'und');
+
+        let cat = tipoRaw;
+        const t = norm(tipoRaw + ' ' + family + ' ' + name);
+        if(!cat){
+          if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente')) cat = 'Pintura';
+          else cat = 'Hierro';
+        }else{
+          cat = /pint/i.test(cat) ? 'Pintura' : (/hierro|metal|perfil|chapa|pletina|angulo|tubo|pds/i.test(cat) ? 'Hierro' : cat);
+        }
+
+        const key = [norm(cat), norm(family), norm(name), norm(unit)].join('|');
+        if(seen.has(key)){
+          const ex = seen.get(key);
+          if(id && !ex.aliasIds.includes(id)) ex.aliasIds.push(id);
+          return;
+        }
+
+        const item = {
+          id,
+          name,
+          cat,
+          grp: family,
+          family,
+          type: cat,
+          unit,
+          sourceOrder: Number(stockRow.order ?? mat.order ?? idx) || idx,
+          familyOrder: Number(stockRow.familyOrder ?? mat.familyOrder ?? idx) || idx,
+          aliasIds: id ? [id] : [],
+          stockKey: key
+        };
+        seen.set(key, item);
+        out.push(item);
+      };
+
+      if(rawStock.length){
+        rawStock.forEach((sr,i)=>{
+          const mat = byId.get(nice(sr.materialId || sr.matId || sr.id)) || {};
+          pushMat(mat, sr, i);
+        });
       }
+
+      rawMaterials.forEach((m,i)=>pushMat(m, null, rawStock.length + i));
+
+      out.sort((a,b)=>
+        (Number(a.familyOrder)||0) - (Number(b.familyOrder)||0) ||
+        nice(a.cat).localeCompare(nice(b.cat),'es') ||
+        nice(a.grp).localeCompare(nice(b.grp),'es') ||
+        (Number(a.sourceOrder)||0) - (Number(b.sourceOrder)||0) ||
+        nice(a.name).localeCompare(nice(b.name),'es')
+      );
+
+      return { ok: out.length>0, materials: out, source: localStorage.getItem('ldh_v2_company_stock_v1') ? 'ldh_v2_company_stock_v1' : 'taller_stock_v3_data' };
     },
 
     _decorateCfgRowStockPill(tr){
@@ -4322,7 +4407,7 @@ _uaPill(item){
       if(!matId){ pill.innerHTML = 'Sin vínculo a Stock'; pill.style.opacity = '.8'; return; }
 
       const { ok, materials } = this._loadStockForConfig();
-      const mat = ok ? materials.find(m => m && m.id === matId) : null;
+      const mat = ok ? materials.find(m => m && (m.id === matId || (Array.isArray(m.aliasIds) && m.aliasIds.includes(matId)))) : null;
       if(mat){
         pill.innerHTML = `Vinculado: <b>${mat.name}</b> <span style="opacity:.8">(${mat.cat || ''}${mat.grp ? ' · '+mat.grp : ''})</span>`;
       }else{
@@ -4380,7 +4465,7 @@ _uaPill(item){
       const arr = (st.materials || []).slice();
 
       const filtered = q ? arr.filter(m => {
-        const t = `${m.name||''} ${m.cat||''} ${m.grp||''}`.toLowerCase();
+        const t = `${m.name||''} ${m.cat||''} ${m.grp||''} ${m.unit||''} ${(m.aliasIds||[]).join(' ')}`.toLowerCase();
         return t.includes(q);
       }) : arr;
 
@@ -4458,7 +4543,7 @@ _uaPill(item){
       if(!row) return;
 
       const st = this._loadStockForConfig();
-      const mat = (st.materials || []).find(m => m && m.id === matId);
+      const mat = (st.materials || []).find(m => m && (m.id === matId || (Array.isArray(m.aliasIds) && m.aliasIds.includes(matId))));
       if(!mat){
         alert('No se encontró el material en el Stock local.');
         return;
@@ -6201,7 +6286,7 @@ window.CarpetaPicker = (function(){
     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
       <div>
         <div style="font-weight:800; font-size:16px;">Seleccionar material del Stock</div>
-        <div style="font-size:12px; opacity:.8; margin-top:2px;">Esto rellenará el nombre del material con el nombre exacto de la ficha de Stock (negro/galva incluidos).</div>
+        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vincula el concepto a una ficha general del Stock real. La empresa concreta se decide en Cálculo y Preparación consume el stock de esa empresa.</div>
       </div>
       <button class="btn btn-ghost" onclick="App.closeCfgStockModal()">✕</button>
     </div>
@@ -6211,7 +6296,7 @@ window.CarpetaPicker = (function(){
       <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>
     </div>
 
-    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">No se ha encontrado la base de datos de Stock en este dispositivo (localStorage: <b>taller_stock_v3_data</b>).</div>
+    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">No se ha encontrado el Stock real en este dispositivo (localStorage: <b>ldh_v2_company_stock_v1</b>). Abre Stock una vez para cargarlo/sincronizarlo.</div>
 
     <div id="cfgStockResults" style="margin-top:12px; max-height:58vh; overflow:auto; border:1px solid rgba(0,0,0,.08); border-radius:12px;"></div>
 
