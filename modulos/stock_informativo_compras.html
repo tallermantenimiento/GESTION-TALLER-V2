@@ -82,6 +82,43 @@ let unsubMeta = null;
 let unsubMaterials = null;
 let lastSource = '';
 
+let openAccState = new Set();
+
+function accKeyFromDetails(d){
+  const summary = d ? d.querySelector('summary') : null;
+  return d?.dataset?.accKey || (summary ? summary.textContent.trim() : '');
+}
+function rememberOpenAccordions(){
+  try{
+    openAccState = new Set(
+      Array.from(document.querySelectorAll('#content details.acc[open]'))
+        .map(accKeyFromDetails)
+        .filter(Boolean)
+    );
+  }catch(e){}
+}
+function isAccOpen(key){
+  return openAccState.has(key);
+}
+function setAccListeners(){
+  try{
+    document.querySelectorAll('#content details.acc').forEach(d=>{
+      d.addEventListener('toggle', ()=>{
+        const k = accKeyFromDetails(d);
+        if(!k) return;
+        if(d.open) openAccState.add(k);
+        else openAccState.delete(k);
+      });
+    });
+  }catch(e){}
+}
+let loadTimer = null;
+function scheduleLoadAll(){
+  clearTimeout(loadTimer);
+  loadTimer = setTimeout(loadAll, 180);
+}
+
+
 function setStatus(txt, ok){
   $('conn').textContent = txt;
   $('conn').className = 'pill ' + (ok ? 'ok' : 'warn');
@@ -231,7 +268,7 @@ async function loadAll(){
 
 function renderCompanies(){
   $('companies').innerHTML = companies.map(c=>`<button class="${c.id===activeCompany?'active':''}" data-company="${esc(c.id)}">${esc(c.name)}</button>`).join('');
-  document.querySelectorAll('[data-company]').forEach(b=>b.onclick=()=>{ activeCompany=b.dataset.company; render(); });
+  document.querySelectorAll('[data-company]').forEach(b=>b.onclick=()=>{ activeCompany=b.dataset.company; openAccState.clear(); render(); });
 }
 
 function filteredRows(){
@@ -252,21 +289,27 @@ function groupBy(arr, fn){
 }
 
 function render(){
+  rememberOpenAccordions();
   renderCompanies();
   const all = filteredRows();
   let html = `<div class="sectionTitle"><span>${esc(companyName(activeCompany))}</span><span>${all.length} materiales visibles</span></div>`;
   html += typeHTML('Hierro', all.filter(x=>x.type==='hierro'));
   html += typeHTML('Pintura', all.filter(x=>x.type==='pintura'));
   $('content').innerHTML = html;
+  setAccListeners();
 }
 
 function typeHTML(title, arr){
   const fams = groupBy(arr, x=>s(x.family)||'Sin familia');
-  return `<details class="acc"><summary><span class="typeName">▸ ${title}</span><span class="materialCount">${arr.length} materiales · ${fams.length} familias</span></summary><div class="accBody">${arr.length ? fams.map(familyHTML).join('') : '<div class="empty">Sin materiales</div>'}</div></details>`;
+  const key = 'type:' + title;
+  const open = isAccOpen(key) ? ' open' : '';
+  return `<details class="acc" data-acc-key="${esc(key)}"${open}><summary><span class="typeName">▸ ${title}</span><span class="materialCount">${arr.length} materiales · ${fams.length} familias</span></summary><div class="accBody">${arr.length ? fams.map(familyHTML).join('') : '<div class="empty">Sin materiales</div>'}</div></details>`;
 }
 
 function familyHTML(f){
-  return `<details class="acc"><summary><span class="familyName">▸ ${esc(f.name)}</span><span class="materialCount">${f.items.length} materiales</span></summary><div class="accBody"><div class="grid">${f.items.map(cardHTML).join('')}</div></div></details>`;
+  const key = 'family:' + activeCompany + ':' + s(f.name);
+  const open = isAccOpen(key) ? ' open' : '';
+  return `<details class="acc" data-acc-key="${esc(key)}"${open}><summary><span class="familyName">▸ ${esc(f.name)}</span><span class="materialCount">${f.items.length} materiales</span></summary><div class="accBody"><div class="grid">${f.items.map(cardHTML).join('')}</div></div></details>`;
 }
 
 function cardHTML(m){
@@ -278,8 +321,8 @@ function cardHTML(m){
 function startWatch(){
   if(unsubMeta) unsubMeta();
   if(unsubMaterials) unsubMaterials();
-  unsubMeta = onSnapshot(doc(db,...STOCK_META), ()=>loadAll(), err=>console.error('meta stock',err));
-  unsubMaterials = onSnapshot(collection(db,'stock_materials'), ()=>loadAll(), err=>console.warn('stock_materials listener',err));
+  unsubMeta = onSnapshot(doc(db,...STOCK_META), ()=>scheduleLoadAll(), err=>console.error('meta stock',err));
+  unsubMaterials = onSnapshot(collection(db,'stock_materials'), ()=>scheduleLoadAll(), err=>console.warn('stock_materials listener',err));
 }
 
 ['search','typeFilter','stockFilter'].forEach(id=>$(id).addEventListener('input',render));
