@@ -81,6 +81,7 @@ let activeCompany = '';
 let unsubMeta = null;
 let unsubMaterials = null;
 let lastSource = '';
+let sourceStats = {package:null,materials:null,direct:null};
 
 let openAccState = new Set();
 
@@ -225,27 +226,99 @@ function normalizeMaterialCollection(docs){
 }
 
 async function readChunkPackage(){
+  sourceStats.package = null;
   const metaSnap = await getDoc(doc(db,...STOCK_META));
-  if(!metaSnap.exists()) return [];
+  if(!metaSnap.exists()){
+    sourceStats.package = {exists:false, totalChunks:0, rawCompanies:0, rawMaterials:0, rawStock:0, rows:0};
+    return [];
+  }
   const meta = metaSnap.data() || {};
   const total = n(meta.totalChunks);
-  if(!total) return [];
+  if(!total){
+    sourceStats.package = {exists:true, totalChunks:0, rawCompanies:0, rawMaterials:0, rawStock:0, rows:0};
+    return [];
+  }
   let json = '';
   for(let i=0;i<total;i++){
     const cs = await getDoc(doc(db,...STOCK_META,'chunks',String(i)));
-    if(cs.exists()) json += cs.data().part || '';
+    if(cs.exists()) json += cs.data().part || cs.data().data || cs.data().text || '';
   }
   const all = JSON.parse(json || '{}');
   const raw = all[STOCK_KEY];
-  if(!raw) return [];
-  return normalizePackage(JSON.parse(raw));
+  if(!raw){
+    sourceStats.package = {exists:true, totalChunks:total, rawCompanies:0, rawMaterials:0, rawStock:0, rows:0};
+    return [];
+  }
+  const parsed = JSON.parse(raw);
+  const normalized = normalizePackage(parsed);
+  sourceStats.package = {
+    exists:true,
+    totalChunks:total,
+    rawCompanies:Array.isArray(parsed.companies) ? parsed.companies.length : 0,
+    rawMaterials:Array.isArray(parsed.materials) ? parsed.materials.length : 0,
+    rawStock:Array.isArray(parsed.stock) ? parsed.stock.length : 0,
+    rows:normalized.length,
+    updatedAt: parsed.updatedAt || meta.updatedAt || meta.savedAt || ''
+  };
+  return normalized;
 }
 
 async function readMaterialCollection(){
+  sourceStats.materials = null;
   const snap = await getDocs(collection(db,'stock_materials'));
   const docs = snap.docs.map(d=>({id:d.id,...d.data()}));
-  return normalizeMaterialCollection(docs);
+  const normalized = normalizeMaterialCollection(docs);
+  sourceStats.materials = {docs:docs.length, rows:normalized.length};
+  return normalized;
 }
+
+async function readDirectStockDoc(){
+  sourceStats.direct = null;
+  try{
+    const snap = await getDoc(doc(db,...STOCK_META));
+    if(!snap.exists()){
+      sourceStats.direct = {exists:false, rows:0};
+      return [];
+    }
+    const d = snap.data() || {};
+    const candidates = [
+      d[STOCK_KEY],
+      d.payload,
+      d.data,
+      d.json,
+      d.stock,
+      d.db,
+      d.state
+    ].filter(Boolean);
+
+    for(const val of candidates){
+      let parsed = val;
+      if(typeof parsed === 'string'){
+        try{ parsed = JSON.parse(parsed); }catch(e){ continue; }
+      }
+      if(parsed && parsed[STOCK_KEY] && typeof parsed[STOCK_KEY] === 'string'){
+        try{ parsed = JSON.parse(parsed[STOCK_KEY]); }catch(e){}
+      }
+      if(parsed && typeof parsed === 'object' && (Array.isArray(parsed.stock) || Array.isArray(parsed.materials))){
+        const normalized = normalizePackage(parsed);
+        sourceStats.direct = {
+          exists:true,
+          rawCompanies:Array.isArray(parsed.companies) ? parsed.companies.length : 0,
+          rawMaterials:Array.isArray(parsed.materials) ? parsed.materials.length : 0,
+          rawStock:Array.isArray(parsed.stock) ? parsed.stock.length : 0,
+          rows:normalized.length
+        };
+        return normalized;
+      }
+    }
+    sourceStats.direct = {exists:true, rows:0};
+    return [];
+  }catch(e){
+    sourceStats.direct = {error:String(e && (e.code || e.message || e)), rows:0};
+    return [];
+  }
+}
+
 
 function mergeRowsPreferPackage(fromPackage, fromDocs){
   const out = [];
@@ -280,17 +353,31 @@ async function loadAll(){
   try{
     const fromPackage = await readChunkPackage();
     let fromDocs = [];
-    try { fromDocs = await readMaterialCollection(); } catch(e) { console.warn('stock_materials no disponible o vacio', e); }
-    // Usamos el paquete del Stock y completamos con stock_materials si el paquete está incompleto.
-    // Así la pantalla informativa no se queda con familias antiguas/incompletas.
-    rows = mergeRowsPreferPackage(fromPackage, fromDocs);
-    lastSource = fromPackage.length && fromDocs.length
-      ? 'paquete taller_data/stock + stock_materials'
-      : (fromPackage.length ? 'paquete taller_data/stock' : (fromDocs.length ? 'stock_materials' : 'sin datos'));
+    let fromDirect = [];
+    try { fromDocs = await readMaterialCollection(); } catch(e) { console.warn('stock_materials no disponible o vacio', e); sourceStats.materials = {error:String(e && (e.code || e.message || e)), docs:0, rows:0}; }
+    try { fromDirect = await readDirectStockDoc(); } catch(e) { console.warn('lectura directa no disponible', e); }
+    // Unimos todas las fuentes legibles de Firestore sin duplicar.
+    rows = mergeRowsPreferPackage(mergeRowsPreferPackage(fromPackage, fromDirect), fromDocs);
+    lastSource = [
+      fromPackage.length ? 'paquete taller_data/stock' : '',
+      fromDirect.length ? 'doc directo' : '',
+      fromDocs.length ? 'stock_materials' : ''
+    ].filter(Boolean).join(' + ') || 'sin datos';
     if(!activeCompany || !companies.some(c=>c.id===activeCompany)) activeCompany = companies[0]?.id || '';
     render();
     $('last').textContent = 'Última actualización: ' + dateShort();
-    $('debug').textContent = 'Fuente: ' + lastSource + ' · empresas: ' + companies.length + ' · materiales: ' + rows.length;
+    const p = sourceStats.package || {};
+    const d = sourceStats.direct || {};
+    const sm = sourceStats.materials || {};
+    $('debug').textContent =
+      'Fuente: ' + lastSource +
+      ' · empresas: ' + companies.length +
+      ' · visibles normalizados: ' + rows.length +
+      ' · paquete raw stock: ' + (p.rawStock ?? 0) +
+      ' / raw materiales: ' + (p.rawMaterials ?? 0) +
+      ' / chunks: ' + (p.totalChunks ?? 0) +
+      ' · directo raw stock: ' + (d.rawStock ?? 0) +
+      ' · stock_materials docs: ' + (sm.docs ?? 0);
   }catch(e){
     console.error(e);
     $('content').innerHTML = '<div class="empty">No se pudo leer el stock. Revisa consola, login o reglas.</div>';
