@@ -4304,7 +4304,8 @@ _uaPill(item){
 
     _loadStockForConfig() {
       // Configuración es GENERAL: no filtra por empresa.
-      // Lee el Stock real nuevo y muestra el catálogo de fichas.
+      // Muestra un catálogo limpio: un solo material por nombre/familia/unidad.
+      // Internamente conserva aliasIds para reconocer vínculos antiguos de cualquier empresa.
       // La empresa concreta se decide después en Cálculo / Preparación.
       const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\s+/g,' ').trim();
       const nice = (v)=>String(v||'').trim();
@@ -4334,7 +4335,7 @@ _uaPill(item){
       });
 
       const out = [];
-      const seenIds = new Set();
+      const byKey = new Map();
 
       const classify = (mat, stockRow)=>{
         mat = mat || {}; stockRow = stockRow || {};
@@ -4356,16 +4357,28 @@ _uaPill(item){
         const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
         if(!name) return;
 
-        // No deduplicar por nombre/familia: en Stock puede haber fichas distintas con nombres parecidos
-        // y Configuración debe poder vincular a la ficha real.
-        if(id && seenIds.has(id)) return;
-        if(id) seenIds.add(id);
-
         const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
         const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || 'und');
         const cat = classify(mat, stockRow);
 
-        out.push({
+        // Catálogo limpio: una sola ficha visible por material general.
+        // La clave NO incluye empresa ni ID para evitar duplicados visuales.
+        const key = [norm(cat), norm(family), norm(name), norm(unit)].join('|');
+        const sourceOrder = Number(stockRow.order ?? mat.order ?? idx) || idx;
+        const familyOrder = Number(stockRow.familyOrder ?? mat.familyOrder ?? idx) || idx;
+        const companyId = nice(stockRow.companyId || mat.companyId || '');
+
+        if(byKey.has(key)){
+          const ex = byKey.get(key);
+          if(id && !ex.aliasIds.includes(id)) ex.aliasIds.push(id);
+          if(companyId && !ex.companyIds.includes(companyId)) ex.companyIds.push(companyId);
+          // Mantener el primer orden visual encontrado en Stock.
+          ex.sourceOrder = Math.min(Number(ex.sourceOrder)||0, sourceOrder);
+          ex.familyOrder = Math.min(Number(ex.familyOrder)||0, familyOrder);
+          return;
+        }
+
+        const item = {
           id,
           name,
           cat,
@@ -4373,12 +4386,14 @@ _uaPill(item){
           family,
           type: cat,
           unit,
-          sourceOrder: Number(stockRow.order ?? mat.order ?? idx) || idx,
-          familyOrder: Number(stockRow.familyOrder ?? mat.familyOrder ?? idx) || idx,
+          sourceOrder,
+          familyOrder,
           aliasIds: id ? [id] : [],
-          companyId: nice(stockRow.companyId || mat.companyId || ''),
-          stockKey: [norm(cat), norm(family), norm(name), norm(unit), norm(id)].join('|')
-        });
+          companyIds: companyId ? [companyId] : [],
+          stockKey: key
+        };
+        byKey.set(key, item);
+        out.push(item);
       };
 
       // Primero recorremos stock para respetar el orden visual publicado.
@@ -4429,7 +4444,7 @@ _uaPill(item){
       const st = this._loadStockForConfig();
       warn.style.display = st.ok ? 'none' : 'block';
       const info = document.getElementById('cfgStockInfo');
-      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + (st.materials||[]).length + ' fichas · ' + (st.source||'')) : '';
+      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + (st.materials||[]).length + ' materiales únicos · ' + (st.source||'')) : '';
       search.value = '';
 
       // Si ya venías asignando, mantenemos el último grupo abierto.
@@ -4469,7 +4484,7 @@ _uaPill(item){
       const st = this._loadStockForConfig();
       const arr = (st.materials || []).slice();
       const info = document.getElementById('cfgStockInfo');
-      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + arr.length + ' fichas · ' + (st.source||'')) : '';
+      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + arr.length + ' materiales únicos · ' + (st.source||'')) : '';
 
       const filtered = q ? arr.filter(m => {
         const t = `${m.name||''} ${m.cat||''} ${m.grp||''} ${m.unit||''} ${m.id||''} ${m.companyId||''} ${(m.aliasIds||[]).join(' ')}`.toLowerCase();
@@ -4521,7 +4536,7 @@ _uaPill(item){
         <div style="padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.06); cursor:pointer;" onclick="App.selectCfgStockMat('${m.id}')">
           <div style="font-weight:900; color:#e6edf7;">${m.name || ''}</div>
           <div style="font-size:12px; opacity:.8; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
-            <span>${norm(m.cat)}${m.grp ? ' · ' + norm(m.grp) : ''}</span>
+            <span>${norm(m.cat)}${m.grp ? ' · ' + norm(m.grp) : ''}${Array.isArray(m.companyIds) && m.companyIds.length>1 ? ' · ' + m.companyIds.length + ' empresas' : ''}</span>
             <span style="opacity:.85;">${m.unit || ''}</span>
           </div>
         </div>
