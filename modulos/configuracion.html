@@ -4304,8 +4304,8 @@ _uaPill(item){
 
     _loadStockForConfig() {
       // Configuración es GENERAL: no filtra por empresa.
-      // Lee el Stock real nuevo y muestra un catálogo único por material.
-      // La empresa se resuelve después en Cálculo / Preparación.
+      // Lee el Stock real nuevo y muestra el catálogo de fichas.
+      // La empresa concreta se decide después en Cálculo / Preparación.
       const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\s+/g,' ').trim();
       const nice = (v)=>String(v||'').trim();
 
@@ -4334,7 +4334,20 @@ _uaPill(item){
       });
 
       const out = [];
-      const seen = new Map();
+      const seenIds = new Set();
+
+      const classify = (mat, stockRow)=>{
+        mat = mat || {}; stockRow = stockRow || {};
+        const tipoRaw = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || '');
+        const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
+        const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
+        const t = norm(tipoRaw + ' ' + family + ' ' + name);
+        if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente')) return 'Pintura';
+        if(tipoRaw){
+          return /pint/i.test(tipoRaw) ? 'Pintura' : 'Hierro';
+        }
+        return 'Hierro';
+      };
 
       const pushMat = (mat, stockRow, idx)=>{
         mat = mat || {};
@@ -4343,27 +4356,16 @@ _uaPill(item){
         const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
         if(!name) return;
 
-        const tipoRaw = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || '');
+        // No deduplicar por nombre/familia: en Stock puede haber fichas distintas con nombres parecidos
+        // y Configuración debe poder vincular a la ficha real.
+        if(id && seenIds.has(id)) return;
+        if(id) seenIds.add(id);
+
         const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
         const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || 'und');
+        const cat = classify(mat, stockRow);
 
-        let cat = tipoRaw;
-        const t = norm(tipoRaw + ' ' + family + ' ' + name);
-        if(!cat){
-          if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente')) cat = 'Pintura';
-          else cat = 'Hierro';
-        }else{
-          cat = /pint/i.test(cat) ? 'Pintura' : (/hierro|metal|perfil|chapa|pletina|angulo|tubo|pds/i.test(cat) ? 'Hierro' : cat);
-        }
-
-        const key = [norm(cat), norm(family), norm(name), norm(unit)].join('|');
-        if(seen.has(key)){
-          const ex = seen.get(key);
-          if(id && !ex.aliasIds.includes(id)) ex.aliasIds.push(id);
-          return;
-        }
-
-        const item = {
+        out.push({
           id,
           name,
           cat,
@@ -4374,12 +4376,12 @@ _uaPill(item){
           sourceOrder: Number(stockRow.order ?? mat.order ?? idx) || idx,
           familyOrder: Number(stockRow.familyOrder ?? mat.familyOrder ?? idx) || idx,
           aliasIds: id ? [id] : [],
-          stockKey: key
-        };
-        seen.set(key, item);
-        out.push(item);
+          companyId: nice(stockRow.companyId || mat.companyId || ''),
+          stockKey: [norm(cat), norm(family), norm(name), norm(unit), norm(id)].join('|')
+        });
       };
 
+      // Primero recorremos stock para respetar el orden visual publicado.
       if(rawStock.length){
         rawStock.forEach((sr,i)=>{
           const mat = byId.get(nice(sr.materialId || sr.matId || sr.id)) || {};
@@ -4387,6 +4389,7 @@ _uaPill(item){
         });
       }
 
+      // Después añadimos fichas maestras que no tengan línea de stock.
       rawMaterials.forEach((m,i)=>pushMat(m, null, rawStock.length + i));
 
       out.sort((a,b)=>
@@ -4425,6 +4428,8 @@ _uaPill(item){
 
       const st = this._loadStockForConfig();
       warn.style.display = st.ok ? 'none' : 'block';
+      const info = document.getElementById('cfgStockInfo');
+      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + (st.materials||[]).length + ' fichas · ' + (st.source||'')) : '';
       search.value = '';
 
       // Si ya venías asignando, mantenemos el último grupo abierto.
@@ -4463,9 +4468,11 @@ _uaPill(item){
 
       const st = this._loadStockForConfig();
       const arr = (st.materials || []).slice();
+      const info = document.getElementById('cfgStockInfo');
+      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + arr.length + ' fichas · ' + (st.source||'')) : '';
 
       const filtered = q ? arr.filter(m => {
-        const t = `${m.name||''} ${m.cat||''} ${m.grp||''} ${m.unit||''} ${(m.aliasIds||[]).join(' ')}`.toLowerCase();
+        const t = `${m.name||''} ${m.cat||''} ${m.grp||''} ${m.unit||''} ${m.id||''} ${m.companyId||''} ${(m.aliasIds||[]).join(' ')}`.toLowerCase();
         return t.includes(q);
       }) : arr;
 
@@ -6296,7 +6303,7 @@ window.CarpetaPicker = (function(){
       <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>
     </div>
 
-    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">No se ha encontrado el Stock real en este dispositivo (localStorage: <b>ldh_v2_company_stock_v1</b>). Abre Stock una vez para cargarlo/sincronizarlo.</div>
+    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">No se ha encontrado el Stock real en este dispositivo (localStorage: <b>ldh_v2_company_stock_v1</b>). Abre Stock una vez para cargarlo/sincronizarlo.</div>\n    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
 
     <div id="cfgStockResults" style="margin-top:12px; max-height:58vh; overflow:auto; border:1px solid rgba(0,0,0,.08); border-radius:12px;"></div>
 
