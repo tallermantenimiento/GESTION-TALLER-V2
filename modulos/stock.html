@@ -1279,6 +1279,30 @@ html, body{
   }
 </style>
 
+
+<style id="LDH_STOCK_FIRESTORE_PUBLICADOR_STATUS_1206">
+  #LDH_stockCloudStatus{
+    pointer-events:auto!important;
+    cursor:default!important;
+    border-radius:999px!important;
+  }
+  #LDH_stockCloudStatus.ok{
+    color:#bbf7d0!important;
+    border-color:rgba(34,197,94,.45)!important;
+    background:rgba(34,197,94,.10)!important;
+  }
+  #LDH_stockCloudStatus.warn{
+    color:#fde68a!important;
+    border-color:rgba(245,158,11,.45)!important;
+    background:rgba(245,158,11,.10)!important;
+  }
+  #LDH_stockCloudStatus.bad{
+    color:#fecaca!important;
+    border-color:rgba(239,68,68,.55)!important;
+    background:rgba(239,68,68,.14)!important;
+  }
+</style>
+
 </head>
 <body>
 <div class="app">
@@ -1292,7 +1316,7 @@ html, body{
 </div>
 </div>
     <div class="actions">
-      <span id="LDH_stockCloudStatus" class="pill warn">Stock nube: iniciando</span>
+      <span id="LDH_stockCloudStatus" class="btn small" title="Pendiente de conectar con Firestore">Stock nube pendiente</span>
       <button class="btn ldh-maint-btn" type="button" onclick="LDH_openMaintenanceModal()">Mantenimiento avanzado</button>
     </div>
     <button class="btn ldh-stock-menu-fixed" type="button" onclick="volverMenu()">← Menú</button>
@@ -1374,7 +1398,7 @@ function save(){
   db.updatedAt=now();
   localStorage.setItem(KEY,JSON.stringify(db));
   try{ LDH_publishCompanyMaster(); }catch(e){}
-  try{ if(typeof LDH_scheduleStockCloudPublish === 'function') LDH_scheduleStockCloudPublish(); }catch(e){}
+  try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(); }catch(e){}
 }
 
 function LDH_publishCompanyMaster(){
@@ -5421,195 +5445,191 @@ function LDH_closeMaintenanceModal(){
 </script>
 
 
-<script id="LDH_STOCK_FIRESTORE_PUBLISH_COMPLETO_1206">
-(function(){
-  const firebaseConfig = {
-    apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
-    authDomain: "gestion-taller-stock.firebaseapp.com",
-    projectId: "gestion-taller-stock",
-    storageBucket: "gestion-taller-stock.firebasestorage.app",
-    messagingSenderId: "164944519480",
-    appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
-  };
-  const STOCK_META_PATH = ['taller_data','stock'];
-  const STOCK_KEY_CLOUD = 'ldh_v2_company_stock_v1';
-  const CHUNK_SIZE = 850000;
-  let cloudDb = null;
-  let cloudReady = false;
-  let publishTimer = null;
-  let publishing = false;
-  let pendingAgain = false;
+<script type="module" id="LDH_STOCK_FIRESTORE_PUBLICADOR_COMPLETO_1206">
+const firebaseConfig = {
+  apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
+  authDomain: "gestion-taller-stock.firebaseapp.com",
+  projectId: "gestion-taller-stock",
+  storageBucket: "gestion-taller-stock.firebasestorage.app",
+  messagingSenderId: "164944519480",
+  appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
+};
 
-  function status(txt, cls){
-    try{
-      const el = document.getElementById('LDH_stockCloudStatus');
-      if(!el) return;
-      el.textContent = txt;
-      el.className = 'pill ' + (cls || 'warn');
-    }catch(e){}
-  }
-  function cleanForJSON(value){
-    try{ return JSON.parse(JSON.stringify(value || {})); }
-    catch(e){ return {}; }
-  }
-  function materialKey(m){
-    return String([
-      m && (m.name || m.nombre || m.material || ''),
-      m && (m.family || m.familia || m.grp || ''),
-      m && (m.type || m.tipo || m.stockType || ''),
-      m && (m.unit || m.unidad || '')
-    ].join('|')).toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/[^a-z0-9|]+/g,' ').trim();
-  }
-  function buildCloudPayload(){
-    const source = (typeof db !== 'undefined' && db) ? db : {};
-    const out = cleanForJSON(source);
-    out.version = out.version || '2.0-stock-empresa';
-    out.updatedAt = (typeof now === 'function') ? now() : new Date().toISOString();
-    out.cloudPublishedAt = new Date().toISOString();
-    out.companies = Array.isArray(out.companies) ? out.companies : [];
-    out.materials = Array.isArray(out.materials) ? out.materials : [];
-    out.stock = Array.isArray(out.stock) ? out.stock : [];
-    out.movements = Array.isArray(out.movements) ? out.movements : [];
-    out.jobs = Array.isArray(out.jobs) ? out.jobs : [];
-    out.reservations = Array.isArray(out.reservations) ? out.reservations : [];
-    out.assignments = Array.isArray(out.assignments) ? out.assignments : [];
-    out.reservationDebts = Array.isArray(out.reservationDebts) ? out.reservationDebts : [];
+const {initializeApp,getApps,getApp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+const {getFirestore,doc,setDoc,serverTimestamp,writeBatch} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
-    // Blindaje: si alguna fila de stock referencia un material que existe solo como datos embebidos,
-    // creamos/normalizamos una ficha maestra para que Compras pueda leer todas las familias.
-    const byId = new Map(out.materials.map(m => [String(m.id || ''), m]).filter(x => x[0]));
-    const byKey = new Map(out.materials.map(m => [materialKey(m), m]).filter(x => x[0]));
-    out.stock.forEach((s, i)=>{
-      const mid = String(s && (s.materialId || s.matId || '') || '');
-      if(mid && byId.has(mid)) return;
-      const name = String((s && (s.name || s.materialName || s.material || s.nombre)) || '').trim();
-      if(!name) return;
-      const stub = {
-        id: mid || ('mat_cloud_' + i + '_' + String(Date.now())),
-        name: name,
-        family: String((s && (s.family || s.familia || s.grp)) || 'Sin familia').trim() || 'Sin familia',
-        type: String((s && (s.type || s.tipo || s.stockType)) || 'hierro').trim() || 'hierro',
-        unit: String((s && (s.unit || s.unidad)) || 'und').trim() || 'und',
-        cloudRecovered:true
-      };
-      const k = materialKey(stub);
-      const existing = byKey.get(k);
-      if(existing){
-        s.materialId = existing.id;
+const fbApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
+const fbAuth = getAuth(fbApp);
+const fbDb = getFirestore(fbApp);
+
+const STOCK_KEY = 'ldh_v2_company_stock_v1';
+const META_PATH = ['taller_data','stock'];
+let publishTimer = null;
+let lastRawPublished = '';
+let authReady = false;
+
+function stEl(){ return document.getElementById('LDH_stockCloudStatus'); }
+function setCloudStatus(txt, cls, detail){
+  const el = stEl();
+  if(!el) return;
+  el.textContent = txt;
+  el.classList.remove('ok','warn','bad');
+  if(cls) el.classList.add(cls);
+  el.title = detail || txt;
+}
+function nowISO(){ return new Date().toISOString(); }
+
+function safeParse(raw){
+  try{ return JSON.parse(raw || '{}') || {}; }catch(e){ return {}; }
+}
+function chunkString(str, size){
+  const out = [];
+  for(let i=0;i<str.length;i+=size) out.push(str.slice(i,i+size));
+  return out.length ? out : [''];
+}
+function completePayloadFromLocalStorage(){
+  const raw = localStorage.getItem(STOCK_KEY) || '';
+  const data = safeParse(raw);
+  data.companies = Array.isArray(data.companies) ? data.companies : [];
+  data.materials = Array.isArray(data.materials) ? data.materials : [];
+  data.stock = Array.isArray(data.stock) ? data.stock : [];
+  data.movements = Array.isArray(data.movements) ? data.movements : [];
+  data.jobs = Array.isArray(data.jobs) ? data.jobs : [];
+  data.reservations = Array.isArray(data.reservations) ? data.reservations : [];
+  data.assignments = Array.isArray(data.assignments) ? data.assignments : [];
+  data.reservationDebts = Array.isArray(data.reservationDebts) ? data.reservationDebts : [];
+  data.updatedAt = data.updatedAt || nowISO();
+  const cleanRaw = JSON.stringify(data);
+  return {data, raw: cleanRaw};
+}
+
+async function publishStockMaterialsMirror(data){
+  // Espejo auxiliar para la app informativa. Si las reglas no permiten esta colección,
+  // no bloquea la publicación principal por chunks.
+  try{
+    const byId = new Map((data.materials||[]).map(m=>[String(m.id||''), m]));
+    const batch = writeBatch(fbDb);
+    let count = 0;
+    (data.stock||[]).forEach((srow, i)=>{
+      const mat = byId.get(String(srow.materialId||'')) || {};
+      if(!mat.id && !mat.name && !mat.nombre) return;
+      const id = String(srow.id || (String(srow.companyId||'stock') + '_' + String(srow.materialId||i))).replace(/[\/#?\[\]]/g,'_');
+      batch.set(doc(fbDb,'stock_materials',id), {
+        id,
+        stockId:String(srow.id||id),
+        companyId:String(srow.companyId||''),
+        materialId:String(srow.materialId||''),
+        name:String(mat.name||mat.nombre||srow.name||''),
+        family:String(mat.family||mat.familia||srow.family||'Sin familia'),
+        type:String(mat.type||mat.tipo||srow.type||'hierro'),
+        unit:String(mat.unit||mat.unidad||srow.unit||'und'),
+        location:String(srow.location||srow.ubicacion||''),
+        min:Number(srow.min||mat.min||mat.minimo||0),
+        qty:Number(srow.qty||srow.cantidad||srow.physicalQty||0),
+        order:Number(srow.order||mat.order||i),
+        familyOrder:Number(srow.familyOrder||mat.familyOrder||i),
+        updatedAt:serverTimestamp()
+      }, {merge:true});
+      count++;
+    });
+    if(count) await batch.commit();
+    return count;
+  }catch(e){
+    console.warn('stock_materials mirror no publicado', e);
+    return 0;
+  }
+}
+
+async function publishFullStock(force=false){
+  try{
+    if(!authReady){
+      setCloudStatus('Stock nube esperando auth','warn','Esperando autenticación de Firebase.');
+      return;
+    }
+
+    const {data, raw} = completePayloadFromLocalStorage();
+    if(!force && raw && raw === lastRawPublished) return;
+    if(!raw || !data.stock || !data.stock.length){
+      setCloudStatus('Stock nube sin datos','warn','No hay datos de stock para publicar.');
+      return;
+    }
+
+    setCloudStatus('Stock nube subiendo...','warn','Publicando catálogo completo en Firestore.');
+
+    const packageObj = {};
+    packageObj[STOCK_KEY] = raw;
+    packageObj.updatedAt = nowISO();
+    packageObj.schema = 'ldh_stock_chunked_v2_full';
+    const packageJson = JSON.stringify(packageObj);
+    const chunks = chunkString(packageJson, 350000);
+
+    // Primero chunks, luego meta. Así la app informativa no lee un totalChunks nuevo antes de existir los chunks.
+    for(let i=0;i<chunks.length;i++){
+      await setDoc(doc(fbDb, ...META_PATH, 'chunks', String(i)), {
+        part: chunks[i],
+        index: i,
+        updatedAt: serverTimestamp()
+      }, {merge:false});
+    }
+
+    await setDoc(doc(fbDb, ...META_PATH), {
+      totalChunks: chunks.length,
+      chunkSize: 350000,
+      updatedAt: serverTimestamp(),
+      updatedAtISO: nowISO(),
+      key: STOCK_KEY,
+      rawCompanies: data.companies.length,
+      rawMaterials: data.materials.length,
+      rawStock: data.stock.length,
+      rawMovements: data.movements.length,
+      rawReservations: data.reservations.length,
+      rawAssignments: data.assignments.length,
+      source: 'stock.html'
+    }, {merge:true});
+
+    const mirrorCount = await publishStockMaterialsMirror(data);
+    lastRawPublished = raw;
+    setCloudStatus(
+      'Stock nube conectado · ' + data.materials.length + ' materiales',
+      'ok',
+      'Publicado en Firestore. Empresas: ' + data.companies.length + ' · materiales: ' + data.materials.length + ' · stock: ' + data.stock.length + ' · chunks: ' + chunks.length + ' · espejo: ' + mirrorCount
+    );
+  }catch(e){
+    const msg = String((e && (e.code || e.message)) || e || 'error');
+    console.error('Error publicando Stock en Firestore', e);
+    setCloudStatus('Stock nube error','bad',msg);
+  }
+}
+
+window.LDH_scheduleStockCloudPublish = function(force=false){
+  clearTimeout(publishTimer);
+  publishTimer = setTimeout(()=>publishFullStock(!!force), force ? 100 : 900);
+};
+window.LDH_publishFullStockNow = function(){ publishFullStock(true); };
+
+onAuthStateChanged(fbAuth, async user=>{
+  try{
+    if(!user){
+      // Si el proyecto permite anónimo, entrará. Si no, se usará sesión previa si existe.
+      try{ await signInAnonymously(fbAuth); return; }
+      catch(e){
+        authReady = false;
+        setCloudStatus('Stock nube sin login','bad','Firebase no permite publicar sin sesión: ' + String(e.code || e.message || e));
         return;
       }
-      out.materials.push(stub);
-      byId.set(String(stub.id), stub);
-      byKey.set(k, stub);
-      if(!s.materialId) s.materialId = stub.id;
-    });
-
-    out.cloudStats = {
-      companies: out.companies.length,
-      materials: out.materials.length,
-      stock: out.stock.length,
-      movements: out.movements.length,
-      reservations: out.reservations.length,
-      assignments: out.assignments.length,
-      reservationDebts: out.reservationDebts.length
-    };
-    return out;
-  }
-  async function ensureFirebase(){
-    if(cloudReady && cloudDb) return cloudDb;
-    status('Stock nube: conectando', 'warn');
-    const appMod = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-    const fsMod = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-    const app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(firebaseConfig);
-    cloudDb = fsMod.getFirestore(app);
-    window.LDH_STOCK_FIRESTORE = {fsMod, cloudDb};
-    cloudReady = true;
-    status('Stock nube conectado', 'ok');
-    return cloudDb;
-  }
-  async function publishStockCloudNow(){
-    if(publishing){ pendingAgain = true; return; }
-    publishing = true;
-    try{
-      const dbRef = await ensureFirebase();
-      const fsMod = window.LDH_STOCK_FIRESTORE.fsMod;
-      const payload = buildCloudPayload();
-      const json = JSON.stringify({[STOCK_KEY_CLOUD]: JSON.stringify(payload)});
-      const totalChunks = Math.max(1, Math.ceil(json.length / CHUNK_SIZE));
-      const metaRef = fsMod.doc(dbRef, ...STOCK_META_PATH);
-
-      status('Stock nube: subiendo ' + payload.cloudStats.materials + ' mat.', 'warn');
-      await fsMod.setDoc(metaRef, {
-        key: STOCK_KEY_CLOUD,
-        updatedAt: payload.updatedAt,
-        cloudPublishedAt: payload.cloudPublishedAt,
-        totalChunks,
-        bytes: json.length,
-        project: 'gestion-taller-stock',
-        stats: payload.cloudStats
-      }, {merge:false});
-
-      for(let i=0;i<totalChunks;i++){
-        const part = json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        await fsMod.setDoc(fsMod.doc(dbRef, ...STOCK_META_PATH, 'chunks', String(i)), {
-          idx:i,
-          totalChunks,
-          part
-        }, {merge:false});
-      }
-
-      // Espejo ligero por documento de material para apps informativas/futuras.
-      // No sustituye al paquete principal; solo ayuda a consultas simples.
-      try{
-        const batch = fsMod.writeBatch(dbRef);
-        const matById = new Map(payload.materials.map(m => [String(m.id || ''), m]));
-        payload.stock.forEach((s, i)=>{
-          const m = matById.get(String(s.materialId || '')) || {};
-          const id = String(s.id || (String(s.companyId||'') + '_' + String(s.materialId||'') + '_' + i)).replace(/[^a-zA-Z0-9_-]+/g,'_').slice(0,140);
-          batch.set(fsMod.doc(dbRef, 'stock_materials', id), {
-            id,
-            stockId:String(s.id||id),
-            companyId:String(s.companyId||''),
-            companyName:String((payload.companies.find(c=>String(c.id)===String(s.companyId))||{}).name || ''),
-            materialId:String(s.materialId||''),
-            name:String(m.name || m.nombre || s.name || s.materialName || ''),
-            family:String(m.family || m.familia || s.family || s.familia || 'Sin familia'),
-            type:String(m.type || m.tipo || s.type || s.tipo || 'hierro'),
-            unit:String(m.unit || m.unidad || s.unit || s.unidad || 'und'),
-            location:String(s.location || s.ubicacion || ''),
-            min:Number(s.min || 0),
-            order:Number(s.order || i),
-            familyOrder:Number(s.familyOrder || 0),
-            updatedAt: payload.cloudPublishedAt,
-            deleted:false
-          }, {merge:false});
-        });
-        await batch.commit();
-      }catch(e){ console.warn('No se pudo actualizar stock_materials', e); }
-
-      status('Stock nube conectado · ' + payload.cloudStats.materials + ' materiales', 'ok');
-      try{ console.log('✅ Stock subido completo a Firestore', payload.cloudStats); }catch(e){}
-    }catch(e){
-      console.error('Error subiendo Stock a Firestore', e);
-      status('Stock nube error', 'bad');
-    }finally{
-      publishing = false;
-      if(pendingAgain){ pendingAgain = false; LDH_scheduleStockCloudPublish(); }
     }
+    authReady = true;
+    setCloudStatus('Stock nube conectado','warn','Autenticado. Preparando publicación...');
+    window.LDH_scheduleStockCloudPublish(true);
+  }catch(e){
+    authReady = false;
+    setCloudStatus('Stock nube auth error','bad',String(e.code || e.message || e));
   }
-  window.LDH_publishStockCloudNow = publishStockCloudNow;
-  window.LDH_scheduleStockCloudPublish = function(){
-    clearTimeout(publishTimer);
-    publishTimer = setTimeout(publishStockCloudNow, 900);
-  };
-  function boot(){
-    try{ ensureFirebase().then(()=>LDH_scheduleStockCloudPublish()); }catch(e){ status('Stock nube error', 'bad'); }
-  }
-  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-  else setTimeout(boot, 0);
-})();
+});
+
+window.addEventListener('online', ()=>window.LDH_scheduleStockCloudPublish(true));
+setTimeout(()=>window.LDH_scheduleStockCloudPublish(true), 1600);
 </script>
 
 </body>
