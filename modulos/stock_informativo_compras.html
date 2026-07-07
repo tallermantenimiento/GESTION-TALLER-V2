@@ -44,7 +44,7 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
     <div id="content" class="empty">Cargando stock...</div>
     <div id="debug" class="debug"></div>
   </section>
-  <div class="foot">Pantalla solo lectura. Lee el paquete actual de Stock y, si existe, también la estructura por material.</div>
+  <div class="foot">Pantalla solo lectura. Respeta el orden actual publicado desde Stock.</div>
 </section>
 </main>
 <script type="module">
@@ -173,6 +173,15 @@ function normalizePackage(db0){
     compMap.set(id, {id, name:s(c.name || c.nombre || c.code || c.id || id).toUpperCase(), order:n(c.order ?? i)});
   });
   const matMap = new Map(matArr.map(m=>[s(m.id),m]));
+
+  // Orden real de Stock:
+  // - familyOrder = primera aparición de la familia dentro de empresa+tipo.
+  // - order = posición de la línea dentro de esa familia.
+  // Así Compras respeta el drag & drop de Stock.
+  const familyPos = new Map();
+  const itemPos = new Map();
+  let globalVisibleIndex = 0;
+
   const out = [];
   stockArr.forEach((r,i)=>{
     const mat = matMap.get(s(r.materialId)) || {};
@@ -180,18 +189,28 @@ function normalizePackage(db0){
     if(!compMap.has(cid)) compMap.set(cid, {id:cid, name:s(r.companyName || cid).toUpperCase(), order:9999});
     const typ = classify(mat,r);
     if(typ !== 'hierro' && typ !== 'pintura') return;
+
+    const fam = s(mat.family || mat.familia || mat.grp || r.family || r.grp || 'Sin familia') || 'Sin familia';
+    const familyKey = cid + '|' + typ + '|' + fam.toLowerCase();
+    if(!familyPos.has(familyKey)) familyPos.set(familyKey, globalVisibleIndex++);
+
+    const itemKey = cid + '|' + typ + '|' + fam.toLowerCase();
+    const itemIndex = itemPos.get(itemKey) || 0;
+    itemPos.set(itemKey, itemIndex + 1);
+
     out.push({
       id: s(r.id || cid + '_' + (r.materialId || i)),
       companyId: cid,
       type: typ,
       name: s(mat.name || mat.nombre || r.name || r.materialName || 'Material'),
-      family: s(mat.family || mat.familia || mat.grp || r.family || r.grp || 'Sin familia'),
+      family: fam,
       unit: s(r.unit || r.unidad || mat.unit || mat.unidad || 'und'),
       location: s(r.location || r.ubicacion || ''),
       min: n(r.min ?? mat.min ?? mat.minimo ?? 0),
       qty: qtyFromStockRow(r),
-      order: n(r.order ?? mat.order ?? i),
-      familyOrder: n(r.familyOrder ?? mat.familyOrder ?? i)
+      order: n(r.order ?? mat.order ?? itemIndex),
+      familyOrder: n(r.familyOrder ?? mat.familyOrder ?? familyPos.get(familyKey)),
+      sourceOrder: i
     });
   });
   companies = Array.from(compMap.values()).sort((a,b)=>a.order-b.order || a.name.localeCompare(b.name,'es'));
@@ -218,7 +237,8 @@ function normalizeMaterialCollection(docs){
       min:n(m.min),
       qty:n(m.qty),
       order:n(m.order ?? i),
-      familyOrder:n(m.familyOrder ?? i)
+      familyOrder:n(m.familyOrder ?? 999999),
+      sourceOrder:n(m.sourceOrder ?? i)
     });
   });
   companies = Array.from(compMap.values()).sort((a,b)=>a.order-b.order || a.name.localeCompare(b.name,'es'));
@@ -398,13 +418,23 @@ function filteredRows(){
     .filter(r=>tf==='all' || r.type===tf)
     .filter(r=>!q || low([r.name,r.family,r.location,r.unit].join(' ')).includes(q))
     .filter(r=>sf==='all' || (sf==='positive' ? n(r.qty)>0 : (n(r.qty)<=0 || (n(r.min)>0 && n(r.qty)<=n(r.min)))))
-    .sort((a,b)=>n(a.familyOrder)-n(b.familyOrder) || s(a.family).localeCompare(s(b.family),'es') || n(a.order)-n(b.order) || s(a.name).localeCompare(s(b.name),'es'));
+    .sort((a,b)=>
+      n(a.familyOrder)-n(b.familyOrder) ||
+      n(a.order)-n(b.order) ||
+      n(a.sourceOrder)-n(b.sourceOrder) ||
+      s(a.family).localeCompare(s(b.family),'es') ||
+      s(a.name).localeCompare(s(b.name),'es')
+    );
 }
 
 function groupBy(arr, fn){
   const map = new Map();
   arr.forEach(x=>{ const k=fn(x); if(!map.has(k)) map.set(k,[]); map.get(k).push(x); });
-  return Array.from(map.entries()).map(([name,items])=>({name,items}));
+  return Array.from(map.entries()).map(([name,items])=>({
+    name,
+    items:items.sort((a,b)=>n(a.order)-n(b.order) || n(a.sourceOrder)-n(b.sourceOrder) || s(a.name).localeCompare(s(b.name),'es')),
+    familyOrder: Math.min(...items.map(x=>n(x.familyOrder)))
+  })).sort((a,b)=>n(a.familyOrder)-n(b.familyOrder) || s(a.name).localeCompare(s(b.name),'es'));
 }
 
 function render(){
