@@ -4304,8 +4304,8 @@ _uaPill(item){
 
     _loadStockForConfig() {
       // Configuración es GENERAL: no filtra por empresa.
-      // Muestra un catálogo limpio, pero sin perder materiales de la misma familia.
-      // La empresa concreta se decide después en Cálculo / Preparación.
+      // Muestra un catálogo limpio, sin duplicar por empresa.
+      // Además mezcla el catálogo remoto de Firestore si ya se ha cargado.
       const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\s+/g,' ').trim();
       const nice = (v)=>String(v||'').trim();
 
@@ -4319,11 +4319,28 @@ _uaPill(item){
         }catch(e){ return null; }
       };
 
-      const db = parse('ldh_v2_company_stock_v1') || parse('taller_stock_v3_data');
-      if(!db) return { ok:false, materials:[], source:'sin stock' };
+      const db = parse('ldh_v2_company_stock_v1') || parse('taller_stock_v3_data') || {};
+      const rawMaterials = Array.isArray(db.materials) ? db.materials.slice() : [];
+      const rawStock = Array.isArray(db.stock) ? db.stock.slice() : [];
 
-      const rawMaterials = Array.isArray(db.materials) ? db.materials : [];
-      const rawStock = Array.isArray(db.stock) ? db.stock : [];
+      const remote = (window.LDH_CFG_REMOTE_STOCK && Array.isArray(window.LDH_CFG_REMOTE_STOCK.materials))
+        ? window.LDH_CFG_REMOTE_STOCK.materials
+        : [];
+      remote.forEach((m,i)=>{
+        if(!m) return;
+        rawMaterials.push({
+          id: nice(m.materialId || m.id || ('remote_'+i)),
+          name: nice(m.name || m.material || m.matName),
+          family: nice(m.family || m.grp || 'Sin familia'),
+          type: nice(m.type || m.cat || 'Hierro'),
+          unit: nice(m.unit || 'und'),
+          order: Number(m.order ?? m.sourceOrder ?? i) || i,
+          familyOrder: Number(m.familyOrder ?? i) || i,
+          companyId: nice(m.companyId || '')
+        });
+      });
+
+      if(!rawMaterials.length && !rawStock.length) return { ok:false, materials:[], source:'sin stock' };
 
       const byId = new Map();
       rawMaterials.forEach((m,i)=>{
@@ -4338,7 +4355,7 @@ _uaPill(item){
 
       const classify = (mat, stockRow)=>{
         mat = mat || {}; stockRow = stockRow || {};
-        const tipoRaw = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || '');
+        const tipoRaw = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || mat.cat || '');
         const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
         const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
         const t = norm(tipoRaw + ' ' + family + ' ' + name);
@@ -4369,20 +4386,16 @@ _uaPill(item){
         const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
         const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || 'und');
         const cat = classify(mat, stockRow);
-        const sourceOrder = Number(stockRow.order ?? mat.order ?? idx) || idx;
+        const sourceOrder = Number(stockRow.order ?? mat.order ?? mat.sourceOrder ?? idx) || idx;
         const familyOrder = Number(stockRow.familyOrder ?? mat.familyOrder ?? idx) || idx;
         const companyId = nice(stockRow.companyId || mat.companyId || '');
 
-        // Clave general: solo une fichas que sean el MISMO material visible.
-        // No incluye empresa ni ID, para no repetir por empresa.
-        // Sí conserva nombres diferentes como 16x16x1.5, 30x20x1.5, 40x40x1.5, etc.
         const key = [norm(cat), norm(family), canonicalName(name), norm(unit)].join('|');
 
         if(byKey.has(key)){
           const ex = byKey.get(key);
           if(id && !ex.aliasIds.includes(id)) ex.aliasIds.push(id);
           if(companyId && !ex.companyIds.includes(companyId)) ex.companyIds.push(companyId);
-          // Mantener el primer orden real publicado desde Stock.
           ex.sourceOrder = Math.min(Number(ex.sourceOrder)||sourceOrder, sourceOrder);
           ex.familyOrder = Math.min(Number(ex.familyOrder)||familyOrder, familyOrder);
           return;
@@ -4406,10 +4419,7 @@ _uaPill(item){
         out.push(item);
       };
 
-      // Primero recorremos las fichas maestras: aquí debe estar el catálogo completo.
       rawMaterials.forEach((m,i)=>pushMat(m, null, i));
-
-      // Después recorremos stock: añade alias/empresas y solo suma materiales si no existían en materials.
       rawStock.forEach((sr,i)=>{
         const mat = byId.get(nice(sr.materialId || sr.matId || sr.id)) || {};
         pushMat(mat, sr, rawMaterials.length + i);
@@ -4423,7 +4433,11 @@ _uaPill(item){
         nice(a.name).localeCompare(nice(b.name),'es')
       );
 
-      return { ok: out.length>0, materials: out, source: localStorage.getItem('ldh_v2_company_stock_v1') ? 'ldh_v2_company_stock_v1' : 'taller_stock_v3_data' };
+      const srcs = [];
+      if(localStorage.getItem('ldh_v2_company_stock_v1')) srcs.push('ldh_v2_company_stock_v1');
+      if(remote.length) srcs.push('Firestore stock_materials');
+      if(!srcs.length && localStorage.getItem('taller_stock_v3_data')) srcs.push('taller_stock_v3_data');
+      return { ok: out.length>0, materials: out, source: srcs.join(' + ') || 'stock local' };
     },
 
     _decorateCfgRowStockPill(tr){
@@ -4458,6 +4472,7 @@ _uaPill(item){
       // Si ya venías asignando, mantenemos el último grupo abierto.
       // Si es la primera vez en la sesión, todo colapsado por defecto.
       modal.style.display = 'flex';
+      try{ if(window.LDH_cfgLoadRemoteStock) window.LDH_cfgLoadRemoteStock(); }catch(e){}
       this.renderCfgStockResults();
     },
 
@@ -8089,6 +8104,66 @@ function LDH_cfgStockDiagnostico(){
     alert('No se pudo calcular diagnóstico: ' + (e && (e.message || e)));
   }
 }
+</script>
+
+
+<script type="module" id="LDH_CONFIG_LEE_STOCK_REAL_FIRESTORE_1206">
+(async function(){
+  if(window.__LDH_CFG_STOCK_REMOTE_INSTALLED) return;
+  window.__LDH_CFG_STOCK_REMOTE_INSTALLED = true;
+
+  window.LDH_CFG_REMOTE_STOCK = window.LDH_CFG_REMOTE_STOCK || {materials:[], loading:false, loaded:false, error:''};
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
+    authDomain: "gestion-taller-stock.firebaseapp.com",
+    projectId: "gestion-taller-stock",
+    storageBucket: "gestion-taller-stock.firebasestorage.app",
+    messagingSenderId: "164944519480",
+    appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
+  };
+
+  function setInfo(extra){
+    try{
+      const info = document.getElementById('cfgStockInfo');
+      if(!info) return;
+      const cur = info.textContent || '';
+      if(extra && !cur.includes(extra)) info.textContent = cur + ' · ' + extra;
+    }catch(e){}
+  }
+
+  window.LDH_cfgLoadRemoteStock = async function(){
+    const state = window.LDH_CFG_REMOTE_STOCK;
+    if(state.loading || state.loaded) return;
+    state.loading = true;
+    state.error = '';
+    setInfo('cargando Firestore...');
+
+    try{
+      const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+      const {getFirestore,collection,getDocs} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+      let app = getApps().find(a => a.options && a.options.projectId === firebaseConfig.projectId);
+      if(!app) app = initializeApp(firebaseConfig, 'ldh-config-stock-real');
+      const db = getFirestore(app);
+
+      const snap = await getDocs(collection(db,'stock_materials'));
+      const docs = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      state.materials = docs.filter(x => x && (x.name || x.material || x.matName));
+      state.loaded = true;
+      state.loading = false;
+
+      try{
+        if(window.App && typeof App.renderCfgStockResults === 'function') App.renderCfgStockResults();
+      }catch(e){}
+    }catch(e){
+      state.loading = false;
+      state.loaded = false;
+      state.error = String(e && (e.code || e.message || e));
+      console.warn('[Config] No se pudo leer stock_materials', e);
+      setInfo('Firestore no disponible');
+    }
+  };
+})();
 </script>
 
 </body></html>
