@@ -8095,4 +8095,285 @@ window.ejecutarDevolucion = function(matId, maxQty){
 </script>
 <!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
 
+
+<script id="LDH_CALC_PREP_TRANSPORT_DIRECTO_FIX_1207">
+(function(){
+  function text(el){ return (el && (el.innerText || el.textContent) || '').trim(); }
+  function val(id){ const el=document.getElementById(id); return el ? String(el.value||'').trim() : ''; }
+  function num(v){
+    let s=String(v??'').trim();
+    if(!s) return 0;
+    s=s.replace(/\s+/g,'').replace(/[^\d,.\-]/g,'');
+    if(s.includes(',') && s.includes('.')) s=s.replace(/\./g,'').replace(',','.');
+    else if(s.includes(',')) s=s.replace(',','.');
+    const n=parseFloat(s);
+    return isFinite(n) ? n : 0;
+  }
+  function getReferencia(){
+    let r = val('refInput') || val('referencia') || val('calcRef') || val('pedidoRef');
+    if(r) return r;
+    const inputs = Array.from(document.querySelectorAll('#view-calc input[type="text"], #view-calc input:not([type])')).filter(i=>i.offsetParent!==null);
+    return inputs.length ? String(inputs[0].value||'').trim() : '';
+  }
+  function getCantidad(){
+    const ids=['var_cantidad','cantidad','cant','cantidadInput','inputUnidades'];
+    for(const id of ids){
+      const n=num(val(id));
+      if(n>0) return n;
+    }
+    const el=document.querySelector('#view-calc input[name="cantidad"], #view-calc input[id*="cantidad"], #view-calc input[id*="Cantidad"]');
+    const n=el ? num(el.value) : 0;
+    return n>0 ? n : 1;
+  }
+  function getConcepto(){
+    const el=document.getElementById('selConcepto');
+    if(!el) return '';
+    if(el.selectedOptions && el.selectedOptions[0]) return String(el.selectedOptions[0].textContent||el.value||'').trim();
+    return String(el.value||'').trim();
+  }
+  function isPaintName(name){
+    const n=String(name||'').toLowerCase();
+    return n.includes('pintur') || n.includes('ral') || n.includes('disolvente') || n.includes('barniz');
+  }
+  function applyPaintLink(lines, empresa){
+    const paintSel=document.getElementById('calcPaintMat');
+    const paintId=(paintSel && paintSel.value) ? String(paintSel.value).trim() : '';
+    const paintName=(paintSel && paintSel.selectedOptions && paintSel.selectedOptions[0]) ? String(paintSel.selectedOptions[0].textContent||'').trim() : '';
+
+    const hasPaint = lines.some(l => isPaintName(l.material || l.mat || l.name));
+    if(!hasPaint) return true;
+
+    if(!empresa){
+      alert('Este pedido incluye pintura, pero no hay empresa receptora seleccionada.');
+      return false;
+    }
+    if(!paintId){
+      alert('Este pedido incluye pintura, pero no hay una ficha de pintura seleccionada para ' + empresa + '.\n\nSelecciona el color/pintura antes de mandarlo a Preparación.');
+      return false;
+    }
+
+    lines.forEach(l=>{
+      const base=String(l.material || l.mat || l.name || '').trim();
+      if(!isPaintName(base)) return;
+      const nice = paintName ? ('pintura — ' + paintName) : 'pintura';
+      l.material = nice;
+      l.mat = nice;
+      l.name = nice;
+      l.linked_matId = paintId;
+      l.linkedMatId = paintId;
+      l.stockMatId = paintId;
+      l.matId = paintId;
+      l.stockLinkId = paintId;
+      l.linked_company = empresa;
+      l.stockLinkEmpresa = empresa;
+      l._paint_empresa = empresa;
+      l.linked_matLabel = paintName || '';
+    });
+
+    try{ localStorage.setItem('calc_paint_pick_' + empresa, JSON.stringify({empresa, matId:paintId, name:paintName})); }catch(_){}
+    return true;
+  }
+  function getLinkedIdByName(name){
+    try{
+      const concept = (window.App && App.state && Array.isArray(App.state.concepts))
+        ? App.state.concepts.find(c => String(c.name||c.nombre||'').trim() === String(document.getElementById('selConcepto')?.value||'').trim() || String(c.name||c.nombre||'').trim() === getConcepto())
+        : null;
+      if(!concept) return '';
+      const all = []
+        .concat(Array.isArray(concept.lineales) ? concept.lineales : [])
+        .concat(Array.isArray(concept.perfiles) ? concept.perfiles : [])
+        .concat(Array.isArray(concept.unidades) ? concept.unidades : [])
+        .concat(Array.isArray(concept.accesorios) ? concept.accesorios : []);
+      const n = String(name||'').trim().toLowerCase();
+      const hit = all.find(x => String(x.material||x.mat||x.name||x.nombre||x.perfil||'').trim().toLowerCase() === n);
+      return hit ? String(hit.linked_matId || hit.stockMatId || hit.matId || hit.stockLinkId || '') : '';
+    }catch(e){ return ''; }
+  }
+  function readCalculatedLines(){
+    const lines=[];
+
+    const unitRows = Array.from(document.querySelectorAll('#tblUnidades tbody tr'));
+    unitRows.forEach(tr=>{
+      const cells=Array.from(tr.querySelectorAll('td'));
+      if(cells.length<2) return;
+      const name=text(cells[0]);
+      const qty=num(text(cells[cells.length-1]));
+      if(!name || qty<=0) return;
+      const linkId=getLinkedIdByName(name);
+      const obj={
+        tipo:'unidad',
+        material:name,
+        mat:name,
+        name:name,
+        pedido:qty,
+        qty_pedida:qty,
+        qty:qty,
+        qty_recibida:0,
+        recibida:0,
+        aplicado_qty:0,
+        aplicado:0,
+        estado:'pendiente',
+        completo:false,
+        ok:false
+      };
+      if(linkId){
+        obj.linked_matId=linkId;
+        obj.stockMatId=linkId;
+        obj.matId=linkId;
+      }
+      lines.push(obj);
+    });
+
+    const linRows = Array.from(document.querySelectorAll('#tblLineales tbody tr'));
+    linRows.forEach(tr=>{
+      const cells=Array.from(tr.querySelectorAll('td'));
+      if(cells.length<2) return;
+      const name=text(cells[0]);
+      const qty=num(text(cells[cells.length-1]));
+      if(!name || qty<=0) return;
+      const linkId=getLinkedIdByName(name);
+      const obj={
+        tipo:'lineal',
+        unidad:'mm',
+        material:name,
+        mat:name,
+        name:name,
+        pedido:qty,
+        qty_pedida:qty,
+        qty:qty,
+        qty_recibida:0,
+        recibida:0,
+        aplicado_qty:0,
+        aplicado:0,
+        estado:'pendiente',
+        completo:false,
+        ok:false
+      };
+      if(linkId){
+        obj.linked_matId=linkId;
+        obj.stockMatId=linkId;
+        obj.matId=linkId;
+      }
+      lines.push(obj);
+    });
+
+    return lines;
+  }
+  function setBoth(key, value){
+    let ok=false;
+    try{ localStorage.setItem(key,value); ok=true; }catch(e){}
+    try{ sessionStorage.setItem(key,value); ok=true; }catch(e){}
+    return ok;
+  }
+  function removeBoth(key){
+    try{ localStorage.removeItem(key); }catch(e){}
+    try{ sessionStorage.removeItem(key); }catch(e){}
+  }
+  function sendDirectToPrep(){
+    try{
+      const ref=getReferencia();
+      if(!ref){ alert('Falta la referencia / cliente.'); return; }
+
+      const concept=getConcepto();
+      const empresa=val('calcEmpresa');
+      const qty=getCantidad();
+
+      const lines=readCalculatedLines();
+      if(!lines.length){
+        alert('Primero debes calcular el material antes de enviar a Preparación.');
+        return;
+      }
+
+      if(!applyPaintLink(lines, empresa)) return;
+
+      const uid='P'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+      const payload={
+        referencia:ref,
+        ref:ref,
+        concepto:concept,
+        concept:concept,
+        empresa:empresa,
+        company:empresa,
+        unidades:qty,
+        cantidad:qty,
+        units:qty,
+        qty:qty,
+        totalUnits:qty,
+        vars:{cantidad:qty, unidades:qty},
+        materiales:lines,
+        materials:lines,
+        estado:'pendiente',
+        status:'pendiente',
+        pedido_uid:uid,
+        uid:uid,
+        timestamp:Date.now()
+      };
+      const meta={
+        referencia:ref,
+        ref:ref,
+        concepto:concept,
+        concept:concept,
+        empresa:empresa,
+        company:empresa,
+        unidades:qty,
+        cantidad:qty,
+        units:qty,
+        qty:qty,
+        totalUnits:qty,
+        vars:{cantidad:qty, unidades:qty},
+        fecha:Date.now(),
+        estado:'pendiente',
+        en_fabricacion:false,
+        pedido_uid:uid,
+        uid:uid
+      };
+
+      const payloadStr=JSON.stringify(payload);
+      const linesStr=JSON.stringify(lines);
+      const metaStr=JSON.stringify(meta);
+
+      // Sobrescribir solo esta referencia, no limpiar otros pedidos.
+      removeBoth('prep_meta_' + ref);
+      removeBoth('prep_recepcion_' + ref);
+
+      const ok1=setBoth('prep_meta_' + ref, metaStr);
+      const ok2=setBoth('prep_recepcion_' + ref, linesStr);
+
+      // Transporte directo para que Preparación lo importe aunque haya problemas con el listado local.
+      setBoth('latest_materials_v1', payloadStr);
+      setBoth('pedido_en_preparacion', payloadStr);
+      setBoth('prep_pedido_payload', payloadStr);
+      setBoth('prep_materiales', payloadStr);
+      setBoth('prep_focus_ref', ref);
+      setBoth('prep_last_import_ref', ref);
+
+      try{ window.name='LDH_PREP|' + payloadStr; }catch(e){}
+
+      if(!ok1 || !ok2){
+        alert('Aviso: el navegador no ha podido guardar todos los datos en almacenamiento local. Se intentará pasar el pedido directamente a Preparación.');
+      }
+
+      window.location.href='preparacion_pedidos.html?openRef=' + encodeURIComponent(ref);
+    }catch(e){
+      console.error('[LDH] Error envío directo a Preparación', e);
+      alert('Error enviando a Preparación: ' + (e && (e.message || e)));
+    }
+  }
+
+  window.irAPreparacion = sendDirectToPrep;
+  window.enviarAPreparacionPedido = sendDirectToPrep;
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    const btn=document.getElementById('btnPreparacion');
+    if(btn){
+      btn.onclick=function(ev){
+        if(ev) ev.preventDefault();
+        sendDirectToPrep();
+        return false;
+      };
+    }
+  });
+})();
+</script>
+
 </body></html>
