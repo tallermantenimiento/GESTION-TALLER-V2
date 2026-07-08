@@ -473,11 +473,6 @@
   }
 </style>
 
-
-<style id="LDH_HIDE_LEGACY_TOP_EMPTY_1207">
-  body > .top{display:none!important;}
-</style>
-
 </head>
 <body>
 
@@ -777,15 +772,15 @@ const UNASSIGNED_KEY = r => "prep_unassigned_" + r; // respaldo opcional
 
 /* ========= FIRESTORE (igual que stock.html) ========= */
 const USE_FIRESTORE_STOCK = true;
-const FIRESTORE_DOC_PATH = { col: "taller_stock", doc: "main" };
+const FIRESTORE_DOC_PATH = { col: "taller_data", doc: "stock" };
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo",
-  authDomain: "gestion-taller-2a439.firebaseapp.com",
-  projectId: "gestion-taller-2a439",
-  storageBucket: "gestion-taller-2a439.firebasestorage.app",
-  messagingSenderId: "498579673950",
-  appId: "1:498579673950:web:eb626781a5b509957db5cf"
+  apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+  authDomain: "gestion-taller-v2.firebaseapp.com",
+  projectId: "gestion-taller-v2",
+  storageBucket: "gestion-taller-v2.firebasestorage.app",
+  messagingSenderId: "888590823508",
+  appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
 };
 
 let fbApp=null, fbAuth=null, fbDb=null;
@@ -2018,7 +2013,8 @@ function saveLinkMap(){
 };
 
   // === Entrada de pedido (compatible con file://) ===
-  // 0) URL hash/query: transporte directo desde Cálculo si localStorage no refresca.
+  // 0) URL hash/query: transporte directo desde Cálculo.
+  // Se añade sin tocar la lógica buena de esta Preparación.
   let snap = null;
   try{
     const hash = String(window.location.hash || '').replace(/^#/, '');
@@ -2147,10 +2143,7 @@ try{
       metaParaGuardar.unidades = qty;
       metaParaGuardar.fecha = Date.now();
       if (!metaParaGuardar.tipo_hierro) metaParaGuardar.tipo_hierro = "";
-      // Al importar desde Cálculo siempre entra como EN PREPARACIÓN, aunque hubiera una meta vieja con la misma referencia.
-      metaParaGuardar.en_fabricacion = false;
-      metaParaGuardar.estado = 'pendiente';
-      metaParaGuardar.status = 'pendiente';
+      if (metaParaGuardar.en_fabricacion === undefined) metaParaGuardar.en_fabricacion = false;
 
       setAny(KM(ref), JSON.stringify(metaParaGuardar));
 
@@ -2158,6 +2151,30 @@ try{
       // Preparación trabaja con `linked_matId`. Sin este adaptador, si el cálculo
       // envía el id como `stockMatId`/`matId`, la línea llega "sin vínculo".
       let materialesSrc = (snap.materiales || snap.materials || snap.lineas || snap.items || []);
+
+      // Compatibilidad Cálculo nuevo: si manda barras/accesorios separados,
+      // los unimos aquí respetando unidad/tipo para que Preparación los separe.
+      try{
+        if((!materialesSrc || !materialesSrc.length) && (Array.isArray(snap.barras) || Array.isArray(snap.accesorios))){
+          const barras = (Array.isArray(snap.barras) ? snap.barras : []).map(x=>{
+            x = (x && typeof x === 'object') ? x : {};
+            x.unit = x.unit || x.unidad || 'barra';
+            x.unidad = x.unidad || x.unit || 'barra';
+            x.tipo = x.tipo || x.type || 'barra';
+            x.type = x.type || x.tipo || 'barra';
+            return x;
+          });
+          const accesorios = (Array.isArray(snap.accesorios) ? snap.accesorios : []).map(x=>{
+            x = (x && typeof x === 'object') ? x : {};
+            x.unit = x.unit || x.unidad || 'ud';
+            x.unidad = x.unidad || x.unit || 'ud';
+            x.tipo = x.tipo || x.type || 'unidad';
+            x.type = x.type || x.tipo || 'unidad';
+            return x;
+          });
+          materialesSrc = barras.concat(accesorios);
+        }
+      }catch(e){}
 
 // LDH FIX 08/06:
 // Si el pedido viene desde Fabricación para regularizar deuda y no trae líneas,
@@ -2200,8 +2217,16 @@ try{
         l.completo = false; l.done = false; l.isDone = false; l.isCompleted = false;
         if(l.qty_pedida === undefined && l.qty !== undefined) l.qty_pedida = l.qty;
         try{
-          const u = String(l.unit || l.ud || '').toLowerCase();
-          if(u.includes('barra')) l.unit = 'barra';
+          const u = String(l.unit || l.unidad || l.ud || l.tipo || l.type || '').toLowerCase();
+          if(u.includes('barra')){
+            l.unit = 'barra';
+            l.unidad = 'barra';
+            l.tipo = l.tipo || 'barra';
+            l.type = l.type || 'barra';
+          }else{
+            l.unit = l.unit || l.unidad || 'ud';
+            l.unidad = l.unidad || l.unit || 'ud';
+          }
         }catch(e){}
         if(snap.source === 'fabricacion_deudor'){
           const q = parseFloat(String(l.qty_pedida ?? l.qty ?? 0).replace(',', '.')) || 0;
@@ -2239,37 +2264,6 @@ try{
               }
             }
           }catch(e){}
-
-        // Normalización final de tipo/unidad para separar correctamente barras y accesorios.
-        const txtLine = String(l.mat || l.material || l.name || '').toLowerCase();
-        const unit0 = String(l.unit || l.unidad || '').toLowerCase();
-        const tipo0 = String(l.tipo || l.type || '').toLowerCase();
-        const looksBar = tipo0.includes('barra') || unit0.includes('barra') || l.categoria === 'barra';
-        if(looksBar){
-          l.unit = 'barra';
-          l.unidad = 'barra';
-          l.tipo = 'barra';
-          l.type = 'barra';
-          l.categoria = 'barra';
-        }else{
-          l.unit = l.unit || l.unidad || 'ud';
-          l.unidad = l.unidad || l.unit || 'ud';
-          l.tipo = l.tipo || l.type || 'unidad';
-          l.type = l.type || l.tipo || 'unidad';
-        }
-        if(l.qty_pedida === undefined && l.pedido !== undefined) l.qty_pedida = l.pedido;
-        if(l.qty === undefined && l.qty_pedida !== undefined) l.qty = l.qty_pedida;
-        l.qty_recibida = 0;
-        l.recibida = 0;
-        l.aplicado_qty = 0;
-        l.aplicado = 0;
-        l.estado = 'pendiente';
-        l.status = 'pendiente';
-        l.completo = false;
-        l.ok = false;
-        l.done = false;
-        l.isDone = false;
-        l.isCompleted = false;
 
         return l;
       });
@@ -5743,6 +5737,23 @@ init();
   const REV_KEY = "__cloud_backup_rev";
   const CID_KEY = "__cloud_client_id";
   const DEBOUNCE_MS = 2500;
+  function LDH_isPrepSyncKey(k){
+    k = String(k || "");
+    return k.indexOf("prep_recepcion_") === 0 ||
+           k.indexOf("prep_meta_") === 0 ||
+           k.indexOf("prep_unassigned_") === 0 ||
+           k === "ldh_preparacion_registry_v1" ||
+           k === "prep_stock_linkmap_v1" ||
+           k === "prep_last_import_ref" ||
+           k === "prep_focus_ref" ||
+           k === "prep_focus_hash_ref" ||
+           k === "prep_auto_open_ref" ||
+           k === "prep_estado_actual" ||
+           k === "prep_materiales" ||
+           k === "prep_pedido_payload" ||
+           k === "pedido_en_preparacion" ||
+           k === "latest_materials_v1";
+  }
 
   let applyingRemote = false;
   let timer = null;
@@ -5794,6 +5805,7 @@ init();
       const all = {};
       for(let i=0;i<localStorage.length;i++){
         const k = localStorage.key(i);
+        if(LDH_isPrepSyncKey(k)) continue;
         all[k] = localStorage.getItem(k);
       }
       const json = JSON.stringify(all);
@@ -5845,8 +5857,19 @@ init();
       json += (cSnap.data().part || "");
     }
     const all = JSON.parse(json);
+    const preservedPrep = {};
+    try{
+      for(let i=0;i<localStorage.length;i++){
+        const pk = localStorage.key(i);
+        if(LDH_isPrepSyncKey(pk)) preservedPrep[pk] = localStorage.getItem(pk);
+      }
+    }catch(e){}
     localStorage.clear();
-    for(const k in all) localStorage.setItem(k, all[k]);
+    for(const k in all){
+      if(LDH_isPrepSyncKey(k)) continue;
+      localStorage.setItem(k, all[k]);
+    }
+    for(const pk in preservedPrep) localStorage.setItem(pk, preservedPrep[pk]);
     currentRev = Number(meta.rev || Date.now());
     localStorage.setItem(REV_KEY, String(currentRev));
   }
@@ -10947,32 +10970,484 @@ function LDH_prepVolverMenu(){
 </script>
 
 
-<script id="LDH_PREP_IMPORT_HASH_FOCUS_FIX_1207">
+<script id="LDH_PREPARACION_LIVE_SYNC_V6_AUTORITATIVO">
 (function(){
-  function getAny2(k){
-    try{ const v=localStorage.getItem(k); if(v!==null&&v!==undefined) return v; }catch(e){}
-    try{ const v=sessionStorage.getItem(k); if(v!==null&&v!==undefined) return v; }catch(e){}
+  "use strict";
+  if(window.__LDH_PREP_LIVE_SYNC_V6__) return;
+  window.__LDH_PREP_LIVE_SYNC_V6__ = true;
+
+  const COL = "taller_data";
+  const DOC = "preparacion";
+  const CLIENT_KEY = "ldh_prep_client_id_v6";
+  const STATUS_ID = "ldhPrepSyncStatusV6";
+  const GOOD_CONFIG = {
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
+
+  let booted = false;
+  let applyingRemote = false;
+  let pushTimer = null;
+  let renderTimer = null;
+  let unsub = null;
+  let lastLocalHash = "";
+  let lastRemoteAt = 0;
+  let lastPushAt = 0;
+
+  function cid(){
+    try{
+      let v = localStorage.getItem(CLIENT_KEY);
+      if(!v){
+        v = "prep6_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36);
+        localStorage.setItem(CLIENT_KEY, v);
+      }
+      return v;
+    }catch(e){ return "prep6_unknown"; }
+  }
+
+  function isPrepKey(k){
+    k = String(k || "");
+    if(k.indexOf("prep_recepcion_") === 0) return true;
+    if(k.indexOf("prep_meta_") === 0) return true;
+    if(k.indexOf("prep_unassigned_") === 0) return true;
+    return [
+      "ldh_preparacion_registry_v1",
+      "prep_stock_linkmap_v1",
+      "prep_last_import_ref",
+      "prep_focus_ref",
+      "prep_focus_hash_ref",
+      "prep_auto_open_ref",
+      "prep_estado_actual",
+      "prep_materiales",
+      "prep_pedido_payload",
+      "pedido_en_preparacion",
+      "latest_materials_v1"
+    ].includes(k);
+  }
+
+  function status(txt){
+    try{
+      let el = document.getElementById(STATUS_ID) || document.getElementById("ldhPrepSyncStatusV5") || document.getElementById("ldhPrepSyncStatusV2") || document.getElementById("ldhPrepSyncStatus");
+      if(!el){
+        el = document.createElement("div");
+        el.id = STATUS_ID;
+        el.style.cssText = "position:fixed;right:12px;bottom:10px;z-index:999999;background:#06131f;border:1px solid #164b63;color:#9fe8ff;border-radius:999px;padding:6px 10px;font:700 11px system-ui;box-shadow:0 0 12px rgba(0,0,0,.35)";
+        document.body.appendChild(el);
+      }
+      el.textContent = txt;
+    }catch(e){}
+  }
+
+  function ensureFirebase(){
+    if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
+    try{
+      let good = (firebase.apps || []).find(a => (a.options || {}).projectId === GOOD_CONFIG.projectId);
+      if(!good){
+        try{ good = firebase.initializeApp(GOOD_CONFIG, "prep_v6"); }
+        catch(e){
+          try{ if(!(firebase.apps || []).length) good = firebase.initializeApp(GOOD_CONFIG); }catch(_){}
+        }
+      }
+      window.firebaseConfig = GOOD_CONFIG;
+      return !!((firebase.apps || []).length && firebase.firestore);
+    }catch(e){
+      return !!(firebase.apps && firebase.apps.length && firebase.firestore);
+    }
+  }
+
+  function db(){
+    try{
+      const good = (firebase.apps || []).find(a => (a.options || {}).projectId === GOOD_CONFIG.projectId);
+      return good ? firebase.firestore(good) : firebase.firestore();
+    }catch(e){ return firebase.firestore(); }
+  }
+  function docRef(){ return db().collection(COL).doc(DOC); }
+  async function ensureAuth(){
+    try{ if(firebase.auth && !firebase.auth().currentUser) await firebase.auth().signInAnonymously(); }catch(e){}
+  }
+
+  function storageKeys(store){
+    const out = [];
+    try{
+      for(let i=0;i<store.length;i++){
+        const k = store.key(i);
+        if(isPrepKey(k)) out.push(k);
+      }
+    }catch(e){}
+    return out;
+  }
+
+  function getValue(k){
+    try{ const v = localStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
+    try{ const v = sessionStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
     return null;
   }
-  function refFromUrl(){
-    try{
-      const u=new URL(location.href);
-      return (u.searchParams.get('openRef') || u.searchParams.get('ref') || u.searchParams.get('referencia') || '').trim();
-    }catch(e){ return ''; }
+
+  function setBoth(k, v){
+    try{ localStorage.setItem(k, v); }catch(e){}
+    try{ sessionStorage.setItem(k, v); }catch(e){}
   }
-  document.addEventListener('DOMContentLoaded', function(){
-    setTimeout(function(){
-      try{
-        const r=refFromUrl() || getAny2('prep_last_import_ref') || getAny2('prep_focus_ref') || '';
-        if(r && getAny2('prep_recepcion_'+r)){
-          if(typeof cargarLista === 'function') cargarLista();
-          if(typeof marcarYabrirRef === 'function') marcarYabrirRef(r);
-        }else if(typeof cargarLista === 'function'){
-          cargarLista();
+  function removeBoth(k){
+    try{ localStorage.removeItem(k); }catch(e){}
+    try{ sessionStorage.removeItem(k); }catch(e){}
+  }
+
+  function collectData(){
+    const keys = new Set();
+    storageKeys(localStorage).forEach(k => keys.add(k));
+    storageKeys(sessionStorage).forEach(k => keys.add(k));
+    const data = {};
+    Array.from(keys).sort().forEach(k => {
+      const v = getValue(k);
+      if(v !== null && v !== undefined) data[k] = v;
+    });
+    return data;
+  }
+
+  function stableHash(data){
+    try{
+      const keys = Object.keys(data || {}).sort();
+      let s = "";
+      keys.forEach(k => { s += k + "=" + String(data[k]).length + ":" + String(data[k]) + "\n"; });
+      return s;
+    }catch(e){ return String(Date.now()); }
+  }
+
+  function currentRef(){
+    try{ if(typeof refActual !== "undefined" && refActual) return String(refActual); }catch(e){}
+    try{ if(window.refActual) return String(window.refActual); }catch(e){}
+    try{ return new URL(location.href).searchParams.get("openRef") || ""; }catch(e){}
+    return "";
+  }
+
+  function refreshViews(forceDetail){
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(function(){
+      const ref = currentRef();
+      try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
+      if(ref){
+        if(forceDetail){
+          try{ if(typeof abrirPedido === "function") { abrirPedido(ref); return; } }catch(e){}
         }
-      }catch(e){ console.warn('[PREP] focus fix', e); }
-    }, 250);
-  });
+        try{ if(typeof renderTabla === "function") renderTabla(); }catch(e){}
+      }
+      try{ if(typeof render === "function") render(); }catch(e){}
+    }, 120);
+  }
+
+  async function pushNow(reason){
+    if(applyingRemote || !booted || !ensureFirebase()) return;
+    try{
+      const data = collectData();
+      const h = stableHash(data);
+      lastLocalHash = h;
+      const payload = {
+        schema: "prep_live_sync_v6_authoritative",
+        updatedAt: Date.now(),
+        updatedBy: cid(),
+        reason: String(reason || ""),
+        data: data,
+        keys: Object.keys(data).sort()
+      };
+      await docRef().set(payload, {merge:false});
+      lastPushAt = payload.updatedAt;
+      lastRemoteAt = Math.max(lastRemoteAt, payload.updatedAt);
+      status("Preparación nube conectada");
+    }catch(e){
+      console.warn("Prep V6 push", e);
+      status("Preparación nube error");
+    }
+  }
+
+  function schedulePush(reason, delay){
+    if(applyingRemote || !booted) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(function(){ pushNow(reason || "change"); }, delay == null ? 350 : delay);
+  }
+
+  function applyRemote(remote){
+    if(!remote || !remote.data) return false;
+    const rdata = remote.data || {};
+    const remoteHash = stableHash(rdata);
+    if(remoteHash === lastLocalHash) return false;
+
+    const all = new Set();
+    storageKeys(localStorage).forEach(k => all.add(k));
+    storageKeys(sessionStorage).forEach(k => all.add(k));
+    Object.keys(rdata).forEach(k => { if(isPrepKey(k)) all.add(k); });
+
+    let changed = false;
+    applyingRemote = true;
+    try{
+      Array.from(all).forEach(k => {
+        if(!isPrepKey(k)) return;
+        if(Object.prototype.hasOwnProperty.call(rdata, k)){
+          const v = String(rdata[k]);
+          if(getValue(k) !== v){ changed = true; }
+          setBoth(k, v);
+        }else{
+          if(getValue(k) !== null){ changed = true; }
+          removeBoth(k);
+        }
+      });
+    }finally{
+      applyingRemote = false;
+    }
+    lastLocalHash = stableHash(collectData());
+    if(changed) refreshViews(true);
+    return changed;
+  }
+
+  function hookStorage(){
+    if(window.__LDH_PREP_V6_STORAGE_HOOKED__) return;
+    window.__LDH_PREP_V6_STORAGE_HOOKED__ = true;
+    try{
+      const oldSet = Storage.prototype.setItem;
+      const oldRemove = Storage.prototype.removeItem;
+      Storage.prototype.setItem = function(k, v){
+        const out = oldSet.apply(this, arguments);
+        try{ if((this === localStorage || this === sessionStorage) && isPrepKey(k) && !applyingRemote) schedulePush("storage_set:" + k, 250); }catch(e){}
+        return out;
+      };
+      Storage.prototype.removeItem = function(k){
+        const out = oldRemove.apply(this, arguments);
+        try{ if((this === localStorage || this === sessionStorage) && isPrepKey(k) && !applyingRemote) schedulePush("storage_del:" + k, 250); }catch(e){}
+        return out;
+      };
+    }catch(e){}
+  }
+
+  function wrapFunction(name){
+    try{
+      const fn = window[name];
+      if(typeof fn !== "function" || fn.__ldhPrepV6Wrapped) return;
+      const wrapped = function(){
+        const out = fn.apply(this, arguments);
+        setTimeout(function(){ schedulePush("fn:" + name, 120); refreshViews(false); }, 40);
+        return out;
+      };
+      wrapped.__ldhPrepV6Wrapped = true;
+      window[name] = wrapped;
+    }catch(e){}
+  }
+
+  function installWrappers(){
+    [
+      "guardarEstadoLocal","guardarPedido","guardar","saveMetaActual","guardarLinea",
+      "guardarUnidadesManual","guardarTipoHierro","updateNote","recibirLinea","recibir",
+      "marcarOk","marcarTodoOk","okTodo","mandarAFabricacion","eliminarPedido",
+      "abrirPedido","volverLista","crearPedido","importarPedido"
+    ].forEach(wrapFunction);
+  }
+
+  function installUiWatch(){
+    if(window.__LDH_PREP_V6_UI_WATCH__) return;
+    window.__LDH_PREP_V6_UI_WATCH__ = true;
+    ["input","change","blur","keyup","click"].forEach(function(evname){
+      document.addEventListener(evname, function(ev){
+        try{
+          const t = ev.target;
+          if(!t) return;
+          if(evname === "click" && !t.closest("button,[role=button],.btn,.pill,a")) return;
+          if(evname !== "click"){
+            const tag = String(t.tagName || "").toLowerCase();
+            if(tag !== "input" && tag !== "select" && tag !== "textarea") return;
+          }
+          schedulePush("ui:" + evname, evname === "input" ? 700 : 280);
+        }catch(e){}
+      }, true);
+    });
+  }
+
+  function pollLocal(){
+    if(applyingRemote || !booted) return;
+    const data = collectData();
+    const h = stableHash(data);
+    if(!lastLocalHash){ lastLocalHash = h; return; }
+    if(h !== lastLocalHash){
+      lastLocalHash = h;
+      schedulePush("poll_local", 180);
+    }
+  }
+
+  async function pollRemote(){
+    if(!booted || applyingRemote || !ensureFirebase()) return;
+    try{
+      const snap = await docRef().get();
+      if(!snap.exists) return;
+      const data = snap.data() || {};
+      const t = Number(data.updatedAt || 0);
+      if(t && t > lastRemoteAt && String(data.updatedBy || "") !== cid()){
+        lastRemoteAt = t;
+        applyRemote(data);
+        status("Preparación nube conectada");
+      }
+    }catch(e){}
+  }
+
+  async function boot(){
+    if(booted || !ensureFirebase()) return;
+    booted = true;
+    hookStorage();
+    installWrappers();
+    installUiWatch();
+    await ensureAuth();
+    status("Preparación nube conectando...");
+    try{
+      const snap = await docRef().get();
+      if(snap.exists){
+        const data = snap.data() || {};
+        lastRemoteAt = Number(data.updatedAt || 0);
+        applyRemote(data);
+      }else{
+        await pushNow("crear_doc_v6");
+      }
+      lastLocalHash = stableHash(collectData());
+      refreshViews(true);
+    }catch(e){ console.warn("Prep V6 initial", e); }
+    try{
+      if(unsub) unsub();
+      unsub = docRef().onSnapshot(function(snap){
+        if(!snap.exists) return;
+        const data = snap.data() || {};
+        const t = Number(data.updatedAt || 0);
+        if(t && t <= lastRemoteAt) return;
+        lastRemoteAt = t || Date.now();
+        if(String(data.updatedBy || "") === cid()) return;
+        applyRemote(data);
+        status("Preparación nube conectada");
+      }, function(e){ console.warn("Prep V6 snapshot", e); status("Preparación nube error"); });
+    }catch(e){}
+    setInterval(installWrappers, 1000);
+    setInterval(pollLocal, 800);
+    setInterval(pollRemote, 2000);
+  }
+
+  window.__ldhPrepSyncNow = function(reason){ return pushNow(reason || "manual_v6"); };
+  window.__ldhPrepSyncV6Debug = function(){ return {cid:cid(), lastLocalHash:lastLocalHash, lastRemoteAt:lastRemoteAt, data:collectData()}; };
+
+  const iv = setInterval(function(){ if(ensureFirebase()){ clearInterval(iv); boot(); } }, 300);
+  window.addEventListener("load", function(){ setTimeout(boot, 700); });
+  document.addEventListener("DOMContentLoaded", function(){ setTimeout(boot, 700); });
+})();
+</script>
+
+
+
+<script id="LDH_PREPARACION_AUTO_RELOAD_REMOTE_V7">
+(function(){
+  "use strict";
+  if(window.__LDH_PREP_AUTO_RELOAD_REMOTE_V7__) return;
+  window.__LDH_PREP_AUTO_RELOAD_REMOTE_V7__ = true;
+
+  const COL = "taller_data";
+  const DOC = "preparacion";
+  const MARK = "ldh_prep_remote_reload_marker_v7";
+  const GOOD_CONFIG = {
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
+
+  let started = false;
+  let firstSnap = true;
+  let lastSeen = 0;
+  let reloadTimer = null;
+
+  function cid(){
+    try{
+      if(window.__ldhPrepSyncV6Debug){
+        const d = window.__ldhPrepSyncV6Debug();
+        if(d && d.cid) return String(d.cid);
+      }
+    }catch(e){}
+    try{ return localStorage.getItem("ldh_prep_client_id_v6") || ""; }catch(e){ return ""; }
+  }
+
+  function ensureFirebase(){
+    try{
+      if(!window.firebase || !firebase.initializeApp || !firebase.firestore) return false;
+      let good = (firebase.apps || []).find(a => (a.options || {}).projectId === GOOD_CONFIG.projectId);
+      if(!good){
+        try{ good = firebase.initializeApp(GOOD_CONFIG, "prep_auto_reload_v7"); }catch(e){}
+      }
+      return true;
+    }catch(e){ return false; }
+  }
+
+  function db(){
+    const good = (firebase.apps || []).find(a => (a.options || {}).projectId === GOOD_CONFIG.projectId);
+    return good ? firebase.firestore(good) : firebase.firestore();
+  }
+
+  function show(msg){
+    try{
+      let el = document.getElementById("ldhPrepRemoteReloadV7");
+      if(!el){
+        el = document.createElement("div");
+        el.id = "ldhPrepRemoteReloadV7";
+        el.style.cssText = "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:999999;background:#102033;color:#fff;border:1px solid #39bdf8;border-radius:14px;padding:10px 14px;font:800 13px system-ui;box-shadow:0 8px 24px rgba(0,0,0,.45)";
+        document.body.appendChild(el);
+      }
+      el.textContent = msg;
+    }catch(e){}
+  }
+
+  function isTyping(){
+    try{
+      const a = document.activeElement;
+      if(!a) return false;
+      const tag = String(a.tagName || "").toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || a.isContentEditable;
+    }catch(e){ return false; }
+  }
+
+  function scheduleReload(remoteAt){
+    if(reloadTimer) return;
+    try{ sessionStorage.setItem(MARK, String(remoteAt || Date.now())); }catch(e){}
+    show("Cambios nuevos en Preparación. Actualizando...");
+    const run = function(){
+      if(isTyping()){
+        show("Cambios nuevos en Preparación. Se actualizará al soltar el campo...");
+        reloadTimer = setTimeout(run, 1200);
+        return;
+      }
+      try{ location.reload(); }catch(e){ try{ location.href = location.href; }catch(_){} }
+    };
+    reloadTimer = setTimeout(run, 650);
+  }
+
+  function start(){
+    if(started || !ensureFirebase()) return;
+    started = true;
+    try{
+      db().collection(COL).doc(DOC).onSnapshot(function(snap){
+        if(!snap.exists) return;
+        const data = snap.data() || {};
+        const t = Number(data.updatedAt || 0);
+        const by = String(data.updatedBy || "");
+        if(!t) return;
+        if(firstSnap){ firstSnap = false; lastSeen = t; return; }
+        if(t <= lastSeen) return;
+        lastSeen = t;
+        if(by && by === cid()) return;
+        const lastReload = Number(sessionStorage.getItem(MARK) || 0);
+        if(lastReload && Math.abs(t - lastReload) < 1500) return;
+        scheduleReload(t);
+      }, function(e){ console.warn("Prep auto reload watcher", e); });
+    }catch(e){ console.warn("Prep auto reload start", e); started = false; }
+  }
+
+  const iv = setInterval(function(){ if(ensureFirebase()){ clearInterval(iv); setTimeout(start, 900); } }, 300);
+  window.addEventListener("load", function(){ setTimeout(start, 1200); });
+  document.addEventListener("DOMContentLoaded", function(){ setTimeout(start, 1200); });
 })();
 </script>
 
