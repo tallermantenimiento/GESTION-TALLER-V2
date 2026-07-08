@@ -2277,6 +2277,9 @@ try{
             }
           }catch(e){}
 
+        // Último paso del import: si viene sin id pero el nombre existe EXACTO en Stock v2, vincular.
+        try{ LDH_autoLinkV2ExactForLine(l); }catch(e){}
+
         return l;
       });
 
@@ -2492,6 +2495,7 @@ if(gBorrow && typeof gBorrow === "object" && Array.isArray(gBorrow.items) && gBo
 }
 
   estadoMateriales = JSON.parse(getAny(KP(ref)) || "[]");
+  try{ LDH_autoLinkV2ExactCurrent(); }catch(e){}
       // Normaliza líneas antiguas (compatibilidad): algunos guardados usan 'material' en vez de 'mat'
       estadoMateriales = (Array.isArray(estadoMateriales)?estadoMateriales:[]).map(l=>{
         if(!l || typeof l!=='object') return l;
@@ -3068,6 +3072,85 @@ function _v2CompanyStockPill(line, linkedMat, pedida){
     return `<span class="link-pill stock-company-pill warn">Stock empresa: material sin ficha v2</span>`;
   }
   return `<span class="link-pill stock-company-pill warn">Stock empresa: sin base v2 cargada</span>`;
+}
+
+
+
+/* ========= AUTO-VÍNCULO STOCK V2 POR NOMBRE EXACTO =========
+   Seguro: solo vincula si hay coincidencia exacta normalizada con una ficha v2.
+   Evita que accesorios vinculados en Configuración lleguen como "Sin vínculo".
+*/
+function LDH_autoLinkV2ExactForLine(line){
+  try{
+    if(!line || typeof line !== "object") return false;
+    if(getLinkedMatIdForLine(line) || line.linked_matId || line.stockMatId || line.matId || line.stockLinkId) return false;
+
+    const pack = _v2LoadCompanyStockDB();
+    if(!pack || !pack.db || !Array.isArray(pack.db.materials)) return false;
+
+    const lineName = normName(line.mat || line.material || line.name || "");
+    if(!lineName) return false;
+
+    // Empresa solo para priorizar materiales que existen en stock de esa empresa; no bloquea si no está en stock.
+    const emp = String((metaActual && (metaActual.empresa || metaActual.company)) || "").trim();
+    let companyId = "";
+    try{
+      const c = (pack.db.companies || []).find(x => _v2Norm(_v2First(x.name,x.nombre,x.code,x.id)) === _v2Norm(emp));
+      companyId = c ? String(_v2First(c.id,c.code,c.name,c.nombre)) : "";
+    }catch(e){}
+
+    const lots = Array.isArray(pack.db.stock) ? pack.db.stock :
+                 Array.isArray(pack.db.stocks) ? pack.db.stocks :
+                 Array.isArray(pack.db.stockLots) ? pack.db.stockLots : [];
+
+    const candidates = (pack.db.materials || []).filter(m=>{
+      const mn = normName(_v2First(m.name, m.nombre, m.material));
+      return mn && mn === lineName;
+    });
+
+    if(!candidates.length) return false;
+
+    let best = candidates[0];
+
+    if(companyId){
+      const inCompany = candidates.find(m => lots.some(r =>
+        String(_v2First(r.companyId,r.empresaId,r.empresa,r.company)) === String(companyId) &&
+        String(_v2First(r.materialId,r.matId,r.material_id,r.idMaterial)) === String(_v2First(m.id,m.materialId,m.matId))
+      ));
+      if(inCompany) best = inCompany;
+    }
+
+    const id = String(_v2First(best.id,best.materialId,best.matId));
+    if(!id) return false;
+
+    line.linked_matId = id;
+    line.stockMatId = id;
+    line.matId = id;
+    line.stockLinkId = id;
+    line.linked_matName = _v2First(best.name,best.nombre,best.material);
+    line._autoLinkedV2Exact = true;
+    return true;
+  }catch(e){
+    console.warn("Auto-vinculo v2 exacto falló", e);
+    return false;
+  }
+}
+
+function LDH_autoLinkV2ExactCurrent(){
+  try{
+    if(!Array.isArray(estadoMateriales)) return false;
+    let changed = false;
+    estadoMateriales.forEach(l => {
+      if(LDH_autoLinkV2ExactForLine(l)) changed = true;
+    });
+    if(changed && refActual){
+      setAny(KP(refActual), JSON.stringify(estadoMateriales));
+    }
+    return changed;
+  }catch(e){
+    console.warn("Auto-vinculo v2 actual falló", e);
+    return false;
+  }
 }
 
 
@@ -8457,6 +8540,15 @@ init();
   }
   function getTrabajoStage(ref){
     try{
+      // Prioridad a Preparación:
+      // si existe prep_recepcion_REF y la meta NO está marcada explícitamente como fabricación/pintura/almacén/entregado,
+      // no debe heredar registros antiguos de Fabricación por reutilizar referencia.
+      const metaPrep = _parse("prep_meta_" + ref) || {};
+      const hasPrepLines = !!(_parse("prep_recepcion_" + ref));
+      if(hasPrepLines && !metaPrep.en_fabricacion && !metaPrep.fabricacion_ts && !metaPrep.en_pintura && !metaPrep.pintura_ts && !metaPrep.en_almacen && !metaPrep.almacen_ts && !metaPrep.entregado && !metaPrep.en_entregado){
+        return "preparacion";
+      }
+
       const records = _findRecords(ref);
       let best = "";
       records.forEach(({rec,fallback})=>{
