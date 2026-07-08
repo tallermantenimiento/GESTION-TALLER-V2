@@ -126,6 +126,12 @@ function setStatus(txt, ok){
 }
 
 function companyId(c){ return s(c.id || c.code || c.name || c.nombre).toLowerCase().replace(/[^a-z0-9]+/g,'_'); }
+function companyDisplayName(c,id){
+  return s((c && (c.name || c.nombre || c.code || c.label)) || id || '').trim().toUpperCase();
+}
+function companyKeyName(name){
+  return s(name).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+}
 function companyName(id){ return (companies.find(c=>c.id===id)||{}).name || id || '-'; }
 
 function classify(mat,row){
@@ -167,17 +173,52 @@ function normalizePackage(db0){
   const compArr = Array.isArray(db0.companies) ? db0.companies : [];
   const matArr = Array.isArray(db0.materials) ? db0.materials : [];
   const stockArr = Array.isArray(db0.stock) ? db0.stock : [];
-  const compMap = new Map();
-  compArr.forEach((c,i)=>{
-    const id = companyId(c) || ('empresa_'+i);
-    compMap.set(id, {id, name:s(c.name || c.nombre || c.code || c.id || id).toUpperCase(), order:n(c.order ?? i)});
-  });
+
+  // Importante: Stock puede tener empresas duplicadas con IDs distintos pero mismo nombre.
+  // Compras debe mostrar una sola pestaña por nombre y agrupar todas las líneas bajo esa empresa.
+  const compMap = new Map();       // canonicalId -> company visible
+  const idAlias = new Map();       // rawId -> canonicalId
+  const nameAlias = new Map();     // normalizedName -> canonicalId
+
+  function registerCompany(c,i){
+    c = c || {};
+    const rawId = companyId(c) || ('empresa_'+i);
+    const visibleName = companyDisplayName(c, rawId) || rawId.toUpperCase();
+    const nameKey = companyKeyName(visibleName);
+    let canonical = nameAlias.get(nameKey);
+    if(!canonical){
+      canonical = rawId;
+      nameAlias.set(nameKey, canonical);
+      compMap.set(canonical, {id:canonical, name:visibleName, order:n(c.order ?? i)});
+    }else{
+      const ex = compMap.get(canonical);
+      if(ex) ex.order = Math.min(n(ex.order), n(c.order ?? i));
+    }
+    idAlias.set(rawId, canonical);
+    return canonical;
+  }
+
+  compArr.forEach(registerCompany);
+
+  function canonicalCompanyFromRow(r){
+    r = r || {};
+    const raw = companyId({id:r.companyId || r.empresaId || r.company || r.empresa || r.companyName || r.nombre});
+    if(raw && idAlias.has(raw)) return idAlias.get(raw);
+
+    const visibleName = companyDisplayName({name:r.companyName || r.empresa || r.company || r.companyId}, raw || 'stock_comun');
+    const key = companyKeyName(visibleName);
+    if(key && nameAlias.has(key)) return nameAlias.get(key);
+
+    const fallbackId = raw || companyId({name:visibleName}) || 'stock_comun';
+    const canonical = registerCompany({id:fallbackId, name:visibleName, order:9999}, 9999);
+    return canonical;
+  }
+
   const matMap = new Map(matArr.map(m=>[s(m.id),m]));
 
   // Orden real de Stock:
   // - familyOrder = primera aparición de la familia dentro de empresa+tipo.
   // - order = posición de la línea dentro de esa familia.
-  // Así Compras respeta el drag & drop de Stock.
   const familyPos = new Map();
   const itemPos = new Map();
   let globalVisibleIndex = 0;
@@ -185,8 +226,7 @@ function normalizePackage(db0){
   const out = [];
   stockArr.forEach((r,i)=>{
     const mat = matMap.get(s(r.materialId)) || {};
-    const cid = companyId({id:r.companyId}) || activeCompany || 'stock_comun';
-    if(!compMap.has(cid)) compMap.set(cid, {id:cid, name:s(r.companyName || cid).toUpperCase(), order:9999});
+    const cid = canonicalCompanyFromRow(r);
     const typ = classify(mat,r);
     if(typ !== 'hierro' && typ !== 'pintura') return;
 
@@ -218,12 +258,25 @@ function normalizePackage(db0){
 }
 
 function normalizeMaterialCollection(docs){
+  // Parte desde las empresas ya normalizadas por normalizePackage.
   const compMap = new Map(companies.map(c=>[c.id,c]));
+  const nameAlias = new Map(companies.map(c=>[companyKeyName(c.name), c.id]));
+
+  function registerVisibleCompany(rawId, visibleName, order=9999){
+    visibleName = companyDisplayName({name:visibleName}, rawId);
+    const key = companyKeyName(visibleName);
+    if(nameAlias.has(key)) return nameAlias.get(key);
+    const cid = rawId || companyId({name:visibleName}) || ('empresa_'+compMap.size);
+    nameAlias.set(key, cid);
+    compMap.set(cid, {id:cid, name:visibleName, order});
+    return cid;
+  }
+
   const out = [];
   docs.forEach((m,i)=>{
     if(m.deleted) return;
-    const cid = companyId({id:m.companyId || m.companyName || 'stock_comun'});
-    if(!compMap.has(cid)) compMap.set(cid, {id:cid,name:s(m.companyName||m.companyId||cid).toUpperCase(),order:9999});
+    const rawId = companyId({id:m.companyId || m.companyName || 'stock_comun'});
+    const cid = registerVisibleCompany(rawId, m.companyName || m.companyId || rawId, 9999);
     const typ = classify(m,m);
     if(typ !== 'hierro' && typ !== 'pintura') return;
     out.push({
@@ -406,6 +459,19 @@ async function loadAll(){
 }
 
 function renderCompanies(){
+  // Seguridad visual: nunca pintar pestañas duplicadas por nombre.
+  const seen = new Set();
+  const visible = [];
+  companies.forEach(c=>{
+    const k = companyKeyName(c.name || c.id);
+    if(seen.has(k)) return;
+    seen.add(k);
+    visible.push(c);
+  });
+  companies = visible;
+  if(activeCompany && !companies.some(c=>c.id===activeCompany)){
+    activeCompany = companies[0]?.id || '';
+  }
   $('companies').innerHTML = companies.map(c=>`<button class="${c.id===activeCompany?'active':''}" data-company="${esc(c.id)}">${esc(c.name)}</button>`).join('');
   document.querySelectorAll('[data-company]').forEach(b=>b.onclick=()=>{ activeCompany=b.dataset.company; openAccState.clear(); render(); });
 }
