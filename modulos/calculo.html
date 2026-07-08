@@ -2835,23 +2835,130 @@ saveData() {
             const hint = document.getElementById('calcPaintHint');
             if(!sel) return;
 
-            // Listener único para persistir la selección de pintura por empresa
-            // (se usa al mandar el pedido a Preparación para que llegue ya vinculada)
+            const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+            const esc = (v)=>String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+            const loadCompanyStock = ()=>{
+                try{
+                    const raw = localStorage.getItem('ldh_v2_company_stock_v1');
+                    if(raw){
+                        const db = JSON.parse(raw);
+                        if(db && typeof db === 'object') return db;
+                    }
+                }catch(_){}
+                try{
+                    const raw = localStorage.getItem('taller_stock_v3_data');
+                    if(raw){
+                        const db = JSON.parse(raw);
+                        if(db && typeof db === 'object') return db;
+                    }
+                }catch(_){}
+                return {companies:[], materials:[], stock:[]};
+            };
+
+            const isPaintMaterial = (m, row)=>{
+                m = m || {}; row = row || {};
+                const txt = norm([
+                    m.type, m.tipo, m.cat, m.category,
+                    m.family, m.familia, m.grp, m.group,
+                    m.name, m.nombre,
+                    row.type, row.tipo, row.cat, row.family, row.grp, row.name
+                ].join(' '));
+                if(txt.includes('estructural') || txt.includes('perfiler') || txt.includes('pletina') || txt.includes('pds') || txt.includes('chapa') || txt.includes('malla') || txt.includes('macizo')) return false;
+                return txt.includes('pintur') || txt.includes('ral') || txt.includes('disolvente') || txt.includes('barniz');
+            };
+
+            const getPaintsForCompany = (empresa)=>{
+                const db = loadCompanyStock();
+                const companies = Array.isArray(db.companies) ? db.companies : [];
+                const materials = Array.isArray(db.materials) ? db.materials : [];
+                const stock = Array.isArray(db.stock) ? db.stock : [];
+
+                const matById = new Map(materials.map((m,i)=>[String(m.id || m.materialId || m.matId || i), m]));
+                const compNameById = new Map();
+                companies.forEach(c=>{
+                    const id = String(c.id || c.companyId || c.code || c.name || '').trim();
+                    const name = String(c.name || c.nombre || c.code || c.id || '').trim();
+                    if(id) compNameById.set(id, name);
+                });
+
+                const empN = norm(empresa);
+                const companyMatches = (cid)=>{
+                    const raw = String(cid||'').trim();
+                    if(!raw) return false;
+                    if(norm(raw) === empN) return true;
+                    const nm = compNameById.get(raw);
+                    if(nm && norm(nm) === empN) return true;
+                    return false;
+                };
+
+                const out = [];
+                const seen = new Set();
+
+                // Stock real nuevo: filtra por empresa receptora y material tipo pintura.
+                stock.forEach((row,i)=>{
+                    if(!companyMatches(row.companyId || row.empresaId || row.company || row.empresa)) return;
+                    const mid = String(row.materialId || row.matId || row.id || '').trim();
+                    const m = matById.get(mid) || {};
+                    if(!isPaintMaterial(m,row)) return;
+
+                    const id = String(m.id || row.materialId || row.matId || row.id || '').trim();
+                    const name = String(m.name || m.nombre || row.name || row.material || row.matName || '').trim();
+                    if(!id || !name) return;
+
+                    const key = norm(id + '|' + name);
+                    if(seen.has(key)) return;
+                    seen.add(key);
+                    out.push({
+                        id,
+                        name,
+                        qty: Number(row.qty ?? row.cantidad ?? row.physicalQty ?? row.stock ?? 0) || 0,
+                        order: Number(row.order ?? m.order ?? i) || i
+                    });
+                });
+
+                // Compatibilidad con esquema antiguo: grupo "pintura EMPRESA".
+                materials.forEach((m,i)=>{
+                    const cat = norm(m.cat || m.type || m.tipo || '');
+                    const grp = norm(m.grp || m.family || m.familia || '');
+                    const legacyOk = (cat === 'pintura' || cat.includes('pintur')) && (grp === norm('pintura ' + empresa) || grp === empN || grp.includes(empN));
+                    const directCompanyOk = companyMatches(m.companyId || m.empresaId || m.company || m.empresa);
+                    if(!(legacyOk || (directCompanyOk && isPaintMaterial(m,null)))) return;
+
+                    const id = String(m.id || m.matId || m.materialId || '').trim();
+                    const name = String(m.name || m.nombre || m.material || '').trim();
+                    if(!id || !name) return;
+
+                    const key = norm(id + '|' + name);
+                    if(seen.has(key)) return;
+                    seen.add(key);
+                    out.push({
+                        id,
+                        name,
+                        qty: Number(m.qty ?? m.stock ?? m.cant ?? 0) || 0,
+                        order: Number(m.order ?? i) || i
+                    });
+                });
+
+                return out.sort((a,b)=>a.order-b.order || String(a.name).localeCompare(String(b.name),'es',{sensitivity:'base'}));
+            };
+
+            // Listener único para persistir la selección de pintura por empresa.
             if(!sel.__paintPickBound){
                 sel.__paintPickBound = true;
                 sel.addEventListener('change', ()=>{
                     try{
                         const emp = ((document.getElementById('calcEmpresa')||{}).value || '').trim();
                         const matId = (sel.value || '').trim();
+                        const label = (sel.selectedOptions && sel.selectedOptions[0]) ? String(sel.selectedOptions[0].textContent||'').trim() : '';
                         if(emp){
                             const key = 'calc_paint_pick_' + emp;
-                            localStorage.setItem(key, JSON.stringify({empresa: emp, matId}));
+                            localStorage.setItem(key, JSON.stringify({empresa: emp, matId, name: label}));
                         }
                     }catch(_){ }
                 });
             }
 
-            // Reset
             sel.innerHTML = '<option value="">— Selecciona color/pintura —</option>';
 
             if(!empresa){
@@ -2859,41 +2966,30 @@ saveData() {
                 return;
             }
 
-            const db = this._loadStockDB();
-            const mats = Array.isArray(db.materials) ? db.materials : [];
-            const targetGrp = ('pintura ' + empresa).toLowerCase();
-
-            // pintar todas las fichas (aunque qty 0)
-            const paints = mats.filter(m => String(m.cat||'').toLowerCase()==='pintura' && String(m.grp||'').toLowerCase()===targetGrp);
-            paints.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''), 'es', {sensitivity:'base'}));
+            const paints = getPaintsForCompany(empresa);
 
             if(paints.length===0){
-                if(hint) hint.textContent = `⚠️ No hay fichas en Stock para pintura ${empresa}. Crea primero la pintura/color en Stock.`;
+                if(hint) hint.textContent = `⚠️ No hay pintura creada en Stock para ${empresa}. Créala en Stock > empresa ${empresa} > Pintura.`;
                 return;
             }
 
             sel.innerHTML = '<option value="">— Selecciona color/pintura —</option>' + paints.map(p=>{
-                const id = p.id || p.matId || p._id || p.key || '';
-                const name = (p.name||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-                const qty = (p.qty ?? p.stock ?? p.cant ?? 0);
-                return `<option value="${id}">${name}</option>`;
+                return `<option value="${esc(p.id)}">${esc(p.name)}</option>`;
             }).join('');
 
-            // Restaurar última selección guardada para esta empresa (si existe)
             try{
                 const saved = JSON.parse(localStorage.getItem('calc_paint_pick_' + empresa) || 'null');
-                if(saved && saved.matId && paints.some(p => String(p.id||p.matId||p._id||p.key||'')===String(saved.matId))){
+                if(saved && saved.matId && paints.some(p => String(p.id)===String(saved.matId))){
                     sel.value = String(saved.matId);
                 }
             }catch(_){ }
 
-            // limpiar selección anterior si no pertenece
             const cur = (sel.value||'').trim();
-            if(cur && !paints.some(p => String(p.id||p.matId||p._id||p.key||'')===cur)){
+            if(cur && !paints.some(p => String(p.id)===cur)){
                 sel.value = '';
             }
 
-            if(hint) hint.textContent = `Mostrando pintura de ${empresa} (aunque stock=0).`;
+            if(hint) hint.textContent = `Mostrando pintura de ${empresa}: ${paints.length} color(es).`;
         }catch(e){
             console.warn('refreshPaintDropdown error', e);
         }
@@ -7078,61 +7174,28 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
 <script>
 (function(){
-  function loadStockDB(){
-    try{
-      // Si existe App._loadStockDB lo usamos (es el schema real del programa)
-      if(window.App && typeof App._loadStockDB === "function") return App._loadStockDB();
-    }catch(e){}
-    try{
-      const raw = localStorage.getItem("taller_stock_v3_data");
-      const db = raw ? JSON.parse(raw) : {materials:[]};
-      if(!db || !Array.isArray(db.materials)) db.materials = [];
-      return db;
-    }catch(e){ return {materials:[]}; }
-  }
-
   function refreshPaintOptions(){
-    const emp = (document.getElementById("calcEmpresa")||{}).value || "";
-    const sel = document.getElementById("calcPaintMat");
-    const hint = document.getElementById("calcPaintHint");
-    if(!sel) return;
-
-    const keep = sel.value;
-    sel.innerHTML = '<option value="">— (Opcional) Selecciona pintura —</option>';
-
-    if(!emp){
-      if(hint) hint.textContent = "Selecciona primero la empresa receptora para listar la pintura.";
-      return;
+    try{
+      if(window.App && typeof App.refreshPaintDropdown === "function"){
+        App.refreshPaintDropdown();
+      }
+    }catch(e){
+      console.warn("refreshPaintOptions pintura empresa error", e);
     }
-    const grp = "pintura " + emp;
-    const db = loadStockDB();
-    const mats = (db.materials||[]).filter(m => String(m.cat||"").toLowerCase()==="pintura" && String(m.grp||"").toLowerCase()===grp.toLowerCase());
-
-    if(!mats.length){
-      if(hint) hint.textContent = `No hay fichas en "${grp}". Si el concepto requiere pintura, crea antes la ficha en Stock.`;
-      return;
-    }
-    if(hint) hint.textContent = `Mostrando pintura de "${grp}" (incluye stock 0).`;
-
-    mats
-      .slice()
-      .sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""), "es"))
-      .forEach(m=>{
-        const opt = document.createElement("option");
-        opt.value = m.id || m.matId || m.key || "";
-        opt.textContent = (m.name || m.mat || m.title || "Pintura");
-        if(String(opt.value) === String(keep)) opt.selected = true;
-        sel.appendChild(opt);
-      });
-
-    // Si el valor anterior ya no existe, se queda en vacío.
   }
 
   document.addEventListener("DOMContentLoaded", function(){
     const empSel = document.getElementById("calcEmpresa");
-    if(empSel) empSel.addEventListener("change", refreshPaintOptions);
-    refreshPaintOptions();
+    if(empSel && !empSel.__paintCompanyBoundFinal){
+      empSel.__paintCompanyBoundFinal = true;
+      empSel.addEventListener("change", refreshPaintOptions);
+    }
+    setTimeout(refreshPaintOptions, 100);
+    setTimeout(refreshPaintOptions, 800);
   });
+
+  // Expuesto por compatibilidad con patches anteriores.
+  window.LDH_refreshPaintOptionsByCompany = refreshPaintOptions;
 })();
 </script>
 
