@@ -5695,5 +5695,202 @@ setTimeout(()=>window.LDH_scheduleStockCloudPublish(true), 1600);
 </script>
 
 
+
+<script id="LDH_STOCK_DRAG_ENTRADA_DELEGADO_FINAL_0807">
+(function(){
+  let ldhDragFamilyKey = null;
+
+  function famKeyLocal(name){
+    try{
+      if(typeof familyKey === "function") return familyKey(name);
+    }catch(e){}
+    return String(name || "Sin familia").trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"") || "sin_familia";
+  }
+
+  function rememberOpen(){
+    try{ if(typeof LDH_stockRememberOpenFamilies === "function") LDH_stockRememberOpenFamilies(); }catch(e){}
+  }
+
+  function restoreOpen(){
+    try{ if(typeof LDH_stockRestoreOpenFamilies === "function") LDH_stockRestoreOpenFamilies(); }catch(e){}
+  }
+
+  function currentFamilyOrder(){
+    return Array.from(document.querySelectorAll(".family-row[data-family-key]"))
+      .map(el => String(el.dataset.familyKey || "").trim())
+      .filter(Boolean);
+  }
+
+  function persistOrder(order){
+    try{
+      if(typeof saveFamilyOrder === "function") saveFamilyOrder(order);
+    }catch(e){}
+
+    // Persistencia real: guardar en materiales y publicar nube.
+    try{
+      if(window.db && Array.isArray(db.materials)){
+        const pos = new Map(order.map((k,i)=>[String(k), i]));
+        let changed = false;
+        db.materials.forEach(m=>{
+          if(!m) return;
+          if(String(m.type||"").toLowerCase() !== String(activeType||"").toLowerCase()) return;
+          const k = famKeyLocal(m.family || m.familia || m.grp || "Sin familia");
+          if(!pos.has(k)) return;
+          const v = pos.get(k);
+          if(Number(m.familyOrder) !== Number(v)){
+            m.familyOrder = v;
+            m.ordenFamilia = v;
+            changed = true;
+          }
+        });
+        if(changed && typeof save === "function") save();
+      }
+    }catch(e){
+      console.warn("Persistencia de orden familias falló", e);
+    }
+  }
+
+  function rerenderKeep(){
+    rememberOpen();
+    try{
+      if(typeof render === "function") render();
+    }catch(e){
+      console.error("Render tras drag falló", e);
+    }
+    setTimeout(function(){
+      restoreOpen();
+      bindFamilies();
+    }, 60);
+  }
+
+  function bindFamilies(){
+    document.querySelectorAll(".family-row[data-family-key]").forEach(row=>{
+      const key = String(row.dataset.familyKey || "").trim();
+      const summary = row.querySelector("summary");
+      const handle = row.querySelector(".family-drag-handle") || summary;
+      if(!summary || !handle || !key) return;
+
+      // Marcar ambos como arrastrables; algunos navegadores no disparan drag en summary.
+      summary.setAttribute("draggable","true");
+      handle.setAttribute("draggable","true");
+      handle.style.cursor = "grab";
+
+      if(handle.__ldhDragBoundFinal) return;
+      handle.__ldhDragBoundFinal = true;
+
+      handle.addEventListener("dragstart", function(ev){
+        ldhDragFamilyKey = key;
+        try{ window.draggedFamilyKey = key; }catch(e){}
+        try{
+          ev.dataTransfer.effectAllowed = "move";
+          ev.dataTransfer.setData("text/plain", key);
+          ev.dataTransfer.setData("application/x-ldh-family", key);
+        }catch(e){}
+        row.classList.add("family-dragging");
+      });
+
+      handle.addEventListener("dragend", function(){
+        ldhDragFamilyKey = null;
+        try{ window.draggedFamilyKey = null; }catch(e){}
+        document.querySelectorAll(".family-row.family-dragging,.family-row.family-drag-over")
+          .forEach(el=>el.classList.remove("family-dragging","family-drag-over"));
+      });
+
+      // Evita que al empezar sobre el asa se cierre/abra el desplegable.
+      handle.addEventListener("click", function(ev){
+        if(ldhDragFamilyKey){
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+      }, true);
+    });
+  }
+
+  // Delegación sobre la fila completa: el drop suele llegar al tr/td/details, no solo al summary.
+  document.addEventListener("dragover", function(ev){
+    const row = ev.target && ev.target.closest && ev.target.closest(".family-row[data-family-key]");
+    if(!row || !ldhDragFamilyKey) return;
+    const targetKey = String(row.dataset.familyKey || "");
+    if(!targetKey || targetKey === ldhDragFamilyKey) return;
+    ev.preventDefault();
+    try{ ev.dataTransfer.dropEffect = "move"; }catch(e){}
+    row.classList.add("family-drag-over");
+  }, true);
+
+  document.addEventListener("dragleave", function(ev){
+    const row = ev.target && ev.target.closest && ev.target.closest(".family-row[data-family-key]");
+    if(row) row.classList.remove("family-drag-over");
+  }, true);
+
+  document.addEventListener("drop", function(ev){
+    const row = ev.target && ev.target.closest && ev.target.closest(".family-row[data-family-key]");
+    if(!row) return;
+
+    const targetKey = String(row.dataset.familyKey || "");
+    const sourceKey = ldhDragFamilyKey ||
+      (ev.dataTransfer && (ev.dataTransfer.getData("application/x-ldh-family") || ev.dataTransfer.getData("text/plain")));
+
+    if(!sourceKey || !targetKey || sourceKey === targetKey) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    const order = currentFamilyOrder();
+    const without = order.filter(k => k !== sourceKey);
+    const idx = without.indexOf(targetKey);
+    if(idx < 0) return;
+
+    without.splice(idx, 0, sourceKey);
+    persistOrder(without);
+
+    ldhDragFamilyKey = null;
+    try{ window.draggedFamilyKey = null; }catch(e){}
+    rerenderKeep();
+  }, true);
+
+  // Botón Entrada robusto: captura el click antes de cualquier onclick roto.
+  document.addEventListener("click", function(ev){
+    const btn = ev.target && ev.target.closest && ev.target.closest("button");
+    if(!btn) return;
+    const txt = String(btn.textContent || "").trim().toLowerCase();
+    const oc = String(btn.getAttribute("onclick") || "").toLowerCase();
+
+    if((txt === "+ entrada" || txt === "entrada") && (oc.includes("openmovemodal") || oc.includes("ldh_openentradaseguro") || btn.closest(".toolbar") || btn.closest("aside"))){
+      ev.preventDefault();
+      ev.stopPropagation();
+      try{
+        if(typeof openMoveModal !== "function") throw new Error("openMoveModal no existe");
+        openMoveModal("entrada");
+      }catch(e){
+        console.error("Entrada no abre", e);
+        alert("No se pudo abrir Entrada: " + (e && (e.message || e)));
+      }
+    }
+  }, true);
+
+  // Reenganchar tras render aunque render haya sido redefinido por otros parches.
+  const oldRender = window.render;
+  if(typeof oldRender === "function" && !oldRender.__ldhWrappedDragFinal){
+    const wrapped = function(){
+      const r = oldRender.apply(this, arguments);
+      setTimeout(bindFamilies, 50);
+      return r;
+    };
+    wrapped.__ldhWrappedDragFinal = true;
+    window.render = wrapped;
+  }
+
+  document.addEventListener("DOMContentLoaded", function(){
+    setTimeout(bindFamilies, 200);
+    setTimeout(bindFamilies, 800);
+    setTimeout(bindFamilies, 1500);
+  });
+
+  window.LDH_repararDragFamiliasStock = bindFamilies;
+})();
+</script>
+
 </body>
 </html>
