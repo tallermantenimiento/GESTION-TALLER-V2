@@ -4472,8 +4472,14 @@ _uaPill(item){
       // Si ya venías asignando, mantenemos el último grupo abierto.
       // Si es la primera vez en la sesión, todo colapsado por defecto.
       modal.style.display = 'flex';
-      try{ if(window.LDH_cfgLoadRemoteStock) window.LDH_cfgLoadRemoteStock(); }catch(e){}
       this.renderCfgStockResults();
+      try{
+        if(window.LDH_cfgLoadRemoteStock){
+          window.LDH_cfgLoadRemoteStock(true).then(()=>{
+            try{ App.renderCfgStockResults(); }catch(_){}
+          });
+        }
+      }catch(e){}
     },
 
     toggleCfgStockGroup(groupKey){
@@ -6338,7 +6344,7 @@ window.CarpetaPicker = (function(){
 
     <div style="display:flex; gap:10px; align-items:center; margin-top:12px;">
       <input id="cfgStockSearch" type="text" placeholder="Buscar por nombre / categoría / grupo..." style="flex:1;" oninput="App.renderCfgStockResults()" />
-      <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>
+      <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgForceRemoteStock()">Actualizar Stock real</button>
     </div>
 
     <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">No se ha encontrado el Stock real en este dispositivo (localStorage: <b>ldh_v2_company_stock_v1</b>). Abre Stock una vez para cargarlo/sincronizarlo.</div>\n    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
@@ -8084,6 +8090,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 <!-- ===== /LDH SYNC TIEMPO REAL FIRESTORE v4 MERGE STOCK ===== -->
 
 
+
 <script id="LDH_CONFIG_STOCK_DIAGNOSTICO_1206">
 function LDH_cfgStockDiagnostico(){
   try{
@@ -8094,9 +8101,13 @@ function LDH_cfgStockDiagnostico(){
       const k = String((m.cat||'') + ' > ' + (m.grp||'Sin familia'));
       byFam[k] = (byFam[k]||0)+1;
     });
+    const remote = window.LDH_CFG_REMOTE_STOCK || {};
     const lines = Object.keys(byFam).sort().map(k=>k + ': ' + byFam[k]);
     alert('Stock real en Configuración\n' +
       'Fuente: ' + (st.source||'') + '\n' +
+      'Remoto cargado: ' + (remote.loaded ? 'sí' : 'no') + '\n' +
+      'Remoto materiales crudos: ' + ((remote.materials||[]).length || 0) + '\n' +
+      'Remoto fuente: ' + (remote.source || remote.error || '') + '\n' +
       'Materiales únicos: ' + mats.length + '\n\n' +
       lines.join('\n')
     );
@@ -8107,12 +8118,14 @@ function LDH_cfgStockDiagnostico(){
 </script>
 
 
+
+
 <script type="module" id="LDH_CONFIG_LEE_STOCK_REAL_FIRESTORE_1206">
 (async function(){
   if(window.__LDH_CFG_STOCK_REMOTE_INSTALLED) return;
   window.__LDH_CFG_STOCK_REMOTE_INSTALLED = true;
 
-  window.LDH_CFG_REMOTE_STOCK = window.LDH_CFG_REMOTE_STOCK || {materials:[], loading:false, loaded:false, error:''};
+  window.LDH_CFG_REMOTE_STOCK = window.LDH_CFG_REMOTE_STOCK || {materials:[], loading:false, loaded:false, error:'', source:''};
 
   const firebaseConfig = {
     apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
@@ -8123,34 +8136,118 @@ function LDH_cfgStockDiagnostico(){
     appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
   };
 
+  const STOCK_KEY = 'ldh_v2_company_stock_v1';
+
+  function nice(v){ return String(v||'').trim(); }
   function setInfo(extra){
     try{
       const info = document.getElementById('cfgStockInfo');
-      if(!info) return;
-      const cur = info.textContent || '';
-      if(extra && !cur.includes(extra)) info.textContent = cur + ' · ' + extra;
+      if(!info || !extra) return;
+      const base = info.textContent || '';
+      info.textContent = base.replace(/ · cargando Firestore\.\.\.| · Firestore no disponible| · Firestore: [^·]+/g,'') + ' · ' + extra;
     }catch(e){}
   }
 
-  window.LDH_cfgLoadRemoteStock = async function(){
+  function rowsFromStockDb(db0){
+    db0 = db0 && typeof db0 === 'object' ? db0 : {};
+    const mats = Array.isArray(db0.materials) ? db0.materials : [];
+    const stock = Array.isArray(db0.stock) ? db0.stock : [];
+    const matById = new Map(mats.map((m,i)=>[nice(m.id || m.materialId || m.matId || ('mat_'+i)), m]));
+    const out = [];
+
+    // Primero stock para capturar orden/familia publicada.
+    stock.forEach((sr,i)=>{
+      const mat = matById.get(nice(sr.materialId || sr.matId || sr.id)) || {};
+      const name = nice(mat.name || mat.nombre || sr.name || sr.material || sr.matName);
+      if(!name) return;
+      out.push({
+        id: nice(mat.id || sr.materialId || sr.matId || sr.id || ('st_'+i)),
+        materialId: nice(mat.id || sr.materialId || sr.matId || sr.id || ('st_'+i)),
+        name,
+        family: nice(mat.family || mat.familia || mat.grp || sr.family || sr.familia || sr.grp || 'Sin familia'),
+        type: nice(mat.type || mat.tipo || sr.type || sr.tipo || 'Hierro'),
+        unit: nice(mat.unit || mat.unidad || sr.unit || sr.unidad || 'und'),
+        order: Number(sr.order ?? mat.order ?? i) || i,
+        familyOrder: Number(sr.familyOrder ?? mat.familyOrder ?? i) || i,
+        companyId: nice(sr.companyId || mat.companyId || '')
+      });
+    });
+
+    // Después materiales sin línea en stock.
+    mats.forEach((m,i)=>{
+      const id = nice(m.id || m.materialId || m.matId || ('mat_'+i));
+      const name = nice(m.name || m.nombre);
+      if(!name) return;
+      out.push({
+        id,
+        materialId:id,
+        name,
+        family: nice(m.family || m.familia || m.grp || 'Sin familia'),
+        type: nice(m.type || m.tipo || 'Hierro'),
+        unit: nice(m.unit || m.unidad || 'und'),
+        order: Number(m.order ?? (stock.length+i)) || (stock.length+i),
+        familyOrder: Number(m.familyOrder ?? (stock.length+i)) || (stock.length+i),
+        companyId: nice(m.companyId || '')
+      });
+    });
+
+    return out;
+  }
+
+  async function readChunks(db, doc, getDoc){
+    const metaSnap = await getDoc(doc(db,'taller_data','stock'));
+    if(!metaSnap.exists()) return [];
+    const meta = metaSnap.data() || {};
+    const total = Number(meta.totalChunks || 0) || 0;
+    if(!total) return [];
+    let json = '';
+    for(let i=0;i<total;i++){
+      const cs = await getDoc(doc(db,'taller_data','stock','chunks',String(i)));
+      if(cs.exists()) json += cs.data().part || '';
+    }
+    const all = JSON.parse(json || '{}');
+    let raw = all[STOCK_KEY] || all.payload || all.data || all.stock || null;
+    if(typeof raw === 'string') raw = JSON.parse(raw);
+    if(raw && raw[STOCK_KEY] && typeof raw[STOCK_KEY] === 'string') raw = JSON.parse(raw[STOCK_KEY]);
+    return rowsFromStockDb(raw);
+  }
+
+  async function readStockMaterials(db, collection, getDocs){
+    const snap = await getDocs(collection(db,'stock_materials'));
+    return snap.docs.map(d => ({id:d.id, ...d.data()})).filter(x => x && (x.name || x.material || x.matName));
+  }
+
+  window.LDH_cfgLoadRemoteStock = async function(force=false){
     const state = window.LDH_CFG_REMOTE_STOCK;
-    if(state.loading || state.loaded) return;
+    if(state.loading) return;
+    if(state.loaded && !force) return;
     state.loading = true;
     state.error = '';
     setInfo('cargando Firestore...');
 
     try{
       const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-      const {getFirestore,collection,getDocs} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+      const {getFirestore,collection,getDocs,doc,getDoc} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+
       let app = getApps().find(a => a.options && a.options.projectId === firebaseConfig.projectId);
       if(!app) app = initializeApp(firebaseConfig, 'ldh-config-stock-real');
       const db = getFirestore(app);
 
-      const snap = await getDocs(collection(db,'stock_materials'));
-      const docs = snap.docs.map(d => ({id:d.id, ...d.data()}));
-      state.materials = docs.filter(x => x && (x.name || x.material || x.matName));
+      const fromDocs = await readStockMaterials(db, collection, getDocs).catch(e => {
+        console.warn('[Config] stock_materials no disponible', e);
+        return [];
+      });
+      const fromChunks = await readChunks(db, doc, getDoc).catch(e => {
+        console.warn('[Config] chunks no disponibles', e);
+        return [];
+      });
+
+      // Unimos ambas fuentes; _loadStockForConfig limpia duplicados por nombre/familia/unidad.
+      state.materials = fromDocs.concat(fromChunks);
       state.loaded = true;
       state.loading = false;
+      state.source = 'Firestore docs ' + fromDocs.length + ' + chunks ' + fromChunks.length;
+      setInfo('Firestore: docs ' + fromDocs.length + ' / chunks ' + fromChunks.length);
 
       try{
         if(window.App && typeof App.renderCfgStockResults === 'function') App.renderCfgStockResults();
@@ -8159,8 +8256,18 @@ function LDH_cfgStockDiagnostico(){
       state.loading = false;
       state.loaded = false;
       state.error = String(e && (e.code || e.message || e));
-      console.warn('[Config] No se pudo leer stock_materials', e);
+      console.warn('[Config] No se pudo leer Stock real Firestore', e);
       setInfo('Firestore no disponible');
+    }
+  };
+
+  window.LDH_cfgForceRemoteStock = async function(){
+    try{
+      await window.LDH_cfgLoadRemoteStock(true);
+      if(window.App && typeof App.renderCfgStockResults === 'function') App.renderCfgStockResults();
+      if(window.LDH_cfgStockDiagnostico) window.LDH_cfgStockDiagnostico();
+    }catch(e){
+      alert('No se pudo actualizar Stock real: ' + (e && (e.message || e)));
     }
   };
 })();
