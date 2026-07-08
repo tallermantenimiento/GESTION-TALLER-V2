@@ -8381,4 +8381,288 @@ window.ejecutarDevolucion = function(matId, maxQty){
 })();
 </script>
 
+
+<script id="LDH_CALC_PREP_BARRAS_ACCESORIOS_CORRECTO_1207">
+(function(){
+  function txt(el){ return (el && (el.innerText || el.textContent) || '').trim(); }
+  function val(id){ const el=document.getElementById(id); return el ? String(el.value||'').trim() : ''; }
+  function num(v){
+    let s=String(v??'').trim();
+    if(!s) return 0;
+    s=s.replace(/\s+/g,'').replace(/[^\d,.\-]/g,'');
+    if(s.includes(',') && s.includes('.')) s=s.replace(/\./g,'').replace(',','.');
+    else if(s.includes(',')) s=s.replace(',','.');
+    const n=parseFloat(s);
+    return isFinite(n) ? n : 0;
+  }
+  function escJson(obj){ return JSON.stringify(obj); }
+  function getReferencia(){
+    return val('refInput') || val('referencia') || val('calcRef') || val('pedidoRef') || ('PEDIDO_' + Date.now());
+  }
+  function getCantidad(){
+    const ids=['var_cantidad','cantidad','cant','cantidadInput','inputUnidades'];
+    for(const id of ids){
+      const n=num(val(id));
+      if(n>0) return n;
+    }
+    const el=document.querySelector('#view-calc input[name="cantidad"], #view-calc input[id*="cantidad"], #view-calc input[id*="Cantidad"]');
+    const n=el ? num(el.value) : 0;
+    return n>0 ? n : 1;
+  }
+  function getConcepto(){
+    const el=document.getElementById('selConcepto');
+    if(!el) return '';
+    if(el.selectedOptions && el.selectedOptions[0]) return String(el.selectedOptions[0].textContent||el.value||'').trim();
+    return String(el.value||'').trim();
+  }
+  function norm(s){
+    return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  }
+  function isPaintName(name){
+    const n=norm(name);
+    return n.includes('pintur') || n.includes('ral') || n.includes('disolvente') || n.includes('barniz');
+  }
+  function findLinkedId(name, desiredUnit){
+    try{
+      const conceptName = val('selConcepto') || getConcepto();
+      const concepts = (window.App && App.state && Array.isArray(App.state.concepts)) ? App.state.concepts : [];
+      const c = concepts.find(x => String(x.name||x.nombre||'').trim() === conceptName || String(x.name||x.nombre||'').trim() === getConcepto());
+      if(!c) return '';
+      const all = []
+        .concat(Array.isArray(c.lineales) ? c.lineales : [])
+        .concat(Array.isArray(c.perfiles) ? c.perfiles : [])
+        .concat(Array.isArray(c.unidades) ? c.unidades : [])
+        .concat(Array.isArray(c.accesorios) ? c.accesorios : []);
+      const nn=norm(name);
+      const hit = all.find(x => {
+        const xn = norm(x.material||x.mat||x.name||x.nombre||x.perfil||'');
+        if(xn !== nn) return false;
+        if(!desiredUnit) return true;
+        const u=norm(x.unit||x.unidad||'');
+        if(desiredUnit === 'barra') return u.includes('barra') || !u || Array.isArray(c.lineales) || Array.isArray(c.perfiles);
+        return !u || u.includes('ud') || u.includes('unidad');
+      }) || all.find(x => norm(x.material||x.mat||x.name||x.nombre||x.perfil||'') === nn);
+      return hit ? String(hit.linked_matId || hit.stockMatId || hit.matId || hit.stockLinkId || '') : '';
+    }catch(e){ return ''; }
+  }
+  function lineFromBar(name, bars){
+    const linked = findLinkedId(name, 'barra');
+    const o = {
+      tipo:'barra',
+      type:'barra',
+      categoria:'barra',
+      unit:'barra',
+      unidad:'barra',
+      mat:name,
+      material:name,
+      name:name,
+      qty_pedida:bars,
+      pedido:bars,
+      qty:bars,
+      qty_recibida:0,
+      recibida:0,
+      aplicado_qty:0,
+      aplicado:0,
+      estado:'pendiente',
+      status:'pendiente',
+      completo:false,
+      ok:false,
+      done:false,
+      isDone:false,
+      isCompleted:false
+    };
+    if(linked){ o.linked_matId=linked; o.stockMatId=linked; o.matId=linked; }
+    return o;
+  }
+  function lineFromUnit(name, qty){
+    const linked = findLinkedId(name, 'ud');
+    const o = {
+      tipo:'unidad',
+      type:'unidad',
+      categoria:'unidad',
+      unit:'ud',
+      unidad:'ud',
+      mat:name,
+      material:name,
+      name:name,
+      qty_pedida:qty,
+      pedido:qty,
+      qty:qty,
+      qty_recibida:0,
+      recibida:0,
+      aplicado_qty:0,
+      aplicado:0,
+      estado:'pendiente',
+      status:'pendiente',
+      completo:false,
+      ok:false,
+      done:false,
+      isDone:false,
+      isCompleted:false
+    };
+    if(linked){ o.linked_matId=linked; o.stockMatId=linked; o.matId=linked; }
+    return o;
+  }
+  function readBars(){
+    const out=[];
+    const tbl=document.getElementById('tblBars');
+    if(!tbl) return out;
+    const headers=Array.from(tbl.querySelectorAll('thead th')).map(h=>norm(txt(h)));
+    const iMat=headers.findIndex(h=>h.includes('perfil') || h.includes('material'));
+    let iBars=headers.findIndex(h=>h.includes('barras necesarias'));
+    if(iBars<0) iBars=headers.findIndex(h=>h.includes('barras'));
+    if(iMat<0 || iBars<0) return out;
+    tbl.querySelectorAll('tbody tr').forEach(tr=>{
+      const tds=Array.from(tr.querySelectorAll('td'));
+      const name=txt(tds[iMat]);
+      const bars=num(txt(tds[iBars]));
+      if(name && bars>0) out.push(lineFromBar(name, bars));
+    });
+    return out;
+  }
+  function readUnits(){
+    const out=[];
+    const tbl=document.getElementById('tblUnidades');
+    if(!tbl) return out;
+    const headers=Array.from(tbl.querySelectorAll('thead th')).map(h=>norm(txt(h)));
+    const iArt=headers.findIndex(h=>h.includes('articulo') || h.includes('artículo') || h.includes('material'));
+    const iQty=headers.findIndex(h=>h.includes('cant'));
+    if(iArt<0 || iQty<0) return out;
+    tbl.querySelectorAll('tbody tr').forEach(tr=>{
+      const tds=Array.from(tr.querySelectorAll('td'));
+      const name=txt(tds[iArt]);
+      const qty=num(txt(tds[iQty]));
+      if(name && qty>0) out.push(lineFromUnit(name, qty));
+    });
+    return out;
+  }
+  function applyPaint(lines, empresa){
+    const paintSel=document.getElementById('calcPaintMat');
+    const paintId=(paintSel && paintSel.value) ? String(paintSel.value).trim() : '';
+    const paintName=(paintSel && paintSel.selectedOptions && paintSel.selectedOptions[0]) ? String(paintSel.selectedOptions[0].textContent||'').trim() : '';
+    const hasPaint = lines.some(l => isPaintName(l.material || l.mat || l.name));
+    if(!hasPaint) return true;
+    if(!empresa){
+      alert('Este pedido incluye pintura, pero no hay empresa receptora seleccionada.');
+      return false;
+    }
+    if(!paintId){
+      alert('Este pedido incluye pintura, pero no hay una ficha de pintura seleccionada para ' + empresa + '.\n\nSelecciona el color/pintura antes de mandarlo a Preparación.');
+      return false;
+    }
+    lines.forEach(l=>{
+      if(!isPaintName(l.material || l.mat || l.name)) return;
+      const nice = paintName ? ('pintura — ' + paintName) : 'pintura';
+      l.mat = nice; l.material = nice; l.name = nice;
+      l.linked_matId = paintId;
+      l.stockMatId = paintId;
+      l.matId = paintId;
+      l.stockLinkId = paintId;
+      l.linked_company = empresa;
+      l.stockLinkEmpresa = empresa;
+      l._paint_empresa = empresa;
+      l.linked_matLabel = paintName || '';
+    });
+    try{ localStorage.setItem('calc_paint_pick_' + empresa, JSON.stringify({empresa, matId:paintId, name:paintName})); }catch(_){}
+    return true;
+  }
+  function setBoth(key, value){
+    let ok=false;
+    try{ localStorage.setItem(key,value); ok=true; }catch(e){}
+    try{ sessionStorage.setItem(key,value); ok=true; }catch(e){}
+    return ok;
+  }
+  function removeBoth(key){
+    try{ localStorage.removeItem(key); }catch(e){}
+    try{ sessionStorage.removeItem(key); }catch(e){}
+  }
+  function sendCorrect(){
+    try{
+      const ref=getReferencia();
+      const concept=getConcepto();
+      const empresa=val('calcEmpresa');
+      const qty=getCantidad();
+
+      const bars=readBars();
+      const units=readUnits();
+      const lines=bars.concat(units);
+
+      if(!lines.length){
+        alert('Primero debes calcular el material antes de enviar a Preparación.');
+        return false;
+      }
+      if(!applyPaint(lines, empresa)) return false;
+
+      const uid='P'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+      const payload={
+        referencia:ref, ref,
+        concepto:concept, concept,
+        empresa, company:empresa,
+        unidades:qty, cantidad:qty, units:qty, qty:qty, totalUnits:qty,
+        vars:{cantidad:qty, unidades:qty},
+        materiales:lines, materials:lines,
+        barras:bars, lineales:bars,
+        accesorios:units, unidades_materiales:units,
+        estado:'pendiente', status:'pendiente',
+        en_fabricacion:false,
+        pedido_uid:uid, uid,
+        timestamp:Date.now(),
+        source:'calculo_barras_accesorios_correcto'
+      };
+      const meta={
+        referencia:ref, ref,
+        concepto:concept, concept,
+        empresa, company:empresa,
+        unidades:qty, cantidad:qty, units:qty, qty:qty, totalUnits:qty,
+        vars:{cantidad:qty, unidades:qty},
+        fecha:Date.now(),
+        estado:'pendiente',
+        en_fabricacion:false,
+        pedido_uid:uid, uid
+      };
+
+      const payloadStr=JSON.stringify(payload);
+      removeBoth('prep_meta_' + ref);
+      removeBoth('prep_recepcion_' + ref);
+      setBoth('prep_meta_' + ref, JSON.stringify(meta));
+      setBoth('prep_recepcion_' + ref, JSON.stringify(lines));
+      setBoth('latest_materials_v1', payloadStr);
+      setBoth('pedido_en_preparacion', payloadStr);
+      setBoth('prep_pedido_payload', payloadStr);
+      setBoth('prep_materiales', payloadStr);
+      setBoth('prep_focus_ref', ref);
+      setBoth('prep_last_import_ref', ref);
+      try{ window.name='LDH_PREP|' + payloadStr; }catch(e){}
+      try{
+        window.location.href='preparacion_pedidos.html?openRef=' + encodeURIComponent(ref) + '#ldhPrep=' + encodeURIComponent(payloadStr);
+      }catch(e){
+        window.location.href='preparacion_pedidos.html?openRef=' + encodeURIComponent(ref);
+      }
+      return false;
+    }catch(e){
+      console.error('[LDH] Error envío correcto a Preparación', e);
+      alert('Error enviando a Preparación: ' + (e && (e.message || e)));
+      return false;
+    }
+  }
+
+  window.irAPreparacion = sendCorrect;
+  window.enviarAPreparacionPedido = sendCorrect;
+  window.LDH_enviarPreparacionCorrecto = sendCorrect;
+
+  function bind(){
+    const btn=document.getElementById('btnPreparacion');
+    if(btn){
+      btn.onclick=function(ev){
+        if(ev) ev.preventDefault();
+        return sendCorrect();
+      };
+    }
+  }
+  document.addEventListener('DOMContentLoaded', bind);
+  setTimeout(bind, 300);
+  setTimeout(bind, 1000);
+})();
+</script>
+
 </body></html>
