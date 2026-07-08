@@ -176,6 +176,7 @@ function normalizePackage(db0){
   const compArr = Array.isArray(db0.companies) ? db0.companies : [];
   const matArr = Array.isArray(db0.materials) ? db0.materials : [];
   const stockArr = Array.isArray(db0.stock) ? db0.stock : [];
+  const movArr = Array.isArray(db0.movements) ? db0.movements : [];
 
   const compMap = new Map();
   const compByName = new Map();
@@ -190,6 +191,24 @@ function normalizePackage(db0){
 
   const matMap = new Map(matArr.map(m=>[s(m.id),m]));
 
+  function realStockFromMovements(companyId, materialId){
+    return movArr
+      .filter(m => s(m.companyId || m.empresaId) === s(companyId) && s(m.materialId || m.matId) === s(materialId))
+      .reduce((a,m)=>{
+        const t = s(m.type || m.tipo || 'entrada').toLowerCase();
+        const q = n(m.qty ?? m.cantidad ?? m.quantity ?? 0);
+
+        // Igual que Stock principal: trazas de preparación no alteran físico real.
+        if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
+
+        if(t === 'entrada' || t === 'ajuste_pos' || t === 'devolucion' || t === 'in') return a + q;
+        if(t === 'salida' || t === 'ajuste_neg' || t === 'consumo' || t === 'out') return a - q;
+
+        // Movimientos antiguos sin tipo claro se consideran entrada, como en Stock.
+        return a + q;
+      },0);
+  }
+
   // Orden real de Stock:
   // - familyOrder = primera aparición de la familia dentro de empresa+tipo.
   // - order = posición de la línea dentro de esa familia.
@@ -199,16 +218,16 @@ function normalizePackage(db0){
 
   const out = [];
   stockArr.forEach((r,i)=>{
-    const mat = matMap.get(s(r.materialId)) || {};
+    const materialId = s(r.materialId || r.matId);
+    const mat = matMap.get(materialId) || {};
 
-    let cid = companyId({id:r.companyId});
+    let cid = companyId({id:r.companyId || r.empresaId});
     if(!compMap.has(cid)){
       const nm = s(r.companyName || r.empresa || r.company || '').toUpperCase();
       if(nm && compByName.has(nm.toLowerCase())){
         cid = compByName.get(nm.toLowerCase()).id;
       }else{
-        // No crear pestañas fantasmas tipo EMP_... / PROBA / IDs huérfanos.
-        // La app de Compras debe reflejar SOLO las empresas centralizadas de Stock.
+        // No crear pestañas fantasma: solo empresas centralizadas reales de Stock.
         return;
       }
     }
@@ -224,8 +243,12 @@ function normalizePackage(db0){
     const itemIndex = itemPos.get(itemKey) || 0;
     itemPos.set(itemKey, itemIndex + 1);
 
+    const qtyByMoves = realStockFromMovements(cid, materialId);
+    const qtyByRow = qtyFromStockRow(r);
+    const hasMoves = movArr.some(m => s(m.companyId || m.empresaId) === s(cid) && s(m.materialId || m.matId) === s(materialId));
+
     out.push({
-      id: s(r.id || cid + '_' + (r.materialId || i)),
+      id: s(r.id || cid + '_' + (materialId || i)),
       companyId: cid,
       type: typ,
       name: s(mat.name || mat.nombre || r.name || r.materialName || 'Material'),
@@ -233,14 +256,15 @@ function normalizePackage(db0){
       unit: s(r.unit || r.unidad || mat.unit || mat.unidad || 'und'),
       location: s(r.location || r.ubicacion || ''),
       min: n(r.min ?? mat.min ?? mat.minimo ?? 0),
-      qty: qtyFromStockRow(r),
+      // Cantidad real: si hay movimientos, usar cálculo real del Stock principal.
+      // Si no hay movimientos, usar cantidad explícita de la fila como respaldo.
+      qty: hasMoves ? qtyByMoves : qtyByRow,
       order: n(r.order ?? mat.order ?? itemIndex),
       familyOrder: n(r.familyOrder ?? mat.familyOrder ?? familyPos.get(familyKey)),
       sourceOrder: i
     });
   });
 
-  // Empresas EXACTAS del Stock, en el mismo orden. No se crean pestañas desde colecciones viejas.
   companies = Array.from(compMap.values()).sort((a,b)=>a.order-b.order || a.name.localeCompare(b.name,'es'));
   return out;
 }
@@ -305,6 +329,7 @@ async function readChunkPackage(){
     rawCompanies:Array.isArray(parsed.companies) ? parsed.companies.length : 0,
     rawMaterials:Array.isArray(parsed.materials) ? parsed.materials.length : 0,
     rawStock:Array.isArray(parsed.stock) ? parsed.stock.length : 0,
+    rawMovements:Array.isArray(parsed.movements) ? parsed.movements.length : 0,
     rows:normalized.length,
     updatedAt: parsed.updatedAt || meta.updatedAt || meta.savedAt || ''
   };
@@ -431,6 +456,7 @@ async function loadAll(){
       ' · visibles normalizados: ' + rows.length +
       ' · paquete raw stock: ' + (p.rawStock ?? 0) +
       ' / raw materiales: ' + (p.rawMaterials ?? 0) +
+      ' / movimientos: ' + (p.rawMovements ?? 0) +
       ' / chunks: ' + (p.totalChunks ?? 0) +
       ' · directo raw stock: ' + (d.rawStock ?? 0) +
       ' · stock_materials docs: ' + (sm.docs ?? 0);
