@@ -2287,7 +2287,7 @@ try{
       });
 
       setAny(KP(ref), JSON.stringify(materialesImport));
-      try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); }catch(_){ }
+      try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); setAny("prep_import_guard_ts", String(Date.now())); }catch(_){ }
 removeAny("latest_materials_v1");
           removeAny("pedido_en_preparacion");
           removeAny("prep_pedido_payload");
@@ -11045,6 +11045,7 @@ function LDH_prepVolverMenu(){
       "prep_stock_linkmap_v1",
       "prep_last_import_ref",
       "prep_focus_ref",
+      "prep_import_guard_ts",
       "prep_focus_hash_ref",
       "prep_auto_open_ref",
       "prep_estado_actual",
@@ -11197,7 +11198,36 @@ function LDH_prepVolverMenu(){
 
   function applyRemote(remote){
     if(!remote || !remote.data) return false;
-    const rdata = remote.data || {};
+
+    let rdata = remote.data || {};
+
+    // Blindaje crítico:
+    // Si acabamos de importar un pedido desde Cálculo, NO permitimos que el primer snapshot remoto
+    // borre prep_meta_REF / prep_recepcion_REF porque la nube aún no lo tiene.
+    try{
+      const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
+      const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
+      const freshImport = guardTs && (Date.now() - guardTs) < 90000 && guardRef;
+      if(freshImport){
+        const kp = "prep_recepcion_" + guardRef;
+        const km = "prep_meta_" + guardRef;
+        const localKp = getValue(kp);
+        const localKm = getValue(km);
+
+        // Si remoto no tiene este pedido, fusionamos las claves locales en rdata antes de aplicar.
+        // Así se mantiene visible y luego V6 lo sube a nube.
+        if(localKp || localKm){
+          rdata = Object.assign({}, rdata);
+          if(localKp && !Object.prototype.hasOwnProperty.call(rdata, kp)) rdata[kp] = localKp;
+          if(localKm && !Object.prototype.hasOwnProperty.call(rdata, km)) rdata[km] = localKm;
+          ["prep_last_import_ref","prep_focus_ref","prep_import_guard_ts"].forEach(function(k){
+            const v = getValue(k);
+            if(v !== null && v !== undefined) rdata[k] = v;
+          });
+        }
+      }
+    }catch(e){}
+
     const remoteHash = stableHash(rdata);
     if(remoteHash === lastLocalHash) return false;
 
@@ -11216,6 +11246,15 @@ function LDH_prepVolverMenu(){
           if(getValue(k) !== v){ changed = true; }
           setBoth(k, v);
         }else{
+          // No eliminar las claves del pedido recién importado aunque el remoto no las traiga todavía.
+          try{
+            const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
+            const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
+            const freshImport = guardTs && (Date.now() - guardTs) < 90000 && guardRef;
+            if(freshImport && (k === "prep_recepcion_" + guardRef || k === "prep_meta_" + guardRef || k === "prep_last_import_ref" || k === "prep_focus_ref" || k === "prep_import_guard_ts")){
+              return;
+            }
+          }catch(e){}
           if(getValue(k) !== null){ changed = true; }
           removeBoth(k);
         }
@@ -11328,7 +11367,18 @@ function LDH_prepVolverMenu(){
       if(snap.exists){
         const data = snap.data() || {};
         lastRemoteAt = Number(data.updatedAt || 0);
-        applyRemote(data);
+        let importFresh = false;
+        try{
+          const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
+          const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
+          importFresh = !!(guardTs && (Date.now() - guardTs) < 90000 && guardRef && getValue("prep_recepcion_" + guardRef));
+        }catch(e){}
+        if(importFresh){
+          // La importación local manda: primero subir a nube, no pisarla con remoto viejo.
+          await pushNow("import_from_calculo_before_remote");
+        }else{
+          applyRemote(data);
+        }
       }else{
         await pushNow("crear_doc_v6");
       }
@@ -11501,6 +11551,37 @@ function LDH_prepVolverMenu(){
         }
       }catch(e){}
     }, 600);
+  });
+})();
+</script>
+
+
+<script id="LDH_PREP_IMPORT_GUARD_VISUAL_1207">
+(function(){
+  function getAny2(k){
+    try{ const v=localStorage.getItem(k); if(v!==null&&v!==undefined) return v; }catch(e){}
+    try{ const v=sessionStorage.getItem(k); if(v!==null&&v!==undefined) return v; }catch(e){}
+    return null;
+  }
+  function refGuard(){
+    const ts = Number(getAny2("prep_import_guard_ts") || "0") || 0;
+    const r = String(getAny2("prep_last_import_ref") || getAny2("prep_focus_ref") || "").trim();
+    if(ts && (Date.now() - ts) < 90000 && r && getAny2("prep_recepcion_" + r)) return r;
+    return "";
+  }
+  function keepOpen(){
+    try{
+      const r = refGuard();
+      if(!r) return;
+      if(typeof cargarLista === "function") cargarLista();
+      if(typeof abrirPedido === "function") abrirPedido(r);
+      if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow("import_guard_keep_open");
+    }catch(e){}
+  }
+  document.addEventListener("DOMContentLoaded", function(){
+    setTimeout(keepOpen, 700);
+    setTimeout(keepOpen, 1600);
+    setTimeout(keepOpen, 3200);
   });
 })();
 </script>
