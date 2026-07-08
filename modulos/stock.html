@@ -1303,6 +1303,21 @@ html, body{
   }
 </style>
 
+
+<style id="LDH_FIX_DRAG_FAMILIAS_POINTER_0807">
+  .family-row summary,
+  .family-row summary *{
+    user-select:none;
+  }
+  .family-drag-handle{
+    cursor:grab!important;
+    pointer-events:auto!important;
+  }
+  .family-row summary{
+    pointer-events:auto!important;
+  }
+</style>
+
 </head>
 <body>
 <div class="app">
@@ -2702,17 +2717,20 @@ function orderFamilies(groups){
 
 function familyDragStart(ev, key){
   draggedFamilyKey = key;
+  window.LDH_draggedFamilyKey = key;
   const row = ev.currentTarget.closest('.family-row');
   if(row) row.classList.add('family-dragging');
   try{
     ev.dataTransfer.effectAllowed = 'move';
     ev.dataTransfer.setData('text/plain', key);
+    ev.dataTransfer.setData('application/x-ldh-family', key);
   }catch(e){}
 }
 
 function familyDragOver(ev, key){
-  ev.preventDefault();
-  if(!draggedFamilyKey || draggedFamilyKey === key) return;
+  if(ev && ev.preventDefault) ev.preventDefault();
+  const src = draggedFamilyKey || window.LDH_draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
+  if(!src || src === key) return;
   const row = ev.currentTarget.closest('.family-row');
   if(row) row.classList.add('family-drag-over');
   try{ ev.dataTransfer.dropEffect = 'move'; }catch(e){}
@@ -2725,23 +2743,63 @@ function familyDragLeave(ev){
 
 function familyDragEnd(){
   draggedFamilyKey = null;
+  window.LDH_draggedFamilyKey = null;
   document.querySelectorAll('.family-row.family-dragging,.family-row.family-drag-over').forEach(el=>el.classList.remove('family-dragging','family-drag-over'));
 }
 
-function familyDrop(ev, targetKey){
-  ev.preventDefault();
-  const sourceKey = draggedFamilyKey || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
-  familyDragEnd();
-  if(!sourceKey || sourceKey === targetKey) return;
+function LDH_familyOrderCurrentFromDOM(){
+  return Array.from(document.querySelectorAll('.family-row[data-family-key]')).map(el=>el.dataset.familyKey).filter(Boolean);
+}
 
-  const current = Array.from(document.querySelectorAll('.family-row[data-family-key]')).map(el=>el.dataset.familyKey);
+function LDH_persistFamilyOrderToMaterials(order){
+  try{
+    if(!db || !Array.isArray(db.materials) || !Array.isArray(order)) return;
+    const pos = new Map(order.map((k,i)=>[String(k), i]));
+    let changed = false;
+    db.materials.forEach(m=>{
+      if(!m) return;
+      if(String(m.type||'').toLowerCase() !== String(activeType||'').toLowerCase()) return;
+      const k = familyKey(m.family || m.familia || m.grp || 'Sin familia');
+      if(!pos.has(k)) return;
+      const v = pos.get(k);
+      if(Number(m.familyOrder) !== Number(v) || Number(m.ordenFamilia) !== Number(v)){
+        m.familyOrder = v;
+        m.ordenFamilia = v;
+        changed = true;
+      }
+    });
+    if(changed && typeof save === 'function') save();
+  }catch(e){
+    console.warn('No se pudo guardar orden familias en db.materials', e);
+  }
+}
+
+function familyDrop(ev, targetKey){
+  if(ev && ev.preventDefault) ev.preventDefault();
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+
+  const sourceKey = draggedFamilyKey || window.LDH_draggedFamilyKey ||
+    (ev.dataTransfer && (ev.dataTransfer.getData('application/x-ldh-family') || ev.dataTransfer.getData('text/plain')));
+
+  familyDragEnd();
+
+  if(!sourceKey || sourceKey === targetKey) return false;
+
+  const current = LDH_familyOrderCurrentFromDOM();
   const order = current.length ? current : loadFamilyOrder();
   const without = order.filter(k=>k !== sourceKey);
   const idx = without.indexOf(targetKey);
-  if(idx < 0) return;
+  if(idx < 0) return false;
+
   without.splice(idx, 0, sourceKey);
+
   saveFamilyOrder(without);
-  LDH_stockRenderKeepFamilies();
+  LDH_persistFamilyOrderToMaterials(without);
+
+  if(typeof LDH_stockRenderKeepFamilies === 'function') LDH_stockRenderKeepFamilies();
+  else render();
+
+  return false;
 }
 
 function familiasHTML(rows){
@@ -2775,7 +2833,7 @@ function familiaHTML(group){
 
   return `<tr class="family-row" data-family-key="${esc(fKey)}"><td colspan="11">
     <details class="family-details" data-family="${esc(group.name)}" ${LDH_stockOpenFamilies.has(String(group.name).trim())?'open':''}>
-      <summary draggable="true" ondragstart="familyDragStart(event,'${esc(fKey)}')" ondragover="familyDragOver(event,'${esc(fKey)}')" ondragleave="familyDragLeave(event)" ondrop="familyDrop(event,'${esc(fKey)}')" ondragend="familyDragEnd(event)">
+      <summary draggable="true" ondragstart="familyDragStart(event,'${esc(fKey)}')" ondragover="familyDragOver(event,\'${esc(fKey)}\');return false" ondragleave="familyDragLeave(event)" ondrop="familyDrop(event,\'${esc(fKey)}\');return false" ondragend="familyDragEnd(event)">
         <span class="family-title">
           <span class="family-drag-handle" title="Arrastra para ordenar familias">☰</span>
           <span class="family-name">${esc(group.name)}</span>
@@ -3211,11 +3269,14 @@ function LDH_autoReceivePrepLine(ref, matId, qty, sourceNote){
 /* === /LDH auto recepción === */
 
 function openMoveModal(type,materialId=''){
-  const jobs=jobsForCompany();
+  let jobs = [];
+  try{ jobs = (typeof jobsForCompany === 'function') ? jobsForCompany() : []; }catch(e){ jobs = []; }
   const isIn = type==='entrada';
+  const materialSelect = (()=>{ try{return materialOptions(materialId);}catch(e){ return '<option value="">Error cargando materiales</option>'; } })();
+
   openModal(
     isIn ? 'Registrar entrada' : 'Registrar salida',
-    `<div class="field"><label>Material</label><select id="moveMat">${materialOptions(materialId)}</select></div>
+    `<div class="field"><label>Material</label><select id="moveMat">${materialSelect}</select></div>
      <div class="grid2">
        <div class="field"><label>Cantidad</label><input id="moveQty" type="number" value="1"></div>
        <div class="field"><label>Nota</label><input id="moveNote" placeholder="Compra, ajuste, consumo..."></div>
@@ -3235,6 +3296,7 @@ function openMoveModal(type,materialId=''){
      <button class="btn ok" onclick="saveMove('${type}')">Guardar</button>`
   );
 }
+
 function quickJobFromMove(){
   const ref=($('moveQuickRef')&&$('moveQuickRef').value.trim())||'';
   if(!ref)return alert('Pon una referencia manual');
@@ -5632,131 +5694,6 @@ window.addEventListener('online', ()=>window.LDH_scheduleStockCloudPublish(true)
 setTimeout(()=>window.LDH_scheduleStockCloudPublish(true), 1600);
 </script>
 
-
-<script id="LDH_STOCK_FIX_DRAG_ENTRADA_SEGURO_0807">
-(function(){
-  // Reparación segura:
-  // 1) Familias: el orden se guarda también en db.materials.familyOrder y se publica con save().
-  // 2) Entrada: botón robusto que abre el modal aunque otro parche haya dejado el onclick frágil.
-  function famKey(name){
-    try{
-      if(typeof familyKey === "function") return familyKey(name);
-    }catch(e){}
-    return String(name || "Sin familia").trim().toLowerCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
-      .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"") || "sin_familia";
-  }
-
-  window.LDH_stockPersistFamilyOrderToDB = function(order){
-    try{
-      if(!window.db || !Array.isArray(db.materials) || !Array.isArray(order)) return false;
-      const pos = new Map(order.map(function(k,i){ return [String(k), i]; }));
-      let changed = false;
-
-      (db.materials || []).forEach(function(m){
-        if(!m) return;
-        if(String(m.type || "").toLowerCase() !== String(activeType || "").toLowerCase()) return;
-        const k = famKey(m.family || m.familia || m.grp || "Sin familia");
-        if(!pos.has(k)) return;
-        const v = pos.get(k);
-        if(Number(m.familyOrder) !== Number(v)){
-          m.familyOrder = v;
-          m.ordenFamilia = v;
-          changed = true;
-        }
-      });
-
-      if(changed && typeof save === "function") save();
-      return changed;
-    }catch(e){
-      console.warn("No se pudo persistir orden de familias", e);
-      return false;
-    }
-  };
-
-  // Override del drop de familias, manteniendo la lógica original pero haciendo persistencia real.
-  window.familyDrop = function(ev, targetKey){
-    try{
-      if(ev && ev.preventDefault) ev.preventDefault();
-
-      try{ if(typeof LDH_stockRememberOpenFamilies === "function") LDH_stockRememberOpenFamilies(); }catch(e){}
-
-      const sourceKey = window.draggedFamilyKey || (ev && ev.dataTransfer && ev.dataTransfer.getData("text/plain"));
-      if(typeof familyDragEnd === "function") familyDragEnd();
-      if(!sourceKey || sourceKey === targetKey) return;
-
-      const current = Array.from(document.querySelectorAll(".family-row[data-family-key]")).map(function(el){
-        return el.dataset.familyKey;
-      });
-      const baseOrder = current.length ? current : (typeof loadFamilyOrder === "function" ? loadFamilyOrder() : []);
-      const without = baseOrder.filter(function(k){ return k !== sourceKey; });
-      const idx = without.indexOf(targetKey);
-      if(idx < 0) return;
-
-      without.splice(idx, 0, sourceKey);
-
-      if(typeof saveFamilyOrder === "function") saveFamilyOrder(without);
-      window.LDH_stockPersistFamilyOrderToDB(without);
-
-      if(typeof LDH_stockRenderKeepFamilies === "function") LDH_stockRenderKeepFamilies();
-      else if(typeof render === "function") render();
-
-      setTimeout(function(){
-        try{ if(typeof LDH_stockRestoreOpenFamilies === "function") LDH_stockRestoreOpenFamilies(); }catch(e){}
-      }, 50);
-    }catch(e){
-      console.error("Error ordenando familias", e);
-      alert("No se pudo ordenar la familia: " + (e && (e.message || e)));
-    }
-  };
-
-  // Hacer el asa de familia más fiable y evitar que el click de arrastre cierre/abra el details.
-  document.addEventListener("mousedown", function(ev){
-    const h = ev.target && ev.target.closest && ev.target.closest(".family-drag-handle");
-    if(!h) return;
-    const summary = h.closest("summary");
-    if(summary) summary.setAttribute("draggable","true");
-  }, true);
-
-  document.addEventListener("click", function(ev){
-    const h = ev.target && ev.target.closest && ev.target.closest(".family-drag-handle");
-    if(!h) return;
-    // Solo evitamos el toggle accidental si venimos de arrastrar.
-    if(window.draggedFamilyKey){
-      ev.preventDefault();
-      ev.stopPropagation();
-    }
-  }, true);
-
-  window.LDH_openEntradaSeguro = function(){
-    try{
-      if(typeof openMoveModal === "function"){
-        openMoveModal("entrada");
-        return;
-      }
-      alert("No se ha encontrado la función de Entrada en este archivo de Stock.");
-    }catch(e){
-      console.error("Error abriendo Entrada", e);
-      alert("No se pudo abrir Entrada: " + (e && (e.message || e)));
-    }
-  };
-
-  // Reforzar botones de Entrada sin tocar el resto.
-  document.addEventListener("DOMContentLoaded", function(){
-    setTimeout(function(){
-      try{
-        document.querySelectorAll("button").forEach(function(btn){
-          const txt = String(btn.textContent || "").trim().toLowerCase();
-          const oc = String(btn.getAttribute("onclick") || "");
-          if((txt === "+ entrada" || txt === "entrada") && oc.indexOf("openMoveModal") >= 0){
-            btn.setAttribute("onclick","LDH_openEntradaSeguro()");
-          }
-        });
-      }catch(e){}
-    }, 300);
-  });
-})();
-</script>
 
 </body>
 </html>
