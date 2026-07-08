@@ -4304,7 +4304,11 @@ _uaPill(item){
 
     _loadStockForConfig() {
       // Configuración es GENERAL: no filtra por empresa.
-      // Debe mostrar el mismo catálogo visual que Stock, sin duplicar por empresa.
+      // Fuentes permitidas para vincular conceptos:
+      // - Stock real hierro/pintura
+      // - Ferretería
+      // - Tableros
+      // La empresa se decide después en Cálculo / Preparación.
       const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\s+/g,' ').trim();
       const nice = (v)=>String(v||'').trim();
 
@@ -4318,69 +4322,20 @@ _uaPill(item){
         }catch(e){ return null; }
       };
 
-      const db = parse('ldh_v2_company_stock_v1') || parse('taller_stock_v3_data') || {};
-      const rawMaterials = Array.isArray(db.materials) ? db.materials.slice() : [];
-      const rawStock = Array.isArray(db.stock) ? db.stock.slice() : [];
-
-      const remote = (window.LDH_CFG_REMOTE_STOCK && Array.isArray(window.LDH_CFG_REMOTE_STOCK.materials))
-        ? window.LDH_CFG_REMOTE_STOCK.materials
-        : [];
-      remote.forEach((m,i)=>{
-        if(!m) return;
-        rawMaterials.push({
-          id: nice(m.materialId || m.id || ('remote_'+i)),
-          name: nice(m.name || m.material || m.matName),
-          family: nice(m.family || m.grp || 'Sin familia'),
-          type: nice(m.type || m.cat || ''),
-          unit: nice(m.unit || 'und'),
-          order: Number(m.order ?? m.sourceOrder ?? i) || i,
-          familyOrder: Number(m.familyOrder ?? i) || i,
-          companyId: nice(m.companyId || '')
-        });
-      });
-
-      if(!rawMaterials.length && !rawStock.length) return { ok:false, materials:[], source:'sin stock' };
-
-      const byId = new Map();
-      rawMaterials.forEach((m,i)=>{
-        if(!m) return;
-        const id = nice(m.id || m.materialId || m.matId || ('mat_'+i));
-        if(id) byId.set(id, m);
-      });
+      const sourceMain = parse('ldh_v2_company_stock_v1') || {};
+      const sourceOldFer = parse('taller_stock_v3_data') || {};
+      const sourceTab = parse('ldh_v2_tableros_stock_v1') || {};
 
       const out = [];
       const byKey = new Map();
 
-      const familyOf = (mat, stockRow)=>{
+      const familyOf = (mat, stockRow, fallback)=>{
         mat = mat || {}; stockRow = stockRow || {};
         return nice(
           mat.family || mat.familia || mat.grp || mat.group ||
           stockRow.family || stockRow.familia || stockRow.grp || stockRow.group ||
-          stockRow.category || stockRow.categoria ||
-          'Sin familia'
+          fallback || 'Sin familia'
         );
-      };
-
-      const typeOf = (mat, stockRow)=>{
-        mat = mat || {}; stockRow = stockRow || {};
-        const explicit = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || mat.cat || stockRow.cat);
-        const fam = familyOf(mat, stockRow);
-        const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
-        const t = norm(explicit + ' ' + fam + ' ' + name);
-
-        // Regla fuerte: ESTRUCTURAL, PERFILERIA, PLETINA, PDS, CHAPA/MALLA, MACIZO son HIERRO.
-        if(
-          t.includes('estructural') || t.includes('perfiler') || t.includes('pletina') ||
-          t.includes('pds') || t.includes('chapa') || t.includes('malla') ||
-          t.includes('macizo') || t.includes('tubo') || t.includes('angulo') ||
-          t.includes('varilla') || t.includes('guia')
-        ) return 'Hierro';
-
-        // Pintura solo si la familia/tipo/nombre indica pintura real.
-        if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente') || t.includes('barniz')) return 'Pintura';
-
-        if(explicit) return /pint/i.test(explicit) ? 'Pintura' : 'Hierro';
-        return 'Hierro';
       };
 
       const canonicalName = (name)=>{
@@ -4393,24 +4348,65 @@ _uaPill(item){
         return x;
       };
 
-      const pushMat = (mat, stockRow, idx)=>{
+      const isFerreteria = (mat, row)=>{
+        const t = norm([
+          mat && (mat.cat || mat.category || mat.tipo || mat.type),
+          mat && (mat.grp || mat.group || mat.family || mat.familia),
+          mat && (mat.name || mat.nombre),
+          row && (row.cat || row.grp || row.family || row.name || row.material)
+        ].join(' '));
+        return t.includes('ferreter') ||
+          t.includes('tornill') || t.includes('arandel') || t.includes('tuerc') ||
+          t.includes('broca') || t.includes('disco') || t.includes('consum') ||
+          t.includes('remache') || t.includes('brida') || t.includes('cable') ||
+          t.includes('contera') || t.includes('rueda') || t.includes('bisagra');
+      };
+
+      const typeOf = (mat, stockRow, sourceKind)=>{
+        mat = mat || {}; stockRow = stockRow || {};
+        if(sourceKind === 'tableros') return 'Tableros';
+        if(sourceKind === 'ferreteria') return 'Ferretería';
+
+        const explicit = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || mat.cat || stockRow.cat);
+        const fam = familyOf(mat, stockRow);
+        const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
+        const t = norm(explicit + ' ' + fam + ' ' + name);
+
+        if(isFerreteria(mat, stockRow)) return 'Ferretería';
+
+        // Regla fuerte: familias de hierro nunca deben caer en Pintura.
+        if(
+          t.includes('estructural') || t.includes('perfiler') || t.includes('pletina') ||
+          t.includes('pds') || t.includes('chapa') || t.includes('malla') ||
+          t.includes('macizo') || t.includes('tubo') || t.includes('angulo') ||
+          t.includes('varilla') || t.includes('guia')
+        ) return 'Hierro';
+
+        if(t.includes('tablero') || t.includes('dm') || t.includes('aglomerado') || t.includes('melamina')) return 'Tableros';
+        if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente') || t.includes('barniz')) return 'Pintura';
+
+        if(explicit) return /pint/i.test(explicit) ? 'Pintura' : 'Hierro';
+        return 'Hierro';
+      };
+
+      const pushMat = (mat, stockRow, idx, sourceKind, forcedFamily)=>{
         mat = mat || {};
         stockRow = stockRow || {};
-        const id = nice(mat.id || stockRow.materialId || stockRow.matId || stockRow.id || ('mat_'+idx));
+        const id = nice(mat.id || stockRow.materialId || stockRow.matId || stockRow.id || (sourceKind + '_' + idx));
         const name = nice(
-          mat.name || mat.nombre || mat.material ||
+          mat.name || mat.nombre || mat.material || mat.title ||
           stockRow.name || stockRow.material || stockRow.matName || stockRow.nombre
         );
         if(!name) return;
 
-        const family = familyOf(mat, stockRow);
-        const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || 'und');
-        const cat = typeOf(mat, stockRow);
+        const cat = typeOf(mat, stockRow, sourceKind);
+        const family = familyOf(mat, stockRow, forcedFamily || (cat === 'Tableros' ? 'Tableros' : 'Sin familia'));
+        const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || (cat === 'Tableros' ? 'tablero' : 'und'));
         const sourceOrder = Number(stockRow.order ?? stockRow.orden ?? mat.order ?? mat.orden ?? mat.sourceOrder ?? idx) || idx;
         const familyOrder = Number(stockRow.familyOrder ?? stockRow.ordenFamilia ?? mat.familyOrder ?? mat.ordenFamilia ?? idx) || idx;
         const companyId = nice(stockRow.companyId || stockRow.empresaId || mat.companyId || mat.empresaId || '');
 
-        // No duplica por empresa, pero conserva nombres/familias distintas.
+        // No duplica por empresa, pero conserva materiales distintos.
         const key = [norm(cat), norm(family), canonicalName(name), norm(unit)].join('|');
 
         if(byKey.has(key)){
@@ -4434,46 +4430,72 @@ _uaPill(item){
           familyOrder,
           aliasIds: id ? [id] : [],
           companyIds: companyId ? [companyId] : [],
+          sourceKind,
           stockKey: key
         };
         byKey.set(key, item);
         out.push(item);
       };
 
-      // 1) Materiales maestros.
-      rawMaterials.forEach((m,i)=>pushMat(m, null, i));
+      const ingestStockDb = (db, sourceKind, opts={})=>{
+        const rawMaterials = Array.isArray(db.materials) ? db.materials : [];
+        const rawStock = Array.isArray(db.stock) ? db.stock : [];
+        const byId = new Map();
 
-      // 2) Filas de stock: añaden alias y también materiales si el maestro no estaba.
-      rawStock.forEach((sr,i)=>{
-        const mat = byId.get(nice(sr.materialId || sr.matId || sr.id)) || {};
-        pushMat(mat, sr, rawMaterials.length + i);
-      });
+        rawMaterials.forEach((m,i)=>{
+          if(!m) return;
+          const id = nice(m.id || m.materialId || m.matId || (sourceKind+'_mat_'+i));
+          if(id) byId.set(id, m);
+        });
 
-      // 3) Compatibilidad con posibles estructuras alternativas del Stock nuevo.
-      ['items','catalog','catalogo','materialsByCompany','stockItems'].forEach(k=>{
-        const v = db[k];
-        if(Array.isArray(v)) v.forEach((m,i)=>pushMat(m, null, rawMaterials.length + rawStock.length + i));
-        else if(v && typeof v === 'object'){
-          Object.keys(v).forEach((ck,ci)=>{
-            const arr = Array.isArray(v[ck]) ? v[ck] : [];
-            arr.forEach((m,i)=>pushMat(m, {companyId:ck}, rawMaterials.length + rawStock.length + ci*1000 + i));
-          });
-        }
-      });
+        // Primero las fichas maestras.
+        rawMaterials.forEach((m,i)=>{
+          if(opts.onlyFerreteria && !isFerreteria(m, null)) return;
+          pushMat(m, null, out.length + i, sourceKind, opts.family);
+        });
+
+        // Después filas de stock para alias/orden y materiales huérfanos.
+        rawStock.forEach((sr,i)=>{
+          const mat = byId.get(nice(sr.materialId || sr.matId || sr.id)) || {};
+          if(opts.onlyFerreteria && !isFerreteria(mat, sr)) return;
+          pushMat(mat, sr, out.length + i, sourceKind, opts.family);
+        });
+      };
+
+      ingestStockDb(sourceMain, 'stock');
+      ingestStockDb(sourceOldFer, 'ferreteria', {onlyFerreteria:true, family:'Ferretería'});
+      ingestStockDb(sourceTab, 'tableros', {family:'Tableros'});
+
+      // Compatibilidad con posibles estructuras alternativas.
+      const ingestAlt = (db, sourceKind, family)=>{
+        ['items','catalog','catalogo','materialsByCompany','stockItems','boards','tableros','ferreteria'].forEach(k=>{
+          const v = db && db[k];
+          if(Array.isArray(v)) v.forEach((m,i)=>pushMat(m, null, out.length + i, sourceKind, family));
+          else if(v && typeof v === 'object'){
+            Object.keys(v).forEach((ck,ci)=>{
+              const arr = Array.isArray(v[ck]) ? v[ck] : [];
+              arr.forEach((m,i)=>pushMat(m, {companyId:ck}, out.length + ci*1000 + i, sourceKind, family));
+            });
+          }
+        });
+      };
+      ingestAlt(sourceMain, 'stock');
+      ingestAlt(sourceOldFer, 'ferreteria', 'Ferretería');
+      ingestAlt(sourceTab, 'tableros', 'Tableros');
 
       out.sort((a,b)=>
+        String(a.cat).localeCompare(String(b.cat),'es') ||
         (Number(a.familyOrder)||0) - (Number(b.familyOrder)||0) ||
-        nice(a.cat).localeCompare(nice(b.cat),'es') ||
-        nice(a.grp).localeCompare(nice(b.grp),'es') ||
+        String(a.grp).localeCompare(String(b.grp),'es') ||
         (Number(a.sourceOrder)||0) - (Number(b.sourceOrder)||0) ||
-        nice(a.name).localeCompare(nice(b.name),'es')
+        String(a.name).localeCompare(String(b.name),'es')
       );
 
       const srcs = [];
-      if(localStorage.getItem('ldh_v2_company_stock_v1')) srcs.push('ldh_v2_company_stock_v1');
-      if(remote.length) srcs.push('Firestore stock_materials');
-      if(!srcs.length && localStorage.getItem('taller_stock_v3_data')) srcs.push('taller_stock_v3_data');
-      return { ok: out.length>0, materials: out, source: srcs.join(' + ') || 'stock local' };
+      if(localStorage.getItem('ldh_v2_company_stock_v1')) srcs.push('Stock');
+      if(localStorage.getItem('taller_stock_v3_data')) srcs.push('Ferretería');
+      if(localStorage.getItem('ldh_v2_tableros_stock_v1')) srcs.push('Tableros');
+      return { ok: out.length>0, materials: out, source: srcs.join(' + ') || 'sin datos' };
     },
 
     _decorateCfgRowStockPill(tr){
@@ -4502,7 +4524,7 @@ _uaPill(item){
       const st = this._loadStockForConfig();
       warn.style.display = st.ok ? 'none' : 'block';
       const info = document.getElementById('cfgStockInfo');
-      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + (st.materials||[]).length + ' materiales únicos · ' + (st.source||'')) : '';
+      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + (st.materials||[]).length + ' materiales vinculables · ' + (st.source||'')) : '';
       search.value = '';
 
       // Si ya venías asignando, mantenemos el último grupo abierto.
@@ -4549,7 +4571,7 @@ _uaPill(item){
       const st = this._loadStockForConfig();
       const arr = (st.materials || []).slice();
       const info = document.getElementById('cfgStockInfo');
-      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + arr.length + ' materiales únicos · ' + (st.source||'')) : '';
+      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + arr.length + ' materiales vinculables · ' + (st.source||'')) : '';
 
       const filtered = q ? arr.filter(m => {
         const t = `${m.name||''} ${m.cat||''} ${m.grp||''} ${m.unit||''} ${m.id||''} ${m.companyId||''} ${(m.aliasIds||[]).join(' ')}`.toLowerCase();
@@ -6373,14 +6395,14 @@ window.CarpetaPicker = (function(){
     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
       <div>
         <div style="font-weight:800; font-size:16px;">Seleccionar material del Stock</div>
-        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vincula el concepto a una ficha general del Stock real. La empresa concreta se decide en Cálculo y Preparación consume el stock de esa empresa.</div>
+        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vincula el concepto a una ficha general de Stock, Ferretería o Tableros. La empresa concreta se decide en Cálculo y Preparación consume el stock correspondiente.</div>
       </div>
       <button class="btn btn-ghost" onclick="App.closeCfgStockModal()">✕</button>
     </div>
 
     <div style="display:flex; gap:10px; align-items:center; margin-top:12px;">
       <input id="cfgStockSearch" type="text" placeholder="Buscar por nombre / categoría / grupo..." style="flex:1;" oninput="App.renderCfgStockResults()" />
-      <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgForceRemoteStock()">Actualizar Stock real</button>
+      <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>\n      <button class="btn btn-chip" type="button" onclick="LDH_cfgForceRemoteStock()">Actualizar Stock real</button>
     </div>
 
     <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">No se ha encontrado el Stock real en este dispositivo (localStorage: <b>ldh_v2_company_stock_v1</b>). Abre Stock una vez para cargarlo/sincronizarlo.</div>\n    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
@@ -8128,6 +8150,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
 
 
+
 <script id="LDH_CONFIG_STOCK_DIAGNOSTICO_1206">
 function LDH_cfgStockDiagnostico(){
   try{
@@ -8138,22 +8161,21 @@ function LDH_cfgStockDiagnostico(){
       const k = String((m.cat||'') + ' > ' + (m.grp||'Sin familia'));
       byFam[k] = (byFam[k]||0)+1;
     });
+    const lines = Object.keys(byFam).sort().map(k=>k + ': ' + byFam[k]);
     let localInfo = '';
     try{
-      const db = JSON.parse(localStorage.getItem('ldh_v2_company_stock_v1') || '{}');
-      localInfo = 'Local materials: ' + ((db.materials||[]).length||0) +
-        ' · stock: ' + ((db.stock||[]).length||0) +
-        ' · keys: ' + Object.keys(db).slice(0,12).join(', ');
+      const s = JSON.parse(localStorage.getItem('ldh_v2_company_stock_v1') || '{}');
+      const f = JSON.parse(localStorage.getItem('taller_stock_v3_data') || '{}');
+      const t = JSON.parse(localStorage.getItem('ldh_v2_tableros_stock_v1') || '{}');
+      localInfo =
+        'Stock materials: ' + ((s.materials||[]).length||0) + ' · stock: ' + ((s.stock||[]).length||0) + '\n' +
+        'Ferretería materials: ' + ((f.materials||[]).length||0) + '\n' +
+        'Tableros materials: ' + ((t.materials||[]).length||0) + ' · stock: ' + ((t.stock||[]).length||0);
     }catch(e){}
-    const remote = window.LDH_CFG_REMOTE_STOCK || {};
-    const lines = Object.keys(byFam).sort().map(k=>k + ': ' + byFam[k]);
-    alert('Stock real en Configuración\n' +
+    alert('Materiales vinculables en Configuración\n' +
       'Fuente: ' + (st.source||'') + '\n' +
       localInfo + '\n' +
-      'Remoto cargado: ' + (remote.loaded ? 'sí' : 'no') + '\n' +
-      'Remoto materiales crudos: ' + ((remote.materials||[]).length || 0) + '\n' +
-      'Remoto fuente: ' + (remote.source || remote.error || '') + '\n' +
-      'Materiales únicos: ' + mats.length + '\n\n' +
+      'Total vinculables: ' + mats.length + '\n\n' +
       lines.join('\n')
     );
   }catch(e){
@@ -8161,6 +8183,7 @@ function LDH_cfgStockDiagnostico(){
   }
 }
 </script>
+
 
 
 
