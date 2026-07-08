@@ -2143,9 +2143,16 @@ try{
       metaParaGuardar.unidades = qty;
       metaParaGuardar.fecha = Date.now();
       if (!metaParaGuardar.tipo_hierro) metaParaGuardar.tipo_hierro = "";
-      // Si entra desde Cálculo, no puede heredar una meta vieja "en fabricación".
+      // Importante: pedido nuevo/reimportado desde Cálculo SIEMPRE queda en Preparación.
+      // No debe heredar estados antiguos de la misma referencia.
       if(snap.source !== 'fabricacion_deudor'){
         metaParaGuardar.en_fabricacion = false;
+        metaParaGuardar.en_pintura = false;
+        metaParaGuardar.en_almacen = false;
+        metaParaGuardar.entregado = false;
+        delete metaParaGuardar.fabricacion_ts;
+        delete metaParaGuardar.pintura_ts;
+        delete metaParaGuardar.almacen_ts;
         metaParaGuardar.estado = "pendiente";
         metaParaGuardar.status = "pendiente";
         metaParaGuardar.recepcion_completa = false;
@@ -2276,10 +2283,6 @@ try{
               }
             }
           }catch(e){}
-
-        // Último paso del import: si viene sin id pero el nombre existe EXACTO en Stock v2, vincular.
-        try{ LDH_autoLinkV2ExactForLine(l); }catch(e){}
-
         return l;
       });
 
@@ -2495,7 +2498,6 @@ if(gBorrow && typeof gBorrow === "object" && Array.isArray(gBorrow.items) && gBo
 }
 
   estadoMateriales = JSON.parse(getAny(KP(ref)) || "[]");
-  try{ LDH_autoLinkV2ExactCurrent(); }catch(e){}
       // Normaliza líneas antiguas (compatibilidad): algunos guardados usan 'material' en vez de 'mat'
       estadoMateriales = (Array.isArray(estadoMateriales)?estadoMateriales:[]).map(l=>{
         if(!l || typeof l!=='object') return l;
@@ -2689,6 +2691,68 @@ function autoCerrarSiCompletoPorRecepcion(){
 }
 
 /* ========= VINCULACIÓN ========= */
+
+/* ========= LDH SAFE: RESOLVER VÍNCULO STOCK V2 SIN GUARDAR =========
+   No modifica el pedido al abrir. Solo devuelve el ID si hay coincidencia exacta por nombre.
+   Así se corrige "Sin vínculo" sin reactivar el fallo de cierre/desaparición.
+*/
+function LDH_resolveV2LinkIdByExactName(line){
+  try{
+    if(!line || typeof line !== "object") return "";
+    const existing = line.linked_matId || line.stockMatId || line.matId || line.stockLinkId || line.stockId || line.materialId;
+    if(existing && LDH_getV2MaterialById(existing)) return String(existing);
+
+    const pack = (typeof _v2LoadCompanyStockDB === "function") ? _v2LoadCompanyStockDB() : null;
+    if(!pack) return "";
+
+    const materials = pack.materials || (pack.db && pack.db.materials) || [];
+    if(!Array.isArray(materials) || !materials.length) return "";
+
+    const rawName = String(line.mat || line.material || line.name || line.title || "").trim();
+    const target = (typeof _v2Norm === "function") ? _v2Norm(rawName) : normName(rawName);
+    if(!target) return "";
+
+    const unit = String(line.unit || line.unidad || "").toLowerCase();
+    const wantsBar = unit.includes("barra");
+
+    const candidates = materials.filter(m=>{
+      const label = String((typeof _v2MaterialLabel === "function") ? _v2MaterialLabel(m) : (m.name || m.nombre || m.material || "")).trim();
+      const n = (typeof _v2Norm === "function") ? _v2Norm(label) : normName(label);
+      if(n !== target) return false;
+
+      // Separación mínima: barras solo con unidad/familia compatible; accesorios no se obligan.
+      const mu = String(m.unit || m.unidad || "").toLowerCase();
+      if(wantsBar && mu && !mu.includes("barra")) return false;
+      return true;
+    });
+
+    if(!candidates.length) return "";
+
+    // Preferir el material que tenga fila en la empresa del pedido, pero no crear/guardar nada.
+    let best = candidates[0];
+    try{
+      const empresaNombre = (typeof _v2GetPedidoEmpresa === "function") ? _v2GetPedidoEmpresa() : ((metaActual && (metaActual.empresa || metaActual.company)) || "");
+      const c = (typeof _v2FindCompany === "function") ? _v2FindCompany(pack, empresaNombre) : null;
+      const cid = c ? String(_v2First(c.id,c.code,c.name,c.nombre)) : "";
+      if(cid){
+        const lots = pack.lots || (pack.db && (pack.db.stock || pack.db.stocks || pack.db.stockLots)) || [];
+        const hit = candidates.find(m=>{
+          const mid = String(m.id || m.materialId || m.matId || "");
+          return (lots || []).some(r =>
+            String(_v2First(r.companyId,r.empresaId,r.empresa,r.company)) === cid &&
+            String(_v2First(r.materialId,r.matId,r.material,r.material_id,r.idMaterial)) === mid
+          );
+        });
+        if(hit) best = hit;
+      }
+    }catch(e){}
+
+    return String(best.id || best.materialId || best.matId || "");
+  }catch(e){
+    return "";
+  }
+}
+
 function getLinkedMatIdForLine(line){
   // Para PINTURA: sólo aceptamos el vínculo que viene del Cálculo (por empresa),
   // nunca heredamos un link global por nombre (evita que SKLUM/CREATE se crucen).
@@ -2718,12 +2782,13 @@ function getLinkedMatIdForLine(line){
 
   const exactV2 = LDH_findExactV2MaterialForLine(line);
   if(exactV2){
-    line.linked_matId = exactV2.id;
-    linkMap[k] = { matId: exactV2.id, name: exactV2.name, cat: exactV2.cat, grp: exactV2.grp, unit: exactV2.unit, autoExact:true, v2:true };
-    try{ saveLinkMap(); }catch(e){}
-    try{ guardarEstadoLocal(); }catch(e){}
+    // Seguro: resolver el vínculo sin guardar el pedido al abrir/renderizar.
+    // Evita que la sincronización cierre o pise la ficha.
     return exactV2.id;
   }
+
+  const safeV2Id = LDH_resolveV2LinkIdByExactName(line);
+  if(safeV2Id) return safeV2Id;
 
   return null;
 }
@@ -3074,84 +3139,6 @@ function _v2CompanyStockPill(line, linkedMat, pedida){
   return `<span class="link-pill stock-company-pill warn">Stock empresa: sin base v2 cargada</span>`;
 }
 
-
-
-/* ========= AUTO-VÍNCULO STOCK V2 POR NOMBRE EXACTO =========
-   Seguro: solo vincula si hay coincidencia exacta normalizada con una ficha v2.
-   Evita que accesorios vinculados en Configuración lleguen como "Sin vínculo".
-*/
-function LDH_autoLinkV2ExactForLine(line){
-  try{
-    if(!line || typeof line !== "object") return false;
-    if(getLinkedMatIdForLine(line) || line.linked_matId || line.stockMatId || line.matId || line.stockLinkId) return false;
-
-    const pack = _v2LoadCompanyStockDB();
-    if(!pack || !pack.db || !Array.isArray(pack.db.materials)) return false;
-
-    const lineName = normName(line.mat || line.material || line.name || "");
-    if(!lineName) return false;
-
-    // Empresa solo para priorizar materiales que existen en stock de esa empresa; no bloquea si no está en stock.
-    const emp = String((metaActual && (metaActual.empresa || metaActual.company)) || "").trim();
-    let companyId = "";
-    try{
-      const c = (pack.db.companies || []).find(x => _v2Norm(_v2First(x.name,x.nombre,x.code,x.id)) === _v2Norm(emp));
-      companyId = c ? String(_v2First(c.id,c.code,c.name,c.nombre)) : "";
-    }catch(e){}
-
-    const lots = Array.isArray(pack.db.stock) ? pack.db.stock :
-                 Array.isArray(pack.db.stocks) ? pack.db.stocks :
-                 Array.isArray(pack.db.stockLots) ? pack.db.stockLots : [];
-
-    const candidates = (pack.db.materials || []).filter(m=>{
-      const mn = normName(_v2First(m.name, m.nombre, m.material));
-      return mn && mn === lineName;
-    });
-
-    if(!candidates.length) return false;
-
-    let best = candidates[0];
-
-    if(companyId){
-      const inCompany = candidates.find(m => lots.some(r =>
-        String(_v2First(r.companyId,r.empresaId,r.empresa,r.company)) === String(companyId) &&
-        String(_v2First(r.materialId,r.matId,r.material_id,r.idMaterial)) === String(_v2First(m.id,m.materialId,m.matId))
-      ));
-      if(inCompany) best = inCompany;
-    }
-
-    const id = String(_v2First(best.id,best.materialId,best.matId));
-    if(!id) return false;
-
-    line.linked_matId = id;
-    line.stockMatId = id;
-    line.matId = id;
-    line.stockLinkId = id;
-    line.linked_matName = _v2First(best.name,best.nombre,best.material);
-    line._autoLinkedV2Exact = true;
-    return true;
-  }catch(e){
-    console.warn("Auto-vinculo v2 exacto falló", e);
-    return false;
-  }
-}
-
-function LDH_autoLinkV2ExactCurrent(){
-  try{
-    if(!Array.isArray(estadoMateriales)) return false;
-    let changed = false;
-    estadoMateriales.forEach(l => {
-      if(LDH_autoLinkV2ExactForLine(l)) changed = true;
-    });
-    if(changed && refActual){
-      setAny(KP(refActual), JSON.stringify(estadoMateriales));
-    }
-    return changed;
-  }catch(e){
-    console.warn("Auto-vinculo v2 actual falló", e);
-    return false;
-  }
-}
 
 
 /* ========= RENDER TABLA ========= */
@@ -11294,6 +11281,14 @@ function LDH_prepVolverMenu(){
           if(getValue(k) !== v){ changed = true; }
           setBoth(k, v);
         }else{
+          try{
+            const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
+            const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
+            const freshImport = guardTs && (Date.now() - guardTs) < 90000 && guardRef;
+            if(freshImport && (k === "prep_recepcion_" + guardRef || k === "prep_meta_" + guardRef || k === "prep_last_import_ref" || k === "prep_focus_ref" || k === "prep_import_guard_ts")){
+              return;
+            }
+          }catch(e){}
           if(getValue(k) !== null){ changed = true; }
           removeBoth(k);
         }
