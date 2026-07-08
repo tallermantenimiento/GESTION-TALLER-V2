@@ -126,7 +126,6 @@ function setStatus(txt, ok){
 }
 
 function companyId(c){ return s(c.id || c.code || c.name || c.nombre).toLowerCase().replace(/[^a-z0-9]+/g,'_'); }
-function companyNormName(v){ return s(v).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z0-9]+/g,' ').trim().replace(/\s+/g,' '); }
 function companyName(id){ return (companies.find(c=>c.id===id)||{}).name || id || '-'; }
 
 function classify(mat,row){
@@ -160,7 +159,16 @@ function classify(mat,row){
 }
 
 function qtyFromStockRow(row){
-  return n(row.physicalQty ?? row.qtyPhysical ?? row.fisico ?? row.realQty ?? row.stockFisico ?? row.stockReal ?? row.stockActual ?? row.existencias ?? row.actualQty ?? row.qty ?? row.cantidad ?? row.quantity ?? 0);
+  // Cantidad que muestra Stock informativo.
+  // Prioridad: físico/real existente. Si el Stock guarda "libre" explícito, se usa solo como respaldo.
+  return n(
+    row.physicalQty ?? row.physical ?? row.fisico ?? row.físico ?? row.qtyPhysical ??
+    row.realQty ?? row.stockFisico ?? row.stockFísico ?? row.stockReal ??
+    row.stockActual ?? row.existencias ?? row.actualQty ?? row.onHand ??
+    row.currentQty ?? row.current ?? row.totalQty ?? row.total ??
+    row.freeQty ?? row.free ?? row.libre ??
+    row.qty ?? row.cantidad ?? row.quantity ?? 0
+  );
 }
 
 function normalizePackage(db0){
@@ -168,17 +176,23 @@ function normalizePackage(db0){
   const compArr = Array.isArray(db0.companies) ? db0.companies : [];
   const matArr = Array.isArray(db0.materials) ? db0.materials : [];
   const stockArr = Array.isArray(db0.stock) ? db0.stock : [];
+
   const compMap = new Map();
+  const compByName = new Map();
+
   compArr.forEach((c,i)=>{
     const id = companyId(c) || ('empresa_'+i);
-    compMap.set(id, {id, name:s(c.name || c.nombre || c.code || c.id || id).toUpperCase(), order:n(c.order ?? i)});
+    const name = s(c.name || c.nombre || c.code || c.id || id).toUpperCase();
+    const obj = {id, name, order:n(c.order ?? i)};
+    compMap.set(id, obj);
+    compByName.set(name.toLowerCase(), obj);
   });
+
   const matMap = new Map(matArr.map(m=>[s(m.id),m]));
 
   // Orden real de Stock:
   // - familyOrder = primera aparición de la familia dentro de empresa+tipo.
   // - order = posición de la línea dentro de esa familia.
-  // Así Compras respeta el drag & drop de Stock.
   const familyPos = new Map();
   const itemPos = new Map();
   let globalVisibleIndex = 0;
@@ -186,8 +200,19 @@ function normalizePackage(db0){
   const out = [];
   stockArr.forEach((r,i)=>{
     const mat = matMap.get(s(r.materialId)) || {};
-    const cid = companyId({id:r.companyId}) || activeCompany || 'stock_comun';
-    if(!compMap.has(cid)) compMap.set(cid, {id:cid, name:s(r.companyName || cid).toUpperCase(), order:9999});
+
+    let cid = companyId({id:r.companyId});
+    if(!compMap.has(cid)){
+      const nm = s(r.companyName || r.empresa || r.company || '').toUpperCase();
+      if(nm && compByName.has(nm.toLowerCase())){
+        cid = compByName.get(nm.toLowerCase()).id;
+      }else{
+        // No crear pestañas fantasmas tipo EMP_... / PROBA / IDs huérfanos.
+        // La app de Compras debe reflejar SOLO las empresas centralizadas de Stock.
+        return;
+      }
+    }
+
     const typ = classify(mat,r);
     if(typ !== 'hierro' && typ !== 'pintura') return;
 
@@ -214,6 +239,8 @@ function normalizePackage(db0){
       sourceOrder: i
     });
   });
+
+  // Empresas EXACTAS del Stock, en el mismo orden. No se crean pestañas desde colecciones viejas.
   companies = Array.from(compMap.values()).sort((a,b)=>a.order-b.order || a.name.localeCompare(b.name,'es'));
   return out;
 }
@@ -344,100 +371,54 @@ async function readDirectStockDoc(){
 function mergeRowsPreferPackage(fromPackage, fromDocs){
   const out = [];
   const seen = new Set();
-  const companyById = new Map((companies || []).map(c => [s(c.id), c]));
-  const canonicalByName = new Map();
-
-  function visibleNameForId(id){
-    const c = companyById.get(s(id));
-    return c ? s(c.name || c.id) : s(id);
-  }
-  function canonicalIdForRow(r){
-    const rawId = s(r.companyId || 'stock_comun');
-    const visible = visibleNameForId(rawId);
-    const nameKey = companyNormName(visible || rawId);
-    if(!nameKey) return rawId || 'stock_comun';
-    if(canonicalByName.has(nameKey)) return canonicalByName.get(nameKey);
-    // Preferimos como ID canónico el primero que ya venga de la lista principal de empresas.
-    canonicalByName.set(nameKey, rawId || nameKey.toLowerCase().replace(/[^a-z0-9]+/g,'_'));
-    return canonicalByName.get(nameKey);
-  }
   const keyOf = r => [
-    canonicalIdForRow(r),
+    s(r.companyId).toLowerCase(),
     s(r.type).toLowerCase(),
     s(r.family).toLowerCase(),
     s(r.name).toLowerCase(),
     s(r.unit).toLowerCase()
   ].join('|');
 
-  function pushRow(r){
-    r = Object.assign({}, r || {});
-    r.companyId = canonicalIdForRow(r);
+  (fromPackage || []).forEach(r=>{
     const k = keyOf(r);
-    if(!k || seen.has(k)){
-      // Si la misma empresa/material llega desde dos IDs duplicados, sumamos cantidades.
-      const existing = out.find(x => [
-        s(x.companyId).toLowerCase(),
-        s(x.type).toLowerCase(),
-        s(x.family).toLowerCase(),
-        s(x.name).toLowerCase(),
-        s(x.unit).toLowerCase()
-      ].join('|') === k);
-      if(existing){
-        existing.qty = n(existing.qty) + n(r.qty);
-        existing.min = Math.max(n(existing.min), n(r.min));
-        existing.order = Math.min(n(existing.order), n(r.order));
-        existing.familyOrder = Math.min(n(existing.familyOrder), n(r.familyOrder));
-      }
-      return;
-    }
+    if(!k || seen.has(k)) return;
     seen.add(k);
     out.push(r);
-  }
-
-  (fromPackage || []).forEach(pushRow);
-  (fromDocs || []).forEach(pushRow);
-
-  // Reconstruir pestañas SOLO desde empresas con filas reales tras la fusión.
-  const oldCompanies = companies || [];
-  const best = new Map();
-  out.forEach(r=>{
-    const id = s(r.companyId);
-    const old = oldCompanies.find(c => s(c.id) === id) || {};
-    const name = s(old.name || visibleNameForId(id) || id).toUpperCase();
-    const key = companyNormName(name || id);
-    if(!best.has(key)){
-      best.set(key, {id, name, order:n(old.order ?? 9999)});
-    }else{
-      const ex = best.get(key);
-      ex.order = Math.min(n(ex.order), n(old.order ?? 9999));
-    }
   });
-  companies = Array.from(best.values()).sort((a,b)=>a.order-b.order || a.name.localeCompare(b.name,'es'));
 
-  // Si la empresa activa quedó con alias duplicado, recolocarla en la canónica.
-  if(activeCompany && !companies.some(c => c.id === activeCompany)){
-    const oldName = visibleNameForId(activeCompany);
-    const hit = companies.find(c => companyNormName(c.name) === companyNormName(oldName));
-    activeCompany = hit ? hit.id : (companies[0]?.id || '');
-  }
+  (fromDocs || []).forEach(r=>{
+    const k = keyOf(r);
+    if(!k || seen.has(k)) return;
+    seen.add(k);
+    out.push(r);
+  });
 
   return out;
 }
+
 
 async function loadAll(){
   try{
     const fromPackage = await readChunkPackage();
     let fromDocs = [];
     let fromDirect = [];
-    try { fromDocs = await readMaterialCollection(); } catch(e) { console.warn('stock_materials no disponible o vacio', e); sourceStats.materials = {error:String(e && (e.code || e.message || e)), docs:0, rows:0}; }
-    try { fromDirect = await readDirectStockDoc(); } catch(e) { console.warn('lectura directa no disponible', e); }
-    // Unimos todas las fuentes legibles de Firestore sin duplicar.
-    rows = mergeRowsPreferPackage(mergeRowsPreferPackage(fromPackage, fromDirect), fromDocs);
-    lastSource = [
-      fromPackage.length ? 'paquete taller_data/stock' : '',
-      fromDirect.length ? 'doc directo' : '',
-      fromDocs.length ? 'stock_materials' : ''
-    ].filter(Boolean).join(' + ') || 'sin datos';
+
+    if(fromPackage.length){
+      // Fuente autoritativa: el paquete que publica Stock.
+      // No mezclar con stock_materials/docs porque pueden quedar restos de empresas antiguas.
+      rows = fromPackage;
+      lastSource = 'paquete taller_data/stock';
+      sourceStats.materials = {docs:0, rows:0, skipped:'omitido: paquete stock autoritativo'};
+      sourceStats.direct = {rows:0, skipped:'omitido: paquete stock autoritativo'};
+    }else{
+      try { fromDirect = await readDirectStockDoc(); } catch(e) { console.warn('lectura directa no disponible', e); }
+      try { fromDocs = await readMaterialCollection(); } catch(e) { console.warn('stock_materials no disponible o vacio', e); sourceStats.materials = {error:String(e && (e.code || e.message || e)), docs:0, rows:0}; }
+      rows = mergeRowsPreferPackage(fromDirect, fromDocs);
+      lastSource = [
+        fromDirect.length ? 'doc directo' : '',
+        fromDocs.length ? 'stock_materials' : ''
+      ].filter(Boolean).join(' + ') || 'sin datos';
+    }
     if(!activeCompany || !companies.some(c=>c.id===activeCompany)) activeCompany = companies[0]?.id || '';
     render();
     $('last').textContent = 'Última actualización: ' + dateShort();
@@ -461,10 +442,7 @@ async function loadAll(){
 }
 
 function renderCompanies(){
-  // Mostrar solo empresas que tienen filas reales en el filtro de datos cargado.
-  const idsWithRows = new Set(rows.map(r=>s(r.companyId)));
-  companies = companies.filter(c => idsWithRows.has(s(c.id)));
-  if(activeCompany && !idsWithRows.has(activeCompany)) activeCompany = companies[0]?.id || '';
+  if(activeCompany && !companies.some(c=>c.id===activeCompany)) activeCompany = companies[0]?.id || '';
   $('companies').innerHTML = companies.map(c=>`<button class="${c.id===activeCompany?'active':''}" data-company="${esc(c.id)}">${esc(c.name)}</button>`).join('');
   document.querySelectorAll('[data-company]').forEach(b=>b.onclick=()=>{ activeCompany=b.dataset.company; openAccState.clear(); render(); });
 }
