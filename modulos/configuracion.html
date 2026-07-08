@@ -4304,8 +4304,7 @@ _uaPill(item){
 
     _loadStockForConfig() {
       // Configuración es GENERAL: no filtra por empresa.
-      // Muestra un catálogo limpio, sin duplicar por empresa.
-      // Además mezcla el catálogo remoto de Firestore si ya se ha cargado.
+      // Debe mostrar el mismo catálogo visual que Stock, sin duplicar por empresa.
       const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').replace(/\\s+/g,' ').trim();
       const nice = (v)=>String(v||'').trim();
 
@@ -4332,7 +4331,7 @@ _uaPill(item){
           id: nice(m.materialId || m.id || ('remote_'+i)),
           name: nice(m.name || m.material || m.matName),
           family: nice(m.family || m.grp || 'Sin familia'),
-          type: nice(m.type || m.cat || 'Hierro'),
+          type: nice(m.type || m.cat || ''),
           unit: nice(m.unit || 'und'),
           order: Number(m.order ?? m.sourceOrder ?? i) || i,
           familyOrder: Number(m.familyOrder ?? i) || i,
@@ -4346,23 +4345,41 @@ _uaPill(item){
       rawMaterials.forEach((m,i)=>{
         if(!m) return;
         const id = nice(m.id || m.materialId || m.matId || ('mat_'+i));
-        if(!id) return;
-        byId.set(id, m);
+        if(id) byId.set(id, m);
       });
 
       const out = [];
       const byKey = new Map();
 
-      const classify = (mat, stockRow)=>{
+      const familyOf = (mat, stockRow)=>{
         mat = mat || {}; stockRow = stockRow || {};
-        const tipoRaw = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || mat.cat || '');
-        const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
+        return nice(
+          mat.family || mat.familia || mat.grp || mat.group ||
+          stockRow.family || stockRow.familia || stockRow.grp || stockRow.group ||
+          stockRow.category || stockRow.categoria ||
+          'Sin familia'
+        );
+      };
+
+      const typeOf = (mat, stockRow)=>{
+        mat = mat || {}; stockRow = stockRow || {};
+        const explicit = nice(mat.type || mat.tipo || stockRow.type || stockRow.tipo || mat.cat || stockRow.cat);
+        const fam = familyOf(mat, stockRow);
         const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
-        const t = norm(tipoRaw + ' ' + family + ' ' + name);
-        if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente')) return 'Pintura';
-        if(tipoRaw){
-          return /pint/i.test(tipoRaw) ? 'Pintura' : 'Hierro';
-        }
+        const t = norm(explicit + ' ' + fam + ' ' + name);
+
+        // Regla fuerte: ESTRUCTURAL, PERFILERIA, PLETINA, PDS, CHAPA/MALLA, MACIZO son HIERRO.
+        if(
+          t.includes('estructural') || t.includes('perfiler') || t.includes('pletina') ||
+          t.includes('pds') || t.includes('chapa') || t.includes('malla') ||
+          t.includes('macizo') || t.includes('tubo') || t.includes('angulo') ||
+          t.includes('varilla') || t.includes('guia')
+        ) return 'Hierro';
+
+        // Pintura solo si la familia/tipo/nombre indica pintura real.
+        if(t.includes('pintur') || t.includes('ral') || t.includes('disolvente') || t.includes('barniz')) return 'Pintura';
+
+        if(explicit) return /pint/i.test(explicit) ? 'Pintura' : 'Hierro';
         return 'Hierro';
       };
 
@@ -4380,16 +4397,20 @@ _uaPill(item){
         mat = mat || {};
         stockRow = stockRow || {};
         const id = nice(mat.id || stockRow.materialId || stockRow.matId || stockRow.id || ('mat_'+idx));
-        const name = nice(mat.name || mat.nombre || stockRow.name || stockRow.material || stockRow.matName);
+        const name = nice(
+          mat.name || mat.nombre || mat.material ||
+          stockRow.name || stockRow.material || stockRow.matName || stockRow.nombre
+        );
         if(!name) return;
 
-        const family = nice(mat.family || mat.familia || mat.grp || mat.group || stockRow.family || stockRow.familia || stockRow.grp || stockRow.group || 'Sin familia');
+        const family = familyOf(mat, stockRow);
         const unit = nice(mat.unit || mat.unidad || stockRow.unit || stockRow.unidad || 'und');
-        const cat = classify(mat, stockRow);
-        const sourceOrder = Number(stockRow.order ?? mat.order ?? mat.sourceOrder ?? idx) || idx;
-        const familyOrder = Number(stockRow.familyOrder ?? mat.familyOrder ?? idx) || idx;
-        const companyId = nice(stockRow.companyId || mat.companyId || '');
+        const cat = typeOf(mat, stockRow);
+        const sourceOrder = Number(stockRow.order ?? stockRow.orden ?? mat.order ?? mat.orden ?? mat.sourceOrder ?? idx) || idx;
+        const familyOrder = Number(stockRow.familyOrder ?? stockRow.ordenFamilia ?? mat.familyOrder ?? mat.ordenFamilia ?? idx) || idx;
+        const companyId = nice(stockRow.companyId || stockRow.empresaId || mat.companyId || mat.empresaId || '');
 
+        // No duplica por empresa, pero conserva nombres/familias distintas.
         const key = [norm(cat), norm(family), canonicalName(name), norm(unit)].join('|');
 
         if(byKey.has(key)){
@@ -4419,10 +4440,25 @@ _uaPill(item){
         out.push(item);
       };
 
+      // 1) Materiales maestros.
       rawMaterials.forEach((m,i)=>pushMat(m, null, i));
+
+      // 2) Filas de stock: añaden alias y también materiales si el maestro no estaba.
       rawStock.forEach((sr,i)=>{
         const mat = byId.get(nice(sr.materialId || sr.matId || sr.id)) || {};
         pushMat(mat, sr, rawMaterials.length + i);
+      });
+
+      // 3) Compatibilidad con posibles estructuras alternativas del Stock nuevo.
+      ['items','catalog','catalogo','materialsByCompany','stockItems'].forEach(k=>{
+        const v = db[k];
+        if(Array.isArray(v)) v.forEach((m,i)=>pushMat(m, null, rawMaterials.length + rawStock.length + i));
+        else if(v && typeof v === 'object'){
+          Object.keys(v).forEach((ck,ci)=>{
+            const arr = Array.isArray(v[ck]) ? v[ck] : [];
+            arr.forEach((m,i)=>pushMat(m, {companyId:ck}, rawMaterials.length + rawStock.length + ci*1000 + i));
+          });
+        }
       });
 
       out.sort((a,b)=>
@@ -8091,6 +8127,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
 
 
+
 <script id="LDH_CONFIG_STOCK_DIAGNOSTICO_1206">
 function LDH_cfgStockDiagnostico(){
   try{
@@ -8101,10 +8138,18 @@ function LDH_cfgStockDiagnostico(){
       const k = String((m.cat||'') + ' > ' + (m.grp||'Sin familia'));
       byFam[k] = (byFam[k]||0)+1;
     });
+    let localInfo = '';
+    try{
+      const db = JSON.parse(localStorage.getItem('ldh_v2_company_stock_v1') || '{}');
+      localInfo = 'Local materials: ' + ((db.materials||[]).length||0) +
+        ' · stock: ' + ((db.stock||[]).length||0) +
+        ' · keys: ' + Object.keys(db).slice(0,12).join(', ');
+    }catch(e){}
     const remote = window.LDH_CFG_REMOTE_STOCK || {};
     const lines = Object.keys(byFam).sort().map(k=>k + ': ' + byFam[k]);
     alert('Stock real en Configuración\n' +
       'Fuente: ' + (st.source||'') + '\n' +
+      localInfo + '\n' +
       'Remoto cargado: ' + (remote.loaded ? 'sí' : 'no') + '\n' +
       'Remoto materiales crudos: ' + ((remote.materials||[]).length || 0) + '\n' +
       'Remoto fuente: ' + (remote.source || remote.error || '') + '\n' +
@@ -8116,6 +8161,7 @@ function LDH_cfgStockDiagnostico(){
   }
 }
 </script>
+
 
 
 
