@@ -3312,69 +3312,108 @@ function quickJobFromMove(){
   }
 }
 function saveMove(type){
-  const mat=$('moveMat').value,qty=Number($('moveQty').value||0);
-  if(!mat||qty<=0)return alert('Cantidad incorrecta');
+  try{
+    const matEl = $('moveMat');
+    const qtyEl = $('moveQty');
+    const noteEl = $('moveNote');
+    const mat = matEl ? matEl.value : '';
+    const qty = Number(qtyEl ? qtyEl.value || 0 : 0);
 
-  db.movements.push(mv(activeCompany,mat,type,qty,$('moveNote').value.trim()));
-
-  if(type==='entrada'){
-    let job=$('moveJob') ? $('moveJob').value : '';
-    if(!job && $('moveQuickRef') && $('moveQuickRef').value.trim()){
-      quickJobFromMove();
-      job = $('moveJob') ? $('moveJob').value : '';
+    if(!mat || qty <= 0){
+      alert('Cantidad incorrecta');
+      return;
     }
-    if(job){
-      const resQty=Number(($('moveResQty')&&$('moveResQty').value)||qty);
-      if(resQty>0){
-        const jobs=jobsForCompany();
-        const j=jobs.find(x=>x.id===job)||LDH_findJobById(job)||{};
-        const ref = LDH_refFromJob(j);
 
-        // Si es una ficha real de Preparación, la entrada marca la línea como recibida/OK.
-        const isPrepReal = !!(ref && localStorage.getItem("prep_recepcion_" + ref));
-        let auto = {ok:false, used:0, remaining:resQty};
+    // 1) Movimiento físico principal. Esto debe funcionar aunque falle la parte de trabajo/reserva.
+    db.movements.push(mv(activeCompany, mat, type, qty, noteEl ? noteEl.value.trim() : ''));
 
-        if(isPrepReal){
-          auto = LDH_autoReceivePrepLine(ref, mat, resQty, "Recibido automáticamente desde Stock");
+    // 2) Entrada vinculada a trabajo, protegida: si falla no bloquea guardar la entrada.
+    if(type === 'entrada'){
+      try{
+        let job = $('moveJob') ? $('moveJob').value : '';
+
+        if(!job && $('moveQuickRef') && $('moveQuickRef').value.trim()){
+          try{ quickJobFromMove(); }catch(e){ console.warn('No se pudo crear reserva manual desde entrada', e); }
+          job = $('moveJob') ? $('moveJob').value : '';
         }
 
-        // Mantener trazabilidad/bloqueo en Stock:
-        // - En trabajo real de Preparación: no queda como "pendiente manual", pero sí como vínculo activo.
-        // - Si el trabajo ya tiene pintura >= 1, se bloquea como fase pintura y no es prestable.
-        const phase = (isPrepReal && ref && LDH_jobHasPaintStarted(ref)) ? "pintura" : (($('movePhase')&&$('movePhase').value)||'preparacion');
-        const r=res(activeCompany,job,mat,phase,resQty);
-        r.source = isPrepReal ? 'stock_recibido_ok' : 'stock';
-        r.createdFrom = isPrepReal ? 'stock_auto_receive' : 'stock';
-        r.origin = isPrepReal ? 'entrada_stock_recibida' : 'stock';
-        r.manual = !isPrepReal;
-        r.autoReceivedFromStock = !!isPrepReal;
-        r.borrowable = !(isPrepReal && ref && LDH_jobHasPaintStarted(ref));
-        r.paintBlocked = !!(isPrepReal && ref && LDH_jobHasPaintStarted(ref));
-        r.receivedQty = auto.used || 0;
-        r.pendingPrepQty = Math.max(0, Number(resQty||0) - Number(auto.used||0));
-        if(ref){ r.ref=ref; r.jobRef=ref; }
-        if(j.concept){ r.concept=j.concept; }
-        if(j.source){ r.jobSource=j.source; }
-        db.reservations.push(r);
-        if(isPrepReal){
-          try{ upsertAssignmentFromPrepReservation(r); }catch(e){}
-        }
+        if(job){
+          const resQty = Number(($('moveResQty') && $('moveResQty').value) || qty);
+          if(resQty > 0){
+            let jobs = [];
+            try{ jobs = (typeof jobsForCompany === 'function') ? jobsForCompany() : []; }catch(e){ jobs = []; }
 
-        // No crear un segundo movimiento físico: la entrada ya está registrada arriba.
-        // La recepción en Preparación queda trazada en prep_recepcion_<ref>, no en movimientos físicos.
-        if(isPrepReal && auto.used>0){
-          // intencionadamente vacío para evitar duplicar stock físico
-        }
+            const j = (jobs.find(x=>x.id===job) || (typeof LDH_findJobById === 'function' ? LDH_findJobById(job) : null) || {});
+            const ref = (typeof LDH_refFromJob === 'function') ? LDH_refFromJob(j) : (j.ref || j.referencia || '');
 
-        if(isPrepReal && auto.used<=0){
-          alert('⚠️ Entrada guardada, pero no he podido marcar ninguna línea de Preparación como recibida para ese material.\n\nRevisa que el material esté vinculado en Preparación.');
+            const isPrepReal = !!(ref && localStorage.getItem("prep_recepcion_" + ref));
+            let auto = {ok:false, used:0, remaining:resQty};
+
+            if(isPrepReal && typeof LDH_autoReceivePrepLine === 'function'){
+              try{
+                auto = LDH_autoReceivePrepLine(ref, mat, resQty, "Recibido automáticamente desde Stock");
+              }catch(e){
+                console.warn('No se pudo auto-recibir línea de Preparación', e);
+                auto = {ok:false, used:0, remaining:resQty};
+              }
+            }
+
+            const phase = (isPrepReal && ref && typeof LDH_jobHasPaintStarted === 'function' && LDH_jobHasPaintStarted(ref))
+              ? "pintura"
+              : (($('movePhase') && $('movePhase').value) || 'preparacion');
+
+            const r = res(activeCompany, job, mat, phase, resQty);
+            r.source = isPrepReal ? 'stock_recibido_ok' : 'stock';
+            r.createdFrom = isPrepReal ? 'stock_auto_receive' : 'stock';
+            r.origin = isPrepReal ? 'entrada_stock_recibida' : 'stock';
+            r.manual = !isPrepReal;
+            r.autoReceivedFromStock = !!isPrepReal;
+            r.borrowable = !(isPrepReal && ref && typeof LDH_jobHasPaintStarted === 'function' && LDH_jobHasPaintStarted(ref));
+            r.paintBlocked = !!(isPrepReal && ref && typeof LDH_jobHasPaintStarted === 'function' && LDH_jobHasPaintStarted(ref));
+            r.receivedQty = Number(auto.used || 0);
+            r.pendingPrepQty = Math.max(0, Number(resQty || 0) - Number(auto.used || 0));
+            if(ref){ r.ref = ref; r.jobRef = ref; }
+            if(j.concept){ r.concept = j.concept; }
+            if(j.source){ r.jobSource = j.source; }
+
+            db.reservations.push(r);
+
+            if(isPrepReal && typeof upsertAssignmentFromPrepReservation === 'function'){
+              try{ upsertAssignmentFromPrepReservation(r); }catch(e){ console.warn('No se pudo actualizar asignación desde reserva', e); }
+            }
+
+            if(isPrepReal && Number(auto.used || 0) <= 0){
+              alert('⚠️ Entrada guardada, pero no he podido marcar ninguna línea de Preparación como recibida para ese material.\n\nRevisa que el material esté vinculado en Preparación.');
+            }
+          }
         }
+      }catch(e){
+        console.warn('La entrada física se guardó, pero falló la parte de trabajo/reserva', e);
       }
     }
-  }
 
-  try{ LDH_syncAutoReceivedReservationsByPaint(); }catch(e){}
-  save();closeModal();render();
+    try{ if(typeof LDH_syncAutoReceivedReservationsByPaint === 'function') LDH_syncAutoReceivedReservationsByPaint(); }catch(e){}
+
+    try{
+      save();
+    }catch(e){
+      console.error('Error guardando Stock', e);
+      // Respaldo mínimo si save() falla por algún parche externo.
+      try{
+        db.updatedAt = new Date().toISOString();
+        localStorage.setItem(KEY, JSON.stringify(db));
+      }catch(e2){
+        alert('No se pudo guardar la entrada en el navegador: ' + (e2 && (e2.message || e2)));
+        return;
+      }
+    }
+
+    try{ closeModal(); }catch(e){}
+    try{ render(); }catch(e){ console.warn('Guardado OK, pero falló render', e); }
+  }catch(e){
+    console.error('Error en Guardar entrada/salida', e);
+    alert('No se pudo guardar: ' + (e && (e.message || e)));
+  }
 }
 
 function normTxt(s){
@@ -5889,6 +5928,34 @@ setTimeout(()=>window.LDH_scheduleStockCloudPublish(true), 1600);
   });
 
   window.LDH_repararDragFamiliasStock = bindFamilies;
+})();
+</script>
+
+
+<script id="LDH_STOCK_FIX_GUARDAR_MODAL_ENTRADA_0807">
+(function(){
+  document.addEventListener("click", function(ev){
+    const btn = ev.target && ev.target.closest && ev.target.closest("button");
+    if(!btn) return;
+    const txt = String(btn.textContent || "").trim().toLowerCase();
+    if(txt !== "guardar") return;
+    const hasMoveModal = document.getElementById("moveMat") && document.getElementById("moveQty");
+    if(!hasMoveModal) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    try{
+      if(typeof saveMove !== "function") throw new Error("saveMove no existe");
+      // Detectar si el modal es entrada o salida por el título visible.
+      const title = String(document.querySelector(".modal h2,.modal h3,.modal-title")?.textContent || document.body.textContent || "").toLowerCase();
+      const type = title.includes("salida") ? "salida" : "entrada";
+      saveMove(type);
+    }catch(e){
+      console.error("Guardar modal falló", e);
+      alert("No se pudo guardar: " + (e && (e.message || e)));
+    }
+  }, true);
 })();
 </script>
 
