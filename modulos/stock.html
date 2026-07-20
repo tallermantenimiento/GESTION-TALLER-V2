@@ -1410,11 +1410,26 @@ const now=()=>new Date().toISOString();
 
 function blankDB(){return {version:'2.0-stock-empresa',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],sampleLoaded:false,updatedAt:now()};}
 function LDH_safeSetMainStock(key, value){
-  // Evita el error "quota exceeded" al sobrescribir una clave grande.
-  // 1) Limpia solo claves temporales/antiguas del propio Stock.
-  // 2) Si sigue fallando, borra la clave actual y la vuelve a escribir.
-  //    Esto evita que Chrome necesite espacio doble al reemplazar el JSON.
-  const obsoletePrefixes = [
+  // Guardado base. Si el navegador está lleno, la compactación se hace en save().
+  try{
+    localStorage.setItem(key, value);
+    return true;
+  }catch(e){
+    // Intento seguro: borrar la clave antes de reescribir evita que Chrome necesite espacio doble.
+    const old = localStorage.getItem(key);
+    try{ localStorage.removeItem(key); }catch(_){}
+    try{
+      localStorage.setItem(key, value);
+      return true;
+    }catch(e2){
+      try{ if(old !== null) localStorage.setItem(key, old); }catch(_){}
+      throw e2;
+    }
+  }
+}
+
+function LDH_cleanTempStorageForQuota(){
+  const prefixes = [
     "ldh_stock_debug_",
     "ldh_stock_tmp_",
     "stock_debug_",
@@ -1422,58 +1437,123 @@ function LDH_safeSetMainStock(key, value){
     "stock_export_tmp_",
     "ldh_stock_last_publish_payload_"
   ];
-  const obsoleteExact = [
+  const exact = [
     "stock_informativo_cache",
     "stock_informativo_last_payload",
     "ldh_stock_publish_last_error",
     "ldh_stock_last_error",
     "ldh_stock_old_payload"
   ];
-
-  function cleanupObsolete(){
-    try{
-      const keys = [];
-      for(let i=0;i<localStorage.length;i++){
-        const k = localStorage.key(i);
-        if(!k) continue;
-        if(obsoleteExact.includes(k) || obsoletePrefixes.some(p=>String(k).startsWith(p))){
-          keys.push(k);
-        }
-      }
-      keys.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
-    }catch(e){}
-  }
-
+  let n = 0;
   try{
-    localStorage.setItem(key, value);
-    return true;
-  }catch(e1){
-    cleanupObsolete();
-    try{
-      localStorage.setItem(key, value);
-      return true;
-    }catch(e2){
-      const old = localStorage.getItem(key);
-      try{ localStorage.removeItem(key); }catch(e){}
-      try{
-        localStorage.setItem(key, value);
-        return true;
-      }catch(e3){
-        // Intentar restaurar el anterior si no cupo el nuevo.
-        try{ if(old !== null) localStorage.setItem(key, old); }catch(e4){}
-        throw e3;
-      }
+    const keys = [];
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if(!k) continue;
+      if(exact.includes(k) || prefixes.some(p => String(k).startsWith(p))) keys.push(k);
     }
+    keys.forEach(k => { try{ localStorage.removeItem(k); n++; }catch(_){} });
+  }catch(_){}
+  return n;
+}
+
+function LDH_compactMovementsForQuota(){
+  // Último recurso ante quota exceeded:
+  // conserva los últimos movimientos detallados y resume los antiguos por empresa/material.
+  // El stock físico no cambia porque el resumen usa entrada/salida por neto.
+  try{
+    if(!db || !Array.isArray(db.movements) || db.movements.length < 800) return false;
+
+    const originalCount = db.movements.length;
+    const keepCount = 450; // detalle reciente visible
+    const sorted = db.movements
+      .slice()
+      .sort((a,b)=> new Date(a.date || a.createdAt || 0) - new Date(b.date || b.createdAt || 0));
+
+    const old = sorted.slice(0, Math.max(0, sorted.length - keepCount));
+    const recent = sorted.slice(Math.max(0, sorted.length - keepCount));
+
+    const skipTypes = new Set(["recepcion_preparacion","stock_recibido_ok","prep_ok","traza_recepcion"]);
+    const acc = new Map();
+
+    old.forEach(m=>{
+      if(!m) return;
+      const type = String(m.type || m.tipo || "entrada").toLowerCase();
+      if(skipTypes.has(type)) return;
+
+      const companyId = String(m.companyId || m.empresaId || "");
+      const materialId = String(m.materialId || m.matId || "");
+      if(!companyId || !materialId) return;
+
+      const q = Number(m.qty ?? m.cantidad ?? m.quantity ?? 0) || 0;
+      let signed = q;
+      if(type === "salida" || type === "ajuste_neg" || type === "consumo" || type === "out") signed = -q;
+      if(type === "entrada" || type === "ajuste_pos" || type === "devolucion" || type === "in") signed = q;
+
+      const key = companyId + "|" + materialId;
+      acc.set(key, (acc.get(key) || 0) + signed);
+    });
+
+    const compacted = [];
+    acc.forEach((net, key)=>{
+      if(Math.abs(net) < 0.000001) return;
+      const parts = key.split("|");
+      compacted.push({
+        id: uid("mov_compact"),
+        companyId: parts[0],
+        materialId: parts[1],
+        type: net >= 0 ? "entrada" : "salida",
+        qty: Math.abs(net),
+        date: "2000-01-01T00:00:00.000Z",
+        note: "Histórico compactado automáticamente para liberar almacenamiento",
+        compacted: true,
+        originalMovements: originalCount
+      });
+    });
+
+    db.movements = compacted.concat(recent);
+    db._movementsCompactedAt = now();
+    db._movementsCompactedOriginalCount = originalCount;
+    db._movementsCompactedCurrentCount = db.movements.length;
+    return true;
+  }catch(e){
+    console.warn("No se pudo compactar movimientos", e);
+    return false;
   }
 }
 
 function save(){
-  db.updatedAt=now();
-  const payload = JSON.stringify(db);
-  LDH_safeSetMainStock(KEY, payload);
+  db.updatedAt = now();
+
+  try{
+    LDH_safeSetMainStock(KEY, JSON.stringify(db));
+  }catch(e1){
+    LDH_cleanTempStorageForQuota();
+
+    try{
+      LDH_safeSetMainStock(KEY, JSON.stringify(db));
+    }catch(e2){
+      const compacted = LDH_compactMovementsForQuota();
+
+      if(compacted){
+        try{
+          LDH_safeSetMainStock(KEY, JSON.stringify(db));
+          try{
+            alert("Stock guardado. Se ha compactado histórico antiguo de movimientos para liberar espacio. El stock físico se mantiene; solo se resumió detalle antiguo.");
+          }catch(_){}
+        }catch(e3){
+          throw e3;
+        }
+      }else{
+        throw e2;
+      }
+    }
+  }
+
   try{ LDH_publishCompanyMaster(); }catch(e){}
   try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(); }catch(e){}
 }
+
 
 function LDH_publishCompanyMaster(){
   try{
@@ -3459,10 +3539,10 @@ function saveMove(type){
       console.error('Error guardando Stock', e);
       // Respaldo mínimo si save() falla por algún parche externo.
       try{
-        db.updatedAt = new Date().toISOString();
-        LDH_safeSetMainStock(KEY, JSON.stringify(db));
+        // Último intento usando la misma compactación automática de save().
+        save();
       }catch(e2){
-        alert('No se pudo guardar la entrada en el navegador porque el almacenamiento está lleno.\n\nPrueba a borrar histórico antiguo de movimientos desde Stock o exporta JSON antes de limpiar.\n\nDetalle: ' + (e2 && (e2.message || e2)));
+        alert('No se pudo guardar la entrada porque el almacenamiento del navegador sigue lleno.\n\nDetalle: ' + (e2 && (e2.message || e2)));
         return;
       }
     }
