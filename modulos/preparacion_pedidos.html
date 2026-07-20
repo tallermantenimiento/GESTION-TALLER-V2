@@ -473,19 +473,6 @@
   }
 </style>
 
-
-<style id="LDH_LIMPIEZA_LEGACY_VISUAL_2007">
-  .legacy-note,
-  .legacy-label,
-  [data-legacy="true"]{
-    display:none!important;
-  }
-  .topbar .muted:empty,
-  header .muted:empty{
-    display:none!important;
-  }
-</style>
-
 </head>
 <body>
 
@@ -1979,7 +1966,8 @@ function LDH_getV2MaterialById(id){
 function getLinkedMatForLine(line){
   const id = getLinkedMatIdForLine(line);
   if(!id) return null;
-  return getMatById(id) || LDH_getV2MaterialById(id);
+  // Prioridad absoluta al Stock real v2. El legacy puede tener IDs/nombres antiguos y mostrar cantidades falsas.
+  return LDH_getV2MaterialById(id) || getMatById(id);
 }
 
 /* ========= LINKMAP ========= */
@@ -2780,37 +2768,34 @@ function getLinkedMatIdForLine(line){
   // nunca heredamos un link global por nombre (evita que SKLUM/CREATE se crucen).
   try{
     if (typeof isPaintLine === "function" && isPaintLine(line)) {
-      if(line.linked_matId && (getMatById(line.linked_matId) || LDH_getV2MaterialById(line.linked_matId))) return line.linked_matId;
+      if(line.linked_matId && LDH_getV2MaterialById(line.linked_matId)) return line.linked_matId;
+      if(line.linked_matId && getMatById(line.linked_matId)) return line.linked_matId;
       return null;
     }
   }catch(e){}
 
-  if(line.linked_matId && (getMatById(line.linked_matId) || LDH_getV2MaterialById(line.linked_matId))) return line.linked_matId;
-
-  const k = linkKeyFor(line);
-  const rec = linkMap[k];
-  if(rec && rec.matId && (getMatById(rec.matId) || LDH_getV2MaterialById(rec.matId))) return rec.matId;
-
-  // Vinculación automática exacta: si el nombre del pedido coincide exactamente
-  // con una ficha de Stock, no hace falta volver a pulsar Vincular en Preparación.
-  const exactLegacy = LDH_findExactLegacyMaterialForLine(line);
-  if(exactLegacy){
-    line.linked_matId = exactLegacy.id;
-    linkMap[k] = { matId: exactLegacy.id, name: exactLegacy.name, cat: exactLegacy.cat, grp: exactLegacy.grp, unit: exactLegacy.unit, autoExact:true };
-    try{ saveLinkMap(); }catch(e){}
-    try{ guardarEstadoLocal(); }catch(e){}
-    return exactLegacy.id;
-  }
-
+  // Prioridad: Stock real v2 por nombre exacto en la empresa del pedido.
+  // Evita que Preparación use linkMap/stockMaterials del stock antiguo y pinte "Stock: 69 barras".
   const exactV2 = LDH_findExactV2MaterialForLine(line);
-  if(exactV2){
-    // Seguro: resolver el vínculo sin guardar el pedido al abrir/renderizar.
-    // Evita que la sincronización cierre o pise la ficha.
-    return exactV2.id;
-  }
+  if(exactV2) return exactV2.id;
 
   const safeV2Id = LDH_resolveV2LinkIdByExactName(line);
   if(safeV2Id) return safeV2Id;
+
+  if(line.linked_matId && LDH_getV2MaterialById(line.linked_matId)) return line.linked_matId;
+
+  const k = linkKeyFor(line);
+  const rec = linkMap[k];
+  if(rec && rec.matId && LDH_getV2MaterialById(rec.matId)) return rec.matId;
+
+  // Legacy solo como último recurso, para no romper pedidos antiguos sin ficha v2.
+  if(line.linked_matId && getMatById(line.linked_matId)) return line.linked_matId;
+  if(rec && rec.matId && getMatById(rec.matId)) return rec.matId;
+
+  const exactLegacy = LDH_findExactLegacyMaterialForLine(line);
+  if(exactLegacy){
+    return exactLegacy.id;
+  }
 
   return null;
 }
@@ -3009,13 +2994,16 @@ function _v2FindCompany(pack, empresaNombre){
 }
 function _v2FindMaterialForLine(pack, line, linkedMat, companyId){
   const rawName = String(_v2First(
-    linkedMat && linkedMat.name,
-    linkedMat && linkedMat.nombre,
+    // Si linkedMat es legacy, priorizamos el texto real de la línea.
+    linkedMat && linkedMat.__v2 && linkedMat.name,
+    linkedMat && linkedMat.__v2 && linkedMat.nombre,
     line && line.stockLinkLabel,
     line && line.linked_matName,
     line && line.mat,
     line && line.material,
-    line && line.name
+    line && line.name,
+    linkedMat && linkedMat.name,
+    linkedMat && linkedMat.nombre
   )).trim();
   const target = _v2Norm(rawName);
   if(!target) return null;
