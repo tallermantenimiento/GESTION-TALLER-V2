@@ -1813,7 +1813,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   <div id="ldhIronChart" class="ldh-iron-chart"></div>
   <div id="ldhIronDetail" class="ldh-iron-table"></div>
   <div class="ldh-iron-note">
-    Criterio: el sistema intenta interpretar medidas como 80x80x2, 100x50x3, pletina 60x8, ángulo 40x40x4, etc. Si no reconoce una medida, aplica un índice mínimo para que no desaparezca del ranking.
+    Criterio: solo se muestran empresas activas del Stock actual. El sistema ignora empresas borradas aunque queden en históricos antiguos.
   </div>
 </section>
 
@@ -2792,6 +2792,24 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const c = (db.companies||[]).find(x => String(x.id) === String(id));
     return String((c && (c.name || c.nombre || c.empresa)) || id || "Sin empresa");
   }
+  function activeCompanyKeys(db){
+    const set = new Set();
+    (db.companies||[]).forEach(c=>{
+      const id = String(c && c.id || "").trim();
+      const name = String(c && (c.name || c.nombre || c.empresa) || "").trim();
+      if(id) set.add(norm(id));
+      if(name) set.add(norm(name));
+    });
+    return set;
+  }
+  function companyIsActive(db, companyId, companyText){
+    const active = activeCompanyKeys(db);
+    // Si Stock no tiene lista de empresas, no bloqueamos para evitar dejar el gráfico vacío por un dato antiguo.
+    if(!active.size) return true;
+    const id = norm(companyId);
+    const name = norm(companyText);
+    return (id && active.has(id)) || (name && active.has(name));
+  }
   function materialById(db, id){
     return (db.materials||[]).find(m => String(m.id || m.materialId) === String(id));
   }
@@ -2884,12 +2902,14 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         companyId = j && (j.companyId || j.empresaId || j.company);
       }
       if(!companyId) return;
+      const compName = companyName(db, companyId);
+      if(!companyIsActive(db, companyId, compName)) return;
       const qty = assignmentQty(a);
       if(qty <= 0) return;
       rows.push({
         source:"Asignación",
         companyId,
-        company:companyName(db, companyId),
+        company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
         qty,
@@ -2911,10 +2931,12 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       if(qty <= 0) return;
       const companyId = r.companyId || "";
       if(!companyId) return;
+      const compName = companyName(db, companyId);
+      if(!companyIsActive(db, companyId, compName)) return;
       rows.push({
         source:"Reserva",
         companyId,
-        company:companyName(db, companyId),
+        company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
         qty,
@@ -2935,6 +2957,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         if(!Array.isArray(lines) || !companyText) continue;
         const c = (db.companies||[]).find(x => norm(x.name||x.nombre||x.id) === norm(companyText) || norm(companyText).includes(norm(x.name||x.nombre||x.id)));
         const companyId = c ? c.id : companyText;
+        if(!companyIsActive(db, companyId, c ? companyName(db, companyId) : companyText)) continue;
         lines.forEach(line=>{
           const materialId = line.stockLinkId || line.materialId || line.matId;
           const m = materialById(db, materialId);
@@ -2973,6 +2996,27 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function fmt(n){
     return Number(n||0).toLocaleString("es-ES",{maximumFractionDigits:1});
   }
+  function cleanDeletedCompaniesFromIronStats(){
+    const db = readDB();
+    const active = activeCompanyKeys(db);
+    if(!active.size) return alert("No hay lista de empresas activa en Stock.");
+    const before = {
+      assignments:(db.assignments||[]).length,
+      reservations:(db.reservations||[]).length,
+      jobs:(db.jobs||[]).length
+    };
+    db.assignments = (db.assignments||[]).filter(a=>{
+      let cid = a.companyId || a.toCompanyId || "";
+      if(!cid && a.jobId){ const j = jobById(db, a.jobId); cid = j && (j.companyId || j.empresaId || j.company); }
+      return companyIsActive(db, cid, companyName(db, cid));
+    });
+    db.reservations = (db.reservations||[]).filter(r=>companyIsActive(db, r.companyId || "", companyName(db, r.companyId || "")));
+    db.jobs = (db.jobs||[]).filter(j=>companyIsActive(db, j.companyId || j.empresaId || j.company || "", companyName(db, j.companyId || j.empresaId || j.company || "")));
+    saveDB(db);
+    alert("Limpieza terminada.\nAsignaciones: " + before.assignments + " → " + db.assignments.length + "\nReservas: " + before.reservations + " → " + db.reservations.length + "\nTrabajos: " + before.jobs + " → " + db.jobs.length);
+    render();
+  }
+
   function render(){
     const chart = document.getElementById("ldhIronChart");
     if(!chart) return;
@@ -4133,277 +4177,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   window.addEventListener("storage", ev=>{ if(ev && (ev.key===KEY || (ev.key||"").startsWith("prep_"))) render(); });
 })();
 </script>
-
-
-
-<script id="LDH_FIX_EMPRESAS_STOCK_UNICO_INDEX_3006">
-(function(){
-  const STOCK_KEY = 'ldh_v2_company_stock_v1';
-  const DELETED_KEY = 'ldh_deleted_companies_v1';
-  const BAR_LENGTH_M = 6;
-  let mode = 'total';
-
-  function readJSON(k, fallback){ try{ const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? fallback : v; }catch(_){ return fallback; } }
-  function writeJSON(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(_){ } }
-  function esc(s){ return String(s ?? '').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-  function norm(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }
-  function displayKey(s){ return norm(s).toUpperCase(); }
-  function isGeneratedName(s){ return /^emp_[a-z0-9]{4,}$/i.test(String(s||'').trim()); }
-  function num(v){ const n = parseFloat(String(v ?? 0).replace(',', '.')); return Number.isFinite(n) ? n : 0; }
-  function companyDisplay(c){
-    if(!c) return '';
-    const n = String(c.name || c.nombre || c.empresa || c.company || '').trim();
-    if(n && !isGeneratedName(n)) return n.toUpperCase();
-    const id = String(c.id || c.companyId || c.empresaId || '').trim();
-    if(id && !isGeneratedName(id)) return id.toUpperCase();
-    return '';
-  }
-  function companyId(c){ return String(c && (c.id || c.companyId || c.empresaId || c.name || c.nombre || c.empresa || c.company) || '').trim(); }
-  function deletedSet(){
-    const arr = readJSON(DELETED_KEY, []);
-    return new Set((Array.isArray(arr) ? arr : []).map(displayKey).filter(Boolean));
-  }
-  function readDB(){
-    const db = readJSON(STOCK_KEY, {}) || {};
-    ['companies','materials','stock','jobs','movements','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(db[k])) db[k] = []; });
-    return db;
-  }
-  function saveDB(db){ db.version = db.version || '2.0-stock-empresa'; db.updatedAt = new Date().toISOString(); writeJSON(STOCK_KEY, db); }
-  function activeCompanies(db){
-    const del = deletedSet();
-    const map = new Map();
-    (db.companies || []).forEach(c=>{
-      if(!c || c.deleted || c.archived || c.borrada || c.eliminada || c.active === false) return;
-      const name = companyDisplay(c);
-      if(!name || isGeneratedName(name) || del.has(displayKey(name))) return;
-      const id = companyId(c) || name;
-      if(!id || isGeneratedName(id) || del.has(displayKey(id))) return;
-      if(!map.has(String(id))) map.set(String(id), {id:String(id), name});
-    });
-    return map;
-  }
-  function cleanupBadDemo(db){
-    let changed = false;
-    const badCompanyIds = new Set();
-    db.companies = (db.companies || []).filter(c=>{
-      const name = companyDisplay(c);
-      const id = companyId(c);
-      const bad = !name || isGeneratedName(name) || (id && isGeneratedName(id) && !String(c.name||c.nombre||'').trim()) || c.statDemo;
-      if(bad){ badCompanyIds.add(String(id || name)); changed = true; return false; }
-      return true;
-    });
-    const badRow = r => !r || r.statDemo || String(r.ref||r.jobRef||'').startsWith('DEMO-HIERRO') || badCompanyIds.has(String(r.companyId||r.toCompanyId||r.fromCompanyId||''));
-    ['jobs','assignments','reservations','reservationDebts','movements'].forEach(k=>{
-      const before = (db[k]||[]).length;
-      db[k] = (db[k]||[]).filter(r=>!badRow(r));
-      if(db[k].length !== before) changed = true;
-    });
-    if(changed) saveDB(db);
-  }
-  function materialById(db, id){ return (db.materials||[]).find(m => String(m.id || m.materialId || m.key) === String(id)); }
-  function jobById(db, id){ return (db.jobs||[]).find(j => String(j.id || j.jobId) === String(id)); }
-  function isIronMaterial(m){
-    const txt = norm([m && m.type, m && m.tipo, m && m.family, m && m.familia, m && m.cat, m && m.grp, m && m.name, m && m.nombre].join(' '));
-    if(!txt) return false;
-    if(txt.includes('pintur') || txt.includes('ferreter') || txt.includes('tablero') || txt.includes('aglomerado')) return false;
-    return txt.includes('hierro') || txt.includes('perfil') || txt.includes('tubo') || txt.includes('pletina') || txt.includes('angulo') || txt.includes('chapa') || txt.includes('barra');
-  }
-  function extractDims(name){
-    const s = norm(name).replace(/ø/g,'diam ').replace(/∅/g,'diam ');
-    const rx = /(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/i;
-    const m = s.match(rx); if(m) return m.slice(1).filter(Boolean).map(Number);
-    const d = s.match(/(?:diam|redondo|tubo redondo|red)\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/i); if(d) return d.slice(1).filter(Boolean).map(Number);
-    const chapa = s.match(/chapa\s*(?:de\s*)?(\d+(?:\.\d+)?)/i); if(chapa) return [1000, Number(chapa[1])];
-    return [];
-  }
-  function kgPerMeterFromName(name){
-    const s = norm(name); const d = extractDims(name); let kgm = 0;
-    if(d.length >= 3){ const a=d[0], b=d[1], t=d[2]; kgm = (s.includes('angulo')||s.includes('angular')||s.includes('l ')) ? Math.max(0,(a+b-t)*t*0.00785) : Math.max(0,(2*t*(a+b-2*t))*0.00785); }
-    else if(d.length === 2){ const a=d[0], b=d[1]; if(s.includes('pletina')) kgm=Math.max(0,a*b*0.00785); else if(s.includes('chapa')) kgm=Math.max(0,b*7.85); else if(s.includes('redondo')||s.includes('macizo')){ const r=a/2; kgm=Math.PI*r*r*0.00785; } else kgm=Math.max(0.6,(a+b)*0.018); }
-    else if(d.length === 1){ const a=d[0]; if(s.includes('redondo')||s.includes('macizo')){ const r=a/2; kgm=Math.PI*r*r*0.00785; } else kgm=Math.max(0.5,a*0.035); }
-    return (!Number.isFinite(kgm) || kgm <= 0) ? 1 : kgm;
-  }
-  function rowDate(o){
-    const v = o && (o.date || o.fecha || o.createdAt || o.updatedAt || o.timestamp || o.ts);
-    if(!v) return new Date();
-    const d = typeof v === 'number' ? new Date(v) : new Date(String(v));
-    return Number.isFinite(d.getTime()) ? d : new Date();
-  }
-  function inPeriod(o){
-    const d = rowDate(o);
-    const y = Number((document.getElementById('ldhIronYear')||{}).value || d.getFullYear());
-    const m = Number((document.getElementById('ldhIronMonth')||{}).value || (d.getMonth()+1));
-    if(mode === 'annual') return d.getFullYear() === y;
-    if(mode === 'monthly') return d.getFullYear() === y && (d.getMonth()+1) === m;
-    if(mode === 'range'){
-      const fy = Number((document.getElementById('ldhIronFromYear')||{}).value || y);
-      const fm = Number((document.getElementById('ldhIronFromMonth')||{}).value || 1);
-      const ty = Number((document.getElementById('ldhIronToYear')||{}).value || y);
-      const tm = Number((document.getElementById('ldhIronToMonth')||{}).value || 12);
-      const n = d.getFullYear()*100 + (d.getMonth()+1);
-      return n >= (fy*100+fm) && n <= (ty*100+tm);
-    }
-    return true;
-  }
-  function assignmentQty(a){
-    const explicit = a && (a.pendingQty ?? a.qtyPending ?? a.pendiente);
-    if(explicit !== undefined && explicit !== null && String(explicit) !== '') return Math.max(0, num(explicit));
-    return Math.max(0, num(a && (a.qty ?? a.cantidad ?? a.barras ?? a.unidades ?? 0)) - num(a && (a.returnedQty ?? a.qtyReturned ?? a.devuelto ?? 0)));
-  }
-  function phaseCounts(a){ const st = String((a && (a.status || a.estado)) || 'activa').toLowerCase(); if(st && !['activa','activo','ok','pendiente'].includes(st)) return false; const ph = String((a && (a.phase || a.fase)) || 'preparacion').toLowerCase(); return !['cancelada','cancelado','devuelta','devuelto','anulada','anulado'].includes(ph); }
-  function collectRows(db, companies){
-    const rows = [];
-    const push = (base, sourceObj)=>{
-      const c = companies.get(String(base.companyId));
-      if(!c) return;
-      if(!inPeriod(sourceObj || base)) return;
-      rows.push({...base, companyId:c.id, company:c.name});
-    };
-    (db.assignments||[]).forEach(a=>{
-      if(!phaseCounts(a)) return;
-      const materialId = a.materialId || a.matId || a.toMaterialId; const m = materialById(db, materialId); if(!m || !isIronMaterial(m)) return;
-      let companyId = a.companyId || a.toCompanyId || '';
-      if(!companyId && a.jobId){ const j = jobById(db, a.jobId); companyId = j && (j.companyId || j.empresaId || j.company); }
-      const qty = assignmentQty(a); if(!companyId || qty <= 0) return;
-      push({source:'Asignación', companyId:String(companyId), materialId, material:String(m.name||m.nombre||materialId), qty, kgm:kgPerMeterFromName(m.name||m.nombre||materialId), ref:String(a.ref||a.jobRef||a.jobId||'')}, a);
-    });
-    (db.reservations||[]).forEach(r=>{
-      const st = String((r && (r.status || r.estado)) || 'activa').toLowerCase(); if(st !== 'activa' && st !== 'activo') return;
-      const ph = String((r && (r.phase || r.fase)) || 'preparacion').toLowerCase(); if(!['preparacion','fabricacion'].includes(ph)) return;
-      const materialId = r.materialId || r.matId; const m = materialById(db, materialId); if(!m || !isIronMaterial(m)) return;
-      const qty = num(r.qty || r.cantidad || 0); const companyId = r.companyId || ''; if(!companyId || qty <= 0) return;
-      push({source:'Reserva', companyId:String(companyId), materialId, material:String(m.name||m.nombre||materialId), qty, kgm:kgPerMeterFromName(m.name||m.nombre||materialId), ref:String(r.ref||r.jobRef||r.jobId||'')}, r);
-    });
-    try{
-      for(let i=0;i<localStorage.length;i++){
-        const k = localStorage.key(i) || ''; if(!k.startsWith('prep_recepcion_')) continue;
-        const ref = k.slice('prep_recepcion_'.length); const lines = readJSON(k, []); const meta = readJSON('prep_meta_' + ref, {});
-        const companyText = String(meta.empresa || meta.company || meta.emp || '').trim(); if(!Array.isArray(lines) || !companyText) continue;
-        const c = Array.from(companies.values()).find(x=>norm(x.name) === norm(companyText)); if(!c) continue;
-        if(!inPeriod(meta)) continue;
-        lines.forEach(line=>{
-          const materialId = line.stockLinkId || line.materialId || line.matId; const m = materialById(db, materialId); if(!m || !isIronMaterial(m)) return;
-          const qty = Math.max(num(line.recibida || line.qty_recibida || line.received || 0), num(line.pedida || line.qty || line.cantidad || 0)); if(qty <= 0) return;
-          rows.push({source:'Preparación', companyId:c.id, company:c.name, materialId, material:String(m.name||m.nombre||materialId), qty, kgm:kgPerMeterFromName(m.name||m.nombre||materialId), ref});
-        });
-      }
-    }catch(_){ }
-    return rows;
-  }
-  function aggregate(rows, companies){
-    const map = new Map();
-    companies.forEach(c=>map.set(c.id, {companyId:c.id, company:c.name, kg:0, bars:0, refs:new Set(), lines:[]}));
-    rows.forEach(r=>{ const kg = r.qty * r.kgm * BAR_LENGTH_M; const cur = map.get(String(r.companyId)); if(!cur) return; cur.kg += kg; cur.bars += r.qty; if(r.ref) cur.refs.add(r.ref); cur.lines.push({...r, kg}); });
-    return Array.from(map.values()).sort((a,b)=>b.kg-a.kg || a.company.localeCompare(b.company,'es',{sensitivity:'base'}));
-  }
-  function fmt(n){ return Number(n||0).toLocaleString('es-ES',{maximumFractionDigits:1}); }
-  function renderSelects(){
-    const now = new Date(); const years = new Set([now.getFullYear(), now.getFullYear()-1, now.getFullYear()+1]);
-    const db = readDB(); [...(db.assignments||[]), ...(db.reservations||[]), ...(db.jobs||[])].forEach(r=>{ const y=rowDate(r).getFullYear(); if(Number.isFinite(y)) years.add(y); });
-    const ys = Array.from(years).sort((a,b)=>b-a);
-    ['ldhIronYear','ldhIronFromYear','ldhIronToYear'].forEach(id=>{ const el=document.getElementById(id); if(el && !el.options.length) el.innerHTML = ys.map(y=>`<option value="${y}">${y}</option>`).join(''); });
-    const months = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-    ['ldhIronMonth','ldhIronFromMonth','ldhIronToMonth'].forEach(id=>{ const el=document.getElementById(id); if(el && !el.options.length) el.innerHTML = months.map((n,i)=>`<option value="${i+1}">${n}</option>`).join(''); });
-    const mEl=document.getElementById('ldhIronMonth'); if(mEl && !mEl.value) mEl.value=String(now.getMonth()+1);
-    const toM=document.getElementById('ldhIronToMonth'); if(toM && !toM.value) toM.value=String(now.getMonth()+1);
-  }
-  function renderDetail(data){
-    const detail = document.getElementById('ldhIronDetail'); if(!detail) return;
-    detail.innerHTML = `<table><thead><tr><th>Empresa</th><th>Trabajos</th><th>Barras</th><th>Kg estimados</th></tr></thead><tbody>` + data.map(x=>`<tr><td>${esc(x.company)}</td><td>${x.refs.size}</td><td>${fmt(x.bars)}</td><td>${fmt(x.kg)} kg</td></tr>`).join('') + `</tbody></table>`;
-  }
-  function render(){
-    renderSelects();
-    const chart = document.getElementById('ldhIronChart'); if(!chart) return;
-    const db = readDB(); cleanupBadDemo(db);
-    const companies = activeCompanies(db);
-    const rows = collectRows(db, companies);
-    const data = aggregate(rows, companies);
-    const totalKg = data.reduce((a,x)=>a+x.kg,0); const totalBars = data.reduce((a,x)=>a+x.bars,0); const maxKg = Math.max(1, ...data.map(x=>x.kg));
-    const top = data.find(x=>x.kg > 0) || data[0];
-    const topEl=document.getElementById('ldhIronTopCompany'); if(topEl) topEl.textContent = top ? top.company : '—';
-    const totalEl=document.getElementById('ldhIronTotal'); if(totalEl) totalEl.textContent = fmt(totalKg) + ' kg';
-    const barsEl=document.getElementById('ldhIronBars'); if(barsEl) barsEl.textContent = fmt(totalBars);
-    if(!data.length){ chart.innerHTML = `<div class="ldh-iron-empty">No hay empresas activas en Stock por empresa.</div>`; renderDetail([]); return; }
-    chart.innerHTML = data.map(x=>{
-      const pct = Math.max(1, Math.round((x.kg / maxKg) * 100));
-      return `<div class="ldh-iron-row"><div><div class="ldh-iron-name">${esc(x.company)}</div><div class="ldh-iron-sub">${x.refs.size} trabajos · ${fmt(x.bars)} barras</div></div><div class="ldh-iron-barbox"><div class="ldh-iron-bar" style="width:${pct}%"></div></div><div class="ldh-iron-val">${fmt(x.kg)} kg</div><button class="btn ghost ldh-iron-view-btn" type="button" onclick="LDH_IronStats_openCompany('${esc(String(x.companyId)).replace(/'/g,'&#39;')}')">Ver</button></div>`;
-    }).join('');
-    window.__LDH_IRON_LAST_DATA = data;
-    renderDetail(data);
-  }
-  window.LDH_IronStats_render = render;
-  window.LDH_IronStats_setMode = function(m){ mode = m || 'total'; document.querySelectorAll('[data-iron-mode]').forEach(b=>b.classList.toggle('active', b.getAttribute('data-iron-mode')===mode)); render(); };
-  window.LDH_IronStats_seedDemo = function(){ alert('Demo desactivada para no crear empresas falsas.'); };
-  window.LDH_IronStats_clearDemo = function(){ const db=readDB(); cleanupBadDemo(db); render(); alert('Datos demo/empresas falsas limpiados.'); };
-  window.LDH_IronStats_toggleDetalle = function(){ const d=document.getElementById('ldhIronDetail'); if(d) d.classList.toggle('show'); };
-  window.LDH_IronStats_openCompany = function(id){
-    const data = window.__LDH_IRON_LAST_DATA || []; const c = data.find(x=>String(x.companyId)===String(id)); if(!c) return;
-    alert(c.company + '\n\n' + c.lines.map(l=>`${l.ref || '-'} · ${l.material} · ${fmt(l.qty)} barras · ${fmt(l.kg)} kg`).join('\n'));
-  };
-  window.LDH_IronStats_closeCompany = function(){};
-  window.LDH_IronStats_print = window.LDH_IronStats_print || function(){ window.print(); };
-  setTimeout(render, 80); setTimeout(render, 600);
-})();
-</script>
-
-
-<!-- LDH_MIGRACION_SOLO_CONCEPTOS_20260630 -->
-<script id="LDH_MIGRACION_SOLO_CONCEPTOS_20260630">
-(function(){
-  'use strict';
-  var FLAG = 'LDH_MIGRACION_SOLO_CONCEPTOS_20260630_V1_DONE';
-  var CONCEPTOS_ANTIGUOS = [{"name":"soporte mamparas","vars":["cantidad"],"lines":["80x80x2=4980*cantidad","80x40x1.5=4260*cantidad","60x40x1.5=10740*cantidad","40x40x1.5=12480*cantidad","40x20x1.5=1380*cantidad","guia 35x35=3600*cantidad","pletina 100x10=226*cantidad","pletina 80x10=660*cantidad","pletina 30x6=600*cantidad"],"units":["pletina corredera guia 35x35 1sujecion (soporte mamparas)=4*cantidad","anilla elevacion D-582 ref:09522832 ØM10 (brazo soportes mamparas)=4*cantidad","bisagra libro ESTEBRO 100mm. cod.196RZ (brazo soporte mamparas)=4*cantidad","iman FSKDC006 (brazo soporte mamparas)=4*cantidad","chapa 3000x1500x3=0.10*cantidad|pintar","chapa 3000x1500x1.5=1*cantidad|pintar","contera 40x20 negra=4*cantidad","pintura=0.458*color","disolvente universal (mezcla)=0.011*cantidad"],"stockLinks":{"lines":{"80x80x2":"q372t4ob4","80x40x1.5":"fuwvmk631","60x40x1.5":"00x3vw6tj","40x40x1.5":"yz52jga4e","40x20x1.5":"zx35v7ire","guia 35x35":"4l11m6cq8","pletina 100x10":"it2fw09yc","pletina 80x10":"a3o5rdl1l","pletina 30x6":"nywtcnpjn"},"units":{"pletina corredera guia 35x35 1sujecion (soporte mamparas)":"t6d2m2e81","anilla elevacion D-582 ref:09522832 ØM10 (brazo soportes mamparas)":"b265sxcyj","bisagra libro ESTEBRO 100mm. cod.196RZ (brazo soporte mamparas)":"thv8pblrg","iman FSKDC006 (brazo soporte mamparas)":"dt1sl1hvd","chapa 3000x1500x3":"8ksqkuiy7","chapa 3000x1500x1.5":"68wjfheiy","contera 40x20 negra":"k1aypxl8a","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Parking bicicletas y patinetes electricos","vars":["cantidad"],"lines":["80x40x1.5=3000*cantidad","60x40x1.5=33000*cantidad","tubo ø25=13800*cantidad","pletina 100x10=960*cantidad","pletina 60x10=300*cantidad","pletina 40x10=600*cantidad"],"units":["chapa sadwich (parking bicicletas y patinetes electricos) 4000x1000x40=3*cantidad","eschufe superficie estanco 80x80=6*cantidad","caja superficie estanca 100x100=2*cantidad","manguera 5x2.5 RZ1=4(metros)*cantidad","tornillo M12x70=8*cantidad","tuerca M12=24*cantidad","tornillo M12x30=16*cantidad","contera ø 25 negra=2*cantidad","pintura=0.274*cantidad","disolvente universal (mezcla)=0.007*cantidad","tornillo auto perforante cabeza exagonal 5x50=24*cantidad","arandela con goma Ø5=24*cantidad"],"stockLinks":{"lines":{"80x40x1.5":"fuwvmk631","60x40x1.5":"00x3vw6tj","tubo ø25":"qgi5w9kpt","pletina 100x10":"it2fw09yc","pletina 60x10":"pg14w1yw2","pletina 40x10":"nn1ovlxdr"},"units":{"chapa sadwich (parking bicicletas y patinetes electricos) 4000x1000x40":"hwsnrylk8","tornillo M12x70":"9x5u110ye","tuerca M12":"zf90togs3","tornillo M12x30":"gz0602iuy","contera ø 25 negra":"1qhj6xi4k","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Brazo articulado foco muelle","vars":["cantidad"],"lines":["80x40x1.5=260*cantidad","40x40x1.5=900*cantidad","pletina 40x6=396*cantidad","pletina 40x8=270*cantidad","tubo Ø16x2 (casquillos brazo foco muelle)=120*cantidad"],"units":["tornillo M12x80=3*cantidad","tuerca ciega M12 (brazo foco muelle)=3*cantidad","arandela ø12=6*cantidad","chapeton Ø12=6*cantidad","tornillo M6x30=1*cantidad","tuerca M6=2*cantidad","arandela ø6=2*cantidad","interruptor estanco superficie 80x80=1*cantidad","caja estanca superficie=1*cantidad","foco pris-eu/101158-216860=1*cantidad","pintura=0.009*cantidad","disolvente universal (mezcla)=0.000*cantidad","tuerca M12=3*cantidad"],"stockLinks":{"lines":{"80x40x1.5":"fuwvmk631","40x40x1.5":"yz52jga4e","pletina 40x6":"puoiqm2fx","pletina 40x8":"c1eq2rae7","tubo Ø16x2 (casquillos brazo foco muelle)":"nsv4eo1jn"},"units":{"tornillo M12x80":"9x5u110ye","tuerca ciega M12 (brazo foco muelle)":"urchk6a1x","arandela ø12":"87zplj3xa","chapeton Ø12":"m4tpkxo5x","tornillo M6x30":"v7eh10jgc","tuerca M6":"vp7tso1fi","arandela ø6":"ybd1f1zwo","tuerca M12":"zf90togs3"}}},{"name":"Mesas empaquetado","vars":["cantidad","carros"],"lines":["40x40x1.5=6000*carros","40x40x1.5=27000*cantidad","30x20x1.5=12000*cantidad","varilla  ø10=6000*cantidad","guia 35x35=1200*cantidad","tubo ø50x1.5=1500*cantidad","pletina 120x10=480*cantidad"],"units":["Tornillo M10x30 (patas mesas empaquetado)=8*cantidad","tornillo m8x10 cabeza alomada allen (para las ruedas)=16*carros","pletina soporte RUEDAS ALEX COD. 2-2340 /  RUEDAS ALEX COD. 2-1034 (carro mesa empaquetado y carro estante mezadine)=4*carros","pletina corredera guia 35x35 2 sujeciones (mesa empaquetado)=4*cantidad","U soporte barra portarrollo (mesa empaquetado)=2*cantidad","contera 40x40 negra=2*cantidad","contera 30x20 negra=8*cantidad","MESAS EMPAQUETADO chapa soporte carton  (1490x395x1.5)=1*cantidad","MESAS EMPAQUETADO chapa proteccion tablero(1002x1504x1.5) (doblado a tres caras no incluido en la medida)=1*cantidad","MESA EMPAQUETADO tablero trasera DM 19mm. (1500x1000)=1*cantidad","MESAS EMPAQUETADO tablero mesa DM 19mm. (1495x995)=1*cantidad","MESAS EMPAQUETADO tablero estante largo DM 19mm. (1495x300)=1*cantidad","MESAS EMPAQUETADO tablero estante corto DM 19mm. (770x300)=1*cantidad","RUEDAS ALEX COD. 2-1034 (carro mesa empaquetado)=4*carros","pintura=0.240*cantidad","disolvente universal (mezcla)=0.006*cantidad","MESAS EMPAQUETADO tablero carros superior DM 19mm. (480x480)=1*carros","MESAS EMPAQUETADO tablero carros inferior DM 19mm. (450x450)=1*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e","30x20x1.5":"qq3v6un4h","varilla  ø10":"58zyzqakr","guia 35x35":"4l11m6cq8","tubo ø50x1.5":"xhdfv8uxs","pletina 120x10":"y1a0hjmao"},"units":{"Tornillo M10x30 (patas mesas empaquetado)":"aiy61eo2p","tornillo m8x10 cabeza alomada allen (para las ruedas)":"2ogmemmcl","pletina soporte RUEDAS ALEX COD. 2-2340 /  RUEDAS ALEX COD. 2-1034 (carro mesa empaquetado y carro estante mezadine)":"op132vwge","pletina corredera guia 35x35 2 sujeciones (mesa empaquetado)":"v8rsi5ggn","U soporte barra portarrollo (mesa empaquetado)":"7oeiylubr","contera 40x40 negra":"1e86x21da","contera 30x20 negra":"zafydpdmq","MESAS EMPAQUETADO chapa soporte carton  (1490x395x1.5)":"nvmynlzxu","MESAS EMPAQUETADO chapa proteccion tablero(1002x1504x1.5) (doblado a tres caras no incluido en la medida)":"oey1q8xev","MESA EMPAQUETADO tablero trasera DM 19mm. (1500x1000)":"weo10tloc","MESAS EMPAQUETADO tablero mesa DM 19mm. (1495x995)":"9q0i9x352","MESAS EMPAQUETADO tablero estante largo DM 19mm. (1495x300)":"lckakhnv8","MESAS EMPAQUETADO tablero estante corto DM 19mm. (770x300)":"vrltdn5ao","RUEDAS ALEX COD. 2-1034 (carro mesa empaquetado)":"3t3hm1nke","MESAS EMPAQUETADO tablero carros superior DM 19mm. (480x480)":"efkz2fqrr","MESAS EMPAQUETADO tablero carros inferior DM 19mm. (450x450)":"2m3uind8q"}}},{"name":"Mesa taller Create","vars":["cantidad","carros"],"lines":["40x40x1.5=17040*cantidad","40x40x1.5=6660*carros"],"units":["corredera tablero teclado (mesas taller CREATE)=1*cantidad","rejiband=1*cantidad","tornillo m8x10 cabeza alomada allen (para las ruedas)=16*carros","rueda (Soliva) 460125800-TECHNICAL ITEM,S.L.U. ref: 256005 (carro gavetas)=4*carros","MESA TALLER CREATE DM19mm. (2000x1000)=1*cantidad","MESA TALLER CREATE tablero superior carro DM19mm. (610x610)=1*carros","MESA TALLER CREATE tablero inferior carro DM19mm. (600x600)=1*carros","MESA TALLER CREATE tablero soporte enchufes frontales DM19mm. (320x265)=1*cantidad","MESA TALLER CREATE tablero teclado DM19mm. (889x300)=1*cantidad","tapete de corte autocurable 2000x1000 (mesas taller CREATE)=1*cantidad","pintura=0.126*cantidad","disolvente universal (mezcla)=0.003*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e"},"units":{"corredera tablero teclado (mesas taller CREATE)":"xudmvvit7","tornillo m8x10 cabeza alomada allen (para las ruedas)":"2ogmemmcl","rueda (Soliva) 460125800-TECHNICAL ITEM,S.L.U. ref: 256005 (carro gavetas)":"bdhllea2c","MESA TALLER CREATE DM19mm. (2000x1000)":"zx03t25wy","MESA TALLER CREATE tablero superior carro DM19mm. (610x610)":"zx03t25wy","MESA TALLER CREATE tablero inferior carro DM19mm. (600x600)":"4j3a2xkir","MESA TALLER CREATE tablero soporte enchufes frontales DM19mm. (320x265)":"1kpex83ib","MESA TALLER CREATE tablero teclado DM19mm. (889x300)":"k654tq55v","tapete de corte autocurable 2000x1000 (mesas taller CREATE)":"y3xg6on24","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Mesa ordenador muelles","vars":["cantidad"],"lines":["40x40x1.5=15400*cantidad"],"units":["chapa perforada 2000x1000=0.125*cantidad|pintar","contera 40x40 blanca=4*cantidad","cajonera ref: HOME LM 81874194 alt: 480 / ancho: 400 / fondo: 340 (mesa ordenador muelles)=1*cantidad","pintura=0.178*cantidad","disolvente universal (mezcla)=0.004*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e"},"units":{"chapa perforada 2000x1000":"tm6xhdd3x","contera 40x40 blanca":"4ip1s31ew","cajonera ref: HOME LM 81874194 alt: 480 / ancho: 400 / fondo: 340 (mesa ordenador muelles)":"y9ef9q933","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"vallas perimetro naves","vars":["cantidad"],"lines":["tubo ø80x1.5=24000*cantidad"],"units":["VALLAS PERIMETRO NAVES chapa 3000x1500x4mm. (cortada a laser y doblada segun plano)=0.20*cantidad","pintura=0.261*cantidad","disolvente universal (mezcla)=0.0063*cantidad","spray retoque (soldaduras)=0.111*cantidad"],"stockLinks":{"lines":{"tubo ø80x1.5":"ylejshu9i"},"units":{"VALLAS PERIMETRO NAVES chapa 3000x1500x4mm. (cortada a laser y doblada segun plano)":"huygt97od","disolvente universal (mezcla)":"6y6shx7x8","spray retoque (soldaduras)":"ear1tb40n"}}},{"name":"Mesa oficinas 2250x900","vars":["cantidad"],"lines":["40x40x1.5=11660*cantidad","40x20x1.5=2010*cantidad","tubo ø30x1.5=6500*cantidad"],"units":["contera 40x20 blanca=4*cantidad","pintura=0.151*cantidad","disolvente universal (mezcla)=0.004*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e","40x20x1.5":"zx35v7ire","tubo ø30x1.5":"u20o2k59m"},"units":{"contera 40x20 blanca":"z2k366n3i","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Bastidor vallas obra","vars":["cantidad"],"lines":["140X60X3=8000*cantidad","80x80x2=15280*cantidad","80x40x1.5=14000*cantidad"],"units":["pintura=0.393*cantidad","disolvente universal (mezcla)=0.009*cantidad"],"stockLinks":{"lines":{"140X60X3":"bifxg4rrm","80x80x2":"q372t4ob4","80x40x1.5":"fuwvmk631"},"units":{"disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"RACK (cajon grande)","vars":["cantidad"],"lines":["40x40=9165*cantidad"],"units":["chapa 2000x1000x1.5=0.762*cantidad|pintar","contera 40x40 blanca=2*cantidad","pintura=0.281*cantidad","disolvente universal (mezcla)=0.007*cantidad"],"stockLinks":{"lines":{},"units":{}}},{"name":"suplemento mesa oficina (1300x900)","vars":["cantidad"],"lines":["40x40x1.5=6840*cantidad","40x20x1.5=900*cantidad","tubo ø30x1.5=2660*cantidad"],"units":["contera 40x20 blanca=2*cantidad","pintura=0.087*cantidad","disolvente universal (mezcla)=0.002*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e","40x20x1.5":"zx35v7ire","tubo ø30x1.5":"u20o2k59m"},"units":{"contera 40x20 blanca":"z2k366n3i","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Rack (cajon pequeño)","vars":["cantidad"],"lines":["40x40x1.5=7100*cantidad"],"units":["chapa 2000x1000x1.5=0.56*cantidad|pintar","contera 40x40 blanca=2*cantidad","pintura=0.143*cantidad","disolvente universal (mezcla)=0.003*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e"},"units":{"chapa 2000x1000x1.5":"daf91ylta","contera 40x40 blanca":"4ip1s31ew","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"CONCEPTO VARIABLE","vars":["cantidad"],"lines":["80x40x1.5=11700*cantidad","pds mediano T=1000*cantidad","pds mediano marco=10200*cantidad"],"units":["pintura=0.493*cantidad","disolvente universal (mezcla)=0.012*cantidad","malla electrosoldada (cuadrado 50x50) 3000x2000=1*cantidad|pintar"],"stockLinks":{"lines":{"80x40x1.5":"fuwvmk631","pds mediano T":"1asenocnf","pds mediano marco":"cpk16xodl"},"units":{}}},{"name":"salida pisable prensas (FENDWICH)","vars":["cantidad"],"lines":["pletina 40x10=15870*cantidad","pletina 100x10=1175*cantidad"],"units":["pintura base solvente color ANTRACITA RAL: 7016=0.083*cantidad","disolvente universal (mezcla)=0.002*cantidad"],"stockLinks":{"lines":{"pletina 40x10":"nn1ovlxdr","pletina 100x10":"it2fw09yc"},"units":{"pintura base solvente color ANTRACITA RAL: 7016":"4d1rhiary","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"soporte QR doble (techo) 2000mm.","vars":["cantidad"],"lines":["40x40x1.5=2600*cantidad"],"units":["contera 40x40 blanca=1*cantidad","pintura base solvente color BLANCO / VERDOSO RAL: 7035=0.055*cantidad","disolvente universal (mezcla)=0.001*cantidad","chapa QR=2*cantidad|pintar"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e"},"units":{"contera 40x40 blanca":"4ip1s31ew","pintura base solvente color BLANCO / VERDOSO RAL: 7035":"buua1mgk4","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"soporte wifi y camaras a techo","vars":["cantidad"],"lines":["tubo ø30x1.5=1600*cantidad"],"units":["chapa anclaje soporte wifi (300x300)=1*cantidad|pintar","chapa soporte wifi (260x180)=1*cantidad|pintar","pintura=0.022*cantidad","disolvente universal (mezcla)=0.001*cantidad"],"stockLinks":{"lines":{"tubo ø30x1.5":"u20o2k59m"},"units":{"chapa anclaje soporte wifi (300x300)":"3u26q2edo","chapa soporte wifi (260x180)":"2f5w9kwq2","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"EXPOSITOR VENTILADORES","vars":["cantidad"],"lines":["60X60X1.5=8508*cantidad","100x100x1.5=497*cantidad","40x40x1.5=10444*cantidad"],"units":["CHAPA 210X210X10=2*cantidad|pintar","CHAPA 90X90X2=8*cantidad|pintar","CHAPA 150X150X4=2*cantidad|pintar","CHAPA 186X96X1.5=1*cantidad|pintar","CHAPA 162X96X1.5=1*cantidad|pintar","tornillo M10X20=8*cantidad","arandela ø10=12*cantidad","contera 100x100 negra=1*cantidad","contera 60x60 negra=4*cantidad","PINTURA=0.609*cantidad","disolvente universal (mezcla)=0.0115*cantidad","tuerca M10=8*cantidad"],"stockLinks":{"lines":{"60X60X1.5":"742ub3rp1","100x100x1.5":"pjboiv6yh","40x40x1.5":"yz52jga4e"},"units":{"tornillo M10X20":"jk4g0yub6","arandela ø10":"gg4uvbe3w","contera 100x100 negra":"2avwnsexj","contera 60x60 negra":"axg50yrc0","disolvente universal (mezcla)":"6y6shx7x8","tuerca M10":"oqe2789fa"}}},{"name":"CAJON GUARDADO MADERAS 1300X900 (grande)","vars":["cantidad"],"lines":["40x40x1.5=6080*cantidad","angulo 60x60=1612*cantidad","angulo 40x40=2900*cantidad"],"units":["pintura=0.061*cantidad","disolvente universal (mezcla)=0.002*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e","angulo 60x60":"2dnewl1we","angulo 40x40":"22mlhflc7"},"units":{"disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"CAJON GUARDADO MADERAS 1100X900 (pequeño)","vars":["cantidad"],"lines":["40x40x1.5=5680*cantidad","angulo 60x60=1412*cantidad","angulo 40x40=2900*cantidad"],"units":["pintura=0.057*cantidad","disolvente universal (mezcla)=0.001*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e","angulo 60x60":"2dnewl1we","angulo 40x40":"22mlhflc7"},"units":{"disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Carro gavetas (PIKING)","vars":["cantidad"],"lines":["40x40x1.5=7924*cantidad","angulo 30x30x3=3192*cantidad","tubo ø30x1.5=442*cantidad"],"units":["malla electrosoldada (cuadrado 50x50) 3000x2000=0,177*cantidad","rueda (Soliva) 460125800-TECHNICAL ITEM,S.L.U. ref: 256005 (carro gavetas)=4*cantidad","pintura=0.056*cantidad","disolvente universal (mezcla)=0.001*cantidad"],"stockLinks":{"lines":{"40x40x1.5":"yz52jga4e","angulo 30x30x3":"hwf4wumjo","tubo ø30x1.5":"u20o2k59m"},"units":{"malla electrosoldada (cuadrado 50x50) 3000x2000":"zoaao93de","rueda (Soliva) 460125800-TECHNICAL ITEM,S.L.U. ref: 256005 (carro gavetas)":"bdhllea2c","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"Carro estante Mezadine (CLASIFICADORES)","vars":["cantidad"],"lines":["40x20x1.5=20780*cantidad"],"units":["chapa soporte QR medida: (160x115x1.5)=2*cantidad","contera 40x20 negra=4*cantidad","malla electrosoldada (cuadrado 50x50) 3000x2000=0.666*cantidad","RUEDAS ALEX COD. 2-2340 (carro estante mezadine)=4*cantidad","pintura=0.111*cantidad","disolvente universal (mezcla)=0.003*cantidad"],"stockLinks":{"lines":{"40x20x1.5":"zx35v7ire"},"units":{"contera 40x20 negra":"k1aypxl8a","malla electrosoldada (cuadrado 50x50) 3000x2000":"zoaao93de","RUEDAS ALEX COD. 2-2340 (carro estante mezadine)":"hfndq678b","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"CARGADOR COCHE ELECTRICO","vars":["cantidad"],"lines":[],"units":["CARGADOR COCHE (anclaje suelo)=2*cantidad|pintar","CARGADOR COCHE (bandeja inferior)=1*cantidad|pintar","CARGADOR COCHE (bandeja superior)=1*cantidad|pintar","CARGADOR COCHE (chapa registro)=1*cantidad|pintar","CARGADOR COCHE (cuerpo principal=1*cantidad|pintar","CARGADOR COCHE (cuña techo)=2*cantidad|pintar","CARGADOR COCHE (techo)=1*cantidad|pintar","tornillo 4,2x16 cabeza plana (pisable)=10*cantidad","PINTURA=0.106*cantidad","disolvente universal (mezcla)=0.003*cantidad"],"stockLinks":{"lines":{},"units":{"CARGADOR COCHE (anclaje suelo)":"omv00kff3","CARGADOR COCHE (bandeja inferior)":"644fsjet5","CARGADOR COCHE (bandeja superior)":"1zke2r4zz","CARGADOR COCHE (chapa registro)":"3cosq836e","CARGADOR COCHE (cuerpo principal":"ojv3jlxa6","CARGADOR COCHE (cuña techo)":"wjiqa831h","CARGADOR COCHE (techo)":"397u7syoy","disolvente universal (mezcla)":"6y6shx7x8"}}},{"name":"PUERTA ESTUDIO FOTOGRAFIA","vars":["cantidad"],"lines":["80x40x1.5=3000*cantidad","pds mediano T=5400*cantidad","pds mediano marco=10800*cantidad","16X16X1.5=20720*cantidad","GUIA DE 60=4920*cantidad"],"units":["pintura=0.493*cantidad","disolvente universal (mezcla)=0.012*cantidad","RUEDAS CORREDERA=2*cantidad"],"stockLinks":{"lines":{"80x40x1.5":"fuwvmk631","pds mediano T":"1asenocnf","pds mediano marco":"cpk16xodl"},"units":{}}},{"name":"PUERTA PISO FOTOGRAFIA","vars":["cantidad"],"lines":["80x40x1.5=2700*cantidad","pds mediano T=5000*cantidad","pds mediano marco=10000*cantidad","16X16X1.5=18080*cantidad","GUIA DE 60=4400*cantidad"],"units":["pintura=0.493*cantidad","disolvente universal (mezcla)=0.012*cantidad","RUEDAS CORREDERA=2*cantidad"],"stockLinks":{"lines":{"80x40x1.5":"fuwvmk631","pds mediano T":"1asenocnf","pds mediano marco":"cpk16xodl"},"units":{}}}];
-
-  function readJson(key, fallback){
-    try{
-      var raw = localStorage.getItem(key);
-      if(!raw) return fallback;
-      return JSON.parse(raw);
-    }catch(e){
-      console.warn('[LDH conceptos] No se pudo leer ' + key, e);
-      return fallback;
-    }
-  }
-
-  function writeJson(key, value){
-    try{
-      localStorage.setItem(key, JSON.stringify(value));
-      return true;
-    }catch(e){
-      console.warn('[LDH conceptos] No se pudo guardar ' + key, e);
-      try{ sessionStorage.setItem(key, JSON.stringify(value)); return true; }catch(e2){ return false; }
-    }
-  }
-
-  function normalizarConcepto(c){
-    return {
-      name: String(c && c.name || '').trim(),
-      vars: Array.isArray(c && c.vars) ? c.vars.slice() : [],
-      lines: Array.isArray(c && c.lines) ? c.lines.slice() : [],
-      units: Array.isArray(c && c.units) ? c.units.slice() : [],
-      stockLinks: (c && c.stockLinks && typeof c.stockLinks === 'object') ? c.stockLinks : { lines: {}, units: {} }
-    };
-  }
-
-  function migrarSoloConceptos(){
-    if(localStorage.getItem(FLAG) === '1') return;
-    var conceptos = CONCEPTOS_ANTIGUOS.map(normalizarConcepto).filter(function(c){ return c.name; });
-    var db = readJson('TallerFlowDB', {}) || {};
-
-    // Solo se sustituye la configuración de conceptos. No se migran pedidos, preparación, fabricación, almacén, stock ni históricos.
-    db.concepts = conceptos;
-
-    if(writeJson('TallerFlowDB', db)){
-      try{ localStorage.setItem(FLAG, '1'); }catch(e){}
-      try{ localStorage.setItem('LDH_CONCEPTOS_ANTIGUOS_COUNT', String(conceptos.length)); }catch(e){}
-      console.log('[LDH conceptos] Migrados solo conceptos:', conceptos.length);
-    }
-  }
-
-  migrarSoloConceptos();
-})();
-</script>
-<!-- /LDH_MIGRACION_SOLO_CONCEPTOS_20260630 -->
 
 </body>
 </html>
