@@ -1649,7 +1649,16 @@ function mirrorUnassignedToLdhDb(){
       applyTo(db[k]);
     }
 
-    setAny("ldh_db", JSON.stringify(db));
+    const __ldhDbPayloadFab = JSON.stringify(db);
+  const __fabMode = LDH_writeSharedLocalKey("ldh_db", __ldhDbPayloadFab);
+  try{
+    const inboxRaw = getAny("ldh_fabricacion_inbox_v1");
+    const inbox = inboxRaw ? (JSON.parse(inboxRaw) || []) : [];
+    const ix = inbox.findIndex(x => x && x.ref === refActual);
+    if(ix >= 0) inbox[ix] = record; else inbox.push(record);
+    LDH_writeSharedLocalKey("ldh_fabricacion_inbox_v1", JSON.stringify(inbox.slice(-200)));
+  }catch(e){}
+  LDH_notifyFabricacionStorageMode(__fabMode);
   }catch(e){ /* silent */ }
 }
 
@@ -5677,6 +5686,54 @@ function marcarTodoOk() {
 }
 function guardarEstadoLocal() { setAny(KP(refActual), JSON.stringify(estadoMateriales)); }
 
+
+function LDH_writeSharedLocalKey(key, value){
+  // Para datos que deben ver otros módulos (Fabricación), NO basta con sessionStorage.
+  // Si localStorage está lleno, primero libera la clave vieja y limpia temporales, luego reintenta.
+  try{
+    localStorage.setItem(key, value);
+    return "local";
+  }catch(e1){
+    try{ localStorage.removeItem(key); }catch(_){}
+    try{
+      localStorage.setItem(key, value);
+      return "local";
+    }catch(e2){
+      try{
+        const cleanPrefixes = ["ldh_stock_debug_","ldh_stock_tmp_","stock_debug_","stock_backup_auto_","stock_export_tmp_","ldh_stock_last_publish_payload_"];
+        const cleanExact = ["stock_informativo_cache","stock_informativo_last_payload","ldh_stock_publish_last_error","ldh_stock_last_error","ldh_stock_old_payload"];
+        const keys = [];
+        for(let i=0;i<localStorage.length;i++){
+          const k = localStorage.key(i);
+          if(!k) continue;
+          if(cleanExact.includes(k) || cleanPrefixes.some(p=>String(k).startsWith(p))) keys.push(k);
+        }
+        keys.forEach(k=>{ try{ localStorage.removeItem(k); }catch(_){} });
+      }catch(_){}
+      try{
+        localStorage.setItem(key, value);
+        return "local";
+      }catch(e3){
+        // Último recurso: sessionStorage. OJO: otros tabs no lo verán.
+        try{
+          sessionStorage.setItem(key, value);
+          return "session";
+        }catch(e4){
+          throw e3;
+        }
+      }
+    }
+  }
+}
+
+function LDH_notifyFabricacionStorageMode(mode){
+  try{
+    if(mode === "session"){
+      alert("⚠️ Enviado a Fabricación, pero el navegador tiene localStorage lleno.\n\nSe ha guardado en esta pestaña. Para verlo en Fabricación, abre Fabricación desde esta misma pestaña o libera espacio de localStorage.");
+    }
+  }catch(e){}
+}
+
 /* ========= MANDAR A FABRICACIÓN (MANUAL) ========= */
 function confirmarTodoRecepcion() {
   const hayBarras = estadoMateriales.some(l => (String(l.unit||"").toLowerCase() === 'barra'));
@@ -5723,6 +5780,17 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
     total: unidadesFinal,
     delivered: 0,
     history: [],
+    flow: {
+      fab: unidadesFinal,
+      fabricacion: unidadesFinal,
+      pintura: 0,
+      almacen: 0,
+      entregado: 0
+    },
+    keepInFab: true,
+    hideFromFab: false,
+    archived: false,
+    history: [],
     notes: notasFinales
   };
 
@@ -5738,6 +5806,15 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
         if(!arr[idx].empresa && arr[idx].company) arr[idx].empresa = arr[idx].company;
       }
       arr[idx].unassignedBorrow = record.unassignedBorrow;
+      arr[idx].flow = arr[idx].flow && typeof arr[idx].flow === "object" ? arr[idx].flow : {};
+      arr[idx].flow.fab = Number(arr[idx].flow.fab || arr[idx].flow.fabricacion || 0) || unidadesFinal;
+      arr[idx].flow.fabricacion = arr[idx].flow.fab;
+      arr[idx].flow.pintura = Number(arr[idx].flow.pintura || 0);
+      arr[idx].flow.almacen = Number(arr[idx].flow.almacen || 0);
+      arr[idx].flow.entregado = Number(arr[idx].flow.entregado || 0);
+      arr[idx].keepInFab = true;
+      arr[idx].hideFromFab = false;
+      arr[idx].archived = false;
 
       if (!arr[idx].notes) arr[idx].notes = "";
       if (!arr[idx].notes.includes("Enviado desde Preparación")) {
