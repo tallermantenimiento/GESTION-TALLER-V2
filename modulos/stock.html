@@ -2889,9 +2889,24 @@ function familyOrderStorageKey(){
 }
 
 function loadFamilyOrder(){
+  const k = familyOrderStorageKey();
+
+  // 1) Memoria de la pestaña: funciona aunque localStorage esté lleno.
+  try{
+    const mem = window.__LDH_STOCK_FAMILY_ORDER_CACHE || {};
+    if(Array.isArray(mem[k])) return mem[k];
+  }catch(e){}
+
+  // 2) sessionStorage: respaldo cuando localStorage no permite escribir.
+  try{
+    const sess = JSON.parse(sessionStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    if(Array.isArray(sess[k])) return sess[k];
+  }catch(e){}
+
+  // 3) localStorage normal.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    const arr = all[familyOrderStorageKey()];
+    const arr = all[k];
     return Array.isArray(arr) ? arr : [];
   }catch(e){
     return [];
@@ -2899,9 +2914,25 @@ function loadFamilyOrder(){
 }
 
 function saveFamilyOrder(order){
+  const k = familyOrderStorageKey();
+
+  // Siempre guardar en memoria primero para que el render inmediato respete el drag.
+  try{
+    window.__LDH_STOCK_FAMILY_ORDER_CACHE = window.__LDH_STOCK_FAMILY_ORDER_CACHE || {};
+    window.__LDH_STOCK_FAMILY_ORDER_CACHE[k] = Array.isArray(order) ? order.slice() : [];
+  }catch(e){}
+
+  // Guardar en sessionStorage aunque localStorage esté lleno.
+  try{
+    const sess = JSON.parse(sessionStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
+    sess[k] = order;
+    sessionStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(sess));
+  }catch(e){}
+
+  // Intento normal en localStorage. Si falla por cuota, no rompe drag/drop.
   try{
     const all = JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY) || '{}') || {};
-    all[familyOrderStorageKey()] = order;
+    all[k] = order;
     localStorage.setItem(FAMILY_ORDER_KEY, JSON.stringify(all));
   }catch(e){}
 }
@@ -2918,8 +2949,11 @@ function orderFamilies(groups){
   const pos = new Map(order.map((k,i)=>[k,i]));
   return groups.sort((a,b)=>{
     const ak = familyKey(a.name), bk = familyKey(b.name);
-    const ap = pos.has(ak) ? pos.get(ak) : 999999;
-    const bp = pos.has(bk) ? pos.get(bk) : 999999;
+
+    // Prioridad 1: orden recién movido por drag, guardado en memoria/session/local.
+    const ap = pos.has(ak) ? pos.get(ak) : Number(a.familyOrder ?? 999999);
+    const bp = pos.has(bk) ? pos.get(bk) : Number(b.familyOrder ?? 999999);
+
     if(ap !== bp) return ap - bp;
     return a.name.localeCompare(b.name,'es',{sensitivity:'base'});
   });
@@ -3003,11 +3037,22 @@ function familyDrop(ev, targetKey){
 
   without.splice(idx, 0, sourceKey);
 
+  // Guardar orden inmediatamente en memoria/session para que no dependa de localStorage lleno.
   saveFamilyOrder(without);
-  LDH_persistFamilyOrderToMaterials(without);
 
-  if(typeof LDH_stockRenderKeepFamilies === 'function') LDH_stockRenderKeepFamilies();
-  else render();
+  try{
+    LDH_persistFamilyOrderToMaterials(without);
+  }catch(e){
+    console.warn('Orden guardado visualmente; no se pudo publicar todavía', e);
+  }
+
+  // Render sin perder la posición aunque localStorage esté lleno.
+  try{
+    if(typeof LDH_stockRenderKeepFamilies === 'function') LDH_stockRenderKeepFamilies();
+    else render();
+  }catch(e){
+    console.warn('Render tras drag falló', e);
+  }
 
   return false;
 }
@@ -3017,8 +3062,11 @@ function familiasHTML(rows){
   rows.forEach(({s,m})=>{
     const fam=String(m.family||'Sin familia').trim()||'Sin familia';
     const key=fam.toLowerCase();
-    if(!groups.has(key)) groups.set(key,{name:fam,items:[]});
-    groups.get(key).items.push({s,m});
+    if(!groups.has(key)) groups.set(key,{name:fam,items:[], familyOrder:999999});
+    const g = groups.get(key);
+    g.items.push({s,m});
+    const fo = Number(m.familyOrder ?? m.ordenFamilia);
+    if(Number.isFinite(fo)) g.familyOrder = Math.min(g.familyOrder, fo);
   });
 
   return orderFamilies(Array.from(groups.values()))
@@ -6199,6 +6247,69 @@ setTimeout(()=>window.LDH_scheduleStockCloudPublish(true), 1600);
     alert("Limpieza temporal de Stock completada. Claves eliminadas: " + n);
     return n;
   };
+})();
+</script>
+
+
+<script id="LDH_STOCK_FIX_SOLO_DRAG_FAMILIAS_0807">
+(function(){
+  let sourceKey = "";
+
+  function rowFromTarget(t){
+    return t && t.closest ? t.closest(".family-row[data-family-key]") : null;
+  }
+
+  document.addEventListener("dragstart", function(ev){
+    const row = rowFromTarget(ev.target);
+    if(!row) return;
+    sourceKey = String(row.dataset.familyKey || "");
+    try{ draggedFamilyKey = sourceKey; }catch(e){}
+    try{ window.LDH_draggedFamilyKey = sourceKey; }catch(e){}
+    try{
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", sourceKey);
+      ev.dataTransfer.setData("application/x-ldh-family", sourceKey);
+    }catch(e){}
+    row.classList.add("family-dragging");
+  }, true);
+
+  document.addEventListener("dragover", function(ev){
+    const row = rowFromTarget(ev.target);
+    if(!row || !sourceKey) return;
+    const targetKey = String(row.dataset.familyKey || "");
+    if(!targetKey || targetKey === sourceKey) return;
+    ev.preventDefault();
+    try{ ev.dataTransfer.dropEffect = "move"; }catch(e){}
+    row.classList.add("family-drag-over");
+  }, true);
+
+  document.addEventListener("drop", function(ev){
+    const row = rowFromTarget(ev.target);
+    if(!row) return;
+    const targetKey = String(row.dataset.familyKey || "");
+    const src = sourceKey || (ev.dataTransfer && (ev.dataTransfer.getData("application/x-ldh-family") || ev.dataTransfer.getData("text/plain")));
+    if(!src || !targetKey || src === targetKey) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    try{
+      familyDrop(ev, targetKey);
+    }catch(e){
+      console.error("Error en drag/drop familias", e);
+      alert("No se pudo mover la familia: " + (e && (e.message || e)));
+    }finally{
+      sourceKey = "";
+      document.querySelectorAll(".family-row.family-dragging,.family-row.family-drag-over")
+        .forEach(el=>el.classList.remove("family-dragging","family-drag-over"));
+    }
+  }, true);
+
+  document.addEventListener("dragend", function(){
+    sourceKey = "";
+    document.querySelectorAll(".family-row.family-dragging,.family-row.family-drag-over")
+      .forEach(el=>el.classList.remove("family-dragging","family-drag-over"));
+  }, true);
 })();
 </script>
 
