@@ -2142,6 +2142,42 @@ _fmtPartialStore(s){
         }
     },
 
+    _stockCentralCompanies() {
+        const out = [];
+        const push = (v) => {
+            const name = String(v && (v.name || v.nombre || v.company || v.empresa || v.id || v) || '').trim();
+            if(name && !out.some(x => x.toLowerCase() === name.toLowerCase())) out.push(name);
+        };
+        const read = (k) => {
+            try { return JSON.parse(localStorage.getItem(k) || sessionStorage.getItem(k) || 'null'); } catch(e) { return null; }
+        };
+        try {
+            const stock = read('ldh_v2_company_stock_v1') || read('taller_stock_v3_data') || {};
+            if(Array.isArray(stock.companies)) stock.companies.forEach(push);
+            if(stock.stock && typeof stock.stock === 'object') Object.keys(stock.stock).forEach(push);
+            if(Array.isArray(stock.materials)) stock.materials.forEach(m => push(m.company || m.empresa || m.companyId || m.empresaId));
+        } catch(e) {}
+        try {
+            const master = read('ldh_company_master_v1') || read('ldh_empresas_centralizadas_v1') || {};
+            if(Array.isArray(master)) master.forEach(push);
+            if(Array.isArray(master.companies)) master.companies.forEach(push);
+            if(Array.isArray(master.empresas)) master.empresas.forEach(push);
+        } catch(e) {}
+        return out;
+    },
+
+    _ensureCompanyAvailable(name) {
+        const n = String(name || '').trim();
+        if(!n) return;
+        const lists = ['companies','empresas','companyList','empresasReceptoras'];
+        lists.forEach(key => {
+            if(!Array.isArray(this.state[key])) this.state[key] = [];
+            if(!this.state[key].some(x => String(x && (x.name || x.nombre || x.id || x) || '').trim().toLowerCase() === n.toLowerCase())) {
+                this.state[key].push(n);
+            }
+        });
+    },
+
     _mergePrepFabricacionMeta() {
         // Lectura directa de Preparación:
         // Si un pedido tiene prep_meta_REF.en_fabricacion=true, Fabricación debe mostrarlo aunque ldh_db/inbox fallen.
@@ -2175,18 +2211,22 @@ _fmtPartialStore(s){
                 const idx = arr.findIndex(x => x && String(x.ref || x.referencia || '').trim() === ref);
                 if(idx >= 0) {
                     const old = arr[idx] || {};
+                    // prep_meta manda sobre registros viejos: si acaba de entrar en fabricación, no puede conservar Entregado antiguo.
                     arr[idx] = {
                         ...old,
                         ...rec,
+                        delivered: 0,
+                        entregado: 0,
                         flow: {
-                            ...(old.flow || {}),
-                            ...(rec.flow || {}),
-                            fab: Number((rec.flow && (rec.flow.fab || rec.flow.fabricacion)) || (old.flow && (old.flow.fab || old.flow.fabricacion)) || rec.total || 0),
-                            fabricacion: Number((rec.flow && (rec.flow.fab || rec.flow.fabricacion)) || (old.flow && (old.flow.fab || old.flow.fabricacion)) || rec.total || 0),
-                            pintura: Number((old.flow && old.flow.pintura) || (rec.flow && rec.flow.pintura) || 0),
-                            almacen: Number((old.flow && old.flow.almacen) || (rec.flow && rec.flow.almacen) || 0),
-                            entregado: Number((old.flow && old.flow.entregado) || (rec.flow && rec.flow.entregado) || 0)
+                            fab: Number((rec.flow && (rec.flow.fab || rec.flow.fabricacion)) || rec.total || 0),
+                            fabricacion: Number((rec.flow && (rec.flow.fab || rec.flow.fabricacion)) || rec.total || 0),
+                            pintura: 0,
+                            almacen: 0,
+                            entregado: 0
                         },
+                        status: 'pendiente',
+                        estado: 'pendiente',
+                        fase: 'fabricacion',
                         archived: false,
                         hideFromFab: false,
                         keepInFab: true
@@ -2213,8 +2253,11 @@ _fmtPartialStore(s){
                     try { lines = JSON.parse(prepRaw || '[]') || []; } catch(e) { lines = []; }
 
                     const total = Number(meta.unidades || meta.uds || meta.total || meta.cantidad || 0) || 0;
-                    const company = String(meta.empresa || meta.company || meta.empresaReceptora || '').trim();
+                    const company = String(meta.empresa || meta.company || meta.empresaReceptora || meta.empresa_receptora || '').trim();
                     const concept = String(meta.concepto || meta.concept || (lines[0] && (lines[0].concepto || lines[0].concept)) || 'Sin concepto').trim();
+                    const units = total > 0 ? total : 1;
+
+                    this._ensureCompanyAvailable(company);
 
                     const rec = {
                         id: meta.pedido_uid || ('PREP-' + ref),
@@ -2224,11 +2267,13 @@ _fmtPartialStore(s){
                         concepto: concept,
                         company: company,
                         empresa: company,
+                        empresaReceptora: company,
                         client: 'Taller / Interno',
                         datePed: meta.fecha_pedido || meta.datePed || meta.createdAt || new Date().toISOString().slice(0,10),
                         datePrev: meta.fecha_entrega || meta.datePrev || new Date().toISOString().slice(0,10),
-                        total: total > 0 ? total : 1,
+                        total: units,
                         delivered: 0,
+                        entregado: 0,
                         status: 'pendiente',
                         estado: 'pendiente',
                         fase: 'fabricacion',
@@ -2237,8 +2282,8 @@ _fmtPartialStore(s){
                         hideFromFab: false,
                         archived: false,
                         flow: {
-                            fab: total > 0 ? total : 1,
-                            fabricacion: total > 0 ? total : 1,
+                            fab: units,
+                            fabricacion: units,
                             pintura: 0,
                             almacen: 0,
                             entregado: 0
@@ -2304,6 +2349,7 @@ _fmtPartialStore(s){
             if(img){ img.src = logo; img.style.display = 'block'; }
         }
         
+        try{ this._stockCentralCompanies().forEach(n => this._ensureCompanyAvailable(n)); }catch(e){}
         try{ this._mergeFabricacionInbox(); }catch(e){ console.warn('merge Fabricación inbox error', e); }
         try{ this._mergePrepFabricacionMeta(); }catch(e){ console.warn('merge prep_meta Fabricación error', e); }
 
