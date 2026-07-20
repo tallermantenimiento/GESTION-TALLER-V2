@@ -1573,6 +1573,7 @@ function LDH_saveToSessionFallback(){
     const minimal = LDH_buildMinimalStockDB();
     sessionStorage.setItem(KEY, JSON.stringify(minimal));
     window.__LDH_STOCK_MEMORY_DB = minimal;
+    window.__LDH_STOCK_FORCE_MEMORY_PUBLISH = true;
     return true;
   }catch(e){
     return false;
@@ -1605,9 +1606,8 @@ function save(){
           try{ alert("Stock guardado. Se ha compactado el histórico de movimientos en saldos netos para liberar espacio. Las cantidades de stock se mantienen."); }catch(_){}
         }catch(e4){
           if(LDH_saveToSessionFallback()){
-            try{ if(window.LDH_publishStockDirectFromMemory) window.LDH_publishStockDirectFromMemory(db); }catch(_){}
-            try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(_){}
-            alert("Entrada guardada temporalmente en esta pestaña y enviada a nube.\n\nEl navegador no permite guardar más en localStorage. No cierres esta pestaña hasta comprobar que Stock nube conectado actualiza.");
+            try{ if(window.LDH_publishStockDirectFromMemory) window.LDH_publishStockDirectFromMemory(window.__LDH_STOCK_MEMORY_DB || db); }catch(_){}
+            alert("Entrada guardada en memoria/sessionStorage y publicada a nube.\n\nEl navegador tiene localStorage lleno, pero esta versión ya no deja que el localStorage viejo pise la nube al actualizar.");
           }else{
             throw e4;
           }
@@ -1617,7 +1617,13 @@ function save(){
   }
 
   try{ LDH_publishCompanyMaster(); }catch(e){}
-  try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(); }catch(e){}
+  try{
+    if(window.__LDH_STOCK_FORCE_MEMORY_PUBLISH){
+      if(window.LDH_publishStockDirectFromMemory) window.LDH_publishStockDirectFromMemory(window.__LDH_STOCK_MEMORY_DB || db);
+    }else{
+      if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish();
+    }
+  }catch(e){}
 }
 
 
@@ -1660,7 +1666,17 @@ function load(){
   try{
     const rawLocal = localStorage.getItem(KEY);
     const rawSession = sessionStorage.getItem(KEY);
-    db = JSON.parse(rawLocal || rawSession || 'null') || blankDB();
+    let chosen = rawLocal || rawSession || 'null';
+    try{
+      const l = rawLocal ? JSON.parse(rawLocal) : null;
+      const s = rawSession ? JSON.parse(rawSession) : null;
+      if(s && (!l || String(s.updatedAt || '') >= String(l.updatedAt || ''))){
+        chosen = rawSession;
+        window.__LDH_STOCK_MEMORY_DB = s;
+        window.__LDH_STOCK_FORCE_MEMORY_PUBLISH = true;
+      }
+    }catch(_){}
+    db = JSON.parse(chosen) || blankDB();
   }catch(e){db=blankDB();}
   db.companies = Array.isArray(db.companies) ? db.companies : [];
   db.materials = Array.isArray(db.materials) ? db.materials : [];
@@ -5849,17 +5865,23 @@ function chunkString(str, size){
 }
 function completePayloadFromLocalStorage(){
   let raw = '';
+
+  // Si localStorage está lleno y hemos guardado en session/memoria, esa es la fuente autoritativa.
+  // Así evitamos que un publish automático posterior lea el localStorage viejo y pise la nube.
   try{
     if(window.__LDH_STOCK_MEMORY_DB){
       raw = JSON.stringify(window.__LDH_STOCK_MEMORY_DB);
     }
   }catch(e){}
-  if(!raw){
-    try{ raw = localStorage.getItem(STOCK_KEY) || ''; }catch(e){}
-  }
+
   if(!raw){
     try{ raw = sessionStorage.getItem(STOCK_KEY) || ''; }catch(e){}
   }
+
+  if(!raw){
+    try{ raw = localStorage.getItem(STOCK_KEY) || ''; }catch(e){}
+  }
+
   const data = safeParse(raw);
   data.companies = Array.isArray(data.companies) ? data.companies : [];
   data.materials = Array.isArray(data.materials) ? data.materials : [];
@@ -5977,6 +5999,19 @@ window.LDH_scheduleStockCloudPublish = function(force=false){
   publishTimer = setTimeout(()=>publishFullStock(!!force), force ? 100 : 900);
 };
 window.LDH_publishFullStockNow = function(){ publishFullStock(true); };
+window.LDH_publishStockDirectFromMemory = async function(memoryDb){
+  try{
+    if(memoryDb){
+      window.__LDH_STOCK_MEMORY_DB = memoryDb;
+      window.__LDH_STOCK_FORCE_MEMORY_PUBLISH = true;
+      try{ sessionStorage.setItem(STOCK_KEY, JSON.stringify(memoryDb)); }catch(e){}
+    }
+    await publishFullStock(true);
+  }catch(e){
+    console.error('Publicación directa desde memoria falló', e);
+    setCloudStatus('Stock nube error','bad',String((e && (e.code || e.message)) || e));
+  }
+};
 
 onAuthStateChanged(fbAuth, async user=>{
   try{
