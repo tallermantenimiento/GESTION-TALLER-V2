@@ -1813,7 +1813,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   <div id="ldhIronChart" class="ldh-iron-chart"></div>
   <div id="ldhIronDetail" class="ldh-iron-table"></div>
   <div class="ldh-iron-note">
-    Criterio: solo se muestran empresas activas del Stock actual. El sistema ignora empresas borradas aunque queden en históricos antiguos.
+    Criterio: se muestran todas las empresas activas del Stock actual, aunque estén a 0 kg. Las empresas borradas del Stock se ignoran aunque queden en históricos antiguos.
   </div>
 </section>
 
@@ -3366,6 +3366,37 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const c = (db.companies||[]).find(x => String(x.id) === String(id));
     return String((c && (c.name || c.nombre || c.empresa)) || id || "Sin empresa");
   }
+  function activeCompanies(db){
+    const seen = new Set();
+    const out = [];
+    (db.companies||[]).forEach(c=>{
+      const id = String(c && c.id || c && c.name || c && c.nombre || c && c.empresa || "").trim();
+      const name = String(c && (c.name || c.nombre || c.empresa || c.id) || "").trim();
+      if(!id && !name) return;
+      const key = norm(id || name);
+      if(seen.has(key)) return;
+      seen.add(key);
+      out.push({companyId:id || name, company:name || id, kg:0, bars:0, refs:new Set(), lines:[]});
+    });
+    return out;
+  }
+  function activeCompanyKeys(db){
+    const set = new Set();
+    (db.companies||[]).forEach(c=>{
+      const id = String(c && c.id || "").trim();
+      const name = String(c && (c.name || c.nombre || c.empresa) || "").trim();
+      if(id) set.add(norm(id));
+      if(name) set.add(norm(name));
+    });
+    return set;
+  }
+  function companyIsActive(db, companyId, companyText){
+    const active = activeCompanyKeys(db);
+    if(!active.size) return true;
+    const id = norm(companyId);
+    const name = norm(companyText);
+    return (id && active.has(id)) || (name && active.has(name));
+  }
   function isIronMaterial(m){
     const txt = norm([m && m.type, m && m.tipo, m && m.family, m && m.familia, m && m.name, m && m.nombre].join(" "));
     if(!txt) return false;
@@ -3528,13 +3559,15 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         companyId = j && (j.companyId || j.empresaId || j.company);
       }
       if(!companyId) return;
+      const compName = companyName(db, companyId);
+      if(!companyIsActive(db, companyId, compName)) return;
       const qty = assignmentQty(a);
       if(qty <= 0) return;
       const dateObj = getLineDate(db, a, a.jobId);
       rows.push({
         source:"Asignación",
         companyId,
-        company:companyName(db, companyId),
+        company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
         qty,
@@ -3556,11 +3589,13 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       if(qty <= 0) return;
       const companyId = r.companyId || "";
       if(!companyId) return;
+      const compName = companyName(db, companyId);
+      if(!companyIsActive(db, companyId, compName)) return;
       const dateObj = getLineDate(db, r, r.jobId);
       rows.push({
         source:"Reserva",
         companyId,
-        company:companyName(db, companyId),
+        company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
         qty,
@@ -3581,6 +3616,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         if(!Array.isArray(lines) || !companyText) continue;
         const c = (db.companies||[]).find(x => norm(x.name||x.nombre||x.id) === norm(companyText) || norm(companyText).includes(norm(x.name||x.nombre||x.id)));
         const companyId = c ? c.id : companyText;
+        if(!companyIsActive(db, companyId, c ? companyName(db, companyId) : companyText)) continue;
         lines.forEach(line=>{
           const materialId = line.stockLinkId || line.materialId || line.matId;
           const m = materialById(db, materialId);
@@ -3605,17 +3641,24 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     return rows;
   }
   function aggregate(rows){
+    const db = readDB();
     const map = new Map();
+    activeCompanies(db).forEach(c=>{
+      map.set(String(c.companyId), c);
+    });
     rows.filter(rowInPeriod).filter(rowPassesCutoff).forEach(r=>{
+      const compName = r.company || companyName(db, r.companyId);
+      if(!companyIsActive(db, r.companyId, compName)) return;
       const kg = r.qty * r.kgm * BAR_LENGTH_M;
-      const cur = map.get(r.companyId) || {companyId:r.companyId, company:r.company, kg:0, bars:0, refs:new Set(), lines:[]};
+      const key = String(r.companyId || compName);
+      const cur = map.get(key) || {companyId:r.companyId || compName, company:compName, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
       cur.bars += r.qty;
       if(r.ref) cur.refs.add(r.ref);
       cur.lines.push({...r, kg});
-      map.set(r.companyId, cur);
+      map.set(key, cur);
     });
-    return Array.from(map.values()).sort((a,b)=>b.kg-a.kg);
+    return Array.from(map.values()).sort((a,b)=>(b.kg-a.kg) || String(a.company).localeCompare(String(b.company),"es",{sensitivity:"base"}));
   }
   function allYears(rows){
     const years = Array.from(new Set(rows.map(r => (r.dateObj||new Date()).getFullYear()))).sort((a,b)=>b-a);
@@ -3639,6 +3682,8 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const prevTM = tmSel ? tmSel.value : "";
 
     const years = allYears(rows);
+    const thisYear = new Date().getFullYear();
+    if(!years.includes(thisYear)) years.unshift(thisYear);
     const yearOptions = years.map(y=>`<option value="${y}">${y}</option>`).join("");
     const monthOptions = MONTHS.map((n,i)=>`<option value="${i}">${n}</option>`).join("");
 
@@ -3700,8 +3745,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 
     if(!data.length){
       chart.innerHTML = `<div class="ldh-iron-empty">
-        No hay datos para <b>${esc(periodLabel())}</b>.<br>
-        Pulsa <b>Cargar demo</b> para crear trabajos simulados por empresa y probar el gráfico.
+        No hay empresas activas en Stock para mostrar en la estadística.
       </div>`;
       renderDetail([]);
       buildPrint(data);
