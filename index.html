@@ -3362,31 +3362,72 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   }
   function materialById(db, id){ return (db.materials||[]).find(m => String(m.id || m.materialId) === String(id)); }
   function jobById(db, id){ return (db.jobs||[]).find(j => String(j.id || j.jobId) === String(id)); }
+  function readCompanyMaster(){
+    try{
+      const raw = localStorage.getItem("ldh_company_master_v1") || sessionStorage.getItem("ldh_company_master_v1") || "";
+      const p = raw ? JSON.parse(raw) : null;
+      const arr = p && Array.isArray(p.companies) ? p.companies : [];
+      const cleaned = [];
+      const seen = new Set();
+      arr.forEach(c=>{
+        const id = String(c && (c.id || c.companyId || c.name || c.nombre || c.empresa) || "").trim();
+        const name = String(c && (c.name || c.nombre || c.empresa || c.code || c.codigo || c.id) || "").trim();
+        const code = String(c && (c.code || c.codigo || "") || "").trim();
+        if(!id && !name && !code) return;
+        const key = norm(name || code || id);
+        if(!key || seen.has(key)) return;
+        seen.add(key);
+        cleaned.push({id:id || name || code, name:name || code || id, code});
+      });
+      return cleaned;
+    }catch(e){ return []; }
+  }
+  function stockCompaniesFromDB(db){
+    const master = readCompanyMaster();
+    if(master.length) return master;
+    const seen = new Set();
+    const out = [];
+    (db.companies||[]).forEach(c=>{
+      const id = String(c && (c.id || c.companyId || c.name || c.nombre || c.empresa) || "").trim();
+      const name = String(c && (c.name || c.nombre || c.empresa || c.code || c.codigo || c.id) || "").trim();
+      const code = String(c && (c.code || c.codigo || "") || "").trim();
+      if(!id && !name && !code) return;
+      const key = norm(name || code || id);
+      if(!key || seen.has(key)) return;
+      seen.add(key);
+      out.push({id:id || name || code, name:name || code || id, code});
+    });
+    return out;
+  }
+  function resolveActiveCompany(db, companyId, companyText){
+    const id = norm(companyId);
+    const name = norm(companyText);
+    const list = stockCompaniesFromDB(db);
+    return list.find(c=>{
+      const vals = [c.id, c.name, c.code].map(norm).filter(Boolean);
+      return (id && vals.includes(id)) || (name && vals.includes(name));
+    }) || null;
+  }
   function companyName(db, id){
+    const cMaster = resolveActiveCompany(db, id, id);
+    if(cMaster) return String(cMaster.name || cMaster.code || cMaster.id);
     const c = (db.companies||[]).find(x => String(x.id) === String(id));
     return String((c && (c.name || c.nombre || c.empresa)) || id || "Sin empresa");
   }
   function activeCompanies(db){
-    const seen = new Set();
-    const out = [];
-    (db.companies||[]).forEach(c=>{
-      const id = String(c && c.id || c && c.name || c && c.nombre || c && c.empresa || "").trim();
-      const name = String(c && (c.name || c.nombre || c.empresa || c.id) || "").trim();
-      if(!id && !name) return;
-      const key = norm(id || name);
-      if(seen.has(key)) return;
-      seen.add(key);
-      out.push({companyId:id || name, company:name || id, kg:0, bars:0, refs:new Set(), lines:[]});
-    });
-    return out;
+    return stockCompaniesFromDB(db).map(c=>({
+      companyId:String(c.id || c.name || c.code),
+      company:String(c.name || c.code || c.id),
+      kg:0,
+      bars:0,
+      refs:new Set(),
+      lines:[]
+    }));
   }
   function activeCompanyKeys(db){
     const set = new Set();
-    (db.companies||[]).forEach(c=>{
-      const id = String(c && c.id || "").trim();
-      const name = String(c && (c.name || c.nombre || c.empresa) || "").trim();
-      if(id) set.add(norm(id));
-      if(name) set.add(norm(name));
+    stockCompaniesFromDB(db).forEach(c=>{
+      [c.id,c.name,c.code].forEach(v=>{ const k = norm(v); if(k) set.add(k); });
     });
     return set;
   }
@@ -3647,15 +3688,17 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       map.set(String(c.companyId), c);
     });
     rows.filter(rowInPeriod).filter(rowPassesCutoff).forEach(r=>{
-      const compName = r.company || companyName(db, r.companyId);
-      if(!companyIsActive(db, r.companyId, compName)) return;
+      const rawName = r.company || companyName(db, r.companyId);
+      const active = resolveActiveCompany(db, r.companyId, rawName);
+      if(!active) return;
+      const key = String(active.id || active.name || active.code);
+      const compName = String(active.name || active.code || active.id);
       const kg = r.qty * r.kgm * BAR_LENGTH_M;
-      const key = String(r.companyId || compName);
-      const cur = map.get(key) || {companyId:r.companyId || compName, company:compName, kg:0, bars:0, refs:new Set(), lines:[]};
+      const cur = map.get(key) || {companyId:key, company:compName, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
       cur.bars += r.qty;
       if(r.ref) cur.refs.add(r.ref);
-      cur.lines.push({...r, kg});
+      cur.lines.push({...r, companyId:key, company:compName, kg});
       map.set(key, cur);
     });
     return Array.from(map.values()).sort((a,b)=>(b.kg-a.kg) || String(a.company).localeCompare(String(b.company),"es",{sensitivity:"base"}));
@@ -4218,7 +4261,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", render);
   else render();
-  window.addEventListener("storage", ev=>{ if(ev && (ev.key===KEY || (ev.key||"").startsWith("prep_"))) render(); });
+  window.addEventListener("storage", ev=>{ if(ev && (ev.key===KEY || ev.key==="ldh_company_master_v1" || (ev.key||"").startsWith("prep_"))) render(); });
 })();
 </script>
 
