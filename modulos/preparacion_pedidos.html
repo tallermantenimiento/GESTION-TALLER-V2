@@ -5874,11 +5874,38 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
   };
   upsertTrabajos(db.trabajos);
 
-  setAny("ldh_db", JSON.stringify(db));
+  const __payloadFab = JSON.stringify(db);
+  const __okMainFab = (typeof LDH_writeSharedLocalKey === "function") ? LDH_writeSharedLocalKey("ldh_db", __payloadFab) : (setAny("ldh_db", __payloadFab), true);
+  const __okInboxFab = (typeof LDH_addFabricacionInbox === "function") ? LDH_addFabricacionInbox(record) : false;
+  try{ window.dispatchEvent(new StorageEvent("storage", {key:"ldh_db", newValue:__payloadFab})); }catch(e){}
+  if(!__okMainFab && !__okInboxFab){
+    alert("⚠️ No se pudo dejar el pedido visible para Fabricación porque el almacenamiento del navegador está lleno.");
+  }
 
   metaActual.en_fabricacion = true;
-  metaActual.fabricacion_ts = metaActual.fabricacion_ts || Date.now();
+  metaActual.fabricacion_ts = new Date().toISOString();
+  metaActual.fase = "fabricacion";
+  metaActual.estado = "fabricacion";
+  metaActual.unidades = unidadesFinal;
+  metaActual.uds = unidadesFinal;
+  metaActual.total = unidadesFinal;
+  delete metaActual.entregado;
+  delete metaActual.en_entregado;
+  delete metaActual.entregado_ts;
+  delete metaActual.en_almacen;
+  delete metaActual.almacen_ts;
+  delete metaActual.en_pintura;
+  delete metaActual.pintura_ts;
+  metaActual.lastUpdate = metaActual.fabricacion_ts;
   setAny(KM(refActual), JSON.stringify(metaActual));
+  try{ localStorage.setItem("prep_focus_ref", refActual); }catch(e){}
+  try{ localStorage.setItem("prep_last_import_ref", refActual); }catch(e){}
+  try{ localStorage.setItem("prep_import_guard_ts", String(Date.now())); }catch(e){}
+  try{ sessionStorage.setItem("prep_focus_ref", refActual); }catch(e){}
+  try{ sessionStorage.setItem("prep_last_import_ref", refActual); }catch(e){}
+  try{ sessionStorage.setItem("prep_import_guard_ts", String(Date.now())); }catch(e){}
+  setTimeout(function(){ try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow("mandar_fabricacion_" + refActual); }catch(e){} }, 80);
+  setTimeout(function(){ try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow("mandar_fabricacion_retry_" + refActual); }catch(e){} }, 900);
 
   LDH_cls("pillFab").remove("hidden");
   if(withAlert){
@@ -9234,7 +9261,7 @@ init();
     }
 
     // Fuente prioritaria directa desde Preparación.
-    // Si prep_meta_REF dice que está en fabricación, NO debe heredar un "Entregado:1" viejo de ldh_db.
+    // Si prep_meta_REF dice que está en fabricación, no hereda estados antiguos de ldh_db.
     try{
       const meta = parse(getStore("prep_meta_" + ref)) || {};
       const totalMeta = n(meta.unidades || meta.uds || meta.total || meta.cantidad || out.total || 1) || 1;
@@ -11431,6 +11458,22 @@ function LDH_prepVolverMenu(){
         if(!isPrepKey(k)) return;
         if(Object.prototype.hasOwnProperty.call(rdata, k)){
           const v = String(rdata[k]);
+          // Protección: si localmente un pedido acaba de pasar a Fabricación, no permitir
+          // que una nube antigua vuelva a EN PREPARACIÓN o ENTREGADO viejo.
+          try{
+            if(k.indexOf("prep_meta_") === 0){
+              const localMeta = JSON.parse(getValue(k) || "{}") || {};
+              const remoteMeta = JSON.parse(v || "{}") || {};
+              const localFab = !!(localMeta.en_fabricacion || localMeta.fabricacion_ts || String(localMeta.fase||"").includes("fabric"));
+              const remoteFab = !!(remoteMeta.en_fabricacion || remoteMeta.fabricacion_ts || String(remoteMeta.fase||"").includes("fabric"));
+              const localTs = Date.parse(localMeta.lastUpdate || localMeta.fabricacion_ts || 0) || 0;
+              const remoteTs = Date.parse(remoteMeta.lastUpdate || remoteMeta.fabricacion_ts || 0) || 0;
+              if(localFab && !remoteFab && (!remoteTs || localTs >= remoteTs)){
+                changed = true;
+                return;
+              }
+            }
+          }catch(e){}
           if(getValue(k) !== v){ changed = true; }
           setBoth(k, v);
         }else{
@@ -11756,6 +11799,35 @@ function LDH_prepVolverMenu(){
     wrapped.__ldhTipoHierroAuto = true;
     window.abrirPedido = wrapped;
   }
+})();
+</script>
+
+
+<script id="LDH_PREP_CLEAN_FAB_META_NO_ENTREGADO_2007">
+(function(){
+  function clean(){
+    try{
+      const ref = (typeof refActual !== "undefined" && refActual) ? refActual : (new URL(location.href).searchParams.get("openRef") || "");
+      if(!ref) return;
+      const key = "prep_meta_" + ref;
+      const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
+      if(!raw) return;
+      const m = JSON.parse(raw) || {};
+      if(m.en_fabricacion || m.fabricacion_ts || String(m.fase||"").includes("fabric")){
+        let changed = false;
+        ["entregado","en_entregado","entregado_ts","en_almacen","almacen_ts","en_pintura","pintura_ts"].forEach(k=>{ if(k in m){ delete m[k]; changed = true; } });
+        if(m.fase !== "fabricacion"){ m.fase = "fabricacion"; changed = true; }
+        if(m.estado !== "fabricacion"){ m.estado = "fabricacion"; changed = true; }
+        if(changed){
+          const v = JSON.stringify(m);
+          try{ localStorage.setItem(key, v); }catch(e){}
+          try{ sessionStorage.setItem(key, v); }catch(e){}
+          try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow("clean_fab_meta_" + ref); }catch(e){}
+        }
+      }
+    }catch(e){}
+  }
+  document.addEventListener("DOMContentLoaded", function(){ setTimeout(clean, 250); setTimeout(clean, 1200); });
 })();
 </script>
 
