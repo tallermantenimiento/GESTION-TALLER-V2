@@ -289,6 +289,75 @@
     return candidate;
   }
 
+  function writePrepDirect(payload){
+    const ref = String(payload && (payload.ref || payload.referencia) || "").trim();
+    if(!ref) return false;
+
+    const lines = Array.isArray(payload.materiales) ? payload.materiales : [
+      ...(Array.isArray(payload.barras) ? payload.barras : []),
+      ...(Array.isArray(payload.accesorios) ? payload.accesorios : [])
+    ];
+
+    const cleanLines = lines.map(l=>{
+      l = (l && typeof l === "object") ? {...l} : {mat:String(l || "Material")};
+      const q = n(l.qty_pedida ?? l.qty ?? l.cantidad ?? 0);
+      l.qty = q;
+      l.qty_pedida = q;
+      l.qty_recibida = 0;
+      l.recibida = 0;
+      l.aplicado_qty = 0;
+      l.stock_consumed_qty = 0;
+      l.ok = false;
+      l.estado = "pendiente";
+      l.status = "pendiente";
+      l.completo = false;
+      l.done = false;
+      l.isDone = false;
+      l.isCompleted = false;
+      if(!l.mat && l.material) l.mat = l.material;
+      if(!l.material && l.mat) l.material = l.mat;
+      if(!l.name && (l.mat || l.material)) l.name = l.mat || l.material;
+      if(!l.unit && l.unidad) l.unit = l.unidad;
+      if(!l.unidad && l.unit) l.unidad = l.unit;
+      if(!l.linked_matId && l.stockMatId) l.linked_matId = l.stockMatId;
+      if(!l.linked_matId && l.matId) l.linked_matId = l.matId;
+      if(!l.linked_matId && l.stock_matId) l.linked_matId = l.stock_matId;
+      return l;
+    }).filter(l => n(l.qty_pedida ?? l.qty) > 0);
+
+    const meta = {
+      referencia: ref,
+      ref: ref,
+      original_ref: payload.original_ref || payload.referencia_original || "",
+      pedido_uid: payload.pedido_uid || payload.uid || uid(),
+      pedido_id: "pid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,8),
+      concepto: payload.concepto || payload.concept || "",
+      empresa: payload.empresa || payload.company || "",
+      company: payload.company || payload.empresa || "",
+      unidades: Math.max(1, Math.round(n(payload.unidades ?? payload.cantidad ?? payload.vars?.cantidad ?? 1) || 1)),
+      cantidad: Math.max(1, Math.round(n(payload.unidades ?? payload.cantidad ?? payload.vars?.cantidad ?? 1) || 1)),
+      vars: payload.vars || {},
+      fecha: Date.now(),
+      createdAt: payload.createdAt || new Date().toISOString(),
+      tipo_hierro: "",
+      en_fabricacion: false,
+      en_pintura: false,
+      en_almacen: false,
+      entregado: false,
+      estado: "pendiente",
+      status: "pendiente",
+      recepcion_completa: false,
+      _notified_complete: false
+    };
+
+    setStore("prep_recepcion_" + ref, JSON.stringify(cleanLines));
+    setStore("prep_meta_" + ref, JSON.stringify(meta));
+    setStore("prep_last_import_ref", ref);
+    setStore("prep_focus_ref", ref);
+    setStore("prep_import_guard_ts", String(Date.now()));
+    return true;
+  }
+
   window.App = {
     dbInfo:{key:"", db:{concepts:[]}},
     concept:null,
@@ -538,6 +607,10 @@
         createdAt:new Date().toISOString()
       };
 
+      // Escritura directa: evita que Preparación ignore el pedido si la referencia original ya existía.
+      // Después dejamos también el snapshot legacy para que Preparación abra la ficha.
+      writePrepDirect(payload);
+
       const json = JSON.stringify(payload);
       setStore("latest_materials_v1", json);
       setStore("pedido_en_preparacion", json);
@@ -549,7 +622,7 @@
       try{ window.name = "LDH_PREP|" + json; }catch(e){}
       const encoded = encodeURIComponent(json);
       if(encoded.length < 1500000){
-        location.href = "preparacion_pedidos.html#ldhPrep=" + encoded;
+        location.href = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal) + "#ldhPrep=" + encoded;
       }else{
         location.href = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal);
       }
