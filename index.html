@@ -1813,7 +1813,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   <div id="ldhIronChart" class="ldh-iron-chart"></div>
   <div id="ldhIronDetail" class="ldh-iron-table"></div>
   <div class="ldh-iron-note">
-    Criterio: se muestran todas las empresas activas del Stock actual, aunque estén a 0 kg. Las empresas borradas del Stock se ignoran aunque queden en históricos antiguos.
+    Criterio: se muestran todas las empresas activas del Stock actual. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60 para aproximar los huecos.
   </div>
 </section>
 
@@ -2848,7 +2848,11 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }else if(d.length === 2){
       const a=d[0], b=d[1];
-      if(s.includes("pletina") || s.includes("planchuela") || s.includes("llanta")){
+      const hasDiameter = s.includes("diam") || s.includes("ø") || s.includes("tubo redondo") || s.includes("redondo") || s.includes("barra redonda");
+      if(hasDiameter && !s.includes("macizo") && b > 0 && b < (a/2)){
+        // Tubo redondo hueco: D exterior x espesor.
+        kgm = Math.max(0, Math.PI * b * (a - b) * 0.00785);
+      }else if(s.includes("pletina") || s.includes("planchuela") || s.includes("llanta")){
         kgm = Math.max(0, a * b * 0.00785);
       }else if(s.includes("chapa")){
         // Chapa: m2 aproximado por mm. Para comparativa lo tratamos como panel 1 m2.
@@ -2873,6 +2877,58 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     if(!isFinite(kgm) || kgm <= 0) kgm = 1;
     return kgm;
   }
+  function isSheetMaterialName(name){
+    const s = norm(name);
+    return s.includes("chapa") || s.includes("malla") || s.includes("panel") || s.includes("plancha");
+  }
+  function sheetMaterialFactor(name){
+    const s = norm(name);
+    // Chapa perforada: no pesa como chapa lisa. Aproximamos un 40% de hueco,
+    // es decir, queda un 60% del peso de la chapa maciza.
+    // Ejemplo 2000x1000x1.5: maciza ≈ 23,55 kg; perforada ≈ 14,13 kg.
+    if(s.includes("perforad") || s.includes("punzonad")) return 0.60;
+    // Malla expandida/rejilla: estimación conservadora si no tenemos ficha de peso exacta.
+    if(s.includes("malla") || s.includes("rejilla")) return 0.55;
+    return 1;
+  }
+  function kgPerUnitFromName(name){
+    const s = norm(name);
+    const d = extractDims(name);
+    if(isSheetMaterialName(name) && d.length >= 3){
+      const L = d[0] / 1000, W = d[1] / 1000, T = d[2] / 1000;
+      const kgSolid = L * W * T * 7850;
+      const kg = kgSolid * sheetMaterialFactor(name);
+      return isFinite(kg) && kg > 0 ? kg : 0;
+    }
+    return 0;
+  }
+  function kgForLine(line){
+    const qty = num(line && line.qty);
+    const unit = norm((line && (line.unit || line.unidad)) || "");
+    const material = String((line && line.material) || "");
+    const kgm = num(line && line.kgm);
+    const kgu = kgPerUnitFromName(material);
+
+    // Barras/perfiles: cantidad = número de barras, largo estándar 6 m.
+    if(unit.includes("barra") || unit.includes("bar")) return qty * kgm * BAR_LENGTH_M;
+
+    // Chapa/malla/plancha: cantidad = unidades o fracción de unidad. No se multiplica por 6 m.
+    if(kgu > 0) return qty * kgu;
+
+    // Compatibilidad con datos antiguos sin unidad: se mantiene el criterio anterior de barra estándar.
+    if(!unit) return qty * kgm * BAR_LENGTH_M;
+
+    // Otros formatos de hierro sin fórmula de pieza: estimación conservadora por metro/unidad, no por barra completa.
+    return qty * kgm;
+  }
+  function weightInfoForLine(line){
+    const unit = norm((line && (line.unit || line.unidad)) || "");
+    const material = String((line && line.material) || "");
+    const kgu = kgPerUnitFromName(material);
+    if(kgu > 0 && !(unit.includes("barra") || unit.includes("bar"))) return fmt(kgu) + " kg/ud";
+    return fmt((line && line.kgm) || 0) + " kg/m";
+  }
+
   function assignmentQty(a){
     const explicit = a && (a.pendingQty ?? a.qtyPending ?? a.pendiente);
     if(explicit !== undefined && explicit !== null && String(explicit) !== ""){
@@ -2912,6 +2968,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
+        unit:String(m.unit || m.unidad || m.units || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
         ref:String(a.ref || a.jobRef || a.jobId || "")
@@ -2939,6 +2996,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
+        unit:String(m.unit || m.unidad || m.units || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
         ref:String(r.ref || r.jobRef || r.jobId || "")
@@ -2970,6 +3028,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
             company:c ? companyName(db, companyId) : companyText,
             materialId,
             material:String(m.name || m.nombre || materialId),
+            unit:String(m.unit || m.unidad || m.units || ""),
             qty:q,
             kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
             ref
@@ -2983,7 +3042,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function aggregate(rows){
     const map = new Map();
     rows.forEach(r=>{
-      const kg = r.qty * r.kgm * BAR_LENGTH_M;
+      const kg = kgForLine(r);
       const cur = map.get(r.companyId) || {companyId:r.companyId, company:r.company, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
       cur.bars += r.qty;
@@ -3066,7 +3125,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
           <td>${esc(l.ref || "—")}</td>
           <td>${esc(l.material)}</td>
           <td>${fmt(l.qty)}</td>
-          <td>${fmt(l.kgm)} kg/m</td>
+          <td>${weightInfoForLine(l)}</td>
           <td>${fmt(l.kg)} kg</td>
           <td>${esc(l.source)}</td>
         </tr>`);
@@ -3173,7 +3232,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
           <td>${esc(l.ref || "—")}</td>
           <td>${esc(l.source || "—")}</td>
           <td class="num">${fmt(l.qty)}</td>
-          <td class="num">${fmt(l.kgm)} kg/m</td>
+          <td class="num">${weightInfoForLine(l)}</td>
           <td class="num">${fmt(l.kg)} kg</td>
         </tr>`).join("");
 
@@ -3467,7 +3526,11 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }else if(d.length === 2){
       const a=d[0], b=d[1];
-      if(s.includes("pletina") || s.includes("planchuela") || s.includes("llanta")){
+      const hasDiameter = s.includes("diam") || s.includes("ø") || s.includes("tubo redondo") || s.includes("redondo") || s.includes("barra redonda");
+      if(hasDiameter && !s.includes("macizo") && b > 0 && b < (a/2)){
+        // Tubo redondo hueco: D exterior x espesor.
+        kgm = Math.max(0, Math.PI * b * (a - b) * 0.00785);
+      }else if(s.includes("pletina") || s.includes("planchuela") || s.includes("llanta")){
         kgm = Math.max(0, a * b * 0.00785);
       }else if(s.includes("chapa")){
         kgm = Math.max(0, b * 7.85);
@@ -3487,6 +3550,47 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     if(!isFinite(kgm) || kgm <= 0) kgm = 1;
     return kgm;
   }
+  function isSheetMaterialName(name){
+    const s = norm(name);
+    return s.includes("chapa") || s.includes("malla") || s.includes("panel") || s.includes("plancha");
+  }
+  function kgPerUnitFromName(name){
+    const s = norm(name);
+    const d = extractDims(name);
+    if(isSheetMaterialName(name) && d.length >= 3){
+      const L = d[0] / 1000, W = d[1] / 1000, T = d[2] / 1000;
+      const kg = L * W * T * 7850;
+      return isFinite(kg) && kg > 0 ? kg : 0;
+    }
+    return 0;
+  }
+  function kgForLine(line){
+    const qty = num(line && line.qty);
+    const unit = norm((line && (line.unit || line.unidad)) || "");
+    const material = String((line && line.material) || "");
+    const kgm = num(line && line.kgm);
+    const kgu = kgPerUnitFromName(material);
+
+    // Barras/perfiles: cantidad = número de barras, largo estándar 6 m.
+    if(unit.includes("barra") || unit.includes("bar")) return qty * kgm * BAR_LENGTH_M;
+
+    // Chapa/malla/plancha: cantidad = unidades o fracción de unidad. No se multiplica por 6 m.
+    if(kgu > 0) return qty * kgu;
+
+    // Compatibilidad con datos antiguos sin unidad: se mantiene el criterio anterior de barra estándar.
+    if(!unit) return qty * kgm * BAR_LENGTH_M;
+
+    // Otros formatos de hierro sin fórmula de pieza: estimación conservadora por metro/unidad, no por barra completa.
+    return qty * kgm;
+  }
+  function weightInfoForLine(line){
+    const unit = norm((line && (line.unit || line.unidad)) || "");
+    const material = String((line && line.material) || "");
+    const kgu = kgPerUnitFromName(material);
+    if(kgu > 0 && !(unit.includes("barra") || unit.includes("bar"))) return fmt(kgu) + " kg/ud";
+    return fmt((line && line.kgm) || 0) + " kg/m";
+  }
+
   function assignmentQty(a){
     const explicit = a && (a.pendingQty ?? a.qtyPending ?? a.pendiente);
     if(explicit !== undefined && explicit !== null && String(explicit) !== "") return Math.max(0, num(explicit));
@@ -3611,6 +3715,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
+        unit:String(m.unit || m.unidad || m.units || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
         ref:String(a.ref || a.jobRef || a.jobId || ""),
@@ -3639,6 +3744,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
+        unit:String(m.unit || m.unidad || m.units || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
         ref:String(r.ref || r.jobRef || r.jobId || ""),
@@ -3671,6 +3777,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
             company:c ? companyName(db, companyId) : companyText,
             materialId,
             material:String(m.name || m.nombre || materialId),
+            unit:String(m.unit || m.unidad || m.units || ""),
             qty:q,
             kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
             ref,
@@ -3693,7 +3800,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       if(!active) return;
       const key = String(active.id || active.name || active.code);
       const compName = String(active.name || active.code || active.id);
-      const kg = r.qty * r.kgm * BAR_LENGTH_M;
+      const kg = kgForLine(r);
       const cur = map.get(key) || {companyId:key, company:compName, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
       cur.bars += r.qty;
@@ -3822,7 +3929,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
           <td>${esc(l.ref || "—")}</td>
           <td>${esc(l.material)}</td>
           <td>${fmt(l.qty)}</td>
-          <td>${fmt(l.kgm)} kg/m</td>
+          <td>${weightInfoForLine(l)}</td>
           <td>${fmt(l.kg)} kg</td>
           <td>${esc(l.source)}</td>
         </tr>`);
@@ -3894,7 +4001,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
           <td>${esc(l.ref || "—")}</td>
           <td>${esc(l.source || "—")}</td>
           <td class="num">${fmt(l.qty)}</td>
-          <td class="num">${fmt(l.kgm)} kg/m</td>
+          <td class="num">${weightInfoForLine(l)}</td>
           <td class="num">${fmt(l.kg)} kg</td>
         </tr>`).join("");
       return `<div class="ldh-iron-material-group">
