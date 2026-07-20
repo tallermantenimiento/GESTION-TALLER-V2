@@ -74,6 +74,11 @@
       <h2 class="section-title">📦 Pedidos en almacén</h2>
       <div id="list"></div>
     </section>
+
+    <section class="card">
+      <h2 class="section-title">✅ Registro de pedidos entregados</h2>
+      <div id="deliveredList"></div>
+    </section>
   </main>
 
   <div id="toast" class="toast"></div>
@@ -120,6 +125,7 @@
       this.mergePrepMeta();
       this.loadCompanies();
       this.render();
+      this.renderDelivered();
       window.addEventListener("storage", () => { this.reload(false); });
       setInterval(() => this.reload(false), 12000);
     },
@@ -129,6 +135,7 @@
       this.mergePrepMeta();
       this.loadCompanies();
       this.render();
+      this.renderDelivered();
       if(show) this.toast("Almacén actualizado");
     },
 
@@ -202,7 +209,7 @@
         const fase = norm(meta.fase || meta.estado || meta.status);
         const isAlm = !!(meta.en_almacen || meta.almacen_ts || fase.includes("almacen"));
         const isEnt = !!(meta.entregado || meta.en_entregado || meta.entregado_ts || fase.includes("entreg"));
-        if(!isAlm || isEnt) return;
+        if(!isAlm && !isEnt) return;
 
         const units = n(meta.unidades || meta.uds || meta.total || meta.cantidad || 1) || 1;
         const company = String(meta.empresa || meta.company || meta.empresaReceptora || meta.empresa_receptora || "").trim();
@@ -215,16 +222,16 @@
           company, empresa: company, empresaReceptora: company,
           total: units,
           delivered: 0,
-          status:"pendiente",
-          estado:"pendiente",
-          fase:"almacen",
+          status:isEnt ? "entregado" : "pendiente",
+          estado:isEnt ? "entregado" : "pendiente",
+          fase:isEnt ? "entregado" : "almacen",
           tipo:"almacen",
           keepInFab:false,
           hideFromFab:false,
           archived:false,
           datePed: meta.fecha_pedido || meta.datePed || meta.createdAt || todayISO(),
           datePrev: meta.fecha_entrega || meta.datePrev || todayISO(),
-          flow:{ fab:0, fabricacion:0, pintura:0, almacen:units, entregado:0 },
+          flow:{ fab:0, fabricacion:0, pintura:0, almacen:isEnt ? 0 : units, entregado:isEnt ? units : 0 },
           history: Array.isArray(meta.history) ? meta.history : []
         };
         changed = this.upsertDelivery(rec) || changed;
@@ -329,6 +336,105 @@
         </tr>`;
     },
 
+    deliveredItems(){
+      const q = norm(document.getElementById("q").value);
+      const companyFilter = document.getElementById("companyFilter").value;
+      return (this.state.deliveries || [])
+        .filter(item => this.itemEntregado(item) > 0 || norm(item.fase || item.estado || item.status).includes("entreg"))
+        .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
+        .filter(item => {
+          if(!q) return true;
+          const hay = [item.ref, item.referencia, item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
+          return norm(hay).includes(q);
+        });
+    },
+
+    renderDelivered(){
+      const box = document.getElementById("deliveredList");
+      if(!box) return;
+      const items = this.deliveredItems();
+      if(!items.length){
+        box.innerHTML = `<div class="empty">No hay pedidos entregados registrados.</div>`;
+        return;
+      }
+
+      const groups = new Map();
+      items.forEach(it=>{
+        const c = String(it.company || it.empresa || it.empresaReceptora || "Sin empresa").trim() || "Sin empresa";
+        if(!groups.has(c)) groups.set(c, []);
+        groups.get(c).push(it);
+      });
+
+      box.innerHTML = Array.from(groups.entries())
+        .sort((a,b)=>a[0].localeCompare(b[0],"es",{sensitivity:"base"}))
+        .map(([company, arr]) => {
+          const units = arr.reduce((a,it)=>a+this.itemEntregado(it),0);
+          const rows = arr
+            .sort((a,b)=>String(a.ref||a.referencia||"").localeCompare(String(b.ref||b.referencia||""),"es",{sensitivity:"base"}))
+            .map(it=>this.deliveredRowHTML(it))
+            .join("");
+          return `
+            <div class="company">
+              <div class="company-head" onclick="const b=this.nextElementSibling; b.style.display=b.style.display==='none'?'block':'none';">
+                <span>▾</span>
+                <span class="company-name">${esc(company)}</span>
+                <span class="badge b-blue">${arr.length} pedidos</span>
+                <span class="badge b-green">${units} uds entregadas</span>
+              </div>
+              <div class="company-body">
+                <table>
+                  <thead><tr><th>Referencia / concepto</th><th>Fechas</th><th>Flujo</th><th>Estado</th><th>Acciones</th></tr></thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </div>
+            </div>`;
+        })
+        .join("");
+    },
+
+    deliveredRowHTML(item){
+      const idx = (this.state.deliveries || []).indexOf(item);
+      const f = item.flow || {};
+      const alm = this.itemAlmacen(item);
+      const ent = this.itemEntregado(item);
+      const fab = n(f.fab ?? f.fabricacion ?? 0);
+      const pint = n(f.pintura ?? 0);
+      const company = String(item.company || item.empresa || item.empresaReceptora || "Sin empresa");
+      const lastEnt = Array.isArray(item.history) ? [...item.history].reverse().find(h=>String(h.type||"").includes("entrega")) : null;
+      return `
+        <tr>
+          <td><div class="ref">${esc(item.ref || item.referencia || "")}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
+          <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Entrega: ${esc(fmtDate((lastEnt && lastEnt.date) || item.entregado_ts || item.fechaEntrega || ""))}</div></td>
+          <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
+          <td><span class="badge b-green">Entregado</span><div class="muted">Total: ${esc(item.total || ent || 0)}</div></td>
+          <td><div class="actions"><button class="btn small orange" onclick="App.reabrirAlmacen(${idx})">↩ Reabrir almacén</button><button class="btn small" onclick="App.ver(${idx})">Ver</button></div></td>
+        </tr>`;
+    },
+
+    reabrirAlmacen(idx){
+      const item = this.state.deliveries[idx];
+      if(!item) return;
+      const max = this.itemEntregado(item);
+      const qty = this.askQty("Cantidad a devolver a Almacén", max);
+      if(qty === null) return;
+
+      item.flow = item.flow || {};
+      item.flow.entregado = Math.max(0, max - qty);
+      item.delivered = item.flow.entregado;
+      item.flow.almacen = this.itemAlmacen(item) + qty;
+      item.fase = "almacen";
+      item.estado = "almacen";
+      item.status = "pendiente";
+      item.history = Array.isArray(item.history) ? item.history : [];
+      item.history.push({ id:uid("hist"), type:"reabrir_almacen", qty, date:new Date().toISOString(), note:"Devuelto desde entregados a Almacén" });
+
+      this.updatePrepMeta(item);
+      this.save();
+      this.render();
+      this.renderDelivered();
+      this.toast("Pedido reabierto en Almacén");
+    },
+
     askQty(title, max){
       const raw = prompt(`${title}\nCantidad máxima: ${max}`, String(max));
       if(raw === null) return null;
@@ -358,6 +464,7 @@
       this.updatePrepMeta(item);
       this.save();
       this.render();
+      this.renderDelivered();
       this.toast("Entrega registrada");
     },
 
@@ -381,6 +488,7 @@
       this.updatePrepMeta(item);
       this.save();
       this.render();
+      this.renderDelivered();
       this.toast("Devuelto a Fabricación");
     },
 
