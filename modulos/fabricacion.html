@@ -2142,6 +2142,122 @@ _fmtPartialStore(s){
         }
     },
 
+    _mergePrepFabricacionMeta() {
+        // Lectura directa de Preparación:
+        // Si un pedido tiene prep_meta_REF.en_fabricacion=true, Fabricación debe mostrarlo aunque ldh_db/inbox fallen.
+        try {
+            if(!Array.isArray(this.state.deliveries)) this.state.deliveries = [];
+
+            const getRaw = (k) => {
+                try { const v = localStorage.getItem(k); if(v !== null) return v; } catch(e) {}
+                try { const v = sessionStorage.getItem(k); if(v !== null) return v; } catch(e) {}
+                return null;
+            };
+
+            const keys = [];
+            try {
+                for(let i=0;i<localStorage.length;i++){
+                    const k = localStorage.key(i);
+                    if(k && k.indexOf('prep_meta_') === 0) keys.push(k);
+                }
+            } catch(e) {}
+            try {
+                for(let i=0;i<sessionStorage.length;i++){
+                    const k = sessionStorage.key(i);
+                    if(k && k.indexOf('prep_meta_') === 0 && !keys.includes(k)) keys.push(k);
+                }
+            } catch(e) {}
+
+            const upsertDelivery = (rec) => {
+                if(!rec || !rec.ref) return false;
+                const ref = String(rec.ref).trim();
+                const arr = this.state.deliveries;
+                const idx = arr.findIndex(x => x && String(x.ref || x.referencia || '').trim() === ref);
+                if(idx >= 0) {
+                    const old = arr[idx] || {};
+                    arr[idx] = {
+                        ...old,
+                        ...rec,
+                        flow: {
+                            ...(old.flow || {}),
+                            ...(rec.flow || {}),
+                            fab: Number((rec.flow && (rec.flow.fab || rec.flow.fabricacion)) || (old.flow && (old.flow.fab || old.flow.fabricacion)) || rec.total || 0),
+                            fabricacion: Number((rec.flow && (rec.flow.fab || rec.flow.fabricacion)) || (old.flow && (old.flow.fab || old.flow.fabricacion)) || rec.total || 0),
+                            pintura: Number((old.flow && old.flow.pintura) || (rec.flow && rec.flow.pintura) || 0),
+                            almacen: Number((old.flow && old.flow.almacen) || (rec.flow && rec.flow.almacen) || 0),
+                            entregado: Number((old.flow && old.flow.entregado) || (rec.flow && rec.flow.entregado) || 0)
+                        },
+                        archived: false,
+                        hideFromFab: false,
+                        keepInFab: true
+                    };
+                } else {
+                    arr.push(rec);
+                }
+                return true;
+            };
+
+            let changed = false;
+
+            keys.forEach(k => {
+                try {
+                    const ref = String(k).replace(/^prep_meta_/, '').trim();
+                    if(!ref) return;
+
+                    const meta = JSON.parse(getRaw(k) || '{}') || {};
+                    const isFab = !!(meta.en_fabricacion || meta.fabricacion_ts || meta.fase === 'fabricacion' || meta.estado === 'fabricacion');
+                    if(!isFab) return;
+
+                    const prepRaw = getRaw('prep_recepcion_' + ref);
+                    let lines = [];
+                    try { lines = JSON.parse(prepRaw || '[]') || []; } catch(e) { lines = []; }
+
+                    const total = Number(meta.unidades || meta.uds || meta.total || meta.cantidad || 0) || 0;
+                    const company = String(meta.empresa || meta.company || meta.empresaReceptora || '').trim();
+                    const concept = String(meta.concepto || meta.concept || (lines[0] && (lines[0].concepto || lines[0].concept)) || 'Sin concepto').trim();
+
+                    const rec = {
+                        id: meta.pedido_uid || ('PREP-' + ref),
+                        ref: ref,
+                        referencia: ref,
+                        concept: concept,
+                        concepto: concept,
+                        company: company,
+                        empresa: company,
+                        client: 'Taller / Interno',
+                        datePed: meta.fecha_pedido || meta.datePed || meta.createdAt || new Date().toISOString().slice(0,10),
+                        datePrev: meta.fecha_entrega || meta.datePrev || new Date().toISOString().slice(0,10),
+                        total: total > 0 ? total : 1,
+                        delivered: 0,
+                        status: 'pendiente',
+                        estado: 'pendiente',
+                        fase: 'fabricacion',
+                        tipo: 'fabricacion',
+                        keepInFab: true,
+                        hideFromFab: false,
+                        archived: false,
+                        flow: {
+                            fab: total > 0 ? total : 1,
+                            fabricacion: total > 0 ? total : 1,
+                            pintura: 0,
+                            almacen: 0,
+                            entregado: 0
+                        },
+                        notes: 'Importado desde Preparación por prep_meta.'
+                    };
+
+                    changed = upsertDelivery(rec) || changed;
+                } catch(e) {}
+            });
+
+            if(changed) {
+                try { this.saveData(); } catch(e) { console.warn('No se pudo guardar merge prep_meta Fabricación', e); }
+            }
+        } catch(e) {
+            console.warn('No se pudo leer prep_meta_* para Fabricación', e);
+        }
+    },
+
     loadData() {
         const stored = _getStoreItem('ldh_db');
         if(stored) {
@@ -2189,6 +2305,7 @@ _fmtPartialStore(s){
         }
         
         try{ this._mergeFabricacionInbox(); }catch(e){ console.warn('merge Fabricación inbox error', e); }
+        try{ this._mergePrepFabricacionMeta(); }catch(e){ console.warn('merge prep_meta Fabricación error', e); }
 
         this.refreshConceptSelects();
         this.refreshCompanySelects();
@@ -2352,6 +2469,7 @@ saveData() {
         if(viewName === 'mini_agenda') this.renderMiniAgenda();
         if(viewName === 'entregas') {
             try{ this._mergeFabricacionInbox(); }catch(e){}
+            try{ this._mergePrepFabricacionMeta(); }catch(e){}
             this.renderDeliveries();
         }
         if(viewName === 'almacen') this.renderAlmacen();
@@ -3536,6 +3654,13 @@ goPrepForUnassigned(keyEnc){
     },
     
     renderDeliveries() {
+        try{
+            if(!this.__mergingPrepMetaNow && this._mergePrepFabricacionMeta){
+                this.__mergingPrepMetaNow = true;
+                this._mergePrepFabricacionMeta();
+                this.__mergingPrepMetaNow = false;
+            }
+        }catch(e){ this.__mergingPrepMetaNow = false; }
         const tbody = document.getElementById('agendaBody');
         if(!tbody) return;
 
