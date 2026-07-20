@@ -1649,16 +1649,16 @@ function mirrorUnassignedToLdhDb(){
       applyTo(db[k]);
     }
 
-    const __ldhDbPayloadFab = JSON.stringify(db);
-  const __fabMode = LDH_writeSharedLocalKey("ldh_db", __ldhDbPayloadFab);
+    const __payloadFab = JSON.stringify(db);
+  const __okMainFab = LDH_writeSharedLocalKey("ldh_db", __payloadFab);
+  const __okInboxFab = LDH_addFabricacionInbox(record);
   try{
-    const inboxRaw = getAny("ldh_fabricacion_inbox_v1");
-    const inbox = inboxRaw ? (JSON.parse(inboxRaw) || []) : [];
-    const ix = inbox.findIndex(x => x && x.ref === refActual);
-    if(ix >= 0) inbox[ix] = record; else inbox.push(record);
-    LDH_writeSharedLocalKey("ldh_fabricacion_inbox_v1", JSON.stringify(inbox.slice(-200)));
+    // Evento storage manual para otras pestañas del mismo origen si están abiertas.
+    window.dispatchEvent(new StorageEvent("storage", {key:"ldh_db", newValue:__payloadFab}));
   }catch(e){}
-  LDH_notifyFabricacionStorageMode(__fabMode);
+  if(!__okMainFab && !__okInboxFab){
+    alert("⚠️ No se pudo dejar el pedido visible para Fabricación porque el almacenamiento del navegador está lleno. Abre Stock una vez y confirma que está conectado a nube, o borra histórico antiguo.");
+  }
   }catch(e){ /* silent */ }
 }
 
@@ -5687,57 +5687,75 @@ function marcarTodoOk() {
 function guardarEstadoLocal() { setAny(KP(refActual), JSON.stringify(estadoMateriales)); }
 
 
+function LDH_freeSmallSharedStorage(){
+  // Libera solo temporales conocidos. No toca datos reales salvo último recurso controlado.
+  try{
+    const cleanPrefixes = [
+      "ldh_stock_debug_","ldh_stock_tmp_","stock_debug_","stock_backup_auto_",
+      "stock_export_tmp_","ldh_stock_last_publish_payload_"
+    ];
+    const cleanExact = [
+      "stock_informativo_cache","stock_informativo_last_payload",
+      "ldh_stock_publish_last_error","ldh_stock_last_error","ldh_stock_old_payload"
+    ];
+    const keys = [];
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if(!k) continue;
+      if(cleanExact.includes(k) || cleanPrefixes.some(p => String(k).startsWith(p))) keys.push(k);
+    }
+    keys.forEach(k => { try{ localStorage.removeItem(k); }catch(e){} });
+  }catch(e){}
+}
+
 function LDH_writeSharedLocalKey(key, value){
-  // Para datos que deben ver otros módulos (Fabricación), NO basta con sessionStorage.
-  // Si localStorage está lleno, primero libera la clave vieja y limpia temporales, luego reintenta.
+  // Guardado para que otros módulos lo vean. Debe ser localStorage, no sessionStorage.
   try{
     localStorage.setItem(key, value);
-    return "local";
+    return true;
   }catch(e1){
-    try{ localStorage.removeItem(key); }catch(_){}
+    try{ localStorage.removeItem(key); }catch(e){}
+    LDH_freeSmallSharedStorage();
     try{
       localStorage.setItem(key, value);
-      return "local";
+      return true;
     }catch(e2){
+      // Último recurso si el causante es la clave enorme de Stock local.
+      // Stock ya publica a nube; eliminamos SOLO la copia local antigua para poder comunicar Fabricación.
       try{
-        const cleanPrefixes = ["ldh_stock_debug_","ldh_stock_tmp_","stock_debug_","stock_backup_auto_","stock_export_tmp_","ldh_stock_last_publish_payload_"];
-        const cleanExact = ["stock_informativo_cache","stock_informativo_last_payload","ldh_stock_publish_last_error","ldh_stock_last_error","ldh_stock_old_payload"];
-        const keys = [];
-        for(let i=0;i<localStorage.length;i++){
-          const k = localStorage.key(i);
-          if(!k) continue;
-          if(cleanExact.includes(k) || cleanPrefixes.some(p=>String(k).startsWith(p))) keys.push(k);
+        const stockRaw = localStorage.getItem("ldh_v2_company_stock_v1");
+        if(stockRaw){
+          try{ sessionStorage.setItem("ldh_v2_company_stock_v1", stockRaw); }catch(e){}
+          localStorage.removeItem("ldh_v2_company_stock_v1");
         }
-        keys.forEach(k=>{ try{ localStorage.removeItem(k); }catch(_){} });
-      }catch(_){}
-      try{
         localStorage.setItem(key, value);
-        return "local";
+        return true;
       }catch(e3){
-        // Último recurso: sessionStorage. OJO: otros tabs no lo verán.
-        try{
-          sessionStorage.setItem(key, value);
-          return "session";
-        }catch(e4){
-          throw e3;
-        }
+        console.warn("No se pudo escribir clave compartida", key, e3);
+        return false;
       }
     }
   }
 }
 
-function LDH_notifyFabricacionStorageMode(mode){
+function LDH_addFabricacionInbox(record){
   try{
-    if(mode === "session"){
-      alert("⚠️ Enviado a Fabricación, pero el navegador tiene localStorage lleno.\n\nSe ha guardado en esta pestaña. Para verlo en Fabricación, abre Fabricación desde esta misma pestaña o libera espacio de localStorage.");
-    }
-  }catch(e){}
+    let inbox = [];
+    try{ inbox = JSON.parse(localStorage.getItem("ldh_fabricacion_inbox_v1") || "[]") || []; }catch(e){ inbox = []; }
+    const ref = String(record && record.ref || "").trim();
+    const idx = inbox.findIndex(x => x && String(x.ref || x.referencia || "").trim() === ref);
+    if(idx >= 0) inbox[idx] = record; else inbox.push(record);
+    return LDH_writeSharedLocalKey("ldh_fabricacion_inbox_v1", JSON.stringify(inbox.slice(-200)));
+  }catch(e){
+    console.warn("No se pudo guardar inbox Fabricación", e);
+    return false;
+  }
 }
 
 /* ========= MANDAR A FABRICACIÓN (MANUAL) ========= */
 function confirmarTodoRecepcion() {
   const hayBarras = estadoMateriales.some(l => (String(l.unit||"").toLowerCase() === 'barra'));
-  if (hayBarras && !metaActual.tipo_hierro) { alert("⚠️ Selecciona el tipo de perfilería."); return; }
+  if (hayBarras && !metaActual.tipo_hierro) { metaActual.tipo_hierro = "Negro"; try{ setAny(KM(refActual), JSON.stringify(metaActual)); }catch(e){} }
 
   const val = parseFloat(document.getElementById("inputUnidades").value) || metaActual.unidades || 0;
   if (val <= 0) { alert("⛔ Indica las UNIDADES."); document.getElementById("inputUnidades").focus(); return; }
@@ -5779,7 +5797,6 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
     priority: "normal",
     total: unidadesFinal,
     delivered: 0,
-    history: [],
     flow: {
       fab: unidadesFinal,
       fabricacion: unidadesFinal,
@@ -5787,6 +5804,8 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
       almacen: 0,
       entregado: 0
     },
+    fase: "fabricacion",
+    tipo: "fabricacion",
     keepInFab: true,
     hideFromFab: false,
     archived: false,
@@ -5812,6 +5831,8 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
       arr[idx].flow.pintura = Number(arr[idx].flow.pintura || 0);
       arr[idx].flow.almacen = Number(arr[idx].flow.almacen || 0);
       arr[idx].flow.entregado = Number(arr[idx].flow.entregado || 0);
+      arr[idx].fase = "fabricacion";
+      arr[idx].tipo = "fabricacion";
       arr[idx].keepInFab = true;
       arr[idx].hideFromFab = false;
       arr[idx].archived = false;
