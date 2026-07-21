@@ -3209,6 +3209,114 @@ function _v2StockRowMaterialMatches(row, material){
     return rowKeys.some(a => matKeys.some(b => a === b || (a.length > 2 && b.length > 2 && (a.includes(b) || b.includes(a)))));
   }catch(e){ return false; }
 }
+function _v2LineMaterialKeys(line){
+  const out = [];
+  try{
+    [
+      line && line.linked_matId,
+      line && line.stockMatId,
+      line && line.matId,
+      line && line.stockLinkId,
+      line && line.materialId,
+      line && line.stockLinkLabel,
+      line && line.linked_matName,
+      line && line.mat,
+      line && line.material,
+      line && line.name,
+      line && line.title,
+      line && line.perfil
+    ].forEach(v=>{
+      const k = _v2Norm(v);
+      if(k && !out.includes(k)) out.push(k);
+    });
+  }catch(e){}
+  return out;
+}
+function _v2MaterialAllKeys(material, line){
+  const out = [];
+  try{
+    _v2MaterialKeysFromObj(material || {}).forEach(k=>{ if(k && !out.includes(k)) out.push(k); });
+    _v2LineMaterialKeys(line || {}).forEach(k=>{ if(k && !out.includes(k)) out.push(k); });
+  }catch(e){}
+  return out;
+}
+function _v2ObjMaterialKeys(obj){
+  const out = [];
+  try{
+    [
+      obj && obj.materialId,
+      obj && obj.matId,
+      obj && obj.material_id,
+      obj && obj.idMaterial,
+      obj && obj.material,
+      obj && obj.mat,
+      obj && obj.materialName,
+      obj && obj.material_nombre,
+      obj && obj.nombreMaterial,
+      obj && obj.name,
+      obj && obj.nombre,
+      obj && obj.label
+    ].forEach(v=>{
+      const k = _v2Norm(v);
+      if(k && !out.includes(k)) out.push(k);
+    });
+  }catch(e){}
+  return out;
+}
+function _v2ObjCompanyMatches(obj, company){
+  try{
+    return _v2StockRowCompanyMatches(obj, company);
+  }catch(e){ return false; }
+}
+function _v2ObjMaterialMatches(obj, material, line){
+  try{
+    const objKeys = _v2ObjMaterialKeys(obj);
+    const matKeys = _v2MaterialAllKeys(material, line);
+    if(!objKeys.length || !matKeys.length) return false;
+    return objKeys.some(a => matKeys.some(b => a === b || (a.length > 2 && b.length > 2 && (a.includes(b) || b.includes(a)))));
+  }catch(e){ return false; }
+}
+function _v2RowsForLine(pack, company, material, line){
+  return (pack && Array.isArray(pack.lots) ? pack.lots : []).filter(row =>
+    _v2ObjCompanyMatches(row, company) && _v2ObjMaterialMatches(row, material, line)
+  );
+}
+function _v2MovementsForLine(pack, company, material, line){
+  return (pack && Array.isArray(pack.movements) ? pack.movements : []).filter(m =>
+    _v2ObjCompanyMatches(m, company) && _v2ObjMaterialMatches(m, material, line)
+  );
+}
+function _v2QtyFromRows(rows){
+  return (Array.isArray(rows) ? rows : []).reduce((a,s)=> a + _v2Num(_v2First(
+    s && s.qty,
+    s && s.cantidad,
+    s && s.stock,
+    s && s.cantidadActual,
+    s && s.real,
+    s && s.fisico,
+    s && s.libre
+  )), 0);
+}
+function _v2QtyFromMovements(movs){
+  return (Array.isArray(movs) ? movs : []).reduce((a,m)=>{
+    const type = _v2First(m && m.type, m && m.tipo, "entrada");
+    const qty = _v2Num(_v2First(m && m.qty, m && m.cantidad, m && m.amount));
+    const sign = LDH_stockTipoMovimientoFisico(type);
+    return a + (sign * qty);
+  }, 0);
+}
+function _v2PhysicalForLine(pack, company, material, line){
+  const rows = _v2RowsForLine(pack, company, material, line);
+  const movs = _v2MovementsForLine(pack, company, material, line);
+  const rowReal = _v2QtyFromRows(rows);
+  const movReal = _v2QtyFromMovements(movs);
+
+  // El módulo Stock actual calcula el físico desde movements.
+  // La fila stock puede existir con 0 y servir solo como ficha/material.
+  // Por eso: si hay movimientos coincidentes, son la fuente principal.
+  if(movs.length) return {real:movReal, rowReal, movReal, rowsMatched:rows.length, movementsMatched:movs.length};
+  return {real:rowReal, rowReal, movReal, rowsMatched:rows.length, movementsMatched:movs.length};
+}
 function _v2AsArrayWithIds(value, fallbackName){
   if(Array.isArray(value)) return value;
   const out = [];
@@ -3539,6 +3647,7 @@ function _v2CompanyStockInfo(line, linkedMat){
 
   const companyId = String(_v2First(company.id, company.empresaId, company.companyId, _v2CompanyLabel(company)));
   let material = _v2FindMaterialForLine(pack, line, linkedMat, companyId);
+
   if(!material){
     const rawName = String(_v2First(line && line.stockLinkLabel, line && line.linked_matName, line && line.mat, line && line.material, line && line.name, line && line.title)).trim();
     if(rawName){
@@ -3560,30 +3669,9 @@ function _v2CompanyStockInfo(line, linkedMat){
   if(!material) return { state:"material_not_found", empresa:_v2CompanyLabel(company), sourceKey:pack.key };
 
   const materialId = String(_v2First(material.id, material.materialId, material.matId, _v2MaterialLabel(material)));
-  const rows = (pack.lots || []).filter(row => _v2StockRowCompanyMatches(row, company) && _v2StockRowMaterialMatches(row, material));
+  const phys = _v2PhysicalForLine(pack, company, material, line);
+  const real = phys.real;
 
-  let real = 0;
-  const movs = (pack.movements || [])
-    .filter(m => _v2StockRowCompanyMatches(m, company) && _v2StockRowMaterialMatches(m, material));
-
-  const rowsReal = rows.reduce((a,s)=> a + _v2Num(_v2First(s.qty, s.cantidad, s.stock, s.cantidadActual, s.real, s.fisico, s.libre)), 0);
-
-  if(rows.length){
-    // La tabla de Stock mantiene la cantidad física actual en la fila.
-    // Los movimientos son historial; no deben tapar una fila física actualizada.
-    real = rowsReal;
-  }else if(movs.length){
-    real = movs.reduce((a,m)=>{
-      const type = _v2First(m.type, m.tipo, "entrada");
-      const qty = _v2Num(_v2First(m.qty, m.cantidad, m.amount));
-      const sign = LDH_stockTipoMovimientoFisico(type);
-      return a + (sign * qty);
-    }, 0);
-  }else{
-    real = 0;
-  }
-
-  // Si no hay fila de stock pero sí existe ficha global, sigue siendo ficha v2 válida.
   const reservado = _v2Reserved(pack, companyId, materialId);
   const asignadoPrep = _v2Assigned(pack, companyId, materialId, "preparacion");
   const asignadoFab = _v2Assigned(pack, companyId, materialId, "fabricacion");
@@ -3600,7 +3688,11 @@ function _v2CompanyStockInfo(line, linkedMat){
     asignado,
     libre: real - reservado - asignado,
     unit: String(_v2First(line && (line.unit || line.unidad), material.unit, material.unidad)),
-    sourceKey: pack.key
+    sourceKey: pack.key,
+    rowsMatched: phys.rowsMatched,
+    movementsMatched: phys.movementsMatched,
+    rowReal: phys.rowReal,
+    movReal: phys.movReal
   };
 }
 function _v2CompanyStockPill(line, linkedMat, pedida){
@@ -3629,7 +3721,7 @@ function _v2CompanyStockPill(line, linkedMat, pedida){
         prestadoTxt = ` · prestado recibido <b>${Number(debt.pending||0)}</b>`;
       }
     }catch(e){}
-    return `<span class="link-pill ${cls}" title="Stock real leído desde ${info.sourceKey || 'Stock v2'}. Si hay material prestado, se muestra aparte porque no es físico propio de la empresa.">${info.empresa}: físico <b>${info.real}</b> · res <b>${info.reservado}</b> · asignado global <b>${info.asignado}</b>${prestadoTxt} · libre <b>${info.libre}</b> ${info.unit||""}</span>`;
+    return `<span class="link-pill ${cls}" title="Stock real leído desde ${info.sourceKey || 'Stock v2'} · movimientos:${info.movementsMatched || 0}=${info.movReal || 0} · filas:${info.rowsMatched || 0}=${info.rowReal || 0}. Si hay material prestado, se muestra aparte porque no es físico propio de la empresa.">${info.empresa}: físico <b>${info.real}</b> · res <b>${info.reservado}</b> · asignado global <b>${info.asignado}</b>${prestadoTxt} · libre <b>${info.libre}</b> ${info.unit||""}</span>`;
   }
   if(info.state === "no_empresa"){
     return `<span class="link-pill stock-company-pill warn">Stock empresa: sin empresa en el pedido</span>`;
@@ -4900,15 +4992,23 @@ function _v2IsActiveReservation(r){
   return st === "activa" && (ph === "preparacion" || ph === "fabricacion") && !LDH_stockEsReservaAutoRecibida(r);
 }
 function _v2MovementReal(pack, companyId, materialId){
-  return (pack.movements || [])
-    .filter(m => String(_v2First(m.companyId, m.empresaId, m.empresa, m.company)) === String(companyId))
-    .filter(m => String(_v2First(m.materialId, m.matId, m.material, m.material_id)) === String(materialId))
-    .reduce((a,m)=>{
-      const type = _v2First(m.type, m.tipo, "entrada");
-      const qty = _v2Num(_v2First(m.qty, m.cantidad, m.amount));
-      const sign = LDH_stockTipoMovimientoFisico(type);
-      return a + (sign * qty);
-    },0);
+  const company = (pack && pack.companies || []).find(c=>{
+    const keys = _v2CompanyKeysFromObj(c);
+    const t = _v2Norm(companyId);
+    return keys.includes(t) || keys.some(k => k && t && (k.includes(t) || t.includes(k)));
+  }) || {id:companyId, name:companyId, empresa:companyId};
+
+  const material = (pack && pack.materials || []).find(m=>{
+    const keys = _v2MaterialKeysFromObj(m);
+    const t = _v2Norm(materialId);
+    return keys.includes(t) || keys.some(k => k && t && (k.includes(t) || t.includes(k)));
+  }) || {id:materialId, name:materialId, material:materialId};
+
+  const movs = _v2MovementsForLine(pack, company, material, {mat:materialId, material:materialId, linked_matId:materialId});
+  if(movs.length) return _v2QtyFromMovements(movs);
+
+  const rows = _v2RowsForLine(pack, company, material, {mat:materialId, material:materialId, linked_matId:materialId});
+  return _v2QtyFromRows(rows);
 }
 function _v2IsActiveAssignment(a){
   const st = _v2Norm(_v2First(a && a.status, a && a.estado, ""));
