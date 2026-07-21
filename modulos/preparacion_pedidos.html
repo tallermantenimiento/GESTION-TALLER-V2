@@ -642,7 +642,7 @@
           <span style="opacity:.75">🔎</span>
           <input id="linkSearch" placeholder="Escribe para filtrar..." autocomplete="off" />
         </div>
-        <div class="small">Se muestran materiales del Stock (con categoría y grupo).</div>
+        <div class="small">Se muestran materiales del Stock real v2 de la empresa del pedido. No se usa el stock antiguo.</div>
       </div>
 
       <div class="link-panel">
@@ -2801,13 +2801,25 @@ function getLinkedMatIdForLine(line){
 }
 function setLinkForLine(index, matId){
   const line = estadoMateriales[index];
-  const mat = getMatById(matId);
+  // Prioridad absoluta al Stock real v2. El modal ya no trabaja contra stockMaterials legacy.
+  const mat = (typeof LDH_getV2MaterialById === "function" ? LDH_getV2MaterialById(matId) : null) || getMatById(matId);
   if(!mat) return;
 
   line.linked_matId = matId;
+  line.stockMatId = matId;
+  line.matId = matId;
+  line.linked_matName = mat.name || mat.nombre || mat.material || "";
+  line.stockLinkLabel = line.linked_matName;
 
   const k = linkKeyFor(line);
-  linkMap[k] = { matId: matId, name: mat.name, cat: mat.cat, grp: mat.grp, unit: mat.unit };
+  linkMap[k] = {
+    matId: matId,
+    name: mat.name || mat.nombre || mat.material || "",
+    cat: mat.cat || mat.categoria || mat.tipo || mat.type || "Stock v2",
+    grp: mat.grp || mat.grupo || mat.familia || mat.family || "",
+    unit: mat.unit || mat.unidad || "",
+    v2: !!mat.__v2
+  };
   saveLinkMap();
 
   guardarEstadoLocal();
@@ -2860,7 +2872,180 @@ function renderLinkResults(){
 
   const q = normName(document.getElementById("linkSearch").value || "");
 
-  let arr = stockMaterials.slice();
+  function first(){
+    for(let i=0;i<arguments.length;i++){
+      const v = arguments[i];
+      if(v !== undefined && v !== null && String(v).trim() !== "") return v;
+    }
+    return "";
+  }
+  function n(v){
+    const x = parseFloat(String(v ?? 0).replace(",", "."));
+    return isNaN(x) ? 0 : x;
+  }
+  function labelCompany(c){
+    try{ if(typeof _v2CompanyLabel === "function") return _v2CompanyLabel(c); }catch(e){}
+    return String(first(c && c.name, c && c.nombre, c && c.empresa, c && c.company, c && c.code, c && c.id));
+  }
+  function labelMaterial(m){
+    try{ if(typeof _v2MaterialLabel === "function") return _v2MaterialLabel(m); }catch(e){}
+    return String(first(m && m.name, m && m.nombre, m && m.material, m && m.mat, m && m.label, m && m.id, m && m.materialId));
+  }
+  function idCompany(c){ return String(first(c && c.id, c && c.companyId, c && c.empresaId, labelCompany(c))); }
+  function idMaterial(m){ return String(first(m && m.id, m && m.materialId, m && m.matId, m && m.material_id, labelMaterial(m))); }
+  function moveSign(type){
+    const t = normName(type || "entrada");
+    if(["salida","out","ajuste neg","ajuste_neg","consumo","consumo terminal","consumo_terminal","prestamo"].includes(t)) return -1;
+    return 1;
+  }
+  function normalizeLots(db){
+    const rows = [];
+    const pushRow = (row, companyId, materialId) => {
+      if(!row) return;
+      if(typeof row !== "object"){
+        rows.push({ companyId, materialId, qty: n(row), cantidad: n(row) });
+        return;
+      }
+      rows.push({
+        ...row,
+        companyId: first(row.companyId,row.empresaId,row.empresa,row.company,companyId),
+        materialId: first(row.materialId,row.matId,row.material_id,row.material,row.mat,materialId),
+        qty: first(row.qty,row.cantidad,row.stock,row.cantidadActual,row.real,row.fisico,row.libre)
+      });
+    };
+
+    ["stockLots","stocks","stock"].forEach(k=>{
+      const v = db && db[k];
+      if(Array.isArray(v)){
+        v.forEach(x=>pushRow(x));
+      }else if(v && typeof v === "object"){
+        Object.keys(v).forEach(cid=>{
+          const bucket = v[cid];
+          if(Array.isArray(bucket)){
+            bucket.forEach(x=>pushRow(x,cid));
+          }else if(bucket && typeof bucket === "object"){
+            if(Array.isArray(bucket.materials)) bucket.materials.forEach(x=>pushRow(x,cid));
+            else Object.keys(bucket).forEach(mid=>pushRow(bucket[mid],cid,mid));
+          }else{
+            pushRow(bucket,cid);
+          }
+        });
+      }
+    });
+    return rows.filter(r => String(first(r.materialId,r.matId,r.material_id,r.material,r.mat,"")).trim());
+  }
+  function loadV2Pack(){
+    try{
+      const pack = (typeof _v2LoadCompanyStockDB === "function") ? _v2LoadCompanyStockDB() : null;
+      if(pack && pack.db){
+        const db = pack.db;
+        return {
+          key: pack.key,
+          db,
+          companies: Array.isArray(pack.companies) ? pack.companies : (Array.isArray(db.companies) ? db.companies : []),
+          materials: Array.isArray(pack.materials) ? pack.materials : (Array.isArray(db.materials) ? db.materials : []),
+          lots: normalizeLots(db),
+          movements: Array.isArray(pack.movements) ? pack.movements : (Array.isArray(db.movements) ? db.movements : []),
+        };
+      }
+    }catch(e){}
+
+    const keys = ["ldh_v2_company_stock_v1","ldh_v2_clean_base","ldh_v2_old_flow_base"];
+    for(const key of keys){
+      try{
+        const raw = getAny(key);
+        if(!raw) continue;
+        const db = JSON.parse(raw);
+        if(!db || typeof db !== "object") continue;
+        return {
+          key, db,
+          companies: Array.isArray(db.companies) ? db.companies : [],
+          materials: Array.isArray(db.materials) ? db.materials : [],
+          lots: normalizeLots(db),
+          movements: Array.isArray(db.movements) ? db.movements : []
+        };
+      }catch(e){}
+    }
+    return null;
+  }
+  function qtyFor(pack, companyId, materialId){
+    const movs = (pack.movements || []).filter(m =>
+      String(first(m.companyId,m.empresaId,m.empresa,m.company)) === String(companyId) &&
+      String(first(m.materialId,m.matId,m.material_id,m.material,m.mat)) === String(materialId)
+    );
+    if(movs.length){
+      return movs.reduce((a,m)=>a + moveSign(first(m.type,m.tipo,"entrada")) * n(first(m.qty,m.cantidad,m.amount)),0);
+    }
+    return (pack.lots || [])
+      .filter(r => String(first(r.companyId,r.empresaId,r.empresa,r.company)) === String(companyId))
+      .filter(r => String(first(r.materialId,r.matId,r.material_id,r.material,r.mat)) === String(materialId))
+      .reduce((a,r)=>a+n(first(r.qty,r.cantidad,r.stock,r.cantidadActual,r.real,r.fisico,r.libre)),0);
+  }
+
+  const pack = loadV2Pack();
+  if(!pack){
+    host.innerHTML = `<div style="padding:12px; opacity:.7;">No hay Stock real v2 cargado.</div>`;
+    return;
+  }
+
+  const empresaPedido = (typeof _v2GetPedidoEmpresa === "function") ? _v2GetPedidoEmpresa() : (metaActual && (metaActual.empresa || metaActual.company) || "");
+  const empresaNorm = normName(empresaPedido);
+  const company = (pack.companies || []).find(c=>{
+    const vals = [idCompany(c), labelCompany(c), c && c.code, c && c.codigo].map(normName).filter(Boolean);
+    return empresaNorm && vals.some(v => v === empresaNorm || v.includes(empresaNorm) || empresaNorm.includes(v));
+  }) || null;
+  const companyId = company ? idCompany(company) : "";
+
+  const matsById = new Map();
+  (pack.materials || []).forEach(m => {
+    const id = idMaterial(m);
+    if(id) matsById.set(String(id), m);
+  });
+
+  // Mostrar solo materiales reales v2. Si hay empresa, se prioriza su stock/lotes; si no, todos los materiales v2.
+  const ids = new Set();
+  if(companyId){
+    (pack.lots || []).forEach(r=>{
+      if(String(first(r.companyId,r.empresaId,r.empresa,r.company)) === String(companyId)){
+        const id = String(first(r.materialId,r.matId,r.material_id,r.material,r.mat));
+        if(id) ids.add(id);
+      }
+    });
+    (pack.movements || []).forEach(m=>{
+      if(String(first(m.companyId,m.empresaId,m.empresa,m.company)) === String(companyId)){
+        const id = String(first(m.materialId,m.matId,m.material_id,m.material,m.mat));
+        if(id) ids.add(id);
+      }
+    });
+  }else{
+    (pack.materials || []).forEach(m=>ids.add(idMaterial(m)));
+  }
+
+  let arr = Array.from(ids)
+    .map(id => {
+      const m = matsById.get(String(id)) || {id, materialId:id, name:id, nombre:id};
+      const name = labelMaterial(m);
+      const cat = first(m.cat,m.categoria,m.category,m.tipo,m.type,"Stock v2");
+      const grp = first(m.grp,m.grupo,m.familia,m.family,"");
+      const unit = first(m.unit,m.unidad,"");
+      const qty = companyId ? qtyFor(pack, companyId, id) : 0;
+      return {id:String(id), name, cat, grp, unit, qty, __v2:true};
+    })
+    .filter(m => m.id && m.name);
+
+  // Si la empresa no tiene lotes/movimientos aún, listamos materiales v2 globales para poder vincular.
+  if(arr.length === 0){
+    arr = (pack.materials || []).map(m=>({
+      id:idMaterial(m),
+      name:labelMaterial(m),
+      cat:first(m.cat,m.categoria,m.category,m.tipo,m.type,"Stock v2"),
+      grp:first(m.grp,m.grupo,m.familia,m.family,""),
+      unit:first(m.unit,m.unidad,""),
+      qty:0,
+      __v2:true
+    })).filter(m=>m.id && m.name);
+  }
+
   if(q){
     arr = arr.filter(m => {
       const t = normName(`${m.name} ${m.cat} ${m.grp}`);
@@ -2869,6 +3054,9 @@ function renderLinkResults(){
   }
 
   arr.sort((a,b) => {
+    const exactA = q && normName(a.name) === q ? -1 : 0;
+    const exactB = q && normName(b.name) === q ? -1 : 0;
+    if(exactA !== exactB) return exactA - exactB;
     const ac = normName(a.cat).localeCompare(normName(b.cat));
     if(ac!==0) return ac;
     const ag = normName(a.grp).localeCompare(normName(b.grp));
@@ -2877,19 +3065,18 @@ function renderLinkResults(){
   });
 
   if(arr.length===0){
-    host.innerHTML = `<div style="padding:12px; opacity:.7;">Sin resultados.</div>`;
+    host.innerHTML = `<div style="padding:12px; opacity:.7;">Sin resultados en Stock real v2.</div>`;
     return;
   }
 
   arr.forEach(m => {
-    const qty = getStockQty(m.id);
     const el = document.createElement("div");
     el.className = "link-item" + (linkModalCtx && linkModalCtx.chosenMatId===m.id ? " active" : "");
     el.innerHTML = `
       <div class="t">${m.name}</div>
       <div class="s">
-        <span>${m.cat} › ${m.grp}</span>
-        <span><b>${qty}</b> ${m.unit || ""}</span>
+        <span>${m.cat}${m.grp ? " › " + m.grp : ""}</span>
+        <span><b>${m.qty}</b> ${m.unit || ""}</span>
       </div>
     `;
     el.onclick = () => {
