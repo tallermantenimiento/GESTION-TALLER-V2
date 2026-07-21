@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -106,6 +106,7 @@
 (function(){
   const DB_KEY = "ldh_db";
   const INBOX_KEY = "ldh_fabricacion_inbox_v1";
+  const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
 
   function getStore(k){
     try{ const v = localStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
@@ -114,6 +115,7 @@
   }
   function setStore(k, v){
     try{ localStorage.setItem(k, v); return true; }catch(e1){
+      try{ localStorage.removeItem(k); }catch(e){}
       try{ sessionStorage.setItem(k, v); return true; }catch(e2){ return false; }
     }
   }
@@ -227,6 +229,66 @@
       });
     },
 
+    overrides(){
+      return parse(getStore(OVERRIDE_KEY), {}) || {};
+    },
+
+    saveOverrides(map){
+      return setStore(OVERRIDE_KEY, JSON.stringify(map || {}));
+    },
+
+    applyOverride(item){
+      if(!item || !item.ref) return item;
+      const ov = this.overrides()[String(item.ref).trim()];
+      if(!ov) return item;
+      item.flow = {...(item.flow || {}), ...(ov.flow || {})};
+      if(item.flow.fabricacion === undefined) item.flow.fabricacion = item.flow.fab;
+      if(item.flow.fab === undefined) item.flow.fab = item.flow.fabricacion;
+      ["fase","estado","status","keepInFab","hideFromFab","archived"].forEach(k=>{
+        if(ov[k] !== undefined) item[k] = ov[k];
+      });
+      if(ov.updatedAt) item.localFlowUpdatedAt = ov.updatedAt;
+      return item;
+    },
+
+    writeOverride(item){
+      item = this.normalizeItem(item);
+      const f = this.ensureFlow(item);
+      const ref = String(item.ref || item.referencia || "").trim();
+      if(!ref) return false;
+      const map = this.overrides();
+      map[ref] = {
+        flow:{
+          fab:n(f.fab),
+          fabricacion:n(f.fab),
+          pintura:n(f.pintura),
+          almacen:n(f.almacen),
+          entregado:n(f.entregado)
+        },
+        fase:item.fase,
+        estado:item.estado,
+        status:item.status,
+        keepInFab:item.keepInFab,
+        hideFromFab:item.hideFromFab,
+        archived:item.archived,
+        updatedAt:new Date().toISOString()
+      };
+      return this.saveOverrides(map);
+    },
+
+    updateInbox(item){
+      try{
+        const ref = String(item && (item.ref || item.referencia) || "").trim();
+        if(!ref) return;
+        let inbox = parse(getStore(INBOX_KEY), []) || [];
+        if(!Array.isArray(inbox)) inbox = [];
+        const idx = inbox.findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+        const rec = this.normalizeItem(item);
+        if(idx >= 0) inbox[idx] = rec; else inbox.push(rec);
+        setStore(INBOX_KEY, JSON.stringify(inbox.slice(-200)));
+      }catch(e){}
+    },
+
     normalizeItem(item){
       item = item && typeof item === "object" ? {...item} : {};
       const ref = String(item.ref || item.referencia || "").trim();
@@ -250,13 +312,13 @@
       const pools = ["deliveries","fabricacion","fab","trabajos"];
       for(const k of pools){
         const found = (this.state[k] || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
-        if(found) return found;
+        if(found) return this.applyOverride(this.normalizeItem(found));
       }
       return null;
     },
 
     upsertEveryPool(item){
-      item = this.normalizeItem(item);
+      item = this.applyOverride(this.normalizeItem(item));
       if(!item.ref) return;
       ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
         if(!Array.isArray(this.state[k])) this.state[k] = [];
@@ -352,7 +414,7 @@
           map.set(it.ref, old ? this.mergeItem(old,it) : it);
         });
       });
-      return Array.from(map.values());
+      return Array.from(map.values()).map(it => this.applyOverride(this.normalizeItem(it)));
     },
 
     visibleItems(){
@@ -473,8 +535,8 @@
 
     itemByRef(refEnc){
       const ref = decodeURIComponent(refEnc || "");
-      const item = this.findByRef(ref);
-      return item ? this.normalizeItem(item) : null;
+      const item = this.allItems().find(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+      return item ? this.applyOverride(this.normalizeItem(item)) : null;
     },
 
     askQty(label, max){
@@ -527,10 +589,11 @@
       item.history = Array.isArray(item.history) ? item.history : [];
       item.history.push({id:uid("hist"), type:`move_${from}_to_${to}`, qty, date:new Date().toISOString(), note:`${labels[from]||from} → ${labels[to]||to}`});
 
+      this.writeOverride(item);
       this.upsertEveryPool(item);
+      this.updateInbox(item);
       this.updatePrepMeta(item);
-      this.save();
-      this.load();
+      this.save(false);
       this.render();
       this.toast("Movimiento guardado");
     },
