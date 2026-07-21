@@ -206,6 +206,7 @@
         const ref = k.replace(/^prep_meta_/,"").trim();
         const meta = parse(getStore(k), null);
         if(!ref || !meta) return;
+        if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return;
         const fase = norm(meta.fase || meta.estado || meta.status);
         const isAlm = !!(meta.en_almacen || meta.almacen_ts || fase.includes("almacen"));
         const isEnt = !!(meta.entregado || meta.en_entregado || meta.entregado_ts || fase.includes("entreg"));
@@ -261,7 +262,7 @@
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
       return (this.state.deliveries || [])
-        .filter(item => this.itemAlmacen(item) > 0)
+        .filter(item => !item.deleted && this.itemAlmacen(item) > 0)
         .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
         .filter(item => {
           if(!q) return true;
@@ -332,7 +333,7 @@
           <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Prev.: ${esc(fmtDate(item.datePrev || item.fechaPrevista || ""))}</div></td>
           <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
           <td><span class="badge b-green">En almacén</span><div class="muted">Total: ${esc(item.total || alm || 0)}</div></td>
-          <td><div class="actions"><button class="btn small green" onclick="App.entregar(${idx})">📦 Entregar</button><button class="btn small orange" onclick="App.devolverFabricacion(${idx})">↩ Fabricación</button><button class="btn small" onclick="App.ver(${idx})">Ver</button></div></td>
+          <td><div class="actions"><button class="btn small green" onclick="App.entregar(${idx})">📦 Entregar</button><button class="btn small orange" onclick="App.devolverFabricacion(${idx})">↩ Fabricación</button><button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'almacen')">🗑 Eliminar</button></div></td>
         </tr>`;
     },
 
@@ -340,7 +341,7 @@
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
       return (this.state.deliveries || [])
-        .filter(item => this.itemEntregado(item) > 0 || norm(item.fase || item.estado || item.status).includes("entreg"))
+        .filter(item => !item.deleted && (this.itemEntregado(item) > 0 || norm(item.fase || item.estado || item.status).includes("entreg")))
         .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
         .filter(item => {
           if(!q) return true;
@@ -407,7 +408,7 @@
           <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Entrega: ${esc(fmtDate((lastEnt && lastEnt.date) || item.entregado_ts || item.fechaEntrega || ""))}</div></td>
           <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
           <td><span class="badge b-green">Entregado</span><div class="muted">Total: ${esc(item.total || ent || 0)}</div></td>
-          <td><div class="actions"><button class="btn small orange" onclick="App.reabrirAlmacen(${idx})">↩ Reabrir almacén</button><button class="btn small" onclick="App.ver(${idx})">Ver</button></div></td>
+          <td><div class="actions"><button class="btn small orange" onclick="App.reabrirAlmacen(${idx})">↩ Reabrir almacén</button><button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'entregados')">🗑 Eliminar</button></div></td>
         </tr>`;
     },
 
@@ -490,6 +491,47 @@
       this.render();
       this.renderDelivered();
       this.toast("Devuelto a Fabricación");
+    },
+
+    eliminarPedido(idx, origen){
+      const item = this.state.deliveries[idx];
+      if(!item) return;
+      const ref = String(item.ref || item.referencia || "").trim();
+      const label = origen === "entregados" ? "Entregados" : "Almacén";
+      const ok = confirm("¿Eliminar definitivamente este pedido de " + label + "?\n\nReferencia: " + ref + "\n\nNo volverá a aparecer en Almacén ni en Entregados.");
+      if(!ok) return;
+
+      this.state.deliveries = (this.state.deliveries || []).filter((x, i) => i !== idx && String(x && (x.ref || x.referencia) || "").trim() !== ref);
+
+      this.markPrepDeleted(ref);
+      this.save();
+      this.render();
+      this.renderDelivered();
+      this.toast("Pedido eliminado");
+    },
+
+    markPrepDeleted(ref){
+      if(!ref) return;
+      const key = "prep_meta_" + ref;
+      const meta = parse(getStore(key), {}) || {};
+      meta.deleted = true;
+      meta.eliminado = true;
+      meta.eliminado_modulos = true;
+      meta.fase = "eliminado";
+      meta.estado = "eliminado";
+      meta.lastUpdate = new Date().toISOString();
+      delete meta.en_fabricacion;
+      delete meta.fabricacion_ts;
+      delete meta.en_pintura;
+      delete meta.pintura_ts;
+      delete meta.en_almacen;
+      delete meta.almacen_ts;
+      delete meta.entregado;
+      delete meta.en_entregado;
+      delete meta.entregado_ts;
+      const raw = JSON.stringify(meta);
+      try{ localStorage.setItem(key, raw); }catch(e){}
+      try{ sessionStorage.setItem(key, raw); }catch(e){}
     },
 
     updatePrepMeta(item){

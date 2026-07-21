@@ -183,6 +183,7 @@
         const ref = k.replace(/^prep_meta_/,"").trim();
         const meta = parse(getStore(k), null);
         if(!ref || !meta) return;
+        if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return;
         const fase = norm(meta.fase || meta.estado || meta.status);
         const enFab = !!(meta.en_fabricacion || meta.fabricacion_ts || fase.includes("fabric"));
         const enPint = !!(meta.en_pintura || meta.pintura_ts || fase.includes("pint"));
@@ -241,6 +242,12 @@
       if(!item || !item.ref) return item;
       const ov = this.overrides()[String(item.ref).trim()];
       if(!ov) return item;
+      if(ov.deleted){
+        item.deleted = true;
+        item.archived = true;
+        item.fase = "eliminado";
+        item.estado = "eliminado";
+      }
       item.flow = {...(item.flow || {}), ...(ov.flow || {})};
       if(item.flow.fabricacion === undefined) item.flow.fabricacion = item.flow.fab;
       if(item.flow.fab === undefined) item.flow.fab = item.flow.fabricacion;
@@ -393,7 +400,7 @@
     },
 
     counters(items){
-      const all = (items || this.allItems()).filter(x=>!x.archived);
+      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted);
       return all.reduce((a,it)=>{
         const f=this.ensureFlow(it);
         a.fab += n(f.fab);
@@ -422,7 +429,7 @@
       const companyFilter = document.getElementById("companyFilter").value;
       const stage = document.getElementById("stageFilter").value;
       return this.allItems()
-        .filter(it=>!it.archived)
+        .filter(it=>!it.archived && !it.deleted)
         .filter(it=>{
           const f=this.ensureFlow(it);
           if(stage === "fab") return n(f.fab) > 0;
@@ -528,6 +535,7 @@
               <button class="btn small green" onclick="App.move('${refEnc}', 'pintura', 'almacen')">🏬 A almacén</button>
               <button class="btn small" onclick="App.openPrep('${refEnc}')">Preparación</button>
               <button class="btn small orange" onclick="App.ver('${refEnc}')">Ver</button>
+              <button class="btn small red" onclick="App.eliminarPedidoRef('${refEnc}')">🗑 Eliminar</button>
             </div>
           </td>
         </tr>`;
@@ -630,6 +638,65 @@
       const v = JSON.stringify(meta);
       try{ localStorage.setItem(key, v); }catch(e){}
       try{ sessionStorage.setItem(key, v); }catch(e){}
+    },
+
+    eliminarPedidoRef(refEnc){
+      const ref = decodeURIComponent(refEnc || "");
+      if(!ref){
+        alert("No se encuentra la referencia del pedido.");
+        return;
+      }
+      const ok = confirm("¿Eliminar definitivamente este pedido de Fabricación?\n\nReferencia: " + ref + "\n\nSe eliminará de Fabricación y no volverá a importarse desde Preparación.");
+      if(!ok) return;
+
+      ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
+        if(Array.isArray(this.state[k])){
+          this.state[k] = this.state[k].filter(x => String(x && (x.ref || x.referencia) || "").trim() !== ref);
+        }
+      });
+
+      try{
+        const map = this.overrides ? this.overrides() : {};
+        map[ref] = {deleted:true, archived:true, flow:{fab:0,fabricacion:0,pintura:0,almacen:0,entregado:0}, fase:"eliminado", estado:"eliminado", updatedAt:new Date().toISOString()};
+        if(this.saveOverrides) this.saveOverrides(map);
+      }catch(e){}
+
+      try{
+        let inbox = parse(getStore(INBOX_KEY), []) || [];
+        if(Array.isArray(inbox)){
+          inbox = inbox.filter(x => String(x && (x.ref || x.referencia) || "").trim() !== ref);
+          setStore(INBOX_KEY, JSON.stringify(inbox));
+        }
+      }catch(e){}
+
+      this.markPrepDeleted(ref);
+      this.save(false);
+      this.render();
+      this.toast("Pedido eliminado");
+    },
+
+    markPrepDeleted(ref){
+      if(!ref) return;
+      const key = "prep_meta_" + ref;
+      const meta = parse(getStore(key), {}) || {};
+      meta.deleted = true;
+      meta.eliminado = true;
+      meta.eliminado_modulos = true;
+      meta.fase = "eliminado";
+      meta.estado = "eliminado";
+      meta.lastUpdate = new Date().toISOString();
+      delete meta.en_fabricacion;
+      delete meta.fabricacion_ts;
+      delete meta.en_pintura;
+      delete meta.pintura_ts;
+      delete meta.en_almacen;
+      delete meta.almacen_ts;
+      delete meta.entregado;
+      delete meta.en_entregado;
+      delete meta.entregado_ts;
+      const raw = JSON.stringify(meta);
+      try{ localStorage.setItem(key, raw); }catch(e){}
+      try{ sessionStorage.setItem(key, raw); }catch(e){}
     },
 
     openPrep(refEnc){
