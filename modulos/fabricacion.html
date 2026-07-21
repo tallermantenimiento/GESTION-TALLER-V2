@@ -36,8 +36,11 @@
     .kpi b{display:block;font-size:22px;margin-top:5px}
     .card{border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(180deg,rgba(16,27,49,.96),rgba(10,19,36,.96));box-shadow:var(--shadow);padding:18px;margin-bottom:18px}
     .section-title{font-size:18px;margin:0 0 14px;display:flex;align-items:center;gap:10px}
-    .company{border:1px solid rgba(148,163,184,.22);border-radius:14px;margin:14px 0;background:rgba(6,12,24,.42);overflow:hidden}
-    .company-head{display:flex;align-items:center;gap:12px;padding:13px 14px;background:rgba(15,23,42,.72);border-bottom:1px solid rgba(148,163,184,.18);cursor:pointer;user-select:none}
+    details.company{border:1px solid rgba(148,163,184,.22);border-radius:14px;margin:14px 0;background:rgba(6,12,24,.42);overflow:hidden}
+    details.company summary{list-style:none;display:flex;align-items:center;gap:12px;padding:13px 14px;background:rgba(15,23,42,.72);border-bottom:1px solid rgba(148,163,184,.18);cursor:pointer;user-select:none}
+    details.company summary::-webkit-details-marker{display:none}
+    .fold::before{content:"▸";display:inline-block;width:18px}
+    details[open] .fold::before{content:"▾"}
     .company-name{font-size:16px;font-weight:900;letter-spacing:.02em}
     .badge{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:900}
     .b-blue{background:rgba(14,165,233,.18);color:#7dd3fc;border:1px solid rgba(14,165,233,.28)}
@@ -69,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Mueve unidades hacia pintura o almacén sin cargar el index antiguo.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto.</p>
     </section>
 
     <div class="toolbar">
@@ -186,9 +189,6 @@
         if((!enFab && !enPint && !enAlm) || isEnt) return;
 
         const units = Math.max(1, n(meta.unidades || meta.uds || meta.total || meta.cantidad || 1) || 1);
-        const existing = this.findByRef(ref);
-        if(existing) return;
-
         const item = {
           id: meta.pedido_uid || meta.pedido_id || ("FAB-" + ref),
           ref,
@@ -201,7 +201,7 @@
           unidades: units,
           delivered: 0,
           status:"pendiente",
-          estado:"pendiente",
+          estado: enPint ? "pintura" : (enAlm ? "almacen" : "fabricacion"),
           fase: enPint ? "pintura" : (enAlm ? "almacen" : "fabricacion"),
           tipo:"fabricacion",
           keepInFab:true,
@@ -219,7 +219,11 @@
           unassignedBorrow: meta.unassignedBorrow || meta.unassigned_borrow || null,
           notes:"Importado desde Preparación"
         };
-        this.upsertEveryPool(item);
+
+        const old = this.findByRef(ref);
+        if(!old){
+          this.upsertEveryPool(item);
+        }
       });
     },
 
@@ -243,10 +247,12 @@
 
     findByRef(ref){
       ref = String(ref||"").trim();
-      return (this.state.deliveries || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref)
-        || (this.state.fabricacion || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref)
-        || (this.state.fab || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref)
-        || (this.state.trabajos || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+      const pools = ["deliveries","fabricacion","fab","trabajos"];
+      for(const k of pools){
+        const found = (this.state[k] || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+        if(found) return found;
+      }
+      return null;
     },
 
     upsertEveryPool(item){
@@ -406,30 +412,30 @@
         .map(it=>this.rowHTML(it))
         .join("");
       return `
-        <div class="company">
-          <div class="company-head" onclick="const ico=this.querySelector('.fold-ico'); const b=this.nextElementSibling; const closed=b.style.display==='none'; b.style.display=closed?'block':'none'; if(ico) ico.textContent=closed?'▾':'▸';">
-            <span class="fold-ico">▸</span>
+        <details class="company">
+          <summary>
+            <span class="fold"></span>
             <span class="company-name">${esc(company)}</span>
             <span class="badge b-orange">Fab: ${totals.fab}</span>
             <span class="badge b-violet">Pint: ${totals.pintura}</span>
             <span class="badge b-green">Alm: ${totals.almacen}</span>
             <span class="badge b-blue">Ent: ${totals.entregado}</span>
-          </div>
-          <div class="company-body" style="display:none">
+          </summary>
+          <div class="company-body">
             <table>
               <thead><tr><th>Referencia / concepto</th><th>Fechas</th><th>Flujo</th><th>Estado</th><th>Acciones</th></tr></thead>
               <tbody>${rows}</tbody>
             </table>
           </div>
-        </div>`;
+        </details>`;
     },
 
     rowHTML(item){
-      const idx = this.getIndex(item.ref);
       const f = this.ensureFlow(item);
       const ua = this.unassignedSummary(item);
       const estado = n(f.pintura)>0 ? "En pintura" : (n(f.fab)>0 ? "En fabricación" : (n(f.almacen)>0 ? "En almacén" : "Sin fase activa"));
       const uaPill = ua.lines ? `<span class="badge b-red">No asignado: ${ua.lines}</span>` : "";
+      const refEnc = encodeURIComponent(item.ref || item.referencia || "");
       return `
         <tr>
           <td>
@@ -455,30 +461,20 @@
           </td>
           <td>
             <div class="actions">
-              <button class="btn small violet" onclick="App.moveRef('${encodeURIComponent(item.ref || "")}', 'fab', 'pintura')">🎨 A pintura</button>
-              <button class="btn small" onclick="App.moveRef('${encodeURIComponent(item.ref || "")}', 'pintura', 'fab')">↩ Fab</button>
-              <button class="btn small green" onclick="App.moveRef('${encodeURIComponent(item.ref || "")}', 'pintura', 'almacen')">🏬 A almacén</button>
-              <button class="btn small" onclick="App.openPrep('${encodeURIComponent(item.ref || "")}')">Preparación</button>
-              <button class="btn small orange" onclick="App.verRef('${encodeURIComponent(item.ref || "")}')">Ver</button>
+              <button class="btn small violet" onclick="App.move('${refEnc}', 'fab', 'pintura')">🎨 A pintura</button>
+              <button class="btn small" onclick="App.move('${refEnc}', 'pintura', 'fab')">↩ Fab</button>
+              <button class="btn small green" onclick="App.move('${refEnc}', 'pintura', 'almacen')">🏬 A almacén</button>
+              <button class="btn small" onclick="App.openPrep('${refEnc}')">Preparación</button>
+              <button class="btn small orange" onclick="App.ver('${refEnc}')">Ver</button>
             </div>
           </td>
         </tr>`;
     },
 
-    getIndex(ref){
-      const arr = this.state.deliveries || [];
-      let idx = arr.findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === String(ref||"").trim());
-      if(idx < 0){
-        const it = this.findByRef(ref);
-        if(it){ this.upsertEveryPool(it); idx = (this.state.deliveries || []).findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === String(ref||"").trim()); }
-      }
-      return idx;
-    },
-
-    itemAtIndex(idx){
-      const it = (this.state.deliveries || [])[idx];
-      if(it) return this.normalizeItem(it);
-      return null;
+    itemByRef(refEnc){
+      const ref = decodeURIComponent(refEnc || "");
+      const item = this.findByRef(ref);
+      return item ? this.normalizeItem(item) : null;
     },
 
     askQty(label, max){
@@ -492,41 +488,13 @@
       return qty;
     },
 
-    itemByRef(ref){
-      ref = String(ref || "").trim();
-      if(!ref) return null;
-      const it = this.findByRef(ref);
-      return it ? this.normalizeItem(it) : null;
-    },
-
-    moveRef(refEnc, from, to){
-      const ref = decodeURIComponent(refEnc || "");
-      const item = this.itemByRef(ref);
+    move(refEnc, from, to){
+      const item = this.itemByRef(refEnc);
       if(!item){
-        alert("No encuentro el trabajo en Fabricación: " + ref);
+        alert("No encuentro el trabajo para mover.");
         return;
       }
-      this.moveItem(item, from, to);
-    },
 
-    verRef(refEnc){
-      const ref = decodeURIComponent(refEnc || "");
-      const item = this.itemByRef(ref);
-      if(!item){
-        alert("No encuentro el trabajo: " + ref);
-        return;
-      }
-      this.showItem(item);
-    },
-
-    move(idx, from, to){
-      const item = this.itemAtIndex(idx);
-      if(!item) return;
-      this.moveItem(item, from, to);
-    },
-
-    moveItem(item, from, to){
-      if(!item) return;
       const f = this.ensureFlow(item);
       const max = n(from === "fab" ? (f.fab ?? f.fabricacion) : f[from]);
       const labels = {fab:"Fabricación", pintura:"Pintura", almacen:"Almacén", entregado:"Entregado"};
@@ -607,13 +575,9 @@
       location.href = "preparacion_pedidos.html?openRef=" + encodeURIComponent(ref);
     },
 
-    ver(idx){
-      const item = this.itemAtIndex(idx);
+    ver(refEnc){
+      const item = this.itemByRef(refEnc);
       if(!item) return;
-      this.showItem(item);
-    },
-
-    showItem(item){
       const f = this.ensureFlow(item);
       alert(
         "Referencia: " + (item.ref || "") + "\n" +
