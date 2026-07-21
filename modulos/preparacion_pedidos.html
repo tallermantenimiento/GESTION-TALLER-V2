@@ -3206,6 +3206,94 @@ function _v2StockRowMaterialMatches(row, material){
     return rowKeys.some(a => matKeys.some(b => a === b || (a.length > 2 && b.length > 2 && (a.includes(b) || b.includes(a)))));
   }catch(e){ return false; }
 }
+function _v2AsArrayWithIds(value, fallbackName){
+  if(Array.isArray(value)) return value;
+  const out = [];
+  if(value && typeof value === "object"){
+    Object.keys(value).forEach(k=>{
+      const v = value[k];
+      if(v && typeof v === "object"){
+        out.push(Object.assign({id:k, key:k, name:(v.name||v.nombre||v.empresa||v.company||v.label||k)}, v));
+      }else{
+        out.push({id:k, name:String(v || k), value:v});
+      }
+    });
+  }
+  return out;
+}
+function _v2LooksLikeStockRow(o){
+  if(!o || typeof o !== "object" || Array.isArray(o)) return false;
+  const keys = Object.keys(o);
+  return [
+    "materialId","matId","material_id","material","mat","materialName","material_nombre",
+    "name","nombre","qty","cantidad","stock","cantidadActual","real","fisico","libre"
+  ].some(k => keys.includes(k));
+}
+function _v2NormalizeStockRows(src, companyHint, materialHint, out){
+  out = out || [];
+  if(src === undefined || src === null) return out;
+
+  if(Array.isArray(src)){
+    src.forEach(x => _v2NormalizeStockRows(x, companyHint, materialHint, out));
+    return out;
+  }
+
+  if(typeof src !== "object"){
+    if(companyHint || materialHint){
+      out.push({companyId:companyHint || "", materialId:materialHint || "", qty:_v2Num(src), cantidad:_v2Num(src)});
+    }
+    return out;
+  }
+
+  if(_v2LooksLikeStockRow(src)){
+    const row = Object.assign({}, src);
+    row.companyId = _v2First(row.companyId,row.empresaId,row.company,row.empresa,row.companyName,row.empresaNombre,companyHint);
+    row.empresa = _v2First(row.empresa,row.company,row.companyName,row.empresaNombre,companyHint);
+    row.materialId = _v2First(row.materialId,row.matId,row.material_id,materialHint,row.material,row.mat,row.name,row.nombre);
+    row.material = _v2First(row.material,row.mat,row.materialName,row.material_nombre,row.name,row.nombre,materialHint);
+    row.qty = _v2First(row.qty,row.cantidad,row.stock,row.cantidadActual,row.real,row.fisico,row.libre,0);
+    out.push(row);
+    return out;
+  }
+
+  Object.keys(src).forEach(k=>{
+    const v = src[k];
+    // Nivel 1 normalmente es empresa; nivel 2 normalmente es material.
+    if(!companyHint){
+      _v2NormalizeStockRows(v, k, materialHint, out);
+    }else if(!materialHint){
+      _v2NormalizeStockRows(v, companyHint, k, out);
+    }else{
+      _v2NormalizeStockRows(v, companyHint, materialHint, out);
+    }
+  });
+  return out;
+}
+function _v2NormalizeLotsFromDB(db){
+  const out = [];
+  if(!db || typeof db !== "object") return out;
+  _v2NormalizeStockRows(db.stockLots, "", "", out);
+  _v2NormalizeStockRows(db.stocks, "", "", out);
+  _v2NormalizeStockRows(db.stock, "", "", out);
+  return out;
+}
+function _v2NormalizeCompaniesFromDB(db){
+  let arr = _v2AsArrayWithIds(db && db.companies, "empresa");
+  // Refuerzo: si existe maestro publicado por Stock, se mezcla como fuente de verdad de nombres.
+  try{
+    const masterRaw = getAny("ldh_company_master_v1");
+    const master = masterRaw ? JSON.parse(masterRaw) : null;
+    const mArr = master && Array.isArray(master.companies) ? master.companies : [];
+    if(mArr.length) arr = mArr.concat(arr || []);
+  }catch(e){}
+  const seen = new Set();
+  return (arr || []).filter(c=>{
+    const key = _v2Norm(_v2First(c && c.id, c && c.companyId, c && c.empresaId, c && c.name, c && c.nombre, c && c.empresa, c && c.company));
+    if(!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 function _v2AugmentMaterialsFromLots(materials, lots){
   const out = Array.isArray(materials) ? materials.slice() : [];
   const seen = new Set(out.map(m => String(_v2First(m && m.id, m && m.materialId, _v2MaterialLabel ? _v2MaterialLabel(m) : "")).trim()).filter(Boolean));
@@ -3240,11 +3328,9 @@ function _v2LoadCompanyStockDB(){
       if(!raw) continue;
       const db = JSON.parse(raw);
       if(!db || typeof db !== "object") continue;
-      const companies = Array.isArray(db.companies) ? db.companies : [];
-      const materialsBase = Array.isArray(db.materials) ? db.materials : [];
-      const lots = Array.isArray(db.stockLots) ? db.stockLots :
-                   Array.isArray(db.stocks) ? db.stocks :
-                   Array.isArray(db.stock) ? db.stock : [];
+      const companies = _v2NormalizeCompaniesFromDB(db);
+      const materialsBase = _v2AsArrayWithIds(db.materials, "material");
+      const lots = _v2NormalizeLotsFromDB(db);
       const materials = _v2AugmentMaterialsFromLots(materialsBase, lots);
       const reservations = Array.isArray(db.reservations) ? db.reservations :
                            Array.isArray(db.reservas) ? db.reservas : [];
@@ -3290,11 +3376,25 @@ function _v2GetPedidoEmpresa(){
 function _v2FindCompany(pack, empresaNombre){
   const target = _v2Norm(empresaNombre);
   if(!target) return null;
-  return pack.companies.find(c=>{
-    const label = _v2Norm(_v2CompanyLabel(c));
-    const id = _v2Norm(c.id);
-    return label === target || id === target || label.includes(target) || target.includes(label);
+  let c = (pack.companies || []).find(c=>{
+    const keys = _v2CompanyKeysFromObj(c);
+    return keys.some(k => k === target || (k.length > 2 && (k.includes(target) || target.includes(k))));
   }) || null;
+  if(c) return c;
+
+  // Si no hay empresa en companies pero sí aparece en filas de stock, crear empresa virtual para lectura.
+  const row = (pack.lots || []).find(r=>{
+    const keys = _v2CompanyKeysFromObj({
+      id:_v2First(r.companyId,r.empresaId,r.company,r.empresa,r.companyName,r.empresaNombre),
+      name:_v2First(r.companyName,r.empresaNombre,r.empresa,r.company,r.companyId,r.empresaId)
+    });
+    return keys.some(k => k === target || (k.length > 2 && (k.includes(target) || target.includes(k))));
+  });
+  if(row){
+    const name = _v2First(row.companyName,row.empresaNombre,row.empresa,row.company,row.companyId,row.empresaId,empresaNombre);
+    return {id:name, name, nombre:name, empresa:name, __fromStockRow:true};
+  }
+  return null;
 }
 function _v2FindMaterialForLine(pack, line, linkedMat, companyId){
   const rawName = String(_v2First(
