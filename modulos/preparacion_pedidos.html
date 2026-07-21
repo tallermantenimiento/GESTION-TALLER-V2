@@ -3968,21 +3968,28 @@ function renderTabla() {
     const stockQty = (linkedId && linkedMat && !linkedMat.__v2) ? getStockQty(linkedId) : null;
 
     let stockPill = "";
+    const companyStockPill = _v2CompanyStockPill(linea, linkedMat, pedida);
+
     if(linkedMat){
       if(linkedMat.__v2){
         stockPill = `<span class="link-pill ok">Vinculado Stock v2: <b>${linkedMat.name}</b></span>`;
       }else{
-        const s = toNum(stockQty);
-        let cls = "ok";
-        if(s <= 0) cls = "danger";
-        else if(pedida > 0 && s < pedida) cls = "warn";
-        stockPill = `<span class="link-pill ${cls}">Stock: <b>${s}</b> ${linkedMat.unit || ""}</span>`;
+        const unitTxt = String((linea && (linea.unit || linea.unidad)) || "").toLowerCase();
+        const isBarOrPaint = unitTxt.includes("barra") || (typeof isPaintLine === "function" && isPaintLine(linea));
+        // No mostrar cantidades del stock antiguo en hierro/pintura. La pill válida es Stock empresa v2.
+        if(isBarOrPaint && companyStockPill){
+          stockPill = "";
+        }else{
+          const s = toNum(stockQty);
+          let cls = "ok";
+          if(s <= 0) cls = "danger";
+          else if(pedida > 0 && s < pedida) cls = "warn";
+          stockPill = `<span class="link-pill ${cls}">Stock: <b>${s}</b> ${linkedMat.unit || ""}</span>`;
+        }
       }
     } else {
       stockPill = `<span class="link-pill">Sin vínculo</span>`;
     }
-
-    const companyStockPill = _v2CompanyStockPill(linea, linkedMat, pedida);
 
     // Reconciliación directa:
     // - Si Stock v2 dice que este material está asignado a este trabajo, reflejarlo como recibido.
@@ -6374,7 +6381,9 @@ init();
     let linkedMat = null;
     try{
       const linkedId = (typeof getLinkedMatIdForLine==="function") ? getLinkedMatIdForLine(line) : "";
-      linkedMat = linkedId && typeof getMatById==="function" ? getMatById(linkedId) : null;
+      linkedMat = linkedId
+        ? ((typeof LDH_getV2MaterialById==="function" ? LDH_getV2MaterialById(linkedId) : null) || (typeof getMatById==="function" ? getMatById(linkedId) : null))
+        : null;
     }catch(e){}
 
     try{
@@ -6384,14 +6393,62 @@ init();
       }
     }catch(e){}
 
-    const target = norm(first(linkedMat&&linkedMat.name, linkedMat&&linkedMat.nombre, line&&line.stockLinkLabel, line&&line.linked_matName, line&&line.mat, line&&line.material, line&&line.name));
+    // Prioridad absoluta al texto real de la línea. El linkedMat puede venir del stock antiguo.
+    const target = norm(first(line&&line.stockLinkLabel, line&&line.linked_matName, line&&line.mat, line&&line.material, line&&line.name, linkedMat&&linkedMat.name, linkedMat&&linkedMat.nombre));
+    if(!target) return null;
+
     const cid = companyId(company);
-    const stockIds = new Set((p.lots||[]).filter(s=>String(first(s.companyId,s.empresaId,s.empresa,s.company))===cid).map(s=>String(first(s.materialId,s.matId,s.material,s.material_id))));
+    const stockRows = (p.lots||[]).filter(s=>String(first(s.companyId,s.empresaId,s.empresa,s.company))===cid);
+    const stockIds = new Set(stockRows.map(s=>String(first(s.materialId,s.matId,s.material_id,s.material))).filter(Boolean));
+
     const mats = (p.materials||[]).slice().sort((a,b)=>(stockIds.has(materialId(a))?0:1)-(stockIds.has(materialId(b))?0:1));
-    return mats.find(m=>{
+    let found = mats.find(m=>{
       const nm = norm(materialLabel(m));
       return nm === target || nm.includes(target) || target.includes(nm);
     });
+    if(found) return found;
+
+    // Fallback real v2: algunas bases guardan el nombre directamente en la fila de stock.
+    const row = stockRows.find(s=>{
+      const txt = norm(first(s.name,s.nombre,s.materialName,s.material_nombre,s.label,s.material,s.mat,s.materialId,s.matId));
+      return txt && (txt === target || txt.includes(target) || target.includes(txt));
+    });
+    if(row){
+      const mid = String(first(row.materialId,row.matId,row.material_id,row.material,target));
+      return {
+        id: mid,
+        materialId: mid,
+        name: first(row.name,row.nombre,row.materialName,row.material_nombre,row.label,row.material,row.mat,target),
+        unit: first(row.unit,row.unidad,line&&line.unit,line&&line.unidad),
+        tipo: first(row.tipo,row.type,row.cat,row.categoria, String(first(line&&line.unit,line&&line.unidad)).toLowerCase().includes("barra") ? "hierro" : ""),
+        __v2:true
+      };
+    }
+
+    return null;
+  }
+
+  function createV2MaterialFromLine(p,line,company){
+    // Último recurso para "Añadir a stock": si el material no existe en v2,
+    // se crea una ficha mínima en Stock real v2 y después se registra la entrada.
+    const name = String(first(line&&line.mat,line&&line.material,line&&line.name,line&&line.title,"Material")).trim();
+    if(!name) return null;
+    if(!p.db.materials) p.db.materials = [];
+    if(!Array.isArray(p.db.materials)) p.db.materials = [];
+    const unit = String(first(line&&line.unit,line&&line.unidad,"ud")).trim();
+    const id = "mat_prep_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
+    const tipo = unit.toLowerCase().includes("barra") ? "hierro" : ((typeof isPaintLine==="function" && isPaintLine(line)) ? "pintura" : "ferreteria");
+    const mat = { id, materialId:id, name, nombre:name, unit, unidad:unit, tipo, type:tipo, createdFrom:"preparacion_pedidos", createdAt:new Date().toISOString() };
+    p.db.materials.push(mat);
+    p.materials = p.db.materials;
+    let lotsArr = Array.isArray(p.db.stockLots) ? p.db.stockLots :
+                  Array.isArray(p.db.stocks) ? p.db.stocks :
+                  Array.isArray(p.db.stock) ? p.db.stock : null;
+    if(!lotsArr){ p.db.stock = []; lotsArr = p.db.stock; }
+    lotsArr.push({ id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId:companyId(company), materialId:id, qty:0, cantidad:0, createdFrom:"preparacion_pedidos" });
+    p.lots = lotsArr;
+    try{ savePack(p); }catch(e){}
+    return mat;
   }
 
   function isActiveRes(r){
@@ -6515,7 +6572,10 @@ init();
     const p = pack();
     const c = activeCompany(p);
     if(!c) return {ok:false, reason:"No se encuentra la empresa del pedido en Stock v2."};
-    const m = materialForLine(p,line,c);
+    let m = materialForLine(p,line,c);
+    if(!m){
+      m = createV2MaterialFromLine(p,line,c);
+    }
     if(!m) return {ok:false, reason:"No se encuentra el material en Stock v2. Pulsa Vincular."};
     return {ok:true,index,line,pack:p,company:c,companyId:companyId(c),material:m,materialId:materialId(m)};
   }
@@ -6890,6 +6950,34 @@ init();
   function matId(m){ return String(first(m && m.id, m && m.materialId, matLabel(m))); }
   function compId(c){ return String(first(c && c.id, c && c.empresaId, compLabel(c))); }
 
+
+  function createMissingV2MaterialLocal(pack,line,company){
+    try{
+      const name = String(first(line&&line.mat,line&&line.material,line&&line.name,line&&line.title,"Material")).trim();
+      if(!name || !pack || !pack.db || !company) return null;
+      if(!Array.isArray(pack.db.materials)) pack.db.materials = Array.isArray(pack.materials) ? pack.materials : [];
+      const unit = String(first(line&&line.unit,line&&line.unidad,"ud")).trim();
+      const id = "mat_prep_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
+      const tipo = unit.toLowerCase().includes("barra") ? "hierro" : ((typeof isPaintLine==="function" && isPaintLine(line)) ? "pintura" : "ferreteria");
+      const mat = {id, materialId:id, name, nombre:name, unit, unidad:unit, tipo, type:tipo, createdFrom:"preparacion_pedidos", createdAt:new Date().toISOString()};
+      pack.db.materials.push(mat);
+      pack.materials = pack.db.materials;
+
+      let lotsArr = Array.isArray(pack.db.stockLots) ? pack.db.stockLots :
+                    Array.isArray(pack.db.stocks) ? pack.db.stocks :
+                    Array.isArray(pack.db.stock) ? pack.db.stock : null;
+      if(!lotsArr){ pack.db.stock = []; lotsArr = pack.db.stock; }
+      lotsArr.push({id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId:compId(company), materialId:id, qty:0, cantidad:0, createdFrom:"preparacion_pedidos"});
+      pack.lots = lotsArr;
+
+      try{ savePack(pack); }catch(e){}
+      return mat;
+    }catch(e){
+      console.warn("No se pudo crear ficha v2 mínima desde Preparación", e);
+      return null;
+    }
+  }
+
   function resolve(index){
     const line = lineByIndex(index);
     if(!line) return {ok:false, reason:"No se encuentra la línea."};
@@ -6921,7 +7009,9 @@ init();
     let linkedMat = null;
     try{
       const linkedId = (typeof getLinkedMatIdForLine === "function") ? getLinkedMatIdForLine(line) : "";
-      linkedMat = linkedId && typeof getMatById === "function" ? getMatById(linkedId) : null;
+      linkedMat = linkedId
+        ? ((typeof LDH_getV2MaterialById === "function" ? LDH_getV2MaterialById(linkedId) : null) || (typeof getMatById === "function" ? getMatById(linkedId) : null))
+        : null;
     }catch(e){}
     let material = null;
     try{
@@ -6930,11 +7020,14 @@ init();
       }
     }catch(e){}
     if(!material){
-      const raw = norm(first(linkedMat && linkedMat.name, linkedMat && linkedMat.nombre, line.stockLinkLabel, line.linked_matName, line.mat, line.material));
+      const raw = norm(first(line.stockLinkLabel, line.linked_matName, line.mat, line.material, line.name, linkedMat && linkedMat.name, linkedMat && linkedMat.nombre));
       material = (pack.materials || []).find(m=>{
         const nm = norm(matLabel(m));
         return nm === raw || nm.includes(raw) || raw.includes(nm);
       });
+    }
+    if(!material){
+      material = createMissingV2MaterialLocal(pack,line,company);
     }
     if(!material) return {ok:false, reason:"No se encuentra el material en Stock v2. Pulsa Vincular."};
 
@@ -7295,6 +7388,34 @@ init();
   function matId(m){ return String(first(m && m.id, m && m.materialId, matLabel(m))); }
   function compId(c){ return String(first(c && c.id, c && c.empresaId, compLabel(c))); }
 
+
+  function createMissingV2MaterialLocal(pack,line,company){
+    try{
+      const name = String(first(line&&line.mat,line&&line.material,line&&line.name,line&&line.title,"Material")).trim();
+      if(!name || !pack || !pack.db || !company) return null;
+      if(!Array.isArray(pack.db.materials)) pack.db.materials = Array.isArray(pack.materials) ? pack.materials : [];
+      const unit = String(first(line&&line.unit,line&&line.unidad,"ud")).trim();
+      const id = "mat_prep_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
+      const tipo = unit.toLowerCase().includes("barra") ? "hierro" : ((typeof isPaintLine==="function" && isPaintLine(line)) ? "pintura" : "ferreteria");
+      const mat = {id, materialId:id, name, nombre:name, unit, unidad:unit, tipo, type:tipo, createdFrom:"preparacion_pedidos", createdAt:new Date().toISOString()};
+      pack.db.materials.push(mat);
+      pack.materials = pack.db.materials;
+
+      let lotsArr = Array.isArray(pack.db.stockLots) ? pack.db.stockLots :
+                    Array.isArray(pack.db.stocks) ? pack.db.stocks :
+                    Array.isArray(pack.db.stock) ? pack.db.stock : null;
+      if(!lotsArr){ pack.db.stock = []; lotsArr = pack.db.stock; }
+      lotsArr.push({id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId:compId(company), materialId:id, qty:0, cantidad:0, createdFrom:"preparacion_pedidos"});
+      pack.lots = lotsArr;
+
+      try{ savePack(pack); }catch(e){}
+      return mat;
+    }catch(e){
+      console.warn("No se pudo crear ficha v2 mínima desde Preparación", e);
+      return null;
+    }
+  }
+
   function resolve(index){
     const line = lineByIndex(index);
     if(!line) return {ok:false, reason:"No se encuentra la línea."};
@@ -7323,7 +7444,9 @@ init();
     let linkedMat = null;
     try{
       const linkedId = (typeof getLinkedMatIdForLine === "function") ? getLinkedMatIdForLine(line) : "";
-      linkedMat = linkedId && typeof getMatById === "function" ? getMatById(linkedId) : null;
+      linkedMat = linkedId
+        ? ((typeof LDH_getV2MaterialById === "function" ? LDH_getV2MaterialById(linkedId) : null) || (typeof getMatById === "function" ? getMatById(linkedId) : null))
+        : null;
     }catch(e){}
     let material = null;
     try{
@@ -7332,11 +7455,14 @@ init();
       }
     }catch(e){}
     if(!material){
-      const raw = norm(first(linkedMat && linkedMat.name, linkedMat && linkedMat.nombre, line.stockLinkLabel, line.linked_matName, line.mat, line.material));
+      const raw = norm(first(line.stockLinkLabel, line.linked_matName, line.mat, line.material, line.name, linkedMat && linkedMat.name, linkedMat && linkedMat.nombre));
       material = (pack.materials || []).find(m=>{
         const nm = norm(matLabel(m));
         return nm === raw || nm.includes(raw) || raw.includes(nm);
       });
+    }
+    if(!material){
+      material = createMissingV2MaterialLocal(pack,line,company);
     }
     if(!material) return {ok:false, reason:"No se encuentra el material en Stock v2. Pulsa Vincular."};
 
