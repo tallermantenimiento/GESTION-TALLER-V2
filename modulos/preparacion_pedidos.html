@@ -3566,7 +3566,13 @@ function _v2CompanyStockInfo(line, linkedMat){
   const movs = (pack.movements || [])
     .filter(m => _v2StockRowCompanyMatches(m, company) && _v2StockRowMaterialMatches(m, material));
 
-  if(movs.length){
+  const rowsReal = rows.reduce((a,s)=> a + _v2Num(_v2First(s.qty, s.cantidad, s.stock, s.cantidadActual, s.real, s.fisico, s.libre)), 0);
+
+  if(rows.length){
+    // La tabla de Stock mantiene la cantidad física actual en la fila.
+    // Los movimientos son historial; no deben tapar una fila física actualizada.
+    real = rowsReal;
+  }else if(movs.length){
     real = movs.reduce((a,m)=>{
       const type = _v2First(m.type, m.tipo, "entrada");
       const qty = _v2Num(_v2First(m.qty, m.cantidad, m.amount));
@@ -3574,7 +3580,7 @@ function _v2CompanyStockInfo(line, linkedMat){
       return a + (sign * qty);
     }, 0);
   }else{
-    real = rows.reduce((a,s)=> a + _v2Num(_v2First(s.qty, s.cantidad, s.stock, s.cantidadActual, s.real, s.fisico, s.libre)), 0);
+    real = 0;
   }
 
   // Si no hay fila de stock pero sí existe ficha global, sigue siendo ficha v2 válida.
@@ -4701,9 +4707,75 @@ function LDH_addReceivedToStockV2(linea, diff, index){
     const materialId = (typeof _v2IdOfMaterial === "function") ? _v2IdOfMaterial(material) : String(_v2First(material.id, material.materialId, material.matId, material.name, material.nombre));
 
     if(!Array.isArray(pack.db.movements)) pack.db.movements = Array.isArray(pack.movements) ? pack.movements : [];
+    const companyName = _v2CompanyLabel(company);
+    const materialName = _v2MaterialLabel(material);
+    const unitName = _v2First(material.unit, material.unidad, linea && linea.unit, linea && linea.unidad, "");
+
     const mov = (typeof _v2Movement === "function")
-      ? _v2Movement("entrada", companyId, materialId, diff, {reason:"entrada_desde_preparacion", lineIndex:index, materialName:_v2MaterialLabel(material), companyName:_v2CompanyLabel(company)})
-      : {id:"mov_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId, materialId, type:"entrada", qty:diff, date:new Date().toISOString(), ref:refActual || "", source:"preparacion_pedidos", reason:"entrada_desde_preparacion"};
+      ? _v2Movement("entrada", companyId, materialId, diff, {
+          reason:"entrada_desde_preparacion",
+          lineIndex:index,
+          materialName,
+          material_nombre:materialName,
+          material:materialName,
+          mat:materialName,
+          companyName,
+          empresaNombre:companyName,
+          empresa:companyName,
+          company:companyName,
+          unit:unitName,
+          unidad:unitName
+        })
+      : {
+          id:"mov_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7),
+          companyId,
+          empresaId:companyId,
+          empresa:companyName,
+          company:companyName,
+          companyName,
+          materialId,
+          matId:materialId,
+          material_id:materialId,
+          material:materialName,
+          mat:materialName,
+          materialName,
+          name:materialName,
+          unit:unitName,
+          unidad:unitName,
+          type:"entrada",
+          tipo:"entrada",
+          qty:diff,
+          cantidad:diff,
+          amount:diff,
+          date:new Date().toISOString(),
+          ref:refActual || "",
+          source:"preparacion_pedidos",
+          reason:"entrada_desde_preparacion"
+        };
+
+    // Refuerzo de campos aunque _v2Movement exista.
+    Object.assign(mov, {
+      companyId,
+      empresaId: _v2First(mov.empresaId, companyId),
+      empresa: _v2First(mov.empresa, companyName),
+      company: _v2First(mov.company, companyName),
+      companyName: _v2First(mov.companyName, companyName),
+      materialId,
+      matId: _v2First(mov.matId, materialId),
+      material_id: _v2First(mov.material_id, materialId),
+      material: _v2First(mov.material, materialName),
+      mat: _v2First(mov.mat, materialName),
+      materialName: _v2First(mov.materialName, materialName),
+      name: _v2First(mov.name, materialName),
+      unit: _v2First(mov.unit, unitName),
+      unidad: _v2First(mov.unidad, unitName),
+      type: "entrada",
+      tipo: "entrada",
+      qty: diff,
+      cantidad: diff,
+      amount: diff
+    });
+
     pack.db.movements.push(mov);
     pack.movements = pack.db.movements;
 
@@ -4711,22 +4783,34 @@ function LDH_addReceivedToStockV2(linea, diff, index){
                   Array.isArray(pack.db.stocks) ? pack.db.stocks :
                   Array.isArray(pack.db.stock) ? pack.db.stock : null;
     if(!lotsArr){ pack.db.stock = []; lotsArr = pack.db.stock; }
+
+    let targetRow = null;
     if(Array.isArray(lotsArr)){
-      const existsRow = lotsArr.some(r => {
+      targetRow = lotsArr.find(r => {
         try{
           if(typeof _v2StockRowCompanyMatches === "function" && typeof _v2StockRowMaterialMatches === "function") return _v2StockRowCompanyMatches(r, company) && _v2StockRowMaterialMatches(r, material);
         }catch(e){}
         return String(_v2First(r.companyId,r.empresaId,r.company,r.empresa))===String(companyId) && String(_v2First(r.materialId,r.matId,r.material_id,r.material))===String(materialId);
       });
-      if(!existsRow){
-        lotsArr.push({id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId, empresa:_v2CompanyLabel(company), materialId, material:_v2MaterialLabel(material), qty:0, cantidad:0, unit:_v2First(material.unit,material.unidad,linea&&linea.unit), createdFrom:"preparacion_pedidos"});
-        pack.lots = lotsArr;
+      if(!targetRow){
+        targetRow = {id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId, empresaId:companyId, empresa:companyName, company:companyName, materialId, matId:materialId, material_id:materialId, material:materialName, mat:materialName, name:materialName, qty:0, cantidad:0, stock:0, real:0, fisico:0, unit:unitName, unidad:unitName, createdFrom:"preparacion_pedidos"};
+        lotsArr.push(targetRow);
       }
+
+      const baseQty = _v2Num(_v2First(targetRow.qty, targetRow.cantidad, targetRow.stock, targetRow.cantidadActual, targetRow.real, targetRow.fisico, 0));
+      const nextQty = baseQty + _v2Num(diff);
+      targetRow.qty = nextQty;
+      targetRow.cantidad = nextQty;
+      targetRow.stock = nextQty;
+      targetRow.real = nextQty;
+      targetRow.fisico = nextQty;
+      targetRow.updatedAt = new Date().toISOString();
+      pack.lots = lotsArr;
     }
 
     if(!_v2SaveCompanyStockDB(pack)) return {success:false, reason:"No se pudo guardar el movimiento en Stock v2."};
 
-    const total = (typeof _v2MovementReal === "function") ? _v2MovementReal(pack, companyId, materialId) : diff;
+    const total = targetRow ? _v2Num(_v2First(targetRow.qty, targetRow.cantidad, targetRow.stock, targetRow.real, targetRow.fisico)) : ((typeof _v2MovementReal === "function") ? _v2MovementReal(pack, companyId, materialId) : diff);
     return {success:true, pack, company, companyId, material, materialId, total};
   }catch(e){
     console.warn("No se pudo añadir a Stock v2", e);
@@ -4758,6 +4842,7 @@ function guardarLinea(index) {
   }
 
   linea.aplicado_qty = yaAplicado + diff;
+  // Añadir a stock regulariza la recepción física. No es consumo de stock libre.
   linea.stock_consumed_qty = toNum(linea.stock_consumed_qty);
   linea.linked_matId = added.materialId;
   linea.stockMatId = added.materialId;
@@ -4801,7 +4886,7 @@ function LDH_stockTipoMovimientoFisico(t){
   t = String(t||'').toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
-  if(['entrada','in','ajuste_pos','devolucion','devolucion_fisica'].includes(t)) return 1;
+  if(['entrada','in','ajuste_pos','devolucion','devolucion_fisica','entrada_preparacion','entrada_prep','entrada_desde_preparacion','stock_entrada','recepcion_stock','add_stock'].includes(t)) return 1;
   if(['salida','out','ajuste_neg','consumo','consumo_terminal'].includes(t)) return -1;
   // Trazas informativas: NO son barras físicas.
   if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion','reserva','reservado','asignacion','asignado'].includes(t)) return 0;
