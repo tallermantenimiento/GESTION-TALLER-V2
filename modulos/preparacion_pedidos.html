@@ -4656,7 +4656,85 @@ function _addToRealStock_byLinkedOrName(linea, ironType) {
   return { success:true, mat, matId: mat.id };
 }
 
-/* ========= AÑADIR A STOCK (movimiento "in") ========= */
+/* ========= AÑADIR A STOCK REAL V2 (movimiento físico "entrada") ========= */
+function LDH_addReceivedToStockV2(linea, diff, index){
+  try{
+    const pack = (typeof _v2LoadCompanyStockDB === "function") ? _v2LoadCompanyStockDB() : null;
+    if(!pack || !pack.db) return {success:false, reason:"No hay base Stock v2 cargada."};
+
+    const empresaNombre = (typeof _v2GetPedidoEmpresa === "function") ? _v2GetPedidoEmpresa() : (metaActual && (metaActual.empresa || metaActual.company) || "");
+    let company = (typeof _v2FindCompany === "function") ? _v2FindCompany(pack, empresaNombre) : null;
+    if(!company){
+      const name = String(empresaNombre || "").trim();
+      if(!name) return {success:false, reason:"El pedido no tiene empresa receptora."};
+      company = {id:name, name, nombre:name, empresa:name, __virtual:true};
+      if(!Array.isArray(pack.db.companies)) pack.db.companies = Array.isArray(pack.companies) ? pack.companies : [];
+      if(!pack.db.companies.some(c => _v2Norm(_v2First(c.id,c.name,c.nombre,c.empresa,c.company)) === _v2Norm(name))){
+        pack.db.companies.push(company);
+      }
+      pack.companies = pack.db.companies;
+    }
+
+    const companyId = (typeof _v2IdOfCompany === "function") ? _v2IdOfCompany(company) : String(_v2First(company.id, company.empresaId, company.name, company.nombre, empresaNombre));
+
+    let linkedMat = null;
+    try{
+      const linkedId = (typeof getLinkedMatIdForLine === "function") ? getLinkedMatIdForLine(linea) : "";
+      linkedMat = linkedId && (typeof LDH_getV2MaterialById === "function") ? LDH_getV2MaterialById(linkedId) : null;
+    }catch(e){}
+
+    let material = (typeof _v2FindMaterialForLine === "function") ? (_v2FindMaterialForLine(pack, linea, linkedMat, companyId) || _v2FindMaterialForLine(pack, linea, linkedMat)) : null;
+    if(!material && linkedMat) material = linkedMat;
+
+    if(!material){
+      const matName = String(_v2First(linea && linea.mat, linea && linea.material, linea && linea.name, linea && linea.title, "Material")).trim();
+      if(!matName) return {success:false, reason:"No se pudo determinar el nombre del material."};
+      const matId = "mat_prep_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
+      const unit = String(_v2First(linea && linea.unit, linea && linea.unidad, "ud")).trim();
+      const tipo = unit.toLowerCase().includes("barra") ? "hierro" : ((typeof isPaintLine === "function" && isPaintLine(linea)) ? "pintura" : "ferreteria");
+      material = {id:matId, materialId:matId, matId, name:matName, nombre:matName, material:matName, unit, unidad:unit, tipo, type:tipo, createdFrom:"preparacion_pedidos", createdAt:new Date().toISOString(), __v2:true};
+      if(!Array.isArray(pack.db.materials)) pack.db.materials = [];
+      pack.db.materials.push(material);
+      pack.materials = pack.db.materials;
+    }
+
+    const materialId = (typeof _v2IdOfMaterial === "function") ? _v2IdOfMaterial(material) : String(_v2First(material.id, material.materialId, material.matId, material.name, material.nombre));
+
+    if(!Array.isArray(pack.db.movements)) pack.db.movements = Array.isArray(pack.movements) ? pack.movements : [];
+    const mov = (typeof _v2Movement === "function")
+      ? _v2Movement("entrada", companyId, materialId, diff, {reason:"entrada_desde_preparacion", lineIndex:index, materialName:_v2MaterialLabel(material), companyName:_v2CompanyLabel(company)})
+      : {id:"mov_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId, materialId, type:"entrada", qty:diff, date:new Date().toISOString(), ref:refActual || "", source:"preparacion_pedidos", reason:"entrada_desde_preparacion"};
+    pack.db.movements.push(mov);
+    pack.movements = pack.db.movements;
+
+    let lotsArr = Array.isArray(pack.db.stockLots) ? pack.db.stockLots :
+                  Array.isArray(pack.db.stocks) ? pack.db.stocks :
+                  Array.isArray(pack.db.stock) ? pack.db.stock : null;
+    if(!lotsArr){ pack.db.stock = []; lotsArr = pack.db.stock; }
+    if(Array.isArray(lotsArr)){
+      const existsRow = lotsArr.some(r => {
+        try{
+          if(typeof _v2StockRowCompanyMatches === "function" && typeof _v2StockRowMaterialMatches === "function") return _v2StockRowCompanyMatches(r, company) && _v2StockRowMaterialMatches(r, material);
+        }catch(e){}
+        return String(_v2First(r.companyId,r.empresaId,r.company,r.empresa))===String(companyId) && String(_v2First(r.materialId,r.matId,r.material_id,r.material))===String(materialId);
+      });
+      if(!existsRow){
+        lotsArr.push({id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId, empresa:_v2CompanyLabel(company), materialId, material:_v2MaterialLabel(material), qty:0, cantidad:0, unit:_v2First(material.unit,material.unidad,linea&&linea.unit), createdFrom:"preparacion_pedidos"});
+        pack.lots = lotsArr;
+      }
+    }
+
+    if(!_v2SaveCompanyStockDB(pack)) return {success:false, reason:"No se pudo guardar el movimiento en Stock v2."};
+
+    const total = (typeof _v2MovementReal === "function") ? _v2MovementReal(pack, companyId, materialId) : diff;
+    return {success:true, pack, company, companyId, material, materialId, total};
+  }catch(e){
+    console.warn("No se pudo añadir a Stock v2", e);
+    return {success:false, reason:e && e.message ? e.message : String(e)};
+  }
+}
+
+/* ========= AÑADIR A STOCK (solo Stock real v2; NO stock antiguo) ========= */
 function guardarLinea(index) {
   const linea = estadoMateriales[index];
   const recibido = toNum(linea.qty_recibida);
@@ -4665,40 +4743,32 @@ function guardarLinea(index) {
 
   if (diff <= 0) return;
 
-  let tipoHierro = null;
   if ((String(linea.unit||"").toLowerCase() === 'barra')) {
-    tipoHierro = metaActual.tipo_hierro || metaActual.tipo_perfil || metaActual.tipoPerfileria || metaActual.tipoHierro || "";
-    if (!tipoHierro) {
-      // En esta versión todo el hierro se considera negro y el panel ya lo muestra como "Negro".
-      // Evitamos el aviso falso "Selecciona tipo de perfilería" cuando no hay radio seleccionable.
-      tipoHierro = "Negro";
-      try{
-        metaActual.tipo_hierro = tipoHierro;
-        setAny(KM(refActual), JSON.stringify(metaActual));
-      }catch(e){}
-    }
+    const tipoHierro = metaActual.tipo_hierro || metaActual.tipo_perfil || metaActual.tipoPerfileria || metaActual.tipoHierro || "Negro";
+    try{
+      metaActual.tipo_hierro = tipoHierro;
+      setAny(KM(refActual), JSON.stringify(metaActual));
+    }catch(e){}
   }
 
-  const check = _addToRealStock_byLinkedOrName(linea, tipoHierro);
-
-  if (!check.success) {
-    abrirModalCreacion({
-      name: check.searchedName,
-      unit: linea.unit,
-      diff: diff,
-      index: index
-    });
+  const added = LDH_addReceivedToStockV2(linea, diff, index);
+  if(!added.success){
+    alert("No se pudo añadir al Stock real v2.\n" + (added.reason || "Motivo desconocido"));
     return;
   }
 
-  stockMovements.push({ id: uuid(), matId: check.matId, type: 'in', qty: diff, date: new Date().toISOString() });
-  saveStockLocal();
-
   linea.aplicado_qty = yaAplicado + diff;
+  linea.stock_consumed_qty = toNum(linea.stock_consumed_qty);
+  linea.linked_matId = added.materialId;
+  linea.stockMatId = added.materialId;
+  linea.matId = added.materialId;
+  linea.linked_matName = _v2MaterialLabel(added.material);
+  linea.stockLinkLabel = linea.linked_matName;
+  if(!Array.isArray(linea.trace)) linea.trace = [];
+  linea.trace.push({at:new Date().toISOString(), qty:diff, source:"entrada_stock_v2_desde_preparacion"});
   guardarEstadoLocal();
 
-  const newTotal = getStockQty(check.matId);
-  alert(`✅ Stock Actualizado.\nMaterial: ${check.mat.name}\nTotal: ${newTotal}`);
+  alert(`✅ Stock real v2 actualizado.\nMaterial: ${_v2MaterialLabel(added.material)}\nAñadido: ${diff}\nTotal real en ${_v2CompanyLabel(added.company)}: ${added.total}`);
   renderTabla();
 }
 
