@@ -13069,4 +13069,133 @@ Libre restante: ${libre - qty}`);
 })();
 </script>
 
+
+<script id="LDH_FIX_PILL_ASIGNADO_LIBRE_2107">
+(function(){
+  const oldInfo = (typeof window._v2CompanyStockInfo === "function") ? window._v2CompanyStockInfo : null;
+
+  function n(v){
+    const x = Number(String(v ?? 0).replace(",", "."));
+    return Number.isFinite(x) ? x : 0;
+  }
+  function first(){
+    for(let i=0;i<arguments.length;i++){
+      const v = arguments[i];
+      if(v !== undefined && v !== null && String(v).trim() !== "") return v;
+    }
+    return "";
+  }
+  function norm(s){
+    return String(s||"").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"");
+  }
+  function qtyOf(x){
+    return n(first(x && x.qty, x && x.cantidad, x && x.asignado, x && x.reservado, x && x.cantidadReservada));
+  }
+  function active(st){
+    st = norm(st);
+    return st === "" || st === "activa" || st === "activo" || st === "active";
+  }
+  function phaseOk(x){
+    const f = norm(first(x && x.phase, x && x.fase, "preparacion"));
+    return f === "" || f === "preparacion" || f === "fabricacion";
+  }
+  function isLoan(a){
+    const txt = String(first(a && a.assignmentType, a && a.reason, a && a.tipo, a && a.source, "")).toLowerCase();
+    return txt.includes("otra_empresa") || txt.includes("otra empresa") || txt.includes("prestamo") || txt.includes("préstamo") || !!(a && (a.toCompanyId || a.toEmpresa || a.fromAssignmentId || a.originalAssignmentId));
+  }
+  function keysCompany(o){
+    return [
+      o && o.companyId, o && o.empresaId, o && o.company, o && o.empresa,
+      o && o.companyName, o && o.empresaNombre
+    ].map(norm).filter(Boolean);
+  }
+  function keysMaterial(o){
+    return [
+      o && o.materialId, o && o.matId, o && o.material_id, o && o.material,
+      o && o.mat, o && o.materialName, o && o.name, o && o.nombre
+    ].map(norm).filter(Boolean);
+  }
+  function keysLine(line){
+    return [
+      line && line.linked_matId, line && line.stockMatId, line && line.matId,
+      line && line.stockLinkLabel, line && line.linked_matName,
+      line && line.mat, line && line.material, line && line.name
+    ].map(norm).filter(Boolean);
+  }
+  function matches(keysA, keysB){
+    if(!keysA.length || !keysB.length) return false;
+    return keysA.some(a => keysB.some(b => a === b || (a.length > 2 && b.length > 2 && (a.includes(b) || b.includes(a)))));
+  }
+  function assignedFlexible(db, exact, line){
+    const arr = Array.isArray(db && db.assignments) ? db.assignments : [];
+    const compKeys = [exact.companyId, exact.companyName].map(norm).filter(Boolean);
+    const matKeys = [exact.materialId, exact.materialName].map(norm).filter(Boolean).concat(keysLine(line));
+    return arr
+      .filter(a => active(first(a.status,a.estado,"activa")))
+      .filter(a => phaseOk(a))
+      .filter(a => !isLoan(a))
+      .filter(a => matches(keysCompany(a), compKeys))
+      .filter(a => matches(keysMaterial(a), matKeys))
+      .reduce((s,a)=>s+qtyOf(a),0);
+  }
+  function reservedFlexible(db, exact, line){
+    const arr = Array.isArray(db && db.reservations) ? db.reservations : [];
+    const compKeys = [exact.companyId, exact.companyName].map(norm).filter(Boolean);
+    const matKeys = [exact.materialId, exact.materialName].map(norm).filter(Boolean).concat(keysLine(line));
+    return arr
+      .filter(a => active(first(a.status,a.estado,"activa")))
+      .filter(a => phaseOk(a))
+      .filter(a => matches(keysCompany(a), compKeys))
+      .filter(a => matches(keysMaterial(a), matKeys))
+      .reduce((s,a)=>s+qtyOf(a),0);
+  }
+  function assignedFromLineTrace(line){
+    const traces = Array.isArray(line && line.trace) ? line.trace : [];
+    return traces.reduce((s,t)=>{
+      const src = String(t && t.source || "").toLowerCase();
+      const q = qtyOf(t);
+      if(q <= 0) return s;
+      if(src.indexOf("libre") === 0 || src.indexOf("stock_recibido_ok") === 0 || src.indexOf("reserva:") === 0) return s + q;
+      return s;
+    },0);
+  }
+
+  window._v2CompanyStockInfo = function(line, linkedMat){
+    let exact = null;
+    try{
+      if(typeof LDH_exactResolveStockLine === "function") exact = LDH_exactResolveStockLine(line);
+    }catch(e){ exact = null; }
+
+    if(exact && exact.db){
+      const reservado = reservedFlexible(exact.db, exact, line);
+      const asignadoDB = assignedFlexible(exact.db, exact, line);
+      const asignadoLinea = assignedFromLineTrace(line);
+
+      // Si la asignación ya existe en DB, se usa DB. Si todavía no encaja por id/nombre,
+      // al menos la línea asignada debe verse como asignado global para no enseñar libre falso.
+      const asignado = Math.max(asignadoDB, asignadoLinea);
+
+      return {
+        state:"ok",
+        empresa:exact.companyName,
+        material:exact.materialName,
+        real:n(exact.real),
+        reservado,
+        asignadoPrep:asignado,
+        asignadoFab:0,
+        asignado,
+        libre:n(exact.real) - reservado - asignado,
+        unit:String(first(line && (line.unit || line.unidad), exact.material && exact.material.unit, exact.material && exact.material.unidad)),
+        sourceKey:(exact.sourceKey || "ldh_v2_company_stock_v1/exacto") + " + asignado flexible",
+        exact:true
+      };
+    }
+
+    return oldInfo ? oldInfo(line, linkedMat) : {state:"no_db"};
+  };
+})();
+</script>
+
 </body></html>
