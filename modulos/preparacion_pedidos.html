@@ -12865,4 +12865,208 @@ function LDH_prepVolverMenu(){
 })();
 </script>
 
+
+<script id="LDH_FIX_ASIGNAR_LIBRE_EXACTO_2107">
+(function(){
+  function n(v){
+    const x = Number(String(v ?? 0).replace(",", "."));
+    return Number.isFinite(x) ? x : 0;
+  }
+  function first(){
+    for(let i=0;i<arguments.length;i++){
+      const v = arguments[i];
+      if(v !== undefined && v !== null && String(v).trim() !== "") return v;
+    }
+    return "";
+  }
+  function norm(s){
+    return String(s||"").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"");
+  }
+  function isActive(st){
+    st = norm(st);
+    return st === "activa" || st === "activo" || st === "active" || st === "";
+  }
+  function qtyOf(x){
+    return n(first(x && x.qty, x && x.cantidad, x && x.asignado, x && x.reservado, x && x.cantidadReservada));
+  }
+  function isLoanAssignment(a){
+    const txt = String(first(a && a.assignmentType, a && a.reason, a && a.tipo, a && a.source, "")).toLowerCase();
+    return txt.includes("otra_empresa") || txt.includes("otra empresa") || txt.includes("prestamo") || txt.includes("préstamo") || !!(a && (a.toCompanyId || a.toEmpresa || a.fromAssignmentId || a.originalAssignmentId));
+  }
+  function activeReserved(db, companyId, materialId){
+    const arr = Array.isArray(db && db.reservations) ? db.reservations : [];
+    return arr
+      .filter(r => String(first(r.companyId,r.empresaId,r.empresa,r.company)) === String(companyId))
+      .filter(r => String(first(r.materialId,r.matId,r.material,r.material_id)) === String(materialId))
+      .filter(r => isActive(first(r.status,r.estado,"activa")))
+      .filter(r => ["preparacion","fabricacion",""].includes(norm(first(r.phase,r.fase,"preparacion"))))
+      .reduce((a,r)=>a+qtyOf(r),0);
+  }
+  function activeAssigned(db, companyId, materialId){
+    const arr = Array.isArray(db && db.assignments) ? db.assignments : [];
+    return arr
+      .filter(a => String(first(a.companyId,a.empresaId,a.empresa,a.company)) === String(companyId))
+      .filter(a => String(first(a.materialId,a.matId,a.material,a.material_id)) === String(materialId))
+      .filter(a => isActive(first(a.status,a.estado,"activa")))
+      .filter(a => ["preparacion","fabricacion",""].includes(norm(first(a.phase,a.fase,"preparacion"))))
+      .filter(a => !isLoanAssignment(a))
+      .reduce((s,a)=>s+qtyOf(a),0);
+  }
+  function saveExactDB(db){
+    try{
+      if(typeof LDH_exactSaveDB === "function") return !!LDH_exactSaveDB(db);
+    }catch(e){}
+    try{
+      db.updatedAt = new Date().toISOString();
+      const raw = JSON.stringify(db);
+      try{ sessionStorage.setItem("ldh_v2_company_stock_v1", raw); }catch(e){}
+      localStorage.setItem("ldh_v2_company_stock_v1", raw);
+      return true;
+    }catch(e1){
+      try{
+        db.updatedAt = new Date().toISOString();
+        sessionStorage.setItem("ldh_v2_company_stock_v1", JSON.stringify(db));
+        return true;
+      }catch(e2){ return false; }
+    }
+  }
+  function completeLine(index, qty, label){
+    const line = estadoMateriales[index];
+    if(!line) return;
+    const ped = n(line.qty_pedida ?? line.pedida ?? line.qty);
+    line.qty_recibida = n(line.qty_recibida ?? line.recibida) + n(qty);
+    line.recibida = line.qty_recibida;
+
+    // Asignar libre usa stock existente. No debe aparecer luego como "Añadir a stock".
+    line.aplicado_qty = n(line.aplicado_qty) + n(qty);
+    line.stock_consumed_qty = n(line.stock_consumed_qty) + n(qty);
+
+    line.ok = ped > 0 && n(line.qty_recibida) >= ped;
+    line.completo = line.ok;
+    line.done = line.ok;
+    line.isDone = line.ok;
+    line.isCompleted = line.ok;
+
+    if(!Array.isArray(line.trace)) line.trace = [];
+    line.trace.push({at:new Date().toISOString(), qty:n(qty), source:label || "libre_exacto_stock"});
+    try{ guardarEstadoLocal(); }catch(e){}
+    try{ renderTabla(); }catch(e){}
+    try{ cargarLista(); }catch(e){}
+    try{ if(typeof autoCerrarSiCompletoPorRecepcion === "function") autoCerrarSiCompletoPorRecepcion(); }catch(e){}
+  }
+
+  window.LDH_asignarLibreSeguro = function(index){
+    const line = Array.isArray(window.estadoMateriales) ? window.estadoMateriales[index] : (typeof estadoMateriales !== "undefined" ? estadoMateriales[index] : null);
+    if(!line){
+      alert("No se encuentra la línea.");
+      return;
+    }
+
+    const pedida = n(line.qty_pedida ?? line.pedida ?? line.qty);
+    const recibida = n(line.qty_recibida ?? line.recibida);
+    const falta = Math.max(0, pedida - recibida);
+    if(falta <= 0){
+      alert("Esta línea ya está completa.");
+      return;
+    }
+
+    let exact = null;
+    try{
+      if(typeof LDH_exactResolveStockLine === "function") exact = LDH_exactResolveStockLine(line);
+    }catch(e){ exact = null; }
+
+    if(!exact || !exact.db){
+      // Fallback visual: si la pill sí puede leer stock, informa del motivo real.
+      let info = null;
+      try{ if(typeof _v2CompanyStockInfo === "function") info = _v2CompanyStockInfo(line, null); }catch(e){}
+      alert("No se ha podido resolver esta línea contra el Stock real para asignar libre." + (info && info.state ? "\nEstado lectura: " + info.state : ""));
+      return;
+    }
+
+    const db = exact.db;
+    const companyId = exact.companyId;
+    const materialId = exact.materialId;
+    const fisico = n(exact.real);
+    const reservado = activeReserved(db, companyId, materialId);
+    const asignado = activeAssigned(db, companyId, materialId);
+    const libre = fisico - reservado - asignado;
+
+    if(libre <= 0){
+      alert(`No hay stock libre para asignar.
+
+Físico: ${fisico}
+Reservado: ${reservado}
+Asignado: ${asignado}
+Libre: ${libre}`);
+      return;
+    }
+
+    const defaultQty = Math.min(falta, libre);
+    const raw = prompt(
+      `Asignar stock libre
+
+Empresa: ${exact.companyName || companyId}
+Material: ${exact.materialName || materialId}
+
+Físico: ${fisico}
+Reservado: ${reservado}
+Asignado: ${asignado}
+Libre: ${libre}
+
+Cantidad a asignar:`,
+      String(defaultQty)
+    );
+    if(raw === null) return;
+    const qty = n(raw);
+    if(qty <= 0){
+      alert("Cantidad incorrecta.");
+      return;
+    }
+    if(qty > libre){
+      alert(`No puedes asignar más de lo libre.\nLibre: ${libre}`);
+      return;
+    }
+
+    if(!Array.isArray(db.assignments)) db.assignments = [];
+    db.assignments.push({
+      id:"asg_libre_exacto_"+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-5),
+      companyId,
+      empresaId:companyId,
+      company: exact.companyName || companyId,
+      empresa: exact.companyName || companyId,
+      materialId,
+      matId:materialId,
+      material: exact.materialName || materialId,
+      mat: exact.materialName || materialId,
+      qty,
+      cantidad:qty,
+      phase:"preparacion",
+      fase:"preparacion",
+      status:"activa",
+      estado:"activa",
+      ref:(typeof refActual !== "undefined" ? refActual : "") || "",
+      jobRef:(typeof refActual !== "undefined" ? refActual : "") || "",
+      assignmentType:"libre",
+      reason:"asignado_desde_stock_libre_exacto",
+      createdAt:new Date().toISOString(),
+      source:"preparacion_pedidos"
+    });
+
+    if(!saveExactDB(db)){
+      alert("No se pudo guardar la asignación libre en Stock.");
+      return;
+    }
+
+    completeLine(index, qty, "libre:" + (exact.companyName || companyId));
+    alert(`✅ Stock libre asignado.
+
+Material: ${exact.materialName || materialId}
+Cantidad: ${qty}
+Libre restante: ${libre - qty}`);
+  };
+})();
+</script>
+
 </body></html>
