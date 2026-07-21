@@ -407,15 +407,15 @@
         .join("");
       return `
         <div class="company">
-          <div class="company-head" onclick="const b=this.nextElementSibling; b.style.display=b.style.display==='none'?'block':'none';">
-            <span>▾</span>
+          <div class="company-head" onclick="const ico=this.querySelector('.fold-ico'); const b=this.nextElementSibling; const closed=b.style.display==='none'; b.style.display=closed?'block':'none'; if(ico) ico.textContent=closed?'▾':'▸';">
+            <span class="fold-ico">▸</span>
             <span class="company-name">${esc(company)}</span>
             <span class="badge b-orange">Fab: ${totals.fab}</span>
             <span class="badge b-violet">Pint: ${totals.pintura}</span>
             <span class="badge b-green">Alm: ${totals.almacen}</span>
             <span class="badge b-blue">Ent: ${totals.entregado}</span>
           </div>
-          <div class="company-body">
+          <div class="company-body" style="display:none">
             <table>
               <thead><tr><th>Referencia / concepto</th><th>Fechas</th><th>Flujo</th><th>Estado</th><th>Acciones</th></tr></thead>
               <tbody>${rows}</tbody>
@@ -455,11 +455,11 @@
           </td>
           <td>
             <div class="actions">
-              <button class="btn small violet" onclick="App.move(${idx}, 'fab', 'pintura')">🎨 A pintura</button>
-              <button class="btn small" onclick="App.move(${idx}, 'pintura', 'fab')">↩ Fab</button>
-              <button class="btn small green" onclick="App.move(${idx}, 'pintura', 'almacen')">🏬 A almacén</button>
+              <button class="btn small violet" onclick="App.moveRef('${encodeURIComponent(item.ref || "")}', 'fab', 'pintura')">🎨 A pintura</button>
+              <button class="btn small" onclick="App.moveRef('${encodeURIComponent(item.ref || "")}', 'pintura', 'fab')">↩ Fab</button>
+              <button class="btn small green" onclick="App.moveRef('${encodeURIComponent(item.ref || "")}', 'pintura', 'almacen')">🏬 A almacén</button>
               <button class="btn small" onclick="App.openPrep('${encodeURIComponent(item.ref || "")}')">Preparación</button>
-              <button class="btn small orange" onclick="App.ver(${idx})">Ver</button>
+              <button class="btn small orange" onclick="App.verRef('${encodeURIComponent(item.ref || "")}')">Ver</button>
             </div>
           </td>
         </tr>`;
@@ -492,26 +492,69 @@
       return qty;
     },
 
+    itemByRef(ref){
+      ref = String(ref || "").trim();
+      if(!ref) return null;
+      const it = this.findByRef(ref);
+      return it ? this.normalizeItem(it) : null;
+    },
+
+    moveRef(refEnc, from, to){
+      const ref = decodeURIComponent(refEnc || "");
+      const item = this.itemByRef(ref);
+      if(!item){
+        alert("No encuentro el trabajo en Fabricación: " + ref);
+        return;
+      }
+      this.moveItem(item, from, to);
+    },
+
+    verRef(refEnc){
+      const ref = decodeURIComponent(refEnc || "");
+      const item = this.itemByRef(ref);
+      if(!item){
+        alert("No encuentro el trabajo: " + ref);
+        return;
+      }
+      this.showItem(item);
+    },
+
     move(idx, from, to){
       const item = this.itemAtIndex(idx);
       if(!item) return;
+      this.moveItem(item, from, to);
+    },
+
+    moveItem(item, from, to){
+      if(!item) return;
       const f = this.ensureFlow(item);
-      const max = n(f[from] ?? (from === "fab" ? f.fabricacion : 0));
+      const max = n(from === "fab" ? (f.fab ?? f.fabricacion) : f[from]);
       const labels = {fab:"Fabricación", pintura:"Pintura", almacen:"Almacén", entregado:"Entregado"};
       const qty = this.askQty(`${labels[from] || from} → ${labels[to] || to}`, max);
       if(qty === null) return;
 
-      if(from === "fab"){ f.fab = n(f.fab) - qty; f.fabricacion = f.fab; }
-      else f[from] = n(f[from]) - qty;
-      f[to] = n(f[to]) + qty;
-      if(to === "fab") f.fabricacion = f.fab;
+      if(from === "fab"){
+        f.fab = Math.max(0, n(f.fab ?? f.fabricacion) - qty);
+        f.fabricacion = f.fab;
+      }else{
+        f[from] = Math.max(0, n(f[from]) - qty);
+      }
+
+      if(to === "fab"){
+        f.fab = n(f.fab ?? f.fabricacion) + qty;
+        f.fabricacion = f.fab;
+      }else{
+        f[to] = n(f[to]) + qty;
+      }
 
       item.flow = f;
       item.fase = to === "almacen" ? "almacen" : (to === "pintura" ? "pintura" : "fabricacion");
       item.estado = item.fase;
       item.status = "pendiente";
       item.archived = false;
+      item.keepInFab = true;
       if(to === "almacen" && n(f.fab) <= 0 && n(f.pintura) <= 0 && n(f.almacen) > 0) item.hideFromFab = true;
+      if(to === "pintura" || to === "fab") item.hideFromFab = false;
 
       item.history = Array.isArray(item.history) ? item.history : [];
       item.history.push({id:uid("hist"), type:`move_${from}_to_${to}`, qty, date:new Date().toISOString(), note:`${labels[from]||from} → ${labels[to]||to}`});
@@ -567,6 +610,10 @@
     ver(idx){
       const item = this.itemAtIndex(idx);
       if(!item) return;
+      this.showItem(item);
+    },
+
+    showItem(item){
       const f = this.ensureFlow(item);
       alert(
         "Referencia: " + (item.ref || "") + "\n" +
