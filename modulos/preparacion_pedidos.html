@@ -3635,7 +3635,216 @@ function _v2FindMaterialForLine(pack, line, linkedMat, companyId){
 
   return null;
 }
+
+/* === LDH EXACT STOCK READER: misma base y mismo criterio que Stock.html === */
+function LDH_exactNorm(v){
+  try{
+    return String(v||"")
+      .toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/ø/g,"o")
+      .replace(/[^\w]+/g," ")
+      .replace(/\s+/g," ")
+      .trim();
+  }catch(e){ return String(v||"").toLowerCase().trim(); }
+}
+function LDH_exactStockRawDB(){
+  const KEY = "ldh_v2_company_stock_v1";
+  let raw = "";
+  try{ if(window.__LDH_STOCK_MEMORY_DB) return window.__LDH_STOCK_MEMORY_DB; }catch(e){}
+  try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){}
+  if(!raw){ try{ raw = localStorage.getItem(KEY) || ""; }catch(e){} }
+  try{
+    const db = JSON.parse(raw || "{}") || {};
+    db.companies = Array.isArray(db.companies) ? db.companies : [];
+    db.materials = Array.isArray(db.materials) ? db.materials : [];
+    db.stock = Array.isArray(db.stock) ? db.stock : [];
+    db.movements = Array.isArray(db.movements) ? db.movements : [];
+    db.reservations = Array.isArray(db.reservations) ? db.reservations : [];
+    db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
+    return db;
+  }catch(e){ return null; }
+}
+function LDH_exactFirst(){
+  for(let i=0;i<arguments.length;i++){
+    const v = arguments[i];
+    if(v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return "";
+}
+function LDH_exactCompanyName(c){ return String(LDH_exactFirst(c && c.name, c && c.nombre, c && c.empresa, c && c.company, c && c.code, c && c.codigo, c && c.id)); }
+function LDH_exactMaterialName(m){ return String(LDH_exactFirst(m && m.name, m && m.nombre, m && m.material, m && m.mat, m && m.label, m && m.id)); }
+function LDH_exactCompanyId(c){ return String(LDH_exactFirst(c && c.id, c && c.companyId, c && c.empresaId, LDH_exactCompanyName(c))); }
+function LDH_exactMaterialId(m){ return String(LDH_exactFirst(m && m.id, m && m.materialId, m && m.matId, LDH_exactMaterialName(m))); }
+function LDH_exactPedidoEmpresa(){
+  return String(LDH_exactFirst(
+    metaActual && metaActual.empresa,
+    metaActual && metaActual.company,
+    metaActual && metaActual.emp,
+    document.getElementById("empresaPrep") && document.getElementById("empresaPrep").textContent
+  )).replace(/^·\s*/,"").trim();
+}
+function LDH_exactLineNames(line){
+  const out = [];
+  [
+    line && line.linked_matName,
+    line && line.stockLinkLabel,
+    line && line.mat,
+    line && line.material,
+    line && line.name,
+    line && line.title,
+    line && line.perfil
+  ].forEach(v=>{
+    const s = String(v||"").trim();
+    const n = LDH_exactNorm(s);
+    if(s && n && !out.some(x=>x.n===n)) out.push({raw:s,n});
+  });
+  return out;
+}
+function LDH_exactFindCompany(db, empresaNombre){
+  const t = LDH_exactNorm(empresaNombre);
+  if(!t) return null;
+  return (db.companies||[]).find(c=>{
+    const vals = [
+      c && c.id, c && c.companyId, c && c.empresaId,
+      c && c.name, c && c.nombre, c && c.empresa, c && c.company,
+      c && c.code, c && c.codigo
+    ].map(LDH_exactNorm).filter(Boolean);
+    return vals.some(v => v === t || (v.length>2 && t.length>2 && (v.includes(t) || t.includes(v))));
+  }) || null;
+}
+function LDH_exactMovementSign(type){
+  const t = LDH_exactNorm(type || "entrada").replace(/\s+/g,"_");
+  if(["entrada","in","ajuste_pos","devolucion","devolucion_fisica","entrada_preparacion","entrada_prep","entrada_desde_preparacion","stock_entrada","recepcion_stock","add_stock"].includes(t)) return 1;
+  if(["salida","out","ajuste_neg","consumo","consumo_terminal"].includes(t)) return -1;
+  if(["recepcion_preparacion","stock_recibido_ok","prep_ok","traza_recepcion","reserva","reservado","asignacion","asignado"].includes(t)) return 0;
+  return 0;
+}
+function LDH_exactRowQty(r){
+  return Number(String(LDH_exactFirst(r && r.qty, r && r.cantidad, r && r.stock, r && r.cantidadActual, r && r.real, r && r.fisico, r && r.libre, 0)).replace(",", ".")) || 0;
+}
+function LDH_exactRealStock(db, companyId, materialId){
+  const movs = (db.movements||[]).filter(m =>
+    String(LDH_exactFirst(m.companyId,m.empresaId,m.empresa,m.company)) === String(companyId) &&
+    String(LDH_exactFirst(m.materialId,m.matId,m.material,m.material_id)) === String(materialId)
+  );
+  if(movs.length){
+    return movs.reduce((a,m)=>{
+      const qty = Number(String(LDH_exactFirst(m.qty,m.cantidad,m.quantity,m.amount,0)).replace(",", ".")) || 0;
+      return a + LDH_exactMovementSign(LDH_exactFirst(m.type,m.tipo,"entrada")) * qty;
+    },0);
+  }
+  return (db.stock||[])
+    .filter(s => String(LDH_exactFirst(s.companyId,s.empresaId,s.empresa,s.company)) === String(companyId))
+    .filter(s => String(LDH_exactFirst(s.materialId,s.matId,s.material,s.material_id)) === String(materialId))
+    .reduce((a,s)=>a+LDH_exactRowQty(s),0);
+}
+function LDH_exactFindMaterial(db, companyId, line){
+  const lineNames = LDH_exactLineNames(line);
+  const linkedIds = [
+    line && line.linked_matId,
+    line && line.stockMatId,
+    line && line.matId,
+    line && line.stockLinkId,
+    line && line.stockId,
+    line && line.materialId
+  ].map(v=>String(v||"").trim()).filter(Boolean);
+
+  const byLinked = (db.materials||[]).find(m => linkedIds.includes(LDH_exactMaterialId(m)));
+  if(byLinked) return byLinked;
+
+  const candidates = (db.materials||[]).filter(m=>{
+    const mn = LDH_exactNorm(LDH_exactMaterialName(m));
+    if(!mn) return false;
+    return lineNames.some(x => mn === x.n || (mn.length>2 && x.n.length>2 && (mn.includes(x.n) || x.n.includes(mn))));
+  });
+  if(!candidates.length) return null;
+
+  const stockIds = new Set((db.stock||[])
+    .filter(s => String(LDH_exactFirst(s.companyId,s.empresaId,s.empresa,s.company)) === String(companyId))
+    .map(s => String(LDH_exactFirst(s.materialId,s.matId,s.material,s.material_id)))
+    .filter(Boolean));
+  const movIds = new Set((db.movements||[])
+    .filter(m => String(LDH_exactFirst(m.companyId,m.empresaId,m.empresa,m.company)) === String(companyId))
+    .map(m => String(LDH_exactFirst(m.materialId,m.matId,m.material,m.material_id)))
+    .filter(Boolean));
+
+  const withStock = candidates.find(m => stockIds.has(LDH_exactMaterialId(m)) || movIds.has(LDH_exactMaterialId(m)));
+  if(withStock) return withStock;
+
+  // Preferir exacto por nombre
+  const exact = candidates.find(m => lineNames.some(x => LDH_exactNorm(LDH_exactMaterialName(m)) === x.n));
+  return exact || candidates[0];
+}
+function LDH_exactResolveStockLine(line){
+  const db = LDH_exactStockRawDB();
+  if(!db) return null;
+  const company = LDH_exactFindCompany(db, LDH_exactPedidoEmpresa());
+  if(!company) return null;
+  const companyId = LDH_exactCompanyId(company);
+  const material = LDH_exactFindMaterial(db, companyId, line);
+  if(!material) return null;
+  const materialId = LDH_exactMaterialId(material);
+  const real = LDH_exactRealStock(db, companyId, materialId);
+  return {
+    db, company, material, companyId, materialId, real,
+    companyName: LDH_exactCompanyName(company),
+    materialName: LDH_exactMaterialName(material),
+    sourceKey: "ldh_v2_company_stock_v1/exacto"
+  };
+}
+function LDH_exactSaveDB(db){
+  try{
+    db.updatedAt = new Date().toISOString();
+    window.__LDH_STOCK_MEMORY_DB = db;
+    sessionStorage.setItem("ldh_v2_company_stock_v1", JSON.stringify(db));
+    localStorage.setItem("ldh_v2_company_stock_v1", JSON.stringify(db));
+    try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(e){}
+    try{ if(window.LDH_publishStockDirectFromMemory) window.LDH_publishStockDirectFromMemory(db); }catch(e){}
+    return true;
+  }catch(e){
+    try{
+      db.updatedAt = new Date().toISOString();
+      window.__LDH_STOCK_MEMORY_DB = db;
+      sessionStorage.setItem("ldh_v2_company_stock_v1", JSON.stringify(db));
+      return true;
+    }catch(e2){ return false; }
+  }
+}
+/* === /LDH EXACT STOCK READER === */
+
 function _v2CompanyStockInfo(line, linkedMat){
+  // 1) Lectura exacta con la misma base y criterio que Stock.html.
+  try{
+    const exact = LDH_exactResolveStockLine(line);
+    if(exact){
+      let reservado = 0, asignadoPrep = 0, asignadoFab = 0;
+      try{
+        const pack = _v2LoadCompanyStockDB();
+        if(pack){
+          reservado = _v2Reserved(pack, exact.companyId, exact.materialId);
+          asignadoPrep = _v2Assigned(pack, exact.companyId, exact.materialId, "preparacion");
+          asignadoFab = _v2Assigned(pack, exact.companyId, exact.materialId, "fabricacion");
+        }
+      }catch(e){}
+      const asignado = asignadoPrep + asignadoFab;
+      return {
+        state:"ok",
+        empresa:exact.companyName,
+        material:exact.materialName,
+        real:exact.real,
+        reservado,
+        asignadoPrep,
+        asignadoFab,
+        asignado,
+        libre: exact.real - reservado - asignado,
+        unit:String(_v2First(line && (line.unit || line.unidad), exact.material.unit, exact.material.unidad)),
+        sourceKey: exact.sourceKey,
+        exact:true
+      };
+    }
+  }catch(e){ console.warn("Lectura exacta Stock falló", e); }
+
   const pack = _v2LoadCompanyStockDB();
   if(!pack) return { state:"no_db" };
 
@@ -3669,7 +3878,9 @@ function _v2CompanyStockInfo(line, linkedMat){
   if(!material) return { state:"material_not_found", empresa:_v2CompanyLabel(company), sourceKey:pack.key };
 
   const materialId = String(_v2First(material.id, material.materialId, material.matId, _v2MaterialLabel(material)));
-  const phys = _v2PhysicalForLine(pack, company, material, line);
+  const phys = (typeof _v2PhysicalForLine === "function")
+    ? _v2PhysicalForLine(pack, company, material, line)
+    : {real:0,rowReal:0,movReal:0,rowsMatched:0,movementsMatched:0};
   const real = phys.real;
 
   const reservado = _v2Reserved(pack, companyId, materialId);
@@ -3721,7 +3932,7 @@ function _v2CompanyStockPill(line, linkedMat, pedida){
         prestadoTxt = ` · prestado recibido <b>${Number(debt.pending||0)}</b>`;
       }
     }catch(e){}
-    return `<span class="link-pill ${cls}" title="Stock real leído desde ${info.sourceKey || 'Stock v2'} · movimientos:${info.movementsMatched || 0}=${info.movReal || 0} · filas:${info.rowsMatched || 0}=${info.rowReal || 0}. Si hay material prestado, se muestra aparte porque no es físico propio de la empresa.">${info.empresa}: físico <b>${info.real}</b> · res <b>${info.reservado}</b> · asignado global <b>${info.asignado}</b>${prestadoTxt} · libre <b>${info.libre}</b> ${info.unit||""}</span>`;
+    return `<span class="link-pill ${cls}" title="Fuente: ${info.sourceKey || 'Stock v2'}${info.exact ? ' · lectura exacta igual que Stock' : ''}.">${info.empresa}: físico <b>${info.real}</b> · res <b>${info.reservado}</b> · asignado global <b>${info.asignado}</b>${prestadoTxt} · libre <b>${info.libre}</b> ${info.unit||""}</span>`;
   }
   if(info.state === "no_empresa"){
     return `<span class="link-pill stock-company-pill warn">Stock empresa: sin empresa en el pedido</span>`;
@@ -4452,7 +4663,7 @@ function renderTabla() {
       const autoAplicadaPos = tracesLinea
         .filter(t => {
           const s = String(t && t.source || "").toLowerCase();
-          return s.indexOf("reserva") === 0 || s.indexOf("libre") === 0 || s.indexOf("otra_empresa") === 0 || s.indexOf("asignado_otra_empresa") === 0 || s.indexOf("stock_recibido_ok") === 0 || s.indexOf("stock_asignado_propio_sync") === 0 || s.indexOf("devolucion_prestamo_recibida") === 0;
+          return s.indexOf("reserva") === 0 || s.indexOf("libre") === 0 || s.indexOf("otra_empresa") === 0 || s.indexOf("asignado_otra_empresa") === 0 || s.indexOf("stock_recibido_ok") === 0 || s.indexOf("stock_asignado_propio_sync") === 0 || s.indexOf("entrada_stock_v2_desde_preparacion") === 0 || s.indexOf("entrada_desde_preparacion") === 0 || s.indexOf("devolucion_prestamo_recibida") === 0;
         })
         .reduce((a,t)=>a + toNum(t.qty), 0);
       const autoAplicadaOut = tracesLinea
@@ -4757,155 +4968,119 @@ function _addToRealStock_byLinkedOrName(linea, ironType) {
 /* ========= AÑADIR A STOCK REAL V2 (movimiento físico "entrada") ========= */
 function LDH_addReceivedToStockV2(linea, diff, index){
   try{
-    const pack = (typeof _v2LoadCompanyStockDB === "function") ? _v2LoadCompanyStockDB() : null;
-    if(!pack || !pack.db) return {success:false, reason:"No hay base Stock v2 cargada."};
+    const exact0 = LDH_exactResolveStockLine(linea);
+    let db, company, material, companyId, materialId;
 
-    const empresaNombre = (typeof _v2GetPedidoEmpresa === "function") ? _v2GetPedidoEmpresa() : (metaActual && (metaActual.empresa || metaActual.company) || "");
-    let company = (typeof _v2FindCompany === "function") ? _v2FindCompany(pack, empresaNombre) : null;
-    if(!company){
-      const name = String(empresaNombre || "").trim();
-      if(!name) return {success:false, reason:"El pedido no tiene empresa receptora."};
-      company = {id:name, name, nombre:name, empresa:name, __virtual:true};
-      if(!Array.isArray(pack.db.companies)) pack.db.companies = Array.isArray(pack.companies) ? pack.companies : [];
-      if(!pack.db.companies.some(c => _v2Norm(_v2First(c.id,c.name,c.nombre,c.empresa,c.company)) === _v2Norm(name))){
-        pack.db.companies.push(company);
+    if(exact0){
+      db = exact0.db;
+      company = exact0.company;
+      material = exact0.material;
+      companyId = exact0.companyId;
+      materialId = exact0.materialId;
+    }else{
+      db = LDH_exactStockRawDB();
+      if(!db) return {success:false, reason:"No hay base Stock v2 cargada."};
+
+      const empresaNombre = LDH_exactPedidoEmpresa();
+      company = LDH_exactFindCompany(db, empresaNombre);
+      if(!company){
+        const name = String(empresaNombre||"").trim();
+        if(!name) return {success:false, reason:"El pedido no tiene empresa receptora."};
+        company = {id:name, name, nombre:name, empresa:name, createdFrom:"preparacion_pedidos"};
+        db.companies.push(company);
       }
-      pack.companies = pack.db.companies;
+      companyId = LDH_exactCompanyId(company);
+
+      material = LDH_exactFindMaterial(db, companyId, linea);
+      if(!material){
+        const matName = String(LDH_exactFirst(linea && linea.mat, linea && linea.material, linea && linea.name, linea && linea.title, "Material")).trim();
+        const unit = String(LDH_exactFirst(linea && linea.unit, linea && linea.unidad, "ud")).trim();
+        const matId = "mat_prep_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
+        const tipo = unit.toLowerCase().includes("barra") ? "hierro" : ((typeof isPaintLine === "function" && isPaintLine(linea)) ? "pintura" : "ferreteria");
+        material = {id:matId, materialId:matId, matId, name:matName, nombre:matName, material:matName, unit, unidad:unit, tipo, type:tipo, createdFrom:"preparacion_pedidos", createdAt:new Date().toISOString()};
+        db.materials.push(material);
+      }
+      materialId = LDH_exactMaterialId(material);
     }
 
-    const companyId = (typeof _v2IdOfCompany === "function") ? _v2IdOfCompany(company) : String(_v2First(company.id, company.empresaId, company.name, company.nombre, empresaNombre));
+    db.stock = Array.isArray(db.stock) ? db.stock : [];
+    db.movements = Array.isArray(db.movements) ? db.movements : [];
 
-    let linkedMat = null;
-    try{
-      const linkedId = (typeof getLinkedMatIdForLine === "function") ? getLinkedMatIdForLine(linea) : "";
-      linkedMat = linkedId && (typeof LDH_getV2MaterialById === "function") ? LDH_getV2MaterialById(linkedId) : null;
-    }catch(e){}
+    const companyName = LDH_exactCompanyName(company);
+    const materialName = LDH_exactMaterialName(material);
+    const unitName = String(LDH_exactFirst(material.unit, material.unidad, linea && linea.unit, linea && linea.unidad, ""));
 
-    let material = (typeof _v2FindMaterialForLine === "function") ? (_v2FindMaterialForLine(pack, linea, linkedMat, companyId) || _v2FindMaterialForLine(pack, linea, linkedMat)) : null;
-    if(!material && linkedMat) material = linkedMat;
-
-    if(!material){
-      const matName = String(_v2First(linea && linea.mat, linea && linea.material, linea && linea.name, linea && linea.title, "Material")).trim();
-      if(!matName) return {success:false, reason:"No se pudo determinar el nombre del material."};
-      const matId = "mat_prep_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7);
-      const unit = String(_v2First(linea && linea.unit, linea && linea.unidad, "ud")).trim();
-      const tipo = unit.toLowerCase().includes("barra") ? "hierro" : ((typeof isPaintLine === "function" && isPaintLine(linea)) ? "pintura" : "ferreteria");
-      material = {id:matId, materialId:matId, matId, name:matName, nombre:matName, material:matName, unit, unidad:unit, tipo, type:tipo, createdFrom:"preparacion_pedidos", createdAt:new Date().toISOString(), __v2:true};
-      if(!Array.isArray(pack.db.materials)) pack.db.materials = [];
-      pack.db.materials.push(material);
-      pack.materials = pack.db.materials;
-    }
-
-    const materialId = (typeof _v2IdOfMaterial === "function") ? _v2IdOfMaterial(material) : String(_v2First(material.id, material.materialId, material.matId, material.name, material.nombre));
-
-    if(!Array.isArray(pack.db.movements)) pack.db.movements = Array.isArray(pack.movements) ? pack.movements : [];
-    const companyName = _v2CompanyLabel(company);
-    const materialName = _v2MaterialLabel(material);
-    const unitName = _v2First(material.unit, material.unidad, linea && linea.unit, linea && linea.unidad, "");
-
-    const mov = (typeof _v2Movement === "function")
-      ? _v2Movement("entrada", companyId, materialId, diff, {
-          reason:"entrada_desde_preparacion",
-          lineIndex:index,
-          materialName,
-          material_nombre:materialName,
-          material:materialName,
-          mat:materialName,
-          companyName,
-          empresaNombre:companyName,
-          empresa:companyName,
-          company:companyName,
-          unit:unitName,
-          unidad:unitName
-        })
-      : {
-          id:"mov_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7),
-          companyId,
-          empresaId:companyId,
-          empresa:companyName,
-          company:companyName,
-          companyName,
-          materialId,
-          matId:materialId,
-          material_id:materialId,
-          material:materialName,
-          mat:materialName,
-          materialName,
-          name:materialName,
-          unit:unitName,
-          unidad:unitName,
-          type:"entrada",
-          tipo:"entrada",
-          qty:diff,
-          cantidad:diff,
-          amount:diff,
-          date:new Date().toISOString(),
-          ref:refActual || "",
-          source:"preparacion_pedidos",
-          reason:"entrada_desde_preparacion"
-        };
-
-    // Refuerzo de campos aunque _v2Movement exista.
-    Object.assign(mov, {
+    db.movements.push({
+      id:"mov_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7),
       companyId,
-      empresaId: _v2First(mov.empresaId, companyId),
-      empresa: _v2First(mov.empresa, companyName),
-      company: _v2First(mov.company, companyName),
-      companyName: _v2First(mov.companyName, companyName),
+      empresaId:companyId,
+      empresa:companyName,
+      company:companyName,
+      companyName,
       materialId,
-      matId: _v2First(mov.matId, materialId),
-      material_id: _v2First(mov.material_id, materialId),
-      material: _v2First(mov.material, materialName),
-      mat: _v2First(mov.mat, materialName),
-      materialName: _v2First(mov.materialName, materialName),
-      name: _v2First(mov.name, materialName),
-      unit: _v2First(mov.unit, unitName),
-      unidad: _v2First(mov.unidad, unitName),
-      type: "entrada",
-      tipo: "entrada",
-      qty: diff,
-      cantidad: diff,
-      amount: diff
+      matId:materialId,
+      material_id:materialId,
+      material:materialName,
+      mat:materialName,
+      materialName,
+      name:materialName,
+      unit:unitName,
+      unidad:unitName,
+      type:"entrada",
+      tipo:"entrada",
+      qty:Number(diff)||0,
+      cantidad:Number(diff)||0,
+      amount:Number(diff)||0,
+      date:new Date().toISOString(),
+      ref:refActual || "",
+      jobRef:refActual || "",
+      source:"preparacion_pedidos",
+      reason:"entrada_desde_preparacion",
+      lineIndex:index
     });
 
-    pack.db.movements.push(mov);
-    pack.movements = pack.db.movements;
-
-    let lotsArr = Array.isArray(pack.db.stockLots) ? pack.db.stockLots :
-                  Array.isArray(pack.db.stocks) ? pack.db.stocks :
-                  Array.isArray(pack.db.stock) ? pack.db.stock : null;
-    if(!lotsArr){ pack.db.stock = []; lotsArr = pack.db.stock; }
-
-    let targetRow = null;
-    if(Array.isArray(lotsArr)){
-      targetRow = lotsArr.find(r => {
-        try{
-          if(typeof _v2StockRowCompanyMatches === "function" && typeof _v2StockRowMaterialMatches === "function") return _v2StockRowCompanyMatches(r, company) && _v2StockRowMaterialMatches(r, material);
-        }catch(e){}
-        return String(_v2First(r.companyId,r.empresaId,r.company,r.empresa))===String(companyId) && String(_v2First(r.materialId,r.matId,r.material_id,r.material))===String(materialId);
-      });
-      if(!targetRow){
-        targetRow = {id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7), companyId, empresaId:companyId, empresa:companyName, company:companyName, materialId, matId:materialId, material_id:materialId, material:materialName, mat:materialName, name:materialName, qty:0, cantidad:0, stock:0, real:0, fisico:0, unit:unitName, unidad:unitName, createdFrom:"preparacion_pedidos"};
-        lotsArr.push(targetRow);
-      }
-
-      const baseQty = _v2Num(_v2First(targetRow.qty, targetRow.cantidad, targetRow.stock, targetRow.cantidadActual, targetRow.real, targetRow.fisico, 0));
-      const nextQty = baseQty + _v2Num(diff);
-      targetRow.qty = nextQty;
-      targetRow.cantidad = nextQty;
-      targetRow.stock = nextQty;
-      targetRow.real = nextQty;
-      targetRow.fisico = nextQty;
-      targetRow.updatedAt = new Date().toISOString();
-      pack.lots = lotsArr;
+    let row = db.stock.find(s =>
+      String(LDH_exactFirst(s.companyId,s.empresaId,s.company,s.empresa)) === String(companyId) &&
+      String(LDH_exactFirst(s.materialId,s.matId,s.material_id,s.material)) === String(materialId)
+    );
+    if(!row){
+      row = {
+        id:"lot_prep_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7),
+        companyId,
+        empresaId:companyId,
+        empresa:companyName,
+        company:companyName,
+        materialId,
+        matId:materialId,
+        material_id:materialId,
+        material:materialName,
+        mat:materialName,
+        name:materialName,
+        unit:unitName,
+        unidad:unitName,
+        qty:0,
+        cantidad:0,
+        stock:0,
+        real:0,
+        fisico:0,
+        createdFrom:"preparacion_pedidos"
+      };
+      db.stock.push(row);
     }
 
-    if(!_v2SaveCompanyStockDB(pack)) return {success:false, reason:"No se pudo guardar el movimiento en Stock v2."};
+    const total = LDH_exactRealStock(db, companyId, materialId);
+    row.qty = total;
+    row.cantidad = total;
+    row.stock = total;
+    row.real = total;
+    row.fisico = total;
+    row.updatedAt = new Date().toISOString();
 
-    const total = targetRow ? _v2Num(_v2First(targetRow.qty, targetRow.cantidad, targetRow.stock, targetRow.real, targetRow.fisico)) : ((typeof _v2MovementReal === "function") ? _v2MovementReal(pack, companyId, materialId) : diff);
-    return {success:true, pack, company, companyId, material, materialId, total};
+    if(!LDH_exactSaveDB(db)) return {success:false, reason:"No se pudo guardar en Stock v2."};
+
+    return {success:true, db, company, companyId, material, materialId, total};
   }catch(e){
-    console.warn("No se pudo añadir a Stock v2", e);
+    console.warn("No se pudo añadir a Stock v2 exacto", e);
     return {success:false, reason:e && e.message ? e.message : String(e)};
   }
 }
