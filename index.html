@@ -3829,7 +3829,8 @@ function collectAssignments(db){
     const txt = norm([m && m.type, m && m.tipo, m && m.family, m && m.familia, m && m.name, m && m.nombre].join(" "));
     if(!txt) return false;
     if(txt.includes("pintur") || txt.includes("ferreter") || txt.includes("tablero") || txt.includes("aglomerado")) return false;
-    return txt.includes("hierro") || txt.includes("perfil") || txt.includes("tubo") || txt.includes("pletina") || txt.includes("angulo") || txt.includes("chapa") || txt.includes("barra");
+    if(txt.includes("hierro") || txt.includes("perfil") || txt.includes("tubo") || txt.includes("pletina") || txt.includes("angulo") || txt.includes("chapa") || txt.includes("barra")) return true;
+    return /\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:\s*x\s*\d+(?:\.\d+)?)?\b/.test(txt);
   }
   function extractDims(name){
     const s = norm(name).replace(/ø/g,"diam ").replace(/∅/g,"diam ");
@@ -4019,6 +4020,153 @@ function collectAssignments(db){
     if(p.mode === "monthly" && p.month !== null && d.getMonth() !== p.month) return false;
     return true;
   }
+
+  function advRawJSON(raw, fallback){
+    try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; }
+  }
+  function advRemotePackage(){
+    try{
+      return window.__LDH_FABRICACION_REMOTE_PACKAGE && typeof window.__LDH_FABRICACION_REMOTE_PACKAGE === "object"
+        ? window.__LDH_FABRICACION_REMOTE_PACKAGE
+        : null;
+    }catch(e){ return null; }
+  }
+  function advPackageMeta(pkg, ref){
+    const raw = pkg && pkg.prepMeta ? pkg.prepMeta[ref] : "";
+    return advRawJSON(raw, {});
+  }
+  function advPackageRecepcion(pkg, ref){
+    const raw = pkg && pkg.prepRecepcion ? pkg.prepRecepcion[ref] : "";
+    return advRawJSON(raw, []);
+  }
+  function advLineMaterial(db, line){
+    const id = line && (line.stockLinkId || line.linked_matId || line.stockMatId || line.materialId || line.matId || line.idMaterial);
+    let m = materialById(db, id);
+    if(m) return m;
+
+    const txt = String(line && (line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.name || line.nombre || line.perfil || line.title) || "").trim();
+    const key = norm(txt);
+    if(key){
+      m = (db.materials||[]).find(mm=>{
+        const vals = [mm&&mm.id,mm&&mm.materialId,mm&&mm.matId,mm&&mm.name,mm&&mm.nombre,mm&&mm.material].map(norm).filter(Boolean);
+        return vals.some(v=>v===key || (v.length>2 && key.length>2 && (v.includes(key)||key.includes(v))));
+      });
+      if(m) return m;
+      return {id:txt, name:txt, type:"hierro", family:String(line && (line.family || line.familia || "")), unit:String(line && (line.unit || line.unidad || "barra"))};
+    }
+    return null;
+  }
+  function advLineQty(line){
+    const vals = [line&&line.qty_pedida,line&&line.pedida,line&&line.qty,line&&line.cantidad,line&&line.barras,line&&line.unidades,line&&line.total];
+    for(const v of vals){ const q = num(v); if(q>0) return q; }
+    return 0;
+  }
+  function advCompanyInfo(db, companyText){
+    companyText = String(companyText||"").trim();
+    if(!companyText) return null;
+    const target = norm(companyText);
+    const c = (db.companies||[]).find(x=>{
+      const id = norm(x.id);
+      const name = norm(x.name || x.nombre || x.empresa);
+      return (id&&id===target) || (name&&name===target) || (name&&target.includes(name)) || (target&&name.includes(target));
+    });
+    const companyId = c ? c.id : companyText;
+    const compName = c ? companyName(db, companyId) : companyText;
+    if(!companyIsActive(db, companyId, compName)) return null;
+    return {companyId, company:compName};
+  }
+  function advIsFabItem(item){
+    if(!item || item.deleted || item.eliminado || item.archived) return false;
+    const f = (item.flow && typeof item.flow === "object") ? item.flow : {};
+    const count = num(f.fab ?? f.fabricacion ?? item.fab ?? item.enFabricacion ?? item.fabricacion) +
+                  num(f.pintura ?? item.pintura ?? item.enPintura) +
+                  num(f.almacen ?? item.almacen ?? item.enAlmacen);
+    if(count > 0) return true;
+    const fase = norm(item.fase || item.estado || item.status || item.tipo || "");
+    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
+  }
+  function advAddLine(rows, seen, db, ref, companyText, line, source, dateSource){
+    const comp = advCompanyInfo(db, companyText);
+    if(!comp) return;
+
+    const m = advLineMaterial(db, line);
+    if(!m || !isIronMaterial(m)) return;
+
+    const qty = advLineQty(line);
+    if(qty <= 0) return;
+
+    const material = String(m.name || m.nombre || line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.perfil || line.name || "");
+    const key = [norm(ref), norm(comp.company || comp.companyId), norm(material || m.id)].join("|");
+    if(seen.has(key)) return;
+    seen.add(key);
+
+    const dt = new Date((dateSource && (dateSource.date || dateSource.fecha || dateSource.createdAt || dateSource.updatedAt || dateSource.fabricacion_ts || dateSource.pintura_ts || dateSource.almacen_ts)) || line.date || line.fecha || now());
+
+    rows.push({
+      source:source || "Fabricación nube",
+      companyId:comp.companyId,
+      company:comp.company,
+      materialId:String(m.id || m.materialId || material),
+      material,
+      unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
+      qty,
+      kgm:kgPerMeterFromName(material),
+      ref,
+      dateObj:isNaN(dt.getTime()) ? new Date() : dt
+    });
+  }
+  function collectAdvancedFabricacionNube(db, existingRows){
+    const pkg = advRemotePackage();
+    const rows = [];
+    if(!pkg) return rows;
+
+    const seen = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company||r.companyId), norm(r.material||r.materialId)].join("|")));
+    const ldh = advRawJSON(pkg.ldh_db, {}) || {};
+    const refs = new Map();
+
+    ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
+      const arr = Array.isArray(ldh[k]) ? ldh[k] : [];
+      arr.forEach(item=>{
+        const ref = String(item && (item.ref || item.referencia || item.jobRef) || "").trim();
+        if(!ref || !advIsFabItem(item)) return;
+        if(!refs.has(ref)) refs.set(ref, item);
+      });
+    });
+
+    Object.keys(pkg.prepMeta || {}).forEach(ref=>{
+      ref = String(ref || "").trim();
+      if(!ref || refs.has(ref)) return;
+      const meta = advPackageMeta(pkg, ref);
+      if(meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return;
+      const fase = norm(meta.fase || meta.estado || meta.status || "");
+      const active = !!(meta.en_fabricacion || meta.fabricacion_ts || meta.en_pintura || meta.pintura_ts || meta.en_almacen || meta.almacen_ts || fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen"));
+      if(active) refs.set(ref, {});
+    });
+
+    refs.forEach((item, ref)=>{
+      const meta = advPackageMeta(pkg, ref) || {};
+      if(meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return;
+
+      const companyText = String(item.company || item.empresa || item.empresaReceptora || meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "").trim();
+      if(!companyText) return;
+
+      let lines = [];
+      [item.materials,item.materiales,item.lines,item.lineas,item.materialLines,item.lineasMateriales,item.perfiles,item.barras,item.items,
+       meta.materials,meta.materiales,meta.lines,meta.lineas,meta.materialLines,meta.lineasMateriales,meta.perfiles,meta.barras,meta.items]
+       .forEach(a=>{ if(Array.isArray(a)) lines = lines.concat(a); });
+
+      if(!lines.length){
+        const prep = advPackageRecepcion(pkg, ref);
+        if(Array.isArray(prep)) lines = prep;
+      }
+
+      lines.forEach(line=>advAddLine(rows, seen, db, ref, companyText, line, "Fabricación nube", meta));
+    });
+
+    return rows;
+  }
+
+
   function collectAllRows(db){
     const rows = [];
     (db.assignments||[]).forEach(a=>{
@@ -4114,6 +4262,12 @@ function collectAssignments(db){
         });
       }
     }catch(e){}
+
+    // Añadir Fabricación remota también al motor avanzado (el que muestra los filtros).
+    try{
+      rows.push(...collectAdvancedFabricacionNube(db, rows));
+    }catch(e){}
+
     return rows;
   }
   function aggregate(rows){
