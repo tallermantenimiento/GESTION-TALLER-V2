@@ -1813,7 +1813,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   <div id="ldhIronChart" class="ldh-iron-chart"></div>
   <div id="ldhIronDetail" class="ldh-iron-table"></div>
   <div class="ldh-iron-note">
-    Criterio: se muestran todas las empresas activas del Stock actual. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60 para aproximar los huecos.
+    Criterio: se cuentan solo perfilería/barras y chapa de hierro de pedidos en fabricación/pintura/almacén. Los accesorios quedan excluidos. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60.
   </div>
 </section>
 
@@ -4735,6 +4735,16 @@ if(document.readyState === "loading"){
       line?.name || line?.nombre || line?.perfil || line?.title || line?.descripcion || ""
     ).trim();
   }
+  function unitText(line){
+    return norm(line?.unit || line?.unidad || line?.units || line?.ud || line?.tipoUnidad || "");
+  }
+  function lineKindText(line){
+    return norm([
+      line?.tipo, line?.type, line?.categoria, line?.category, line?.grupo,
+      line?.family, line?.familia, line?.seccion, line?.section, line?.tabla,
+      line?.origen, line?.kind
+    ].join(" "));
+  }
   function qty(line){
     const vals = [
       line?.qty_pedida, line?.pedida, line?.qty, line?.cantidad,
@@ -4746,11 +4756,39 @@ if(document.readyState === "loading"){
     }
     return 0;
   }
-  function isIronName(name){
+  function isSheetName(name){
+    const s = norm(name);
+    return s.includes("chapa") || s.includes("plancha") || s.includes("malla") || s.includes("rejilla") || s.includes("panel");
+  }
+  function isAccessoryName(name){
     const s = norm(name);
     if(!s) return false;
-    if(s.includes("pintur") || s.includes("ferreter") || s.includes("tablero") || s.includes("aglomerado")) return false;
-    if(s.includes("tubo") || s.includes("perfil") || s.includes("pletina") || s.includes("angulo") || s.includes("chapa") || s.includes("barra") || s.includes("varilla")) return true;
+    // Accesorios/ferretería que pueden contener medidas pero no deben sumar hierro consumido.
+    return (
+      s.includes("pintur") || s.includes("ferreter") || s.includes("tablero") || s.includes("aglomerado") ||
+      s.includes("tornill") || s.includes("tuerca") || s.includes("arandela") || s.includes("bisagra") ||
+      s.includes("rueda") || s.includes("tapón") || s.includes("tapon") || s.includes("embellecedor") ||
+      s.includes("sujecion") || s.includes("sujeción") || s.includes("soporte mampara") || s.includes("mampara") ||
+      s.includes("cortera") || s.includes("corredera")
+    );
+  }
+  function isIronLine(line){
+    const material = materialText(line);
+    const s = norm(material);
+    const u = unitText(line);
+    const k = lineKindText(line);
+
+    if(!s) return false;
+    if(isAccessoryName(s)) return false;
+    if(k.includes("accesorio") || k.includes("ferreter") || k.includes("pintur") || k.includes("tablero")) return false;
+
+    // Las unidades/cajas/botes no cuentan como hierro, salvo chapa/plancha explícita.
+    const unitIsAccessory = u.includes("ud") || u.includes("unidad") || u.includes("caja") || u.includes("bote") || u.includes("pieza");
+    if(unitIsAccessory && !isSheetName(s)) return false;
+
+    if(isSheetName(s)) return true;
+    if(s.includes("tubo") || s.includes("perfil") || s.includes("pletina") || s.includes("angulo") || s.includes("angular") || s.includes("barra") || s.includes("varilla")) return true;
+
     // perfiles escritos solo como medidas: 80x80x2, 40x40x1.5, etc.
     return /\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:\s*x\s*\d+(?:\.\d+)?)?\b/.test(s);
   }
@@ -4759,10 +4797,29 @@ if(document.readyState === "loading"){
     const m = s.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/);
     return m ? m.slice(1).filter(Boolean).map(Number) : [];
   }
+  function sheetFactor(name){
+    const s = norm(name);
+    if(s.includes("perforad") || s.includes("punzonad")) return 0.60;
+    if(s.includes("malla") || s.includes("rejilla")) return 0.55;
+    return 1;
+  }
+  function kgSheetUnit(name){
+    const d = extractDims(name);
+    if(!isSheetName(name) || d.length < 3) return 0;
+    const L = d[0] / 1000;
+    const W = d[1] / 1000;
+    const T = d[2] / 1000;
+    const kg = L * W * T * 7850 * sheetFactor(name);
+    return Number.isFinite(kg) && kg > 0 ? kg : 0;
+  }
   function kgm(name){
     const s = norm(name);
     const d = extractDims(name);
     let k = 1;
+    if(isSheetName(name)){
+      const perUnit = kgSheetUnit(name);
+      return perUnit > 0 ? perUnit : 0;
+    }
     if(d.length >= 3){
       const a=d[0], b=d[1], t=d[2];
       if(s.includes("angulo") || s.includes("angular")) k = Math.max(0, (a+b-t)*t*0.00785);
@@ -4775,6 +4832,20 @@ if(document.readyState === "loading"){
       k = Math.max(0.5, d[0]*0.035);
     }
     return Number.isFinite(k) && k > 0 ? k : 1;
+  }
+  function kgFor(line, material, q){
+    if(isSheetName(material)){
+      const perUnit = kgSheetUnit(material);
+      if(perUnit > 0) return q * perUnit;
+    }
+    return q * kgm(material) * BAR_LENGTH_M;
+  }
+  function weightLabel(material){
+    if(isSheetName(material)){
+      const perUnit = kgSheetUnit(material);
+      if(perUnit > 0) return fmt(perUnit) + " kg/ud";
+    }
+    return fmt(kgm(material)) + " kg/m";
   }
   function isActiveMeta(meta){
     if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
@@ -4804,7 +4875,7 @@ if(document.readyState === "loading"){
 
       lines.forEach((line, idx)=>{
         const material = materialText(line);
-        if(!isIronName(material)) return;
+        if(!isIronLine(line)) return;
         const q = qty(line);
         if(q <= 0) return;
 
@@ -4812,7 +4883,7 @@ if(document.readyState === "loading"){
         if(seen.has(key)) return;
         seen.add(key);
 
-        const kg = q * kgm(material) * BAR_LENGTH_M;
+        const kg = kgFor(line, material, q);
         rows.push({ref, empresa, material, qty:q, kg, source:"prep_meta directo"});
       });
     });
@@ -4855,7 +4926,7 @@ if(document.readyState === "loading"){
     if(!data.length){
       chart.innerHTML = `<div class="ldh-iron-empty">
         No hay líneas de hierro detectadas en pedidos marcados como Fabricación/Pintura/Almacén.<br>
-        <small>Lectura directa activa: prep_meta_* + prep_recepcion_*.</small>
+        <small>Lectura directa activa: solo perfilería/barras/chapa; accesorios excluidos.</small>
       </div>`;
       if(detail) detail.innerHTML = "";
       return true;
@@ -4866,7 +4937,7 @@ if(document.readyState === "loading"){
       return `<div class="ldh-iron-row">
         <div>
           <div class="ldh-iron-name">${esc(x.company)}</div>
-          <div class="ldh-iron-sub">${esc(x.refs.size)} trabajos · ${fmt(x.bars)} barras</div>
+          <div class="ldh-iron-sub">${esc(x.refs.size)} trabajos · ${fmt(x.bars)} barras/uds chapa</div>
         </div>
         <div class="ldh-iron-barbox"><div class="ldh-iron-bar" style="width:${pct}%"></div></div>
         <div class="ldh-iron-val">${fmt(x.kg)} kg</div>
@@ -4883,14 +4954,14 @@ if(document.readyState === "loading"){
             <td>${esc(l.ref)}</td>
             <td>${esc(l.material)}</td>
             <td>${fmt(l.qty)}</td>
-            <td>${fmt(kgm(l.material))} kg/m</td>
+            <td>${weightLabel(l.material)}</td>
             <td>${fmt(l.kg)} kg</td>
             <td>${esc(l.source)}</td>
           </tr>`);
         });
       });
       detail.innerHTML = `<table>
-        <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Barras</th><th>Kg/m aprox.</th><th>Kg estimados</th><th>Origen</th></tr></thead>
+        <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Barras / uds chapa</th><th>Peso aprox.</th><th>Kg estimados</th><th>Origen</th></tr></thead>
         <tbody>${trs.join("")}</tbody>
       </table>`;
     }
