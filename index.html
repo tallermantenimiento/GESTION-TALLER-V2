@@ -2944,6 +2944,167 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const ph = String((a && (a.phase || a.fase)) || "preparacion").toLowerCase();
     return !["cancelada","cancelado","devuelta","devuelto","anulada","anulado"].includes(ph);
   }
+
+  function getAnyStore(key){
+    try{
+      const v = localStorage.getItem(key);
+      if(v !== null && v !== undefined && v !== "") return v;
+    }catch(e){}
+    try{
+      const v = sessionStorage.getItem(key);
+      if(v !== null && v !== undefined && v !== "") return v;
+    }catch(e){}
+    return "";
+  }
+  function parseAnyStore(key, fallback){
+    try{
+      const raw = getAnyStore(key);
+      return raw ? JSON.parse(raw) : fallback;
+    }catch(e){ return fallback; }
+  }
+  function materialByText(db, text){
+    const key = norm(text);
+    if(!key) return null;
+    return (db.materials||[]).find(m=>{
+      const keys = [
+        m && m.id,
+        m && m.materialId,
+        m && m.matId,
+        m && m.name,
+        m && m.nombre,
+        m && m.material
+      ].map(norm).filter(Boolean);
+      return keys.some(k => k === key || (k.length > 2 && key.length > 2 && (k.includes(key) || key.includes(k))));
+    }) || null;
+  }
+  function materialForLine(db, line){
+    const id = line && (line.stockLinkId || line.linked_matId || line.materialId || line.matId || line.stockMatId || line.idMaterial);
+    let m = materialById(db, id);
+    if(m) return m;
+    const text = line && (line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.name || line.nombre || line.perfil || line.title);
+    m = materialByText(db, text);
+    if(m) return m;
+    if(text){
+      return {
+        id:String(text),
+        name:String(text),
+        type:"hierro",
+        family:String(line && (line.family || line.familia || "")),
+        unit:String(line && (line.unit || line.unidad || "barra"))
+      };
+    }
+    return null;
+  }
+  function lineQtyForIron(line){
+    const vals = [
+      line && line.qty_pedida,
+      line && line.pedida,
+      line && line.qty,
+      line && line.cantidad,
+      line && line.barras,
+      line && line.unidades,
+      line && line.total
+    ];
+    for(const v of vals){
+      const q = num(v);
+      if(q > 0) return q;
+    }
+    return 0;
+  }
+  function itemFlow(it){
+    it = it || {};
+    const f = (it && typeof it.flow === "object") ? it.flow : {};
+    return {
+      fab:num((f.fab ?? f.fabricacion ?? it.fab ?? it.enFabricacion)),
+      pintura:num((f.pintura ?? f.paint ?? it.pintura ?? it.enPintura)),
+      almacen:num((f.almacen ?? f.alm ?? it.almacen ?? it.enAlmacen)),
+      entregado:num((f.entregado ?? it.delivered ?? it.entregado))
+    };
+  }
+  function isFabItem(it){
+    if(!it || it.deleted || it.eliminado) return false;
+    const f = itemFlow(it);
+    if((f.fab + f.pintura + f.almacen) > 0) return true;
+    const fase = norm(it.fase || it.estado || it.status || it.tipo);
+    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
+  }
+  function collectFabricacionModular(db, existingRows){
+    const rows = [];
+    const ldh = parseAnyStore("ldh_db", {}) || {};
+    const seenItems = new Map();
+
+    ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
+      const arr = Array.isArray(ldh[k]) ? ldh[k] : [];
+      arr.forEach(it=>{
+        const ref = String((it && (it.ref || it.referencia)) || "").trim();
+        if(!ref || !isFabItem(it)) return;
+        if(!seenItems.has(ref)) seenItems.set(ref, it);
+      });
+    });
+
+    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
+
+    seenItems.forEach((it, ref)=>{
+      const meta = parseAnyStore("prep_meta_" + ref, {}) || {};
+      if(meta.deleted || meta.eliminado || meta.eliminado_modulos) return;
+
+      const companyText = String(
+        it.company || it.empresa || it.empresaReceptora ||
+        meta.empresa || meta.company || meta.emp || ""
+      ).trim();
+      if(!companyText) return;
+
+      const c = (db.companies||[]).find(x => {
+        const id = norm(x.id);
+        const name = norm(x.name || x.nombre || x.empresa);
+        const target = norm(companyText);
+        return (id && id === target) || (name && name === target) || (name && target.includes(name)) || (target && name.includes(target));
+      });
+      const companyId = c ? c.id : companyText;
+      const compName = c ? companyName(db, companyId) : companyText;
+      if(!companyIsActive(db, companyId, compName)) return;
+
+      let lines = [];
+      const candidates = [
+        it.materials, it.materiales, it.lines, it.lineas, it.materialLines, it.lineasMateriales,
+        it.perfiles, it.barras, it.items
+      ];
+      candidates.forEach(a=>{ if(Array.isArray(a)) lines = lines.concat(a); });
+
+      if(!lines.length){
+        const prep = parseAnyStore("prep_recepcion_" + ref, []);
+        if(Array.isArray(prep)) lines = prep;
+      }
+
+      lines.forEach(line=>{
+        const m = materialForLine(db, line);
+        if(!m || !isIronMaterial(m)) return;
+
+        const qty = lineQtyForIron(line);
+        if(qty <= 0) return;
+
+        const materialLabel = String(m.name || m.nombre || line.stockLinkLabel || line.material || line.mat || line.perfil || "");
+        const dedupeKey = [norm(ref), norm(compName || companyId), norm(materialLabel || m.id)].join("|");
+        if(existing.has(dedupeKey)) return;
+        existing.add(dedupeKey);
+
+        rows.push({
+          source:"Fabricación modular",
+          companyId,
+          company:compName,
+          materialId:String(m.id || m.materialId || materialLabel),
+          material:materialLabel,
+          unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
+          qty,
+          kgm:kgPerMeterFromName(materialLabel),
+          ref
+        });
+      });
+    });
+
+    return rows;
+  }
+
   function collectAssignments(db){
     const rows = [];
 
@@ -3037,6 +3198,13 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }catch(e){}
 
+    // Pedidos reales del módulo Fabricación limpio.
+    // Esto evita que la estadística quede a 0 cuando el pedido ya está en Fabricación
+    // pero no existe una asignación/reserva de Stock compatible.
+    try{
+      rows.push(...collectFabricacionModular(db, rows));
+    }catch(e){}
+
     return rows;
   }
   function aggregate(rows){
@@ -3092,7 +3260,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 
     if(!data.length){
       chart.innerHTML = `<div class="ldh-iron-empty">
-        Todavía no hay asignaciones de hierro suficientes para calcular el ranking.<br>
+        Todavía no hay pedidos de fabricación/asignaciones de hierro suficientes para calcular el ranking.<br>
         Pulsa <b>Cargar demo</b> para crear trabajos simulados vinculados a materiales de hierro y probar el gráfico.
       </div>`;
       renderDetail([]);
