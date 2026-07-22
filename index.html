@@ -2755,7 +2755,20 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function now(){ return new Date().toISOString(); }
   function readDB(){
     try{
-      const db = JSON.parse(localStorage.getItem(KEY) || "null") || {};
+      let db = null;
+      try{
+        if(window.__LDH_INDEX_STOCK_DB && typeof window.__LDH_INDEX_STOCK_DB === "object"){
+          db = window.__LDH_INDEX_STOCK_DB;
+        }
+      }catch(e){}
+
+      if(!db){
+        let raw = "";
+        try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){}
+        if(!raw){ try{ raw = localStorage.getItem(KEY) || ""; }catch(e){} }
+        db = raw ? JSON.parse(raw) : {};
+      }
+
       db.companies = Array.isArray(db.companies) ? db.companies : [];
       db.materials = Array.isArray(db.materials) ? db.materials : [];
       db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -3105,6 +3118,121 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     return rows;
   }
 
+
+  function LDH_IronStats_storageKeys(prefix){
+    const out = [];
+    const add = (st) => {
+      try{
+        for(let i=0;i<st.length;i++){
+          const k = st.key(i) || "";
+          if(k.startsWith(prefix) && !out.includes(k)) out.push(k);
+        }
+      }catch(e){}
+    };
+    add(localStorage);
+    add(sessionStorage);
+    return out;
+  }
+  function LDH_IronStats_metaActiveForStats(meta){
+    if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
+    const fase = norm(meta.fase || meta.estado || meta.status || "");
+    if(meta.en_fabricacion || meta.fabricacion_ts || meta.en_pintura || meta.pintura_ts || meta.en_almacen || meta.almacen_ts) return true;
+    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
+  }
+  function LDH_IronStats_itemActiveForStats(item){
+    if(!item || item.deleted || item.eliminado || item.archived) return false;
+    const f = (item.flow && typeof item.flow === "object") ? item.flow : {};
+    const fab = num(f.fab ?? f.fabricacion ?? item.fab ?? item.enFabricacion ?? item.fabricacion);
+    const pintura = num(f.pintura ?? item.pintura ?? item.enPintura);
+    const almacen = num(f.almacen ?? item.almacen ?? item.enAlmacen);
+    if((fab + pintura + almacen) > 0) return true;
+    const fase = norm(item.fase || item.estado || item.status || "");
+    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
+  }
+  function LDH_IronStats_linesForRef(ref, meta, item){
+    let lines = [];
+    const add = (arr) => { if(Array.isArray(arr)) lines = lines.concat(arr); };
+    [item&&item.materials,item&&item.materiales,item&&item.lines,item&&item.lineas,item&&item.materialLines,item&&item.lineasMateriales,item&&item.perfiles,item&&item.barras,item&&item.items,
+     meta&&meta.materials,meta&&meta.materiales,meta&&meta.lines,meta&&meta.lineas,meta&&meta.materialLines,meta&&meta.lineasMateriales,meta&&meta.perfiles,meta&&meta.barras,meta&&meta.items].forEach(add);
+    if(!lines.length){
+      const prep = parseAnyStore("prep_recepcion_" + ref, []);
+      if(Array.isArray(prep)) lines = prep;
+    }
+    return lines;
+  }
+  function LDH_IronStats_companyFromText(db, companyText){
+    companyText = String(companyText || "").trim();
+    if(!companyText) return null;
+    const target = norm(companyText);
+    const c = (db.companies||[]).find(x=>{
+      const id = norm(x.id);
+      const name = norm(x.name || x.nombre || x.empresa);
+      return (id && id === target) || (name && name === target) || (name && target.includes(name)) || (target && name.includes(target));
+    });
+    const companyId = c ? c.id : companyText;
+    const compName = c ? companyName(db, companyId) : companyText;
+    if(!companyIsActive(db, companyId, compName)) return null;
+    return {companyId, company:compName};
+  }
+  function LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, source){
+    const comp = LDH_IronStats_companyFromText(db, companyText);
+    if(!comp) return;
+    const m = materialForLine(db, line);
+    if(!m || !isIronMaterial(m)) return;
+    const qty = lineQtyForIron(line);
+    if(qty <= 0) return;
+    const materialLabel = String(m.name || m.nombre || line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.perfil || line.name || "");
+    const dedupeKey = [norm(ref), norm(comp.company || comp.companyId), norm(materialLabel || m.id)].join("|");
+    if(existing.has(dedupeKey)) return;
+    existing.add(dedupeKey);
+    rows.push({
+      source,
+      companyId:comp.companyId,
+      company:comp.company,
+      materialId:String(m.id || m.materialId || materialLabel),
+      material:materialLabel,
+      unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
+      qty,
+      kgm:kgPerMeterFromName(materialLabel),
+      ref
+    });
+  }
+  function collectPrepMetaFabricacion(db, existingRows){
+    const rows = [];
+    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
+    LDH_IronStats_storageKeys("prep_meta_").forEach(key=>{
+      const ref = key.slice("prep_meta_".length).trim();
+      if(!ref) return;
+      const meta = parseAnyStore(key, {}) || {};
+      if(!LDH_IronStats_metaActiveForStats(meta)) return;
+      const companyText = String(meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "").trim();
+      if(!companyText) return;
+      const lines = LDH_IronStats_linesForRef(ref, meta, null);
+      if(!Array.isArray(lines) || !lines.length) return;
+      lines.forEach(line=>LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, "Preparación/Fabricación"));
+    });
+    return rows;
+  }
+  function collectInboxFabricacion(db, existingRows){
+    const rows = [];
+    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
+    const inbox = parseAnyStore("ldh_fabricacion_inbox_v1", []) || [];
+    if(!Array.isArray(inbox)) return rows;
+    inbox.forEach(item=>{
+      if(!LDH_IronStats_itemActiveForStats(item)) return;
+      const ref = String((item.ref || item.referencia) || "").trim();
+      if(!ref) return;
+      const meta = parseAnyStore("prep_meta_" + ref, {}) || {};
+      if(meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return;
+      const companyText = String(item.company || item.empresa || item.empresaReceptora || meta.empresa || meta.company || "").trim();
+      if(!companyText) return;
+      const lines = LDH_IronStats_linesForRef(ref, meta, item);
+      if(!Array.isArray(lines) || !lines.length) return;
+      lines.forEach(line=>LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, "Inbox Fabricación"));
+    });
+    return rows;
+  }
+
   function collectAssignments(db){
     const rows = [];
 
@@ -3172,7 +3300,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
         const ref = key.slice("prep_recepcion_".length);
         const lines = JSON.parse(localStorage.getItem(key) || "[]");
         const meta = JSON.parse(localStorage.getItem("prep_meta_" + ref) || "{}");
-        if(!flowMetaActive(meta)) continue;
         const companyText = String(meta.empresa || meta.company || meta.emp || "");
         if(!Array.isArray(lines) || !companyText) continue;
         const c = (db.companies||[]).find(x => norm(x.name||x.nombre||x.id) === norm(companyText) || norm(companyText).includes(norm(x.name||x.nombre||x.id)));
@@ -3199,12 +3326,9 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }catch(e){}
 
-    // Pedidos reales del módulo Fabricación limpio.
-    // Esto evita que la estadística quede a 0 cuando el pedido ya está en Fabricación
-    // pero no existe una asignación/reserva de Stock compatible.
-    try{
-      rows.push(...collectFabricacionModular(db, rows));
-    }catch(e){}
+    try{ rows.push(...collectPrepMetaFabricacion(db, rows)); }catch(e){}
+    try{ rows.push(...collectFabricacionModular(db, rows)); }catch(e){}
+    try{ rows.push(...collectInboxFabricacion(db, rows)); }catch(e){}
 
     return rows;
   }
@@ -3780,21 +3904,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     return isNaN(dt.getTime()) ? new Date() : dt;
   }
 
-  function flowMetaActive(meta){
-    if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
-    const fase = norm(meta.fase || meta.estado || meta.status || "");
-    return !!(meta.en_fabricacion || meta.fabricacion_ts || meta.en_pintura || meta.pintura_ts || meta.en_almacen || meta.almacen_ts || fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen"));
-  }
-  function flowMetaDate(meta, line){
-    // Para estadísticas por año/mes cuenta desde que entra en fabricación.
-    // Si no hay fecha fiable de fase, se considera activo ahora para no desaparecer en filtros.
-    const raw = (meta && (meta.fabricacion_ts || meta.pintura_ts || meta.almacen_ts || meta.updatedAt || meta.lastUpdate)) ||
-                (line && (line.fabricacion_ts || line.date || line.fecha || line.createdAt || line.updatedAt)) ||
-                now();
-    const dt = new Date(raw);
-    return isNaN(dt.getTime()) ? new Date() : dt;
-  }
-
   function cleanCutoffDate(){
     const el = document.getElementById("ldhIronCleanDate");
     if(el && el.value){
@@ -3954,9 +4063,9 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
           if(!m || !isIronMaterial(m)) return;
           const q = Math.max(num(line.recibida || line.qty_recibida || line.received || 0), num(line.pedida || line.qty || line.cantidad || 0));
           if(q <= 0) return;
-          const dt = flowMetaDate(meta, line);
+          const dt = new Date(meta.date || meta.fecha || line.date || line.fecha || now());
           rows.push({
-            source:"Preparación/Fabricación",
+            source:"Preparación",
             companyId,
             company:c ? companyName(db, companyId) : companyText,
             materialId,
@@ -3978,7 +4087,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     activeCompanies(db).forEach(c=>{
       map.set(String(c.companyId), c);
     });
-    rows.forEach(r=>{ if(!r.dateObj || isNaN(new Date(r.dateObj).getTime())) r.dateObj = new Date(); });
     rows.filter(rowInPeriod).filter(rowPassesCutoff).forEach(r=>{
       const rawName = r.company || companyName(db, r.companyId);
       const active = resolveActiveCompany(db, r.companyId, rawName);
@@ -4605,8 +4713,13 @@ function setSmallStatus(txt){
   }catch(e){}
 }
 function saveLocalStock(raw){
-  try{ localStorage.setItem(STOCK_KEY, raw); }
-  catch(e){ try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(e2){} }
+  const stock = parseJSON(raw, null);
+  if(stock && typeof stock === "object"){
+    window.__LDH_INDEX_STOCK_DB = stock;
+  }
+  try{ sessionStorage.setItem(STOCK_KEY, raw); return "sessionStorage"; }catch(e){}
+  try{ localStorage.setItem(STOCK_KEY, raw); return "localStorage"; }catch(e){}
+  return "memoria";
 }
 async function restoreStockFromFirestore(){
   try{
@@ -4668,8 +4781,8 @@ async function restoreStockFromFirestore(){
       return;
     }
 
-    saveLocalStock(raw);
-    setSmallStatus("Stock Firestore restaurado: " + (stock.companies||[]).length + " empresas · " + (stock.materials||[]).length + " materiales.");
+    const target = saveLocalStock(raw);
+    setSmallStatus("Stock Firestore restaurado en " + target + ": " + (stock.companies||[]).length + " empresas · " + (stock.materials||[]).length + " materiales.");
 
     setTimeout(()=>{
       try{ if(typeof window.LDH_IronStats_render === "function") window.LDH_IronStats_render(); }catch(e){}
@@ -4685,6 +4798,16 @@ if(document.readyState === "loading"){
 }else{
   restoreStockFromFirestore();
 }
+</script>
+
+
+<script id="LDH_INDEX_STATS_DEBUG_2107">
+window.LDH_debugIronStats = function(){
+  try{
+    const db = (typeof window.__LDH_INDEX_STOCK_DB === "object" && window.__LDH_INDEX_STOCK_DB) ? window.__LDH_INDEX_STOCK_DB : JSON.parse(sessionStorage.getItem("ldh_v2_company_stock_v1") || localStorage.getItem("ldh_v2_company_stock_v1") || "{}");
+    console.log("STOCK DB", {companies:(db.companies||[]).length, materials:(db.materials||[]).length, stock:(db.stock||[]).length});
+  }catch(e){ console.warn(e); }
+};
 </script>
 
 </body>
