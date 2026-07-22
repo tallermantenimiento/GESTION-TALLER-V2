@@ -2755,10 +2755,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function now(){ return new Date().toISOString(); }
   function readDB(){
     try{
-      let raw = "";
-      try{ raw = localStorage.getItem(KEY) || ""; }catch(e){}
-      if(!raw){ try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){} }
-      const db = raw ? JSON.parse(raw) : {};
+      const db = JSON.parse(localStorage.getItem(KEY) || "null") || {};
       db.companies = Array.isArray(db.companies) ? db.companies : [];
       db.materials = Array.isArray(db.materials) ? db.materials : [];
       db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -3108,186 +3105,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     return rows;
   }
 
-
-  function LDH_IronStats_storageKeys(prefix){
-    const out = [];
-    const add = (st) => {
-      try{
-        for(let i=0;i<st.length;i++){
-          const k = st.key(i) || "";
-          if(k.startsWith(prefix) && !out.includes(k)) out.push(k);
-        }
-      }catch(e){}
-    };
-    add(localStorage);
-    add(sessionStorage);
-    return out;
-  }
-
-  function LDH_IronStats_getFlow(item){
-    item = item || {};
-    const f = (item.flow && typeof item.flow === "object") ? item.flow : {};
-    return {
-      fab:num(f.fab ?? f.fabricacion ?? item.fab ?? item.enFabricacion ?? item.fabricacion),
-      pintura:num(f.pintura ?? item.pintura ?? item.enPintura),
-      almacen:num(f.almacen ?? item.almacen ?? item.enAlmacen),
-      entregado:num(f.entregado ?? item.entregado ?? item.delivered)
-    };
-  }
-
-  function LDH_IronStats_metaActiveForStats(meta){
-    if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
-    const fase = norm(meta.fase || meta.estado || meta.status || "");
-    if(meta.en_fabricacion || meta.fabricacion_ts || meta.en_pintura || meta.pintura_ts || meta.en_almacen || meta.almacen_ts) return true;
-    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
-  }
-
-  function LDH_IronStats_itemActiveForStats(item){
-    if(!item || item.deleted || item.eliminado || item.archived) return false;
-    const f = LDH_IronStats_getFlow(item);
-    if((f.fab + f.pintura + f.almacen) > 0) return true;
-    const fase = norm(item.fase || item.estado || item.status || "");
-    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
-  }
-
-  function LDH_IronStats_linesForRef(ref, meta, item){
-    let lines = [];
-
-    const add = (arr) => {
-      if(Array.isArray(arr)) lines = lines.concat(arr);
-    };
-
-    add(item && item.materials);
-    add(item && item.materiales);
-    add(item && item.lines);
-    add(item && item.lineas);
-    add(item && item.materialLines);
-    add(item && item.lineasMateriales);
-    add(item && item.perfiles);
-    add(item && item.barras);
-    add(item && item.items);
-
-    add(meta && meta.materials);
-    add(meta && meta.materiales);
-    add(meta && meta.lines);
-    add(meta && meta.lineas);
-    add(meta && meta.materialLines);
-    add(meta && meta.lineasMateriales);
-    add(meta && meta.perfiles);
-    add(meta && meta.barras);
-    add(meta && meta.items);
-
-    if(!lines.length){
-      const prep = parseAnyStore("prep_recepcion_" + ref, []);
-      if(Array.isArray(prep)) lines = prep;
-    }
-
-    return lines;
-  }
-
-  function LDH_IronStats_companyFromText(db, companyText){
-    companyText = String(companyText || "").trim();
-    if(!companyText) return null;
-    const target = norm(companyText);
-    const c = (db.companies||[]).find(x=>{
-      const id = norm(x.id);
-      const name = norm(x.name || x.nombre || x.empresa);
-      return (id && id === target) || (name && name === target) || (name && target.includes(name)) || (target && name.includes(target));
-    });
-    const companyId = c ? c.id : companyText;
-    const compName = c ? companyName(db, companyId) : companyText;
-    if(!companyIsActive(db, companyId, compName)) return null;
-    return {companyId, company:compName};
-  }
-
-  function LDH_IronStats_materialForLine(db, line){
-    return materialForLine(db, line);
-  }
-
-  function LDH_IronStats_lineQty(line){
-    return lineQtyForIron(line);
-  }
-
-  function LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, source){
-    const comp = LDH_IronStats_companyFromText(db, companyText);
-    if(!comp) return;
-
-    const m = LDH_IronStats_materialForLine(db, line);
-    if(!m || !isIronMaterial(m)) return;
-
-    const qty = LDH_IronStats_lineQty(line);
-    if(qty <= 0) return;
-
-    const materialLabel = String(m.name || m.nombre || line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.perfil || line.name || "");
-    const dedupeKey = [norm(ref), norm(comp.company || comp.companyId), norm(materialLabel || m.id)].join("|");
-    if(existing.has(dedupeKey)) return;
-    existing.add(dedupeKey);
-
-    rows.push({
-      source,
-      companyId:comp.companyId,
-      company:comp.company,
-      materialId:String(m.id || m.materialId || materialLabel),
-      material:materialLabel,
-      unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
-      qty,
-      kgm:kgPerMeterFromName(materialLabel),
-      ref
-    });
-  }
-
-  function collectPrepMetaFabricacion(db, existingRows){
-    const rows = [];
-    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
-
-    LDH_IronStats_storageKeys("prep_meta_").forEach(key=>{
-      const ref = key.slice("prep_meta_".length).trim();
-      if(!ref) return;
-      const meta = parseAnyStore(key, {}) || {};
-      if(!LDH_IronStats_metaActiveForStats(meta)) return;
-
-      const companyText = String(meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "").trim();
-      if(!companyText) return;
-
-      const lines = LDH_IronStats_linesForRef(ref, meta, null);
-      if(!Array.isArray(lines) || !lines.length) return;
-
-      lines.forEach(line=>{
-        LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, "Preparación/Fabricación");
-      });
-    });
-
-    return rows;
-  }
-
-  function collectInboxFabricacion(db, existingRows){
-    const rows = [];
-    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
-    const inbox = parseAnyStore("ldh_fabricacion_inbox_v1", []) || [];
-    if(!Array.isArray(inbox)) return rows;
-
-    inbox.forEach(item=>{
-      if(!LDH_IronStats_itemActiveForStats(item)) return;
-      const ref = String((item.ref || item.referencia) || "").trim();
-      if(!ref) return;
-      const meta = parseAnyStore("prep_meta_" + ref, {}) || {};
-      if(meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return;
-
-      const companyText = String(item.company || item.empresa || item.empresaReceptora || meta.empresa || meta.company || "").trim();
-      if(!companyText) return;
-
-      const lines = LDH_IronStats_linesForRef(ref, meta, item);
-      if(!Array.isArray(lines) || !lines.length) return;
-
-      lines.forEach(line=>{
-        LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, "Inbox Fabricación");
-      });
-    });
-
-    return rows;
-  }
-
-
   function collectAssignments(db){
     const rows = [];
 
@@ -3381,18 +3198,11 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }catch(e){}
 
-    // Pedidos reales del flujo modular.
-    // Primero prep_meta_* porque Preparación marca ahí que el pedido ya está en Fabricación/Pintura/Almacén.
-    try{
-      rows.push(...collectPrepMetaFabricacion(db, rows));
-    }catch(e){}
-
-    // Después Fabricación limpio e inbox, por si el pedido está allí pero no quedó marcado en prep_meta.
+    // Pedidos reales del módulo Fabricación limpio.
+    // Esto evita que la estadística quede a 0 cuando el pedido ya está en Fabricación
+    // pero no existe una asignación/reserva de Stock compatible.
     try{
       rows.push(...collectFabricacionModular(db, rows));
-    }catch(e){}
-    try{
-      rows.push(...collectInboxFabricacion(db, rows));
     }catch(e){}
 
     return rows;
@@ -3451,7 +3261,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     if(!data.length){
       chart.innerHTML = `<div class="ldh-iron-empty">
         Todavía no hay pedidos de fabricación/asignaciones de hierro suficientes para calcular el ranking.<br>
-        <small>Lectura activa: prep_meta_* + ldh_db + inbox de Fabricación.</small><br>
         Pulsa <b>Cargar demo</b> para crear trabajos simulados vinculados a materiales de hierro y probar el gráfico.
       </div>`;
       renderDetail([]);
@@ -4728,6 +4537,383 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", render);
   else render();
   window.addEventListener("storage", ev=>{ if(ev && (ev.key===KEY || ev.key==="ldh_company_master_v1" || (ev.key||"").startsWith("prep_"))) render(); });
+})();
+</script>
+
+
+<script type="module" id="LDH_INDEX_STOCK_FIRESTORE_RESTORE_2107">
+/*
+  LDH INDEX · Restore Stock v2 desde Firestore
+  Motivo: el index lee localStorage para estadísticas, pero en incógnito / otro PC localStorage está vacío.
+  Este bloque descarga el paquete publicado por modulos/stock.html en gestion-taller-stock/taller_data/stock.
+*/
+const firebaseConfig = {
+  apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
+  authDomain: "gestion-taller-stock.firebaseapp.com",
+  projectId: "gestion-taller-stock",
+  storageBucket: "gestion-taller-stock.firebasestorage.app",
+  messagingSenderId: "164944519480",
+  appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
+};
+
+const STOCK_KEY = "ldh_v2_company_stock_v1";
+const META_PATH = ["taller_data", "stock"];
+
+function parseJSON(raw, fallback){
+  try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; }
+}
+function localStockHasData(){
+  let raw = "";
+  try{ raw = localStorage.getItem(STOCK_KEY) || ""; }catch(e){}
+  if(!raw){ try{ raw = sessionStorage.getItem(STOCK_KEY) || ""; }catch(e){} }
+  const db = parseJSON(raw, null);
+  return !!(db && Array.isArray(db.materials) && db.materials.length && Array.isArray(db.companies) && db.companies.length);
+}
+function setSmallStatus(txt){
+  try{
+    let el = document.getElementById("LDH_indexCloudStockStatus");
+    if(!el){
+      const note = document.querySelector(".ldh-iron-note");
+      if(note){
+        el = document.createElement("div");
+        el.id = "LDH_indexCloudStockStatus";
+        el.style.marginTop = "8px";
+        el.style.color = "#7dd3fc";
+        el.style.fontWeight = "900";
+        el.style.fontSize = "11px";
+        note.appendChild(el);
+      }
+    }
+    if(el) el.textContent = txt;
+  }catch(e){}
+}
+function saveLocalStock(raw){
+  try{ localStorage.setItem(STOCK_KEY, raw); }
+  catch(e){ try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(e2){} }
+}
+async function restoreStockFromFirestore(){
+  try{
+    if(localStockHasData()){
+      setSmallStatus("Stock local disponible.");
+      return;
+    }
+
+    setSmallStatus("Descargando Stock desde Firestore...");
+
+    const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
+    const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+    const {getFirestore,doc,getDoc} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+
+    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    await new Promise(resolve=>{
+      let done = false;
+      const finish = () => { if(!done){ done = true; resolve(); } };
+      const unsub = onAuthStateChanged(auth, async user=>{
+        try{
+          if(user){ try{ unsub(); }catch(e){} finish(); return; }
+          try{ await signInAnonymously(auth); }catch(e){ finish(); }
+        }catch(e){ finish(); }
+      });
+      setTimeout(finish, 3500);
+    });
+
+    const metaSnap = await getDoc(doc(db, ...META_PATH));
+    if(!metaSnap.exists()){
+      setSmallStatus("Stock Firestore: sin documento taller_data/stock.");
+      return;
+    }
+
+    const meta = metaSnap.data() || {};
+    const total = Number(meta.totalChunks || 0);
+    let packageJson = "";
+
+    if(total > 0){
+      const parts = [];
+      for(let i=0;i<total;i++){
+        const cSnap = await getDoc(doc(db, ...META_PATH, "chunks", String(i)));
+        if(!cSnap.exists()) throw new Error("Falta chunk " + i);
+        parts.push(String((cSnap.data() || {}).part || ""));
+      }
+      packageJson = parts.join("");
+    }else if(meta[STOCK_KEY]){
+      packageJson = JSON.stringify({[STOCK_KEY]: meta[STOCK_KEY]});
+    }
+
+    const pack = parseJSON(packageJson, {}) || {};
+    const raw = String(pack[STOCK_KEY] || "");
+    const stock = parseJSON(raw, null);
+
+    if(!stock || !Array.isArray(stock.materials) || !stock.materials.length){
+      setSmallStatus("Stock Firestore descargado, pero sin materiales válidos.");
+      return;
+    }
+
+    saveLocalStock(raw);
+    setSmallStatus("Stock Firestore restaurado: " + (stock.companies||[]).length + " empresas · " + (stock.materials||[]).length + " materiales.");
+
+    setTimeout(()=>{
+      try{ if(typeof window.LDH_IronStats_render === "function") window.LDH_IronStats_render(); }catch(e){}
+    }, 150);
+  }catch(e){
+    console.error("Index restore Stock Firestore error", e);
+    setSmallStatus("Error leyendo Stock Firestore: " + String((e && (e.code || e.message)) || e));
+  }
+}
+
+if(document.readyState === "loading"){
+  document.addEventListener("DOMContentLoaded", restoreStockFromFirestore);
+}else{
+  restoreStockFromFirestore();
+}
+</script>
+
+
+<script id="LDH_INDEX_STATS_RENDER_DIRECTO_PREPMETA_2107">
+(function(){
+  const STOCK_KEY = "ldh_v2_company_stock_v1";
+  const BAR_LENGTH_M = 6;
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function norm(s){
+    return String(s || "").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/,/g,".")
+      .replace(/\s+/g," ")
+      .trim();
+  }
+  function num(v){
+    const n = parseFloat(String(v ?? 0).replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function getRaw(key){
+    try{ const v = localStorage.getItem(key); if(v) return v; }catch(e){}
+    try{ const v = sessionStorage.getItem(key); if(v) return v; }catch(e){}
+    return "";
+  }
+  function parse(key, fallback){
+    try{ const raw = getRaw(key); return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; }
+  }
+  function allKeys(prefix){
+    const out = [];
+    const add = (st)=>{
+      try{
+        for(let i=0;i<st.length;i++){
+          const k = st.key(i) || "";
+          if(k.startsWith(prefix) && !out.includes(k)) out.push(k);
+        }
+      }catch(e){}
+    };
+    add(localStorage);
+    add(sessionStorage);
+    return out;
+  }
+  function db(){
+    const d = parse(STOCK_KEY, {}) || {};
+    d.companies = Array.isArray(d.companies) ? d.companies : [];
+    d.materials = Array.isArray(d.materials) ? d.materials : [];
+    return d;
+  }
+  function companyName(stockDb, text){
+    text = String(text || "").trim();
+    if(!text) return "";
+    const target = norm(text);
+    const c = (stockDb.companies || []).find(x=>{
+      const id = norm(x.id);
+      const name = norm(x.name || x.nombre || x.empresa);
+      return (id && id === target) || (name && name === target) || (name && target.includes(name)) || (target && name.includes(target));
+    });
+    return c ? String(c.name || c.nombre || c.empresa || c.id || text) : text;
+  }
+  function materialText(line){
+    return String(
+      line?.stockLinkLabel || line?.linked_matName || line?.material || line?.mat ||
+      line?.name || line?.nombre || line?.perfil || line?.title || line?.descripcion || ""
+    ).trim();
+  }
+  function qty(line){
+    const vals = [
+      line?.qty_pedida, line?.pedida, line?.qty, line?.cantidad,
+      line?.barras, line?.unidades, line?.total, line?.recibida, line?.qty_recibida
+    ];
+    for(const v of vals){
+      const q = num(v);
+      if(q > 0) return q;
+    }
+    return 0;
+  }
+  function isIronName(name){
+    const s = norm(name);
+    if(!s) return false;
+    if(s.includes("pintur") || s.includes("ferreter") || s.includes("tablero") || s.includes("aglomerado")) return false;
+    if(s.includes("tubo") || s.includes("perfil") || s.includes("pletina") || s.includes("angulo") || s.includes("chapa") || s.includes("barra") || s.includes("varilla")) return true;
+    // perfiles escritos solo como medidas: 80x80x2, 40x40x1.5, etc.
+    return /\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:\s*x\s*\d+(?:\.\d+)?)?\b/.test(s);
+  }
+  function extractDims(name){
+    const s = norm(name);
+    const m = s.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/);
+    return m ? m.slice(1).filter(Boolean).map(Number) : [];
+  }
+  function kgm(name){
+    const s = norm(name);
+    const d = extractDims(name);
+    let k = 1;
+    if(d.length >= 3){
+      const a=d[0], b=d[1], t=d[2];
+      if(s.includes("angulo") || s.includes("angular")) k = Math.max(0, (a+b-t)*t*0.00785);
+      else k = Math.max(0, (2*t*(a+b-2*t))*0.00785);
+    }else if(d.length === 2){
+      const a=d[0], b=d[1];
+      if(s.includes("pletina")) k = Math.max(0, a*b*0.00785);
+      else k = Math.max(0.6, (a+b)*0.018);
+    }else if(d.length === 1){
+      k = Math.max(0.5, d[0]*0.035);
+    }
+    return Number.isFinite(k) && k > 0 ? k : 1;
+  }
+  function isActiveMeta(meta){
+    if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
+    const fase = norm(meta.fase || meta.estado || meta.status || "");
+    return !!(
+      meta.en_fabricacion || meta.fabricacion_ts ||
+      meta.en_pintura || meta.pintura_ts ||
+      meta.en_almacen || meta.almacen_ts ||
+      fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen")
+    );
+  }
+  function collect(){
+    const stockDb = db();
+    const rows = [];
+    const seen = new Set();
+
+    allKeys("prep_meta_").forEach(k=>{
+      const ref = k.slice("prep_meta_".length);
+      const meta = parse(k, {}) || {};
+      if(!ref || !isActiveMeta(meta)) return;
+
+      const empresa = companyName(stockDb, meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "");
+      if(!empresa) return;
+
+      let lines = parse("prep_recepcion_" + ref, []);
+      if(!Array.isArray(lines)) lines = [];
+
+      lines.forEach((line, idx)=>{
+        const material = materialText(line);
+        if(!isIronName(material)) return;
+        const q = qty(line);
+        if(q <= 0) return;
+
+        const key = [norm(ref), norm(empresa), norm(material), idx].join("|");
+        if(seen.has(key)) return;
+        seen.add(key);
+
+        const kg = q * kgm(material) * BAR_LENGTH_M;
+        rows.push({ref, empresa, material, qty:q, kg, source:"prep_meta directo"});
+      });
+    });
+
+    return rows;
+  }
+  function aggregate(rows){
+    const map = new Map();
+    rows.forEach(r=>{
+      const cur = map.get(r.empresa) || {company:r.empresa, kg:0, bars:0, refs:new Set(), lines:[]};
+      cur.kg += r.kg;
+      cur.bars += r.qty;
+      cur.refs.add(r.ref);
+      cur.lines.push(r);
+      map.set(r.empresa, cur);
+    });
+    return Array.from(map.values()).sort((a,b)=>b.kg-a.kg);
+  }
+  function fmt(n){
+    return Number(n||0).toLocaleString("es-ES",{maximumFractionDigits:1});
+  }
+  function renderDirect(){
+    const chart = document.getElementById("ldhIronChart");
+    if(!chart) return false;
+
+    const rows = collect();
+    const data = aggregate(rows);
+    const top = document.getElementById("ldhIronTopCompany");
+    const total = document.getElementById("ldhIronTotal");
+    const bars = document.getElementById("ldhIronBars");
+    const detail = document.getElementById("ldhIronDetail");
+    const totalKg = data.reduce((a,x)=>a+x.kg,0);
+    const totalBars = data.reduce((a,x)=>a+x.bars,0);
+    const maxKg = Math.max(1, ...data.map(x=>x.kg));
+
+    if(top) top.textContent = data[0] ? data[0].company : "—";
+    if(total) total.textContent = fmt(totalKg) + " kg";
+    if(bars) bars.textContent = fmt(totalBars);
+
+    if(!data.length){
+      chart.innerHTML = `<div class="ldh-iron-empty">
+        No hay líneas de hierro detectadas en pedidos marcados como Fabricación/Pintura/Almacén.<br>
+        <small>Lectura directa activa: prep_meta_* + prep_recepcion_*.</small>
+      </div>`;
+      if(detail) detail.innerHTML = "";
+      return true;
+    }
+
+    chart.innerHTML = data.map(x=>{
+      const pct = Math.max(3, Math.round((x.kg/maxKg)*100));
+      return `<div class="ldh-iron-row">
+        <div>
+          <div class="ldh-iron-name">${esc(x.company)}</div>
+          <div class="ldh-iron-sub">${esc(x.refs.size)} trabajos · ${fmt(x.bars)} barras</div>
+        </div>
+        <div class="ldh-iron-barbox"><div class="ldh-iron-bar" style="width:${pct}%"></div></div>
+        <div class="ldh-iron-val">${fmt(x.kg)} kg</div>
+        <button class="btn ghost ldh-iron-view-btn" type="button" onclick="document.getElementById('ldhIronDetail')?.classList.toggle('show')">Ver</button>
+      </div>`;
+    }).join("");
+
+    if(detail){
+      const trs = [];
+      data.forEach(comp=>{
+        comp.lines.forEach(l=>{
+          trs.push(`<tr>
+            <td>${esc(comp.company)}</td>
+            <td>${esc(l.ref)}</td>
+            <td>${esc(l.material)}</td>
+            <td>${fmt(l.qty)}</td>
+            <td>${fmt(kgm(l.material))} kg/m</td>
+            <td>${fmt(l.kg)} kg</td>
+            <td>${esc(l.source)}</td>
+          </tr>`);
+        });
+      });
+      detail.innerHTML = `<table>
+        <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Barras</th><th>Kg/m aprox.</th><th>Kg estimados</th><th>Origen</th></tr></thead>
+        <tbody>${trs.join("")}</tbody>
+      </table>`;
+    }
+
+    return true;
+  }
+
+  const oldRender = window.LDH_IronStats_render;
+  window.LDH_IronStats_render = function(){
+    try{
+      const ok = renderDirect();
+      if(ok) return;
+    }catch(e){
+      console.warn("Render directo estadísticas falló", e);
+    }
+    if(typeof oldRender === "function") return oldRender.apply(this, arguments);
+  };
+
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", ()=>setTimeout(window.LDH_IronStats_render, 150));
+  }else{
+    setTimeout(window.LDH_IronStats_render, 150);
+  }
 })();
 </script>
 
