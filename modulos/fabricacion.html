@@ -66,7 +66,7 @@
     <span class="spacer"></span>
     <a class="btn small" href="preparacion_pedidos.html">← Preparación</a>
     <a class="btn small" href="almacen.html">Almacén →</a>
-    <button class="btn small" onclick="App.reload()">Actualizar</button>
+    <button class="btn small" onclick="App.reload()">Actualizar</button><button class="btn small" onclick="window.LDH_fabricacionPublishNow && window.LDH_fabricacionPublishNow()">Publicar nube</button><button class="btn small" onclick="window.LDH_fabricacionRestoreCloudNow && window.LDH_fabricacionRestoreCloudNow()">Restaurar nube</button>
   </div>
 
   <main class="wrap">
@@ -84,7 +84,7 @@
         <option value="pintura">Solo pintura</option>
         <option value="almacen">También almacén</option>
       </select>
-      <span id="status" class="status">Cargando...</span>
+      <span id="status" class="status">Cargando...</span><span id="cloudStatus" class="status">Nube: esperando...</span>
     </div>
 
     <section class="summary">
@@ -732,5 +732,247 @@
   document.addEventListener("DOMContentLoaded", () => App.init());
 })();
 </script>
+
+<script type="module" id="LDH_FABRICACION_FIRESTORE_SYNC_2107">
+const firebaseConfig = {
+  apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+  authDomain: "gestion-taller-v2.firebaseapp.com",
+  projectId: "gestion-taller-v2",
+  storageBucket: "gestion-taller-v2.firebasestorage.app",
+  messagingSenderId: "888590823508",
+  appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+};
+
+const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
+const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+const {getFirestore,doc,getDoc,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const DOC_REF = doc(db, "taller_data", "fabricacion");
+const DB_KEY = "ldh_db";
+const INBOX_KEY = "ldh_fabricacion_inbox_v1";
+const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
+
+let authReady = false;
+let ignorePublish = false;
+let publishTimer = null;
+let lastRemoteUpdated = "";
+
+function status(txt, cls){
+  const el = document.getElementById("cloudStatus");
+  if(!el) return;
+  el.textContent = txt;
+  el.classList.remove("ok","warn","bad");
+  if(cls) el.classList.add(cls);
+}
+function parse(raw, fb){ try{ return raw ? JSON.parse(raw) : fb; }catch(e){ return fb; } }
+function getStore(k){
+  try{ const v = localStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
+  try{ const v = sessionStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
+  return "";
+}
+function setStore(k, v){
+  try{ localStorage.setItem(k, v); return; }catch(e){}
+  try{ sessionStorage.setItem(k, v); }catch(e){}
+}
+function storageKeys(prefix){
+  const out = [];
+  const add = st => {
+    try{
+      for(let i=0;i<st.length;i++){
+        const k = st.key(i) || "";
+        if(k.startsWith(prefix) && !out.includes(k)) out.push(k);
+      }
+    }catch(e){}
+  };
+  add(localStorage); add(sessionStorage);
+  return out;
+}
+function refFromKey(k){ return String(k || "").replace(/^prep_(meta|recepcion)_/,""); }
+function activeRefSetFromDB(ldh){
+  const set = new Set();
+  const addRef = r => { r = String(r||"").trim(); if(r) set.add(r); };
+  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+    const arr = Array.isArray(ldh && ldh[pool]) ? ldh[pool] : [];
+    arr.forEach(it => addRef(it && (it.ref || it.referencia || it.jobRef)));
+  });
+  storageKeys("prep_meta_").forEach(k => addRef(refFromKey(k)));
+  return set;
+}
+function localPackage(){
+  const ldhRaw = getStore(DB_KEY);
+  const ldh = parse(ldhRaw, {}) || {};
+  const refs = activeRefSetFromDB(ldh);
+  const prepMeta = {};
+  const prepRecepcion = {};
+
+  refs.forEach(ref=>{
+    const mRaw = getStore("prep_meta_" + ref);
+    if(mRaw) prepMeta[ref] = mRaw;
+    const rRaw = getStore("prep_recepcion_" + ref);
+    if(rRaw) prepRecepcion[ref] = rRaw;
+  });
+
+  return {
+    ldh_db: ldhRaw || JSON.stringify({deliveries:[],fabricacion:[],fab:[],trabajos:[],deliveryCompanies:[]}),
+    inbox: getStore(INBOX_KEY) || "[]",
+    overrides: getStore(OVERRIDE_KEY) || "{}",
+    prepMeta,
+    prepRecepcion,
+    counts: {
+      refs: refs.size,
+      deliveries: Array.isArray(ldh.deliveries) ? ldh.deliveries.length : 0,
+      fabricacion: Array.isArray(ldh.fabricacion) ? ldh.fabricacion.length : 0,
+      fab: Array.isArray(ldh.fab) ? ldh.fab.length : 0,
+      trabajos: Array.isArray(ldh.trabajos) ? ldh.trabajos.length : 0,
+      prepMeta: Object.keys(prepMeta).length,
+      prepRecepcion: Object.keys(prepRecepcion).length
+    },
+    updatedAtISO: new Date().toISOString()
+  };
+}
+function localScore(pkg){
+  pkg = pkg || localPackage();
+  const c = pkg.counts || {};
+  return Number(c.refs||0) + Number(c.deliveries||0) + Number(c.fabricacion||0) + Number(c.fab||0) + Number(c.trabajos||0) + Number(c.prepMeta||0) + Number(c.prepRecepcion||0);
+}
+function applyRemotePackage(pkg){
+  if(!pkg || !pkg.ldh_db) return false;
+  ignorePublish = true;
+  setStore(DB_KEY, pkg.ldh_db);
+  setStore(INBOX_KEY, pkg.inbox || "[]");
+  setStore(OVERRIDE_KEY, pkg.overrides || "{}");
+
+  Object.entries(pkg.prepMeta || {}).forEach(([ref, raw])=>setStore("prep_meta_" + ref, raw));
+  Object.entries(pkg.prepRecepcion || {}).forEach(([ref, raw])=>setStore("prep_recepcion_" + ref, raw));
+
+  setTimeout(()=>{
+    ignorePublish = false;
+    try{ window.App && window.App.reload && window.App.reload(false); }catch(e){}
+  }, 200);
+  return true;
+}
+async function restoreIfRemoteBetter(){
+  try{
+    const snap = await getDoc(DOC_REF);
+    if(!snap.exists()) return false;
+    const remote = snap.data() || {};
+    const lScore = localScore();
+    const rScore = localScore(remote);
+    if(rScore > lScore){
+      applyRemotePackage(remote);
+      status("Nube restaurada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
+      return true;
+    }
+    return false;
+  }catch(e){
+    console.warn("restore fabricacion error", e);
+    status("Nube error lectura", "bad");
+    return false;
+  }
+}
+async function publish(force=false){
+  if(!authReady || ignorePublish) return;
+  clearTimeout(publishTimer);
+  publishTimer = setTimeout(async()=>{
+    try{
+      const pkg = localPackage();
+      const score = localScore(pkg);
+      if(!force && score <= 0) return;
+
+      // Protección: si la nube tiene más referencias, no publicar encima; restaurar.
+      const snap = await getDoc(DOC_REF);
+      if(snap.exists()){
+        const remote = snap.data() || {};
+        const remoteScore = localScore(remote);
+        if(remoteScore > score){
+          applyRemotePackage(remote);
+          status("Nube restaurada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
+          return;
+        }
+      }
+
+      await setDoc(DOC_REF, {
+        ...pkg,
+        updatedAt: serverTimestamp(),
+        source: "fabricacion.html"
+      }, {merge:false});
+      status("Nube conectada · " + (pkg.counts.refs || 0) + " refs", "ok");
+    }catch(e){
+      console.error("publish fabricacion error", e);
+      status("Nube error", "bad");
+    }
+  }, force ? 100 : 900);
+}
+function hookApp(){
+  const appObj = window.App;
+  if(!appObj || appObj.__LDH_CLOUD_HOOKED) return false;
+  appObj.__LDH_CLOUD_HOOKED = true;
+
+  const oldSave = appObj.save;
+  appObj.save = function(){
+    const res = oldSave.apply(this, arguments);
+    publish(false);
+    return res;
+  };
+
+  const oldReload = appObj.reload;
+  appObj.reload = function(){
+    const res = oldReload.apply(this, arguments);
+    publish(false);
+    return res;
+  };
+
+  publish(true);
+  return true;
+}
+window.LDH_fabricacionPublishNow = () => publish(true);
+window.LDH_fabricacionRestoreCloudNow = restoreIfRemoteBetter;
+
+onAuthStateChanged(auth, async user=>{
+  if(!user){
+    try{ await signInAnonymously(auth); return; }
+    catch(e){
+      authReady = false;
+      status("Nube sin login", "bad");
+      return;
+    }
+  }
+  authReady = true;
+  status("Nube comprobando...", "warn");
+  await restoreIfRemoteBetter();
+  hookApp();
+  publish(true);
+
+  onSnapshot(DOC_REF, snap=>{
+    if(!snap.exists() || ignorePublish) return;
+    const remote = snap.data() || {};
+    const remoteStamp = String(remote.updatedAtISO || "");
+    if(remoteStamp && remoteStamp === lastRemoteUpdated) return;
+    lastRemoteUpdated = remoteStamp;
+
+    if(localScore(remote) > localScore()){
+      applyRemotePackage(remote);
+      status("Nube actualizada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
+    }
+  }, err=>{
+    console.warn("snapshot fabricacion error", err);
+    status("Nube escucha error", "bad");
+  });
+});
+
+window.addEventListener("storage", ev=>{
+  if(!ev || ev.key === DB_KEY || ev.key === INBOX_KEY || ev.key === OVERRIDE_KEY || String(ev.key||"").startsWith("prep_")){
+    publish(false);
+  }
+});
+
+setTimeout(hookApp, 500);
+setTimeout(hookApp, 1500);
+</script>
+
 </body>
 </html>
