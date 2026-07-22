@@ -1813,7 +1813,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   <div id="ldhIronChart" class="ldh-iron-chart"></div>
   <div id="ldhIronDetail" class="ldh-iron-table"></div>
   <div class="ldh-iron-note">
-    Criterio: se muestran todas las empresas activas del Stock actual. Lectura consumo: prep_meta + prep_recepcion. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60 para aproximar los huecos.
+    Criterio: se muestran todas las empresas activas del Stock actual. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60 para aproximar los huecos.
   </div>
 </section>
 
@@ -2755,10 +2755,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function now(){ return new Date().toISOString(); }
   function readDB(){
     try{
-      let raw = "";
-      try{ raw = localStorage.getItem(KEY) || ""; }catch(e){}
-      if(!raw){ try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){} }
-      const db = raw ? JSON.parse(raw) : {};
+      const db = JSON.parse(localStorage.getItem(KEY) || "null") || {};
       db.companies = Array.isArray(db.companies) ? db.companies : [];
       db.materials = Array.isArray(db.materials) ? db.materials : [];
       db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -3108,161 +3105,6 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     return rows;
   }
 
-
-  function LDH_IronStats_storageKeys(prefix){
-    const out = [];
-    const add = (st) => {
-      try{
-        for(let i=0;i<st.length;i++){
-          const k = st.key(i) || "";
-          if(k.startsWith(prefix) && !out.includes(k)) out.push(k);
-        }
-      }catch(e){}
-    };
-    add(localStorage);
-    add(sessionStorage);
-    return out;
-  }
-
-  function LDH_IronStats_metaActiveForStats(meta){
-    if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
-    const fase = norm(meta.fase || meta.estado || meta.status || "");
-    if(meta.en_fabricacion || meta.fabricacion_ts || meta.en_pintura || meta.pintura_ts || meta.en_almacen || meta.almacen_ts) return true;
-    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
-  }
-
-  function LDH_IronStats_materialFromLine(db, line){
-    if(typeof materialForLine === "function"){
-      const m = materialForLine(db, line);
-      if(m) return m;
-    }
-
-    const id = line && (line.stockLinkId || line.linked_matId || line.stockMatId || line.materialId || line.matId);
-    let m = materialById(db, id);
-    if(m) return m;
-
-    const txt = String(line && (
-      line.stockLinkLabel || line.linked_matName || line.material || line.mat ||
-      line.name || line.nombre || line.perfil || line.title || ""
-    ) || "").trim();
-
-    if(txt){
-      const key = norm(txt);
-      m = (db.materials||[]).find(x=>{
-        const vals = [x&&x.id, x&&x.materialId, x&&x.matId, x&&x.name, x&&x.nombre, x&&x.material].map(norm).filter(Boolean);
-        return vals.some(v => v === key || (v.length > 2 && key.length > 2 && (v.includes(key) || key.includes(v))));
-      });
-      if(m) return m;
-
-      // Si la línea tiene nombre tipo 80x80x2 aunque no esté perfectamente vinculada,
-      // se trata como hierro para que la estadística no quede a cero.
-      return {
-        id: txt,
-        name: txt,
-        type: "hierro",
-        family: String(line && (line.family || line.familia || "")),
-        unit: String(line && (line.unit || line.unidad || "barra"))
-      };
-    }
-
-    return null;
-  }
-
-  function LDH_IronStats_qtyFromLine(line){
-    const vals = [
-      line && line.qty_pedida,
-      line && line.pedida,
-      line && line.qty,
-      line && line.cantidad,
-      line && line.barras,
-      line && line.unidades,
-      line && line.total
-    ];
-    for(const v of vals){
-      const q = num(v);
-      if(q > 0) return q;
-    }
-    return 0;
-  }
-
-  function LDH_IronStats_companyFromText(db, txt){
-    txt = String(txt || "").trim();
-    if(!txt) return null;
-    const target = norm(txt);
-    const c = (db.companies||[]).find(x=>{
-      const id = norm(x.id);
-      const name = norm(x.name || x.nombre || x.empresa);
-      return (id && id === target) || (name && name === target) || (name && target.includes(name)) || (target && name.includes(target));
-    });
-    const companyId = c ? c.id : txt;
-    const compName = c ? companyName(db, companyId) : txt;
-    if(!companyIsActive(db, companyId, compName)) return null;
-    return {companyId, company:compName};
-  }
-
-  function LDH_IronStats_addPrepLine(rows, existing, db, ref, companyText, line, source){
-    const comp = LDH_IronStats_companyFromText(db, companyText);
-    if(!comp) return;
-
-    const m = LDH_IronStats_materialFromLine(db, line);
-    if(!m || !isIronMaterial(m)) return;
-
-    const qty = LDH_IronStats_qtyFromLine(line);
-    if(qty <= 0) return;
-
-    const materialLabel = String(m.name || m.nombre || line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.name || "");
-    const key = [norm(ref), norm(comp.company || comp.companyId), norm(materialLabel || m.id)].join("|");
-    if(existing.has(key)) return;
-    existing.add(key);
-
-    rows.push({
-      source,
-      companyId:comp.companyId,
-      company:comp.company,
-      materialId:String(m.id || m.materialId || materialLabel),
-      material:materialLabel,
-      unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
-      qty,
-      kgm:kgPerMeterFromName(materialLabel),
-      ref
-    });
-  }
-
-  function collectPrepMetaFabricacion(db, existingRows){
-    const rows = [];
-    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
-
-    LDH_IronStats_storageKeys("prep_meta_").forEach(key=>{
-      const ref = key.slice("prep_meta_".length).trim();
-      if(!ref) return;
-      const meta = parseAnyStore(key, {}) || {};
-      if(!LDH_IronStats_metaActiveForStats(meta)) return;
-
-      const companyText = String(meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "").trim();
-      if(!companyText) return;
-
-      let lines = parseAnyStore("prep_recepcion_" + ref, []);
-      if(!Array.isArray(lines) || !lines.length){
-        lines = []
-          .concat(Array.isArray(meta.materials)?meta.materials:[])
-          .concat(Array.isArray(meta.materiales)?meta.materiales:[])
-          .concat(Array.isArray(meta.lines)?meta.lines:[])
-          .concat(Array.isArray(meta.lineas)?meta.lineas:[])
-          .concat(Array.isArray(meta.perfiles)?meta.perfiles:[])
-          .concat(Array.isArray(meta.barras)?meta.barras:[])
-          .concat(Array.isArray(meta.items)?meta.items:[]);
-      }
-      if(!Array.isArray(lines) || !lines.length) return;
-
-      lines.forEach(line=>{
-        LDH_IronStats_addPrepLine(rows, existing, db, ref, companyText, line, "Preparación/Fabricación");
-      });
-    });
-
-    return rows;
-  }
-
-
   function collectAssignments(db){
     const rows = [];
 
@@ -3356,12 +3198,9 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }catch(e){}
 
-    // Pedidos reales del flujo modular: la fuente fiable es prep_meta_* + prep_recepcion_*.
-    try{
-      rows.push(...collectPrepMetaFabricacion(db, rows));
-    }catch(e){}
-
-    // Mantener también Fabricación limpio por compatibilidad.
+    // Pedidos reales del módulo Fabricación limpio.
+    // Esto evita que la estadística quede a 0 cuando el pedido ya está en Fabricación
+    // pero no existe una asignación/reserva de Stock compatible.
     try{
       rows.push(...collectFabricacionModular(db, rows));
     }catch(e){}
@@ -4829,6 +4668,280 @@ if(document.readyState === "loading"){
 }else{
   restoreStockFromFirestore();
 }
+</script>
+
+
+<script id="LDH_INDEX_STATS_FALLBACK_PREP_DIRECTO_2207">
+(function(){
+  const STOCK_KEY = "ldh_v2_company_stock_v1";
+  const BAR_LENGTH_M = 6;
+
+  function esc(s){
+    return String(s??"").replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+  }
+  function norm(s){
+    return String(s||"").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/,/g,".")
+      .replace(/\s+/g," ")
+      .trim();
+  }
+  function num(v){
+    const n = parseFloat(String(v ?? "").replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function parse(raw, fb){
+    try{ return raw ? JSON.parse(raw) : fb; }catch(e){ return fb; }
+  }
+  function getStore(key){
+    try{ const v = localStorage.getItem(key); if(v !== null && v !== "") return v; }catch(e){}
+    try{ const v = sessionStorage.getItem(key); if(v !== null && v !== "") return v; }catch(e){}
+    return "";
+  }
+  function readStock(){
+    const db = parse(getStore(STOCK_KEY), {}) || {};
+    db.companies = Array.isArray(db.companies) ? db.companies : [];
+    db.materials = Array.isArray(db.materials) ? db.materials : [];
+    return db;
+  }
+  function storageKeys(prefix){
+    const out = [];
+    const add = st => {
+      try{
+        for(let i=0;i<st.length;i++){
+          const k = st.key(i) || "";
+          if(k.startsWith(prefix) && !out.includes(k)) out.push(k);
+        }
+      }catch(e){}
+    };
+    add(localStorage);
+    add(sessionStorage);
+    return out;
+  }
+  function companyNameFromStock(db, text){
+    text = String(text || "").trim();
+    if(!text) return "";
+    const t = norm(text);
+    const c = (db.companies||[]).find(x=>{
+      const id = norm(x && x.id);
+      const name = norm(x && (x.name || x.nombre || x.empresa));
+      return (id && id === t) || (name && name === t) || (name && t.includes(name)) || (t && name.includes(t));
+    });
+    return c ? String(c.name || c.nombre || c.empresa || text) : text;
+  }
+  function lineMaterialText(line){
+    return String(
+      line?.material || line?.mat || line?.name || line?.nombre || line?.perfil ||
+      line?.stockLinkLabel || line?.linked_matName || line?.materialName || line?.descripcion ||
+      line?.concepto || line?.title || ""
+    ).trim();
+  }
+  function isIronText(text){
+    const s = norm(text);
+    if(!s) return false;
+    if(s.includes("pintur") || s.includes("tablero") || s.includes("aglomerado") || s.includes("dm ")) return false;
+    if(/(^|\s)\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:\s*x\s*\d+(?:\.\d+)?)?(\s|$)/i.test(s)) return true;
+    if(/(ø|diam|redondo|tubo|perfil|pletina|angulo|angular|chapa|barra|varilla|guia)/i.test(s)) return true;
+    return false;
+  }
+  function qtyLine(line){
+    const keys = [
+      "qty_pedida","pedida","qty","cantidad","cant","unidades","barras","total",
+      "cantidad_pedida","cantidadPedida","barras_pedidas","barrasPedidas",
+      "necesario","necesaria","required","needed","pedir","a_pedir","aPedir"
+    ];
+    for(const k of keys){
+      const q = num(line && line[k]);
+      if(q > 0) return q;
+    }
+    // Último recurso: si hay un perfil claro pero no cantidad, contar 1 para no dejar la estadística a cero.
+    return lineMaterialText(line) ? 1 : 0;
+  }
+  function extractDims(name){
+    const s = norm(name).replace(/ø/g,"diam ").replace(/∅/g,"diam ");
+    const m = s.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/i);
+    if(m) return m.slice(1).filter(Boolean).map(Number);
+    const d = s.match(/(?:diam|redondo|tubo redondo|red)\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/i);
+    if(d) return d.slice(1).filter(Boolean).map(Number);
+    return [];
+  }
+  function kgPerMeter(name){
+    const s = norm(name);
+    const d = extractDims(name);
+    let kgm = 1;
+    if(d.length >= 3){
+      const a=d[0], b=d[1], t=d[2];
+      if(s.includes("angulo") || s.includes("angular")){
+        kgm = Math.max(0, (a + b - t) * t * 0.00785);
+      }else{
+        kgm = Math.max(0, (2 * t * (a + b - 2*t)) * 0.00785);
+      }
+    }else if(d.length === 2){
+      const a=d[0], b=d[1];
+      if((s.includes("diam") || s.includes("redondo")) && b > 0 && b < a/2){
+        kgm = Math.max(0, Math.PI * b * (a - b) * 0.00785);
+      }else if(s.includes("pletina")){
+        kgm = Math.max(0, a * b * 0.00785);
+      }else{
+        kgm = Math.max(0.6, (a + b) * 0.018);
+      }
+    }else if(d.length === 1){
+      kgm = Math.max(0.5, d[0] * 0.035);
+    }
+    return Number.isFinite(kgm) && kgm > 0 ? kgm : 1;
+  }
+  function activeMeta(meta){
+    if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
+    const fase = norm(meta.fase || meta.estado || meta.status || "");
+    return !!(
+      meta.en_fabricacion || meta.fabricacion_ts ||
+      meta.en_pintura || meta.pintura_ts ||
+      meta.en_almacen || meta.almacen_ts ||
+      fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen")
+    );
+  }
+  function collectDirect(){
+    const db = readStock();
+    const rows = [];
+    const seen = new Set();
+
+    storageKeys("prep_meta_").forEach(k=>{
+      const ref = k.replace(/^prep_meta_/, "");
+      const meta = parse(getStore(k), {}) || {};
+      if(!activeMeta(meta)) return;
+
+      const company = companyNameFromStock(db, meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "");
+      if(!company) return;
+
+      let lines = parse(getStore("prep_recepcion_" + ref), []);
+      if(!Array.isArray(lines) || !lines.length){
+        lines = []
+          .concat(Array.isArray(meta.lines) ? meta.lines : [])
+          .concat(Array.isArray(meta.lineas) ? meta.lineas : [])
+          .concat(Array.isArray(meta.materiales) ? meta.materiales : [])
+          .concat(Array.isArray(meta.materials) ? meta.materials : []);
+      }
+      if(!Array.isArray(lines) || !lines.length) return;
+
+      lines.forEach((line, idx)=>{
+        const mat = lineMaterialText(line);
+        if(!isIronText(mat)) return;
+        const qty = qtyLine(line);
+        if(qty <= 0) return;
+
+        const key = [ref, company, mat, idx].map(norm).join("|");
+        if(seen.has(key)) return;
+        seen.add(key);
+
+        const kgm = kgPerMeter(mat);
+        const unit = norm(line?.unit || line?.unidad || "barra");
+        const kg = qty * kgm * (unit.includes("barra") || unit.includes("bar") || !unit ? BAR_LENGTH_M : 1);
+
+        rows.push({
+          ref,
+          company,
+          material:mat,
+          qty,
+          kgm,
+          kg,
+          source:"prep_meta/prep_recepcion directo"
+        });
+      });
+    });
+
+    return rows;
+  }
+  function renderDirectIfNeeded(){
+    const totalEl = document.getElementById("ldhIronTotal");
+    const barsEl = document.getElementById("ldhIronBars");
+    const chart = document.getElementById("ldhIronChart");
+    if(!totalEl || !barsEl || !chart) return;
+
+    // Si el cálculo normal ya muestra consumo, no lo tocamos.
+    const currentKg = num(String(totalEl.textContent || "").replace(/[^\d,.-]/g,""));
+    const currentBars = num(String(barsEl.textContent || "").replace(/[^\d,.-]/g,""));
+    if(currentKg > 0 || currentBars > 0) return;
+
+    const rows = collectDirect();
+    if(!rows.length) return;
+
+    const map = new Map();
+    rows.forEach(r=>{
+      const cur = map.get(r.company) || {company:r.company, kg:0, bars:0, refs:new Set(), lines:[]};
+      cur.kg += r.kg;
+      cur.bars += r.qty;
+      if(r.ref) cur.refs.add(r.ref);
+      cur.lines.push(r);
+      map.set(r.company, cur);
+    });
+    const data = Array.from(map.values()).sort((a,b)=>b.kg-a.kg);
+    const totalKg = data.reduce((a,x)=>a+x.kg,0);
+    const totalBars = data.reduce((a,x)=>a+x.bars,0);
+    const maxKg = Math.max(1, ...data.map(x=>x.kg));
+
+    document.getElementById("ldhIronTopCompany").textContent = data[0] ? data[0].company : "—";
+    totalEl.textContent = totalKg.toLocaleString("es-ES",{maximumFractionDigits:1}) + " kg";
+    barsEl.textContent = totalBars.toLocaleString("es-ES",{maximumFractionDigits:1});
+
+    chart.innerHTML = data.map(x=>{
+      const pct = Math.max(3, Math.round((x.kg/maxKg)*100));
+      return `<div class="ldh-iron-row">
+        <div>
+          <div class="ldh-iron-name">${esc(x.company)}</div>
+          <div class="ldh-iron-sub">${esc(x.refs.size || 0)} trabajos · ${x.bars.toLocaleString("es-ES",{maximumFractionDigits:1})} barras</div>
+        </div>
+        <div class="ldh-iron-barbox"><div class="ldh-iron-bar" style="width:${pct}%"></div></div>
+        <div class="ldh-iron-val">${x.kg.toLocaleString("es-ES",{maximumFractionDigits:1})} kg</div>
+        <button class="btn ghost ldh-iron-view-btn" type="button" onclick="alert('Detalle disponible en modo directo: ${esc(x.company)}')">Ver</button>
+      </div>`;
+    }).join("");
+
+    const detail = document.getElementById("ldhIronDetail");
+    if(detail){
+      const tr = rows.map(r=>`<tr>
+        <td>${esc(r.company)}</td><td>${esc(r.ref)}</td><td>${esc(r.material)}</td>
+        <td>${r.qty.toLocaleString("es-ES",{maximumFractionDigits:1})}</td>
+        <td>${r.kgm.toLocaleString("es-ES",{maximumFractionDigits:2})} kg/m</td>
+        <td>${r.kg.toLocaleString("es-ES",{maximumFractionDigits:1})} kg</td>
+        <td>${esc(r.source)}</td>
+      </tr>`).join("");
+      detail.innerHTML = `<table>
+        <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Barras</th><th>Kg/m aprox.</th><th>Kg estimados</th><th>Origen</th></tr></thead>
+        <tbody>${tr}</tbody>
+      </table>`;
+    }
+
+    const note = document.querySelector(".ldh-iron-note");
+    if(note && !document.getElementById("LDH_statsFallbackDirectNote")){
+      const n = document.createElement("div");
+      n.id = "LDH_statsFallbackDirectNote";
+      n.style.marginTop = "8px";
+      n.style.color = "#facc15";
+      n.style.fontWeight = "900";
+      n.textContent = "Estadística calculada desde prep_meta/prep_recepcion directo.";
+      note.appendChild(n);
+    }
+  }
+
+  const old = window.LDH_IronStats_render;
+  if(typeof old === "function" && !old.__LDH_directFallback2207){
+    const wrapped = function(){
+      const r = old.apply(this, arguments);
+      setTimeout(renderDirectIfNeeded, 50);
+      setTimeout(renderDirectIfNeeded, 300);
+      return r;
+    };
+    wrapped.__LDH_directFallback2207 = true;
+    window.LDH_IronStats_render = wrapped;
+  }
+
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", ()=>setTimeout(renderDirectIfNeeded, 500));
+  }else{
+    setTimeout(renderDirectIfNeeded, 500);
+  }
+  setTimeout(renderDirectIfNeeded, 1200);
+})();
 </script>
 
 </body>
