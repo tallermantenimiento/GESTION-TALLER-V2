@@ -1357,6 +1357,7 @@ html, body{
       <div class="section-title">Acciones</div>
       <button class="btn ok" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openMaterialModal()">+ Material</button>
       <button class="btn" id="LDH_btnCopiarCatalogo" type="button" style="width:100%;justify-content:center;margin-bottom:8px" onclick="LDH_copiarCatalogoSeguro()">Copiar catálogo</button>
+      <button class="btn" id="LDH_btnRestaurarNube" type="button" style="width:100%;justify-content:center;margin-bottom:8px" onclick="window.LDH_restoreStockFromCloudNow && window.LDH_restoreStockFromCloudNow()">Restaurar nube</button>
       <button class="btn" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openMoveModal('entrada')">+ Entrada</button>
       <button class="btn" style="width:100%;justify-content:center;margin-bottom:8px" onclick="openReserveModal()">Reservar a trabajo</button>
 
@@ -5873,7 +5874,7 @@ const firebaseConfig = {
 
 const {initializeApp,getApps,getApp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
 const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-const {getFirestore,doc,setDoc,serverTimestamp,writeBatch} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+const {getFirestore,doc,getDoc,setDoc,serverTimestamp,writeBatch} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
 const fbApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const fbAuth = getAuth(fbApp);
@@ -5937,6 +5938,133 @@ function completePayloadFromLocalStorage(){
   return {data, raw: cleanRaw};
 }
 
+
+async function readRemoteStockPackage(){
+  const metaSnap = await getDoc(doc(fbDb, ...META_PATH));
+  if(!metaSnap.exists()) return {data:null, raw:"", meta:null};
+  const meta = metaSnap.data() || {};
+  const total = Number(meta.totalChunks || 0);
+  let packageJson = "";
+
+  if(total > 0){
+    const parts = [];
+    for(let i=0;i<total;i++){
+      const snap = await getDoc(doc(fbDb, ...META_PATH, 'chunks', String(i)));
+      if(!snap.exists()) throw new Error('Falta chunk remoto ' + i);
+      parts.push(String((snap.data() || {}).part || ""));
+    }
+    packageJson = parts.join("");
+  }else if(meta[STOCK_KEY]){
+    packageJson = JSON.stringify({[STOCK_KEY]: meta[STOCK_KEY]});
+  }
+
+  const pack = safeParse(packageJson);
+  const raw = String(pack[STOCK_KEY] || "");
+  const data = safeParse(raw);
+  data.companies = Array.isArray(data.companies) ? data.companies : [];
+  data.materials = Array.isArray(data.materials) ? data.materials : [];
+  data.stock = Array.isArray(data.stock) ? data.stock : [];
+  data.movements = Array.isArray(data.movements) ? data.movements : [];
+  data.jobs = Array.isArray(data.jobs) ? data.jobs : [];
+  data.reservations = Array.isArray(data.reservations) ? data.reservations : [];
+  data.assignments = Array.isArray(data.assignments) ? data.assignments : [];
+  data.reservationDebts = Array.isArray(data.reservationDebts) ? data.reservationDebts : [];
+  return {data, raw, meta};
+}
+
+function localStockCount(){
+  const p = completePayloadFromLocalStorage();
+  return {
+    data:p.data,
+    raw:p.raw,
+    companies:Array.isArray(p.data.companies) ? p.data.companies.length : 0,
+    materials:Array.isArray(p.data.materials) ? p.data.materials.length : 0,
+    stock:Array.isArray(p.data.stock) ? p.data.stock.length : 0
+  };
+}
+
+function writeStockEverywhere(raw){
+  try{ localStorage.setItem(STOCK_KEY, raw); }catch(e){}
+  try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(e){}
+  try{ window.__LDH_STOCK_MEMORY_DB = safeParse(raw); }catch(e){}
+}
+
+async function restoreRemoteIfLocalMissing(){
+  const local = localStockCount();
+  if(local.materials > 0 && local.stock > 0) return false;
+
+  setCloudStatus('Stock nube descargando...','warn','Local vacío: descargando catálogo desde Firestore antes de publicar.');
+  const remote = await readRemoteStockPackage();
+
+  if(remote && remote.raw && remote.data && remote.data.materials && remote.data.materials.length){
+    writeStockEverywhere(remote.raw);
+    lastRawPublished = remote.raw;
+    setCloudStatus(
+      'Stock nube restaurado · ' + remote.data.materials.length + ' materiales',
+      'ok',
+      'Restaurado desde Firestore. Empresas: ' + remote.data.companies.length + ' · materiales: ' + remote.data.materials.length + ' · stock: ' + remote.data.stock.length
+    );
+    setTimeout(()=>location.reload(), 350);
+    return true;
+  }
+
+  setCloudStatus('Stock nube sin copia remota','warn','No hay copia remota válida para restaurar.');
+  return false;
+}
+
+async function cloudPublishSafetyCheck(force){
+  // Evita que un navegador vacío/incógnito pise la nube con una muestra pequeña.
+  // Si hay remoto con más materiales que el local, primero restauramos remoto.
+  const local = localStockCount();
+
+  try{
+    const remote = await readRemoteStockPackage();
+    const remoteMaterials = remote && remote.data && remote.data.materials ? remote.data.materials.length : 0;
+
+    if(remote && remote.raw && remoteMaterials > local.materials){
+      writeStockEverywhere(remote.raw);
+      lastRawPublished = remote.raw;
+      setCloudStatus(
+        'Stock nube restaurado · ' + remoteMaterials + ' materiales',
+        'ok',
+        'Se evitó sobrescribir Firestore con un local menor. Local: ' + local.materials + ' · remoto: ' + remoteMaterials
+      );
+      setTimeout(()=>location.reload(), 350);
+      return false;
+    }
+  }catch(e){
+    console.warn('No se pudo comprobar remoto antes de publicar', e);
+    // Si no se puede leer remoto y el local es muy pequeño, no publicamos automáticamente.
+    if(!force && local.materials < 10){
+      setCloudStatus('Stock nube protegido','warn','No se publica local pequeño porque no se pudo comprobar la copia remota.');
+      return false;
+    }
+  }
+
+  return true;
+}
+
+window.LDH_restoreStockFromCloudNow = async function(){
+  try{
+    if(!authReady){
+      setCloudStatus('Stock nube esperando auth','warn','Espera unos segundos y vuelve a intentar restaurar.');
+      return;
+    }
+    const remote = await readRemoteStockPackage();
+    if(remote && remote.raw && remote.data && remote.data.materials && remote.data.materials.length){
+      writeStockEverywhere(remote.raw);
+      lastRawPublished = remote.raw;
+      setCloudStatus('Stock nube restaurado · ' + remote.data.materials.length + ' materiales','ok','Restaurado manual desde Firestore.');
+      setTimeout(()=>location.reload(), 350);
+    }else{
+      setCloudStatus('Stock nube sin copia válida','bad','Firestore no contiene una copia válida.');
+    }
+  }catch(e){
+    setCloudStatus('Stock nube error restore','bad',String((e && (e.code || e.message)) || e));
+  }
+};
+
+
 async function publishStockMaterialsMirror(data){
   // Espejo auxiliar para la app informativa. Si las reglas no permiten esta colección,
   // no bloquea la publicación principal por chunks.
@@ -5980,6 +6108,8 @@ async function publishFullStock(force=false){
       setCloudStatus('Stock nube esperando auth','warn','Esperando autenticación de Firebase.');
       return;
     }
+
+    if(!(await cloudPublishSafetyCheck(force))) return;
 
     const {data, raw} = completePayloadFromLocalStorage();
     if(!force && raw && raw === lastRawPublished) return;
@@ -6066,8 +6196,9 @@ onAuthStateChanged(fbAuth, async user=>{
       }
     }
     authReady = true;
-    setCloudStatus('Stock nube conectado','warn','Autenticado. Preparando publicación...');
-    window.LDH_scheduleStockCloudPublish(true);
+    setCloudStatus('Stock nube conectado','warn','Autenticado. Comprobando copia remota...');
+    const restored = await restoreRemoteIfLocalMissing();
+    if(!restored) window.LDH_scheduleStockCloudPublish(true);
   }catch(e){
     authReady = false;
     setCloudStatus('Stock nube auth error','bad',String(e.code || e.message || e));
