@@ -1813,7 +1813,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   <div id="ldhIronChart" class="ldh-iron-chart"></div>
   <div id="ldhIronDetail" class="ldh-iron-table"></div>
   <div class="ldh-iron-note">
-    Criterio: se muestran todas las empresas activas del Stock actual. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60 para aproximar los huecos.
+    Criterio: se muestran todas las empresas activas del Stock actual. Lectura consumo: prep_meta + prep_recepcion. Barras/perfiles se calculan a 6 m por barra; chapa lisa se calcula por superficie y espesor; chapa perforada se estima con factor 0,60 para aproximar los huecos.
   </div>
 </section>
 
@@ -2755,20 +2755,10 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function now(){ return new Date().toISOString(); }
   function readDB(){
     try{
-      let db = null;
-      try{
-        if(window.__LDH_INDEX_STOCK_DB && typeof window.__LDH_INDEX_STOCK_DB === "object"){
-          db = window.__LDH_INDEX_STOCK_DB;
-        }
-      }catch(e){}
-
-      if(!db){
-        let raw = "";
-        try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){}
-        if(!raw){ try{ raw = localStorage.getItem(KEY) || ""; }catch(e){} }
-        db = raw ? JSON.parse(raw) : {};
-      }
-
+      let raw = "";
+      try{ raw = localStorage.getItem(KEY) || ""; }catch(e){}
+      if(!raw){ try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){} }
+      const db = raw ? JSON.parse(raw) : {};
       db.companies = Array.isArray(db.companies) ? db.companies : [];
       db.materials = Array.isArray(db.materials) ? db.materials : [];
       db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -3133,58 +3123,98 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     add(sessionStorage);
     return out;
   }
+
   function LDH_IronStats_metaActiveForStats(meta){
     if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return false;
     const fase = norm(meta.fase || meta.estado || meta.status || "");
     if(meta.en_fabricacion || meta.fabricacion_ts || meta.en_pintura || meta.pintura_ts || meta.en_almacen || meta.almacen_ts) return true;
     return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
   }
-  function LDH_IronStats_itemActiveForStats(item){
-    if(!item || item.deleted || item.eliminado || item.archived) return false;
-    const f = (item.flow && typeof item.flow === "object") ? item.flow : {};
-    const fab = num(f.fab ?? f.fabricacion ?? item.fab ?? item.enFabricacion ?? item.fabricacion);
-    const pintura = num(f.pintura ?? item.pintura ?? item.enPintura);
-    const almacen = num(f.almacen ?? item.almacen ?? item.enAlmacen);
-    if((fab + pintura + almacen) > 0) return true;
-    const fase = norm(item.fase || item.estado || item.status || "");
-    return fase.includes("fabric") || fase.includes("pint") || fase.includes("almacen");
-  }
-  function LDH_IronStats_linesForRef(ref, meta, item){
-    let lines = [];
-    const add = (arr) => { if(Array.isArray(arr)) lines = lines.concat(arr); };
-    [item&&item.materials,item&&item.materiales,item&&item.lines,item&&item.lineas,item&&item.materialLines,item&&item.lineasMateriales,item&&item.perfiles,item&&item.barras,item&&item.items,
-     meta&&meta.materials,meta&&meta.materiales,meta&&meta.lines,meta&&meta.lineas,meta&&meta.materialLines,meta&&meta.lineasMateriales,meta&&meta.perfiles,meta&&meta.barras,meta&&meta.items].forEach(add);
-    if(!lines.length){
-      const prep = parseAnyStore("prep_recepcion_" + ref, []);
-      if(Array.isArray(prep)) lines = prep;
+
+  function LDH_IronStats_materialFromLine(db, line){
+    if(typeof materialForLine === "function"){
+      const m = materialForLine(db, line);
+      if(m) return m;
     }
-    return lines;
+
+    const id = line && (line.stockLinkId || line.linked_matId || line.stockMatId || line.materialId || line.matId);
+    let m = materialById(db, id);
+    if(m) return m;
+
+    const txt = String(line && (
+      line.stockLinkLabel || line.linked_matName || line.material || line.mat ||
+      line.name || line.nombre || line.perfil || line.title || ""
+    ) || "").trim();
+
+    if(txt){
+      const key = norm(txt);
+      m = (db.materials||[]).find(x=>{
+        const vals = [x&&x.id, x&&x.materialId, x&&x.matId, x&&x.name, x&&x.nombre, x&&x.material].map(norm).filter(Boolean);
+        return vals.some(v => v === key || (v.length > 2 && key.length > 2 && (v.includes(key) || key.includes(v))));
+      });
+      if(m) return m;
+
+      // Si la línea tiene nombre tipo 80x80x2 aunque no esté perfectamente vinculada,
+      // se trata como hierro para que la estadística no quede a cero.
+      return {
+        id: txt,
+        name: txt,
+        type: "hierro",
+        family: String(line && (line.family || line.familia || "")),
+        unit: String(line && (line.unit || line.unidad || "barra"))
+      };
+    }
+
+    return null;
   }
-  function LDH_IronStats_companyFromText(db, companyText){
-    companyText = String(companyText || "").trim();
-    if(!companyText) return null;
-    const target = norm(companyText);
+
+  function LDH_IronStats_qtyFromLine(line){
+    const vals = [
+      line && line.qty_pedida,
+      line && line.pedida,
+      line && line.qty,
+      line && line.cantidad,
+      line && line.barras,
+      line && line.unidades,
+      line && line.total
+    ];
+    for(const v of vals){
+      const q = num(v);
+      if(q > 0) return q;
+    }
+    return 0;
+  }
+
+  function LDH_IronStats_companyFromText(db, txt){
+    txt = String(txt || "").trim();
+    if(!txt) return null;
+    const target = norm(txt);
     const c = (db.companies||[]).find(x=>{
       const id = norm(x.id);
       const name = norm(x.name || x.nombre || x.empresa);
       return (id && id === target) || (name && name === target) || (name && target.includes(name)) || (target && name.includes(target));
     });
-    const companyId = c ? c.id : companyText;
-    const compName = c ? companyName(db, companyId) : companyText;
+    const companyId = c ? c.id : txt;
+    const compName = c ? companyName(db, companyId) : txt;
     if(!companyIsActive(db, companyId, compName)) return null;
     return {companyId, company:compName};
   }
-  function LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, source){
+
+  function LDH_IronStats_addPrepLine(rows, existing, db, ref, companyText, line, source){
     const comp = LDH_IronStats_companyFromText(db, companyText);
     if(!comp) return;
-    const m = materialForLine(db, line);
+
+    const m = LDH_IronStats_materialFromLine(db, line);
     if(!m || !isIronMaterial(m)) return;
-    const qty = lineQtyForIron(line);
+
+    const qty = LDH_IronStats_qtyFromLine(line);
     if(qty <= 0) return;
-    const materialLabel = String(m.name || m.nombre || line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.perfil || line.name || "");
-    const dedupeKey = [norm(ref), norm(comp.company || comp.companyId), norm(materialLabel || m.id)].join("|");
-    if(existing.has(dedupeKey)) return;
-    existing.add(dedupeKey);
+
+    const materialLabel = String(m.name || m.nombre || line.stockLinkLabel || line.linked_matName || line.material || line.mat || line.name || "");
+    const key = [norm(ref), norm(comp.company || comp.companyId), norm(materialLabel || m.id)].join("|");
+    if(existing.has(key)) return;
+    existing.add(key);
+
     rows.push({
       source,
       companyId:comp.companyId,
@@ -3197,41 +3227,41 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       ref
     });
   }
+
   function collectPrepMetaFabricacion(db, existingRows){
     const rows = [];
     const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
+
     LDH_IronStats_storageKeys("prep_meta_").forEach(key=>{
       const ref = key.slice("prep_meta_".length).trim();
       if(!ref) return;
       const meta = parseAnyStore(key, {}) || {};
       if(!LDH_IronStats_metaActiveForStats(meta)) return;
+
       const companyText = String(meta.empresa || meta.company || meta.emp || meta.empresaReceptora || "").trim();
       if(!companyText) return;
-      const lines = LDH_IronStats_linesForRef(ref, meta, null);
+
+      let lines = parseAnyStore("prep_recepcion_" + ref, []);
+      if(!Array.isArray(lines) || !lines.length){
+        lines = []
+          .concat(Array.isArray(meta.materials)?meta.materials:[])
+          .concat(Array.isArray(meta.materiales)?meta.materiales:[])
+          .concat(Array.isArray(meta.lines)?meta.lines:[])
+          .concat(Array.isArray(meta.lineas)?meta.lineas:[])
+          .concat(Array.isArray(meta.perfiles)?meta.perfiles:[])
+          .concat(Array.isArray(meta.barras)?meta.barras:[])
+          .concat(Array.isArray(meta.items)?meta.items:[]);
+      }
       if(!Array.isArray(lines) || !lines.length) return;
-      lines.forEach(line=>LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, "Preparación/Fabricación"));
+
+      lines.forEach(line=>{
+        LDH_IronStats_addPrepLine(rows, existing, db, ref, companyText, line, "Preparación/Fabricación");
+      });
     });
+
     return rows;
   }
-  function collectInboxFabricacion(db, existingRows){
-    const rows = [];
-    const existing = new Set((existingRows||[]).map(r=>[norm(r.ref), norm(r.company || r.companyId), norm(r.material || r.materialId)].join("|")));
-    const inbox = parseAnyStore("ldh_fabricacion_inbox_v1", []) || [];
-    if(!Array.isArray(inbox)) return rows;
-    inbox.forEach(item=>{
-      if(!LDH_IronStats_itemActiveForStats(item)) return;
-      const ref = String((item.ref || item.referencia) || "").trim();
-      if(!ref) return;
-      const meta = parseAnyStore("prep_meta_" + ref, {}) || {};
-      if(meta.deleted || meta.eliminado || meta.eliminado_modulos || meta.archived) return;
-      const companyText = String(item.company || item.empresa || item.empresaReceptora || meta.empresa || meta.company || "").trim();
-      if(!companyText) return;
-      const lines = LDH_IronStats_linesForRef(ref, meta, item);
-      if(!Array.isArray(lines) || !lines.length) return;
-      lines.forEach(line=>LDH_IronStats_addLine(rows, existing, db, ref, companyText, line, "Inbox Fabricación"));
-    });
-    return rows;
-  }
+
 
   function collectAssignments(db){
     const rows = [];
@@ -3326,9 +3356,15 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       }
     }catch(e){}
 
-    try{ rows.push(...collectPrepMetaFabricacion(db, rows)); }catch(e){}
-    try{ rows.push(...collectFabricacionModular(db, rows)); }catch(e){}
-    try{ rows.push(...collectInboxFabricacion(db, rows)); }catch(e){}
+    // Pedidos reales del flujo modular: la fuente fiable es prep_meta_* + prep_recepcion_*.
+    try{
+      rows.push(...collectPrepMetaFabricacion(db, rows));
+    }catch(e){}
+
+    // Mantener también Fabricación limpio por compatibilidad.
+    try{
+      rows.push(...collectFabricacionModular(db, rows));
+    }catch(e){}
 
     return rows;
   }
@@ -4713,13 +4749,8 @@ function setSmallStatus(txt){
   }catch(e){}
 }
 function saveLocalStock(raw){
-  const stock = parseJSON(raw, null);
-  if(stock && typeof stock === "object"){
-    window.__LDH_INDEX_STOCK_DB = stock;
-  }
-  try{ sessionStorage.setItem(STOCK_KEY, raw); return "sessionStorage"; }catch(e){}
-  try{ localStorage.setItem(STOCK_KEY, raw); return "localStorage"; }catch(e){}
-  return "memoria";
+  try{ localStorage.setItem(STOCK_KEY, raw); }
+  catch(e){ try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(e2){} }
 }
 async function restoreStockFromFirestore(){
   try{
@@ -4781,8 +4812,8 @@ async function restoreStockFromFirestore(){
       return;
     }
 
-    const target = saveLocalStock(raw);
-    setSmallStatus("Stock Firestore restaurado en " + target + ": " + (stock.companies||[]).length + " empresas · " + (stock.materials||[]).length + " materiales.");
+    saveLocalStock(raw);
+    setSmallStatus("Stock Firestore restaurado: " + (stock.companies||[]).length + " empresas · " + (stock.materials||[]).length + " materiales.");
 
     setTimeout(()=>{
       try{ if(typeof window.LDH_IronStats_render === "function") window.LDH_IronStats_render(); }catch(e){}
@@ -4798,16 +4829,6 @@ if(document.readyState === "loading"){
 }else{
   restoreStockFromFirestore();
 }
-</script>
-
-
-<script id="LDH_INDEX_STATS_DEBUG_2107">
-window.LDH_debugIronStats = function(){
-  try{
-    const db = (typeof window.__LDH_INDEX_STOCK_DB === "object" && window.__LDH_INDEX_STOCK_DB) ? window.__LDH_INDEX_STOCK_DB : JSON.parse(sessionStorage.getItem("ldh_v2_company_stock_v1") || localStorage.getItem("ldh_v2_company_stock_v1") || "{}");
-    console.log("STOCK DB", {companies:(db.companies||[]).length, materials:(db.materials||[]).length, stock:(db.stock||[]).length});
-  }catch(e){ console.warn(e); }
-};
 </script>
 
 </body>
