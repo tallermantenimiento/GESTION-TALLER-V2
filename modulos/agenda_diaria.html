@@ -1335,6 +1335,13 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 .wo-small-btn:hover{filter:brightness(1.15)}
 .wo-finish-btn{border-color:#22c55e;background:linear-gradient(180deg,#15803d,#14532d);color:#fff}
 .wo-danger-btn{border-color:#ef4444;background:linear-gradient(180deg,#991b1b,#7f1d1d);color:#fff}
+.wo-start-btn{border-color:#f59e0b;background:linear-gradient(180deg,#b45309,#92400e);color:#fff}
+.wo-table tr.wo-in-progress-row{background:linear-gradient(90deg,rgba(245,158,11,.20),rgba(245,158,11,.055))}
+.wo-table tr.wo-in-progress-row:hover{background:linear-gradient(90deg,rgba(245,158,11,.26),rgba(245,158,11,.09))}
+.wo-table tr.wo-in-progress-row td{border-bottom-color:rgba(251,191,36,.38)}
+.wo-table tr.wo-in-progress-row td:first-child{box-shadow:inset 5px 0 #f59e0b}
+.wo-in-progress-pill{display:flex;width:max-content;align-items:center;gap:6px;margin-top:6px;padding:4px 8px;border:1px solid rgba(251,191,36,.58);border-radius:999px;background:#78350f;color:#fef3c7;font-family:ui-sans-serif,system-ui,sans-serif;font-size:10px;font-weight:950;letter-spacing:.05em;white-space:nowrap}
+.wo-in-progress-dot{width:8px;height:8px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,.16)}
 .wo-empty{padding:34px;text-align:center;color:#9fb0c8}
 .wo-history-tools{display:grid;grid-template-columns:minmax(180px,1fr) repeat(2,minmax(150px,.65fr)) minmax(220px,1.2fr) auto;gap:10px;align-items:end;margin:14px 0}
 .wo-history-tools label,.wo-purge-box label{display:block;color:#b8c9df;font-size:11px;font-weight:850;margin-bottom:5px}
@@ -7429,6 +7436,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
       ral: normText(o.ral),
       priority: Math.max(1, Math.round(Number(o.priority)||1)),
       status: normText(o.status) || 'pending',
+      inProgress: !!o.inProgress,
+      startedAtMs: Number(o.startedAtMs)||0,
       completedDate: normText(o.completedDate || o.finishedDate),
       completedAtMs: Number(o.completedAtMs || o.finishedAtMs)||0,
       createdBy: normText(o.createdBy) || 'taller',
@@ -7487,6 +7496,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     init(){
       this.orders = readOrders();
       this.normalizePendingPositions(false);
+      this.normalizeInProgress(false);
       writeOrders(this.orders);
       this.loadCompaniesLocal();
       this.render();
@@ -7497,6 +7507,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       window.addEventListener('storage', e => {
         if(e.key === KEY){
           this.orders = readOrders().filter(o=>!this.deletedIds.has(o.id));
+          this.normalizeInProgress(false);
           this.render();
         }
         if(STOCK_KEYS.includes(e.key)) this.loadCompaniesLocal();
@@ -7614,7 +7625,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
         if(!prev || Number(remote.updatedAtMs)>=Number(prev.updatedAtMs)) local.set(remote.id,remote);
       });
       this.orders = Array.from(local.values());
-      const changed = this.normalizePendingPositions(true);
+      const changed = Array.from(new Map([
+        ...this.normalizePendingPositions(true),
+        ...this.normalizeInProgress(true)
+      ].map(order=>[order.id,order])).values());
       writeOrders(this.orders);
       this.render();
       this.updateSyncStatus('Sincronización: actualizada', true);
@@ -7670,6 +7684,20 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return changed;
     },
 
+    normalizeInProgress(touchUpdatedAt){
+      const changed = [];
+      const now = Date.now();
+      this.orders.forEach(order=>{
+        if(order.inProgress && order.status !== 'pending'){
+          order.inProgress = false;
+          order.startedAtMs = 0;
+          if(touchUpdatedAt) order.updatedAtMs = now;
+          changed.push(order);
+        }
+      });
+      return changed;
+    },
+
     resequencePending(movingOrder,desiredPosition){
       const previousPositions = new Map(
         this.orders.filter(o=>o.status === 'pending').map(o=>[o.id,Number(o.priority)])
@@ -7707,9 +7735,9 @@ window.ejecutarDevolucion = function(matId, maxQty){
       if(empty) empty.style.display = rows.length ? 'none' : 'block';
       if(body){
         body.innerHTML = rows.map((o,index)=>{
-          return `<tr>
+          return `<tr${o.inProgress ? ' class="wo-in-progress-row"' : ''}>
             <td><input type="number" class="wo-priority" min="1" max="${rows.length}" step="1" value="${index+1}" aria-label="Orden de ejecución de ${esc(o.reference)}" onchange="WorkOrders.changePriority('${esc(o.id)}',this)"></td>
-            <td class="wo-reference">${esc(o.reference)}</td>
+            <td class="wo-reference">${esc(o.reference)}${o.inProgress?'<span class="wo-in-progress-pill"><span class="wo-in-progress-dot"></span>EN PROCESO</span>':''}</td>
             <td>${esc(fmtDate(o.entryDate))}</td>
             <td>${esc(fmtDate(o.deliveryDate))}</td>
             <td class="wo-company">${esc(o.companyName)}</td>
@@ -7717,6 +7745,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
             <td class="wo-desc"><strong>${esc(o.description)}</strong>${o.material?`<div style="margin-top:5px;color:#9fb0c8">Material: ${esc(o.material)}</div>`:''}</td>
             <td>${esc(finishText(o))}</td>
             <td><div class="wo-actions">
+              <button type="button" class="wo-small-btn wo-start-btn" onclick="WorkOrders.toggleInProgress('${esc(o.id)}')">${o.inProgress?'■ Quitar marca':'▶ En proceso'}</button>
               <button type="button" class="wo-small-btn wo-finish-btn" onclick="WorkOrders.finishOrder('${esc(o.id)}')">✓ Terminar</button>
               <button type="button" class="wo-small-btn" onclick="WorkOrders.printExisting('${esc(o.id)}')">🖨 Imprimir</button>
               <button type="button" class="wo-small-btn" onclick="WorkOrders.openEdit('${esc(o.id)}')">✎ Editar</button>
@@ -7900,6 +7929,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
       if(existing){
         row.createdAtMs = existing.createdAtMs;
         row.createdBy = existing.createdBy || 'taller';
+        row.inProgress = !!existing.inProgress;
+        row.startedAtMs = Number(existing.startedAtMs)||0;
       }
       row.updatedAtMs = Date.now();
       return row;
@@ -7993,12 +8024,45 @@ window.ejecutarDevolucion = function(matId, maxQty){
       }
     },
 
+    async toggleInProgress(id){
+      const order = this.orders.find(item=>item.id===id && item.status === 'pending');
+      if(!order) return;
+      const activating = !order.inProgress;
+      const now = Date.now();
+      order.inProgress = activating;
+      order.startedAtMs = activating ? now : 0;
+      order.updatedAtMs = now;
+      const changedRows = [order];
+
+      writeOrders(this.orders);
+      this.render();
+      if(this.cloud?.saveOrders || this.cloud?.saveOrder){
+        try{
+          if(this.cloud.saveOrders) await this.cloud.saveOrders(changedRows);
+          else await Promise.all(changedRows.map(item=>this.cloud.saveOrder(item)));
+          this.updateSyncStatus(
+            activating
+              ? `Sincronización: ${order.reference} marcado en proceso`
+              : 'Sincronización: marca de proceso retirada',
+            true
+          );
+        }catch(error){
+          console.error('No se pudo sincronizar la marca En proceso',error);
+          this.updateSyncStatus('Marca guardada localmente · sincronización pendiente',false);
+        }
+      }else{
+        this.updateSyncStatus('Marca guardada localmente · sin conexión',false);
+      }
+    },
+
     async finishOrder(id){
       const order = this.orders.find(o=>o.id===id && o.status === 'pending');
       if(!order) return;
       if(!confirm(`¿Marcar como terminado el trabajo ${order.reference} de ${order.companyName}? Se moverá al histórico.`)) return;
       const now = Date.now();
       order.status = 'completed';
+      order.inProgress = false;
+      order.startedAtMs = 0;
       order.completedDate = todayISO();
       order.completedAtMs = now;
       order.updatedAtMs = now;
@@ -8419,4 +8483,6 @@ window.ejecutarDevolucion = function(matId, maxQty){
 <!-- LDH_AGENDA_GUARDAR_IMPRIMIR_SIN_PESTANA_V5_20260723 -->
 <!-- LDH_AGENDA_AJUSTE_EMPRESA_CANTIDAD_COLOR_V6_20260723 -->
 <!-- LDH_AGENDA_HISTORICO_TERMINAR_ANULAR_LIMPIEZA_V7_20260723 -->
+<!-- LDH_AGENDA_TRABAJO_EN_PROCESO_VISIBLE_V8_20260724 -->
+<!-- LDH_AGENDA_VARIOS_TRABAJOS_EN_PROCESO_V9_20260724 -->
 </body></html>
