@@ -3799,7 +3799,10 @@ _uaPill(item){
 
       const parse = (key)=>{
         try{
-          const raw = localStorage.getItem(key);
+          let raw = localStorage.getItem(key);
+          if(!raw){
+            try{ raw = sessionStorage.getItem(key); }catch(e){}
+          }
           if(!raw) return null;
           const db = JSON.parse(raw);
           return (db && typeof db === 'object') ? db : null;
@@ -7221,7 +7224,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     document.body.classList.add('ldh-module-standalone');
     var bar=document.createElement('div');
     bar.className='ldh-module-topbar no-print';
-    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>Módulo independiente</small><span class="spacer"></span>';
+    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>v3 · Hierro Firestore + vínculo exacto</small><span class="spacer"></span>';
     document.body.insertBefore(bar, document.body.firstChild);
   }
   function route(){
@@ -7730,22 +7733,34 @@ window.ejecutarDevolucion = function(matId, maxQty){
     return out;
   }
 
-  async function readChunks(db, doc, getDoc){
+  async function readStockPackage(db, doc, getDoc){
     const metaSnap = await getDoc(doc(db,'taller_data','stock'));
-    if(!metaSnap.exists()) return [];
+    if(!metaSnap.exists()) return {rows:[], raw:''};
     const meta = metaSnap.data() || {};
     const total = Number(meta.totalChunks || 0) || 0;
-    if(!total) return [];
     let json = '';
-    for(let i=0;i<total;i++){
-      const cs = await getDoc(doc(db,'taller_data','stock','chunks',String(i)));
-      if(cs.exists()) json += cs.data().part || '';
+
+    if(total > 0){
+      for(let i=0;i<total;i++){
+        const cs = await getDoc(doc(db,'taller_data','stock','chunks',String(i)));
+        if(!cs.exists()) throw new Error('Falta chunk de Stock ' + i);
+        json += String((cs.data() || {}).part || '');
+      }
+    }else if(meta[STOCK_KEY]){
+      json = JSON.stringify({[STOCK_KEY]:meta[STOCK_KEY]});
     }
+
     const all = JSON.parse(json || '{}');
     let raw = all[STOCK_KEY] || all.payload || all.data || all.stock || null;
-    if(typeof raw === 'string') raw = JSON.parse(raw);
-    if(raw && raw[STOCK_KEY] && typeof raw[STOCK_KEY] === 'string') raw = JSON.parse(raw[STOCK_KEY]);
-    return rowsFromStockDb(raw);
+    let rawText = typeof raw === 'string' ? raw : (raw ? JSON.stringify(raw) : '');
+    let stockDb = rawText ? JSON.parse(rawText) : null;
+    if(stockDb && stockDb[STOCK_KEY]){
+      rawText = typeof stockDb[STOCK_KEY] === 'string'
+        ? stockDb[STOCK_KEY]
+        : JSON.stringify(stockDb[STOCK_KEY]);
+      stockDb = JSON.parse(rawText);
+    }
+    return {rows:rowsFromStockDb(stockDb), raw:rawText};
   }
 
   async function readStockMaterials(db, collection, getDocs){
@@ -7763,27 +7778,58 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
     try{
       const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+      const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
       const {getFirestore,collection,getDocs,doc,getDoc} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
       let app = getApps().find(a => a.options && a.options.projectId === firebaseConfig.projectId);
       if(!app) app = initializeApp(firebaseConfig, 'ldh-config-stock-real');
+      const auth = getAuth(app);
       const db = getFirestore(app);
+
+      await new Promise(resolve => {
+        let done = false;
+        const finish = () => {
+          if(done) return;
+          done = true;
+          resolve();
+        };
+        const unsub = onAuthStateChanged(auth, async user => {
+          try{
+            if(user){
+              try{ unsub(); }catch(e){}
+              finish();
+              return;
+            }
+            try{ await signInAnonymously(auth); }catch(e){ finish(); }
+          }catch(e){ finish(); }
+        });
+        setTimeout(finish, 3500);
+      });
 
       const fromDocs = await readStockMaterials(db, collection, getDocs).catch(e => {
         console.warn('[Config] stock_materials no disponible', e);
         return [];
       });
-      const fromChunks = await readChunks(db, doc, getDoc).catch(e => {
+      const packageResult = await readStockPackage(db, doc, getDoc).catch(e => {
         console.warn('[Config] chunks no disponibles', e);
-        return [];
+        return {rows:[], raw:''};
       });
+      const fromChunks = packageResult.rows || [];
+
+      if(packageResult.raw){
+        try{
+          localStorage.setItem(STOCK_KEY, packageResult.raw);
+        }catch(e){
+          try{ sessionStorage.setItem(STOCK_KEY, packageResult.raw); }catch(e2){}
+        }
+      }
 
       // Unimos ambas fuentes; _loadStockForConfig limpia duplicados por nombre/familia/unidad.
       state.materials = fromDocs.concat(fromChunks);
       state.loaded = true;
       state.loading = false;
-      state.source = 'Firestore docs ' + fromDocs.length + ' + chunks ' + fromChunks.length;
-      setInfo('Firestore: docs ' + fromDocs.length + ' / chunks ' + fromChunks.length);
+      state.source = 'Firestore autenticado · docs ' + fromDocs.length + ' + catálogo ' + fromChunks.length;
+      setInfo('Firestore conectado: Hierro ' + fromChunks.length + ' / fichas ' + fromDocs.length);
 
       try{
         if(window.App && typeof App.autoLinkCfgRowsByExactName === 'function') App.autoLinkCfgRowsByExactName();
