@@ -3997,18 +3997,42 @@ _uaPill(item){
       return exact[0];
     },
 
+    _cfgFindStockMaterialById(matId){
+      const id = String(matId || '').trim();
+      if(!id) return null;
+      const st = this._loadStockForConfig();
+      return (st.materials || []).find(m =>
+        m && (
+          String(m.id || '') === id ||
+          (Array.isArray(m.aliasIds) && m.aliasIds.some(alias => String(alias || '') === id))
+        )
+      ) || null;
+    },
+
     _autoLinkCfgRowByExactName(tr){
-      if(!tr || tr.dataset.stockMatId) return false;
+      if(!tr) return false;
       const nameInp = tr.querySelector('td input');
       const name = (nameInp ? nameInp.value : '').trim();
       if(!name) return false;
+
+      const previousId = String(tr.dataset.stockMatId || '').trim();
+      const currentMat = this._cfgFindStockMaterialById(previousId);
+      if(currentMat){
+        const canonicalId = String(currentMat.id || previousId);
+        const changed = canonicalId !== previousId;
+        tr.dataset.stockMatId = canonicalId;
+        this._decorateCfgRowStockPill(tr);
+        return changed;
+      }
+
       const tableId = tr.closest('table')?.id || '';
       const preferredCat = tableId === 'cfgTblLines' ? 'Hierro' : '';
       const mat = this._cfgFindExactStockMaterial(name, preferredCat);
       if(!mat || !mat.id) return false;
+      const changed = String(mat.id) !== previousId;
       tr.dataset.stockMatId = mat.id;
       this._decorateCfgRowStockPill(tr);
-      return true;
+      return changed;
     },
 
     _autoLinkConceptsByExactName(){
@@ -4019,6 +4043,10 @@ _uaPill(item){
       let changed = 0;
       const materialFor = (name, preferredCat='') => this._cfgFindExactStockMaterial(name, preferredCat);
       const formulaName = (formula) => String(formula || '').split('=')[0].trim();
+      const linkedKeyFor = (map, name) => {
+        const target = this._cfgExactNameKey(name);
+        return Object.keys(map || {}).find(key => this._cfgExactNameKey(key) === target) || '';
+      };
 
       this.state.concepts.forEach(concept => {
         if(!concept) return;
@@ -4033,11 +4061,26 @@ _uaPill(item){
         const fill = (formulas, map, preferredCat='') => {
           (Array.isArray(formulas) ? formulas : []).forEach(formula => {
             const name = formulaName(formula);
-            if(!name || map[name]) return;
+            if(!name) return;
+
+            const linkedKey = linkedKeyFor(map, name);
+            const previousId = linkedKey ? String(map[linkedKey] || '').trim() : '';
+            const currentMat = this._cfgFindStockMaterialById(previousId);
+            if(currentMat){
+              const canonicalId = String(currentMat.id || previousId);
+              if(linkedKey !== name || canonicalId !== previousId){
+                if(linkedKey && linkedKey !== name) delete map[linkedKey];
+                map[name] = canonicalId;
+                changed++;
+              }
+              return;
+            }
+
             const mat = materialFor(name, preferredCat);
             if(!mat || !mat.id) return;
+            if(linkedKey && linkedKey !== name) delete map[linkedKey];
             map[name] = mat.id;
-            changed++;
+            if(previousId !== String(mat.id) || linkedKey !== name) changed++;
           });
         };
 
@@ -4055,6 +4098,7 @@ _uaPill(item){
       let changedRows = 0;
       document.querySelectorAll('#cfgTblLines tbody tr, #cfgTblUnits tbody tr').forEach(tr => {
         if(this._autoLinkCfgRowByExactName(tr)) changedRows++;
+        else if(tr.dataset.stockMatId) this._decorateCfgRowStockPill(tr);
       });
       return { concepts: changedConcepts, rows: changedRows };
     },
@@ -4300,7 +4344,10 @@ _uaPill(item){
                 rows.forEach(tr => {
                   const nameInp = tr.querySelector('td input');
                   const name = (nameInp ? nameInp.value : '').trim();
-                  const matId = map && map[name];
+                  const exactKey = Object.keys(map || {}).find(key =>
+                    App._cfgExactNameKey(key) === App._cfgExactNameKey(name)
+                  );
+                  const matId = exactKey ? map[exactKey] : '';
                   if(matId){
                     tr.dataset.stockMatId = matId;
                     App._decorateCfgRowStockPill(tr);
@@ -7224,7 +7271,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     document.body.classList.add('ldh-module-standalone');
     var bar=document.createElement('div');
     bar.className='ldh-module-topbar no-print';
-    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>v3 · Hierro Firestore + vínculo exacto</small><span class="spacer"></span>';
+    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>v4 · Reenlace global al Stock nuevo</small><span class="spacer"></span>';
     document.body.insertBefore(bar, document.body.firstChild);
   }
   function route(){
