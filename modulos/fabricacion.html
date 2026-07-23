@@ -129,6 +129,7 @@
 
   window.App = {
     state:{ deliveries:[], fabricacion:[], fab:[], trabajos:[], deliveryCompanies:[] },
+    openCompanies:new Set(),
 
     init(){
       this.load();
@@ -456,6 +457,12 @@
       document.getElementById("status").textContent = `${items.length} trabajos visibles`;
 
       const list = document.getElementById("list");
+      list.querySelectorAll("details.company[data-company]").forEach(detail=>{
+        const company = String(detail.dataset.company || "");
+        if(!company) return;
+        if(detail.open) this.openCompanies.add(company);
+        else this.openCompanies.delete(company);
+      });
       if(!items.length){
         list.innerHTML = `<div class="empty">No hay trabajos activos en Fabricación.</div>`;
         return;
@@ -472,6 +479,15 @@
         .sort((a,b)=>a[0].localeCompare(b[0],"es",{sensitivity:"base"}))
         .map(([company, arr]) => this.companyHTML(company, arr))
         .join("");
+
+      list.querySelectorAll("details.company[data-company]").forEach(detail=>{
+        detail.addEventListener("toggle",()=>{
+          const company = String(detail.dataset.company || "");
+          if(!company) return;
+          if(detail.open) this.openCompanies.add(company);
+          else this.openCompanies.delete(company);
+        });
+      });
     },
 
     companyHTML(company, arr){
@@ -481,7 +497,7 @@
         .map(it=>this.rowHTML(it))
         .join("");
       return `
-        <details class="company">
+        <details class="company" data-company="${esc(company)}"${this.openCompanies.has(company) ? " open" : ""}>
           <summary>
             <span class="fold"></span>
             <span class="company-name">${esc(company)}</span>
@@ -640,7 +656,52 @@
       try{ sessionStorage.setItem(key, v); }catch(e){}
     },
 
-    eliminarPedidoRef(refEnc){
+    purgeDeletedRefs(refs){
+      const deletedRefs = new Set(
+        (Array.isArray(refs) ? refs : [refs])
+          .map(ref=>String(ref || "").trim())
+          .filter(Boolean)
+      );
+      if(!deletedRefs.size) return 0;
+
+      ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
+        if(Array.isArray(this.state[k])){
+          this.state[k] = this.state[k].filter(item=>
+            !deletedRefs.has(String(item && (item.ref || item.referencia) || "").trim())
+          );
+        }
+      });
+
+      const map = this.overrides();
+      const deletedAt = new Date().toISOString();
+      deletedRefs.forEach(ref=>{
+        map[ref] = {
+          ...(map[ref] || {}),
+          deleted:true,
+          archived:true,
+          flow:{fab:0,fabricacion:0,pintura:0,almacen:0,entregado:0},
+          fase:"eliminado",
+          estado:"eliminado",
+          updatedAt:deletedAt
+        };
+        this.markPrepDeleted(ref);
+      });
+      this.saveOverrides(map);
+
+      let inbox = parse(getStore(INBOX_KEY), []) || [];
+      if(Array.isArray(inbox)){
+        inbox = inbox.filter(item=>
+          !deletedRefs.has(String(item && (item.ref || item.referencia) || "").trim())
+        );
+        setStore(INBOX_KEY, JSON.stringify(inbox));
+      }
+
+      this.save(false);
+      this.render();
+      return deletedRefs.size;
+    },
+
+    async eliminarPedidoRef(refEnc){
       const ref = decodeURIComponent(refEnc || "");
       if(!ref){
         alert("No se encuentra la referencia del pedido.");
@@ -649,30 +710,18 @@
       const ok = confirm("¿Eliminar definitivamente este pedido de Fabricación?\n\nReferencia: " + ref + "\n\nSe eliminará de Fabricación y no volverá a importarse desde Preparación.");
       if(!ok) return;
 
-      ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
-        if(Array.isArray(this.state[k])){
-          this.state[k] = this.state[k].filter(x => String(x && (x.ref || x.referencia) || "").trim() !== ref);
-        }
-      });
+      if(typeof window.LDH_fabricacionDeleteRef !== "function"){
+        alert("La sincronización todavía no está preparada. Espera a que aparezca “Nube conectada” y vuelve a intentarlo para que el pedido no reaparezca.");
+        return;
+      }
 
       try{
-        const map = this.overrides ? this.overrides() : {};
-        map[ref] = {deleted:true, archived:true, flow:{fab:0,fabricacion:0,pintura:0,almacen:0,entregado:0}, fase:"eliminado", estado:"eliminado", updatedAt:new Date().toISOString()};
-        if(this.saveOverrides) this.saveOverrides(map);
-      }catch(e){}
-
-      try{
-        let inbox = parse(getStore(INBOX_KEY), []) || [];
-        if(Array.isArray(inbox)){
-          inbox = inbox.filter(x => String(x && (x.ref || x.referencia) || "").trim() !== ref);
-          setStore(INBOX_KEY, JSON.stringify(inbox));
-        }
-      }catch(e){}
-
-      this.markPrepDeleted(ref);
-      this.save(false);
-      this.render();
-      this.toast("Pedido eliminado");
+        await window.LDH_fabricacionDeleteRef(ref);
+        this.toast("Pedido eliminado definitivamente");
+      }catch(error){
+        console.error("No se pudo eliminar el pedido en la nube", error);
+        alert("No se ha eliminado el pedido. Comprueba que aparezca “Nube conectada” y vuelve a intentarlo.");
+      }
     },
 
     markPrepDeleted(ref){
@@ -745,13 +794,14 @@ const firebaseConfig = {
 
 const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
 const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
-const {getFirestore,doc,getDoc,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+const {getFirestore,collection,doc,getDoc,getDocs,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
 const DOC_REF = doc(db, "taller_data", "fabricacion");
+const DELETED_COL = collection(db, "taller_data", "fabricacion", "deleted");
 const DB_KEY = "ldh_db";
 const INBOX_KEY = "ldh_fabricacion_inbox_v1";
 const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
@@ -760,6 +810,9 @@ let authReady = false;
 let ignorePublish = false;
 let publishTimer = null;
 let lastRemoteUpdated = "";
+const deletedRefs = new Set();
+let deleteSyncReady = false;
+let deletedListenerStarted = false;
 
 function status(txt, cls){
   const el = document.getElementById("cloudStatus");
@@ -792,14 +845,32 @@ function storageKeys(prefix){
   return out;
 }
 function refFromKey(k){ return String(k || "").replace(/^prep_(meta|recepcion)_/,""); }
+function refValue(item){ return String(item && (item.ref || item.referencia || item.jobRef) || "").trim(); }
+function localDeletedRefSet(){
+  const out = new Set(deletedRefs);
+  const overrides = parse(getStore(OVERRIDE_KEY), {}) || {};
+  Object.entries(overrides).forEach(([ref, value])=>{
+    if(value && value.deleted) out.add(String(ref || "").trim());
+  });
+  return out;
+}
 function activeRefSetFromDB(ldh){
   const set = new Set();
-  const addRef = r => { r = String(r||"").trim(); if(r) set.add(r); };
+  const deleted = localDeletedRefSet();
+  const addRef = r => {
+    r = String(r||"").trim();
+    if(r && !deleted.has(r)) set.add(r);
+  };
   ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
     const arr = Array.isArray(ldh && ldh[pool]) ? ldh[pool] : [];
-    arr.forEach(it => addRef(it && (it.ref || it.referencia || it.jobRef)));
+    arr.forEach(it => addRef(refValue(it)));
   });
-  storageKeys("prep_meta_").forEach(k => addRef(refFromKey(k)));
+  storageKeys("prep_meta_").forEach(k => {
+    const ref = refFromKey(k);
+    const meta = parse(getStore(k), {}) || {};
+    if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return;
+    addRef(ref);
+  });
   return set;
 }
 function localPackage(){
@@ -839,8 +910,67 @@ function localScore(pkg){
   const c = pkg.counts || {};
   return Number(c.refs||0) + Number(c.deliveries||0) + Number(c.fabricacion||0) + Number(c.fab||0) + Number(c.trabajos||0) + Number(c.prepMeta||0) + Number(c.prepRecepcion||0);
 }
+function withoutDeletedRefs(pkg){
+  if(!pkg || !pkg.ldh_db) return pkg;
+  const deleted = localDeletedRefSet();
+  if(!deleted.size) return pkg;
+
+  const clean = {...pkg};
+  const ldh = parse(pkg.ldh_db, {}) || {};
+  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+    const rows = Array.isArray(ldh[pool]) ? ldh[pool] : [];
+    ldh[pool] = rows.filter(item=>!deleted.has(refValue(item)));
+  });
+  clean.ldh_db = JSON.stringify(ldh);
+
+  const inbox = parse(pkg.inbox, []) || [];
+  clean.inbox = JSON.stringify(
+    Array.isArray(inbox) ? inbox.filter(item=>!deleted.has(refValue(item))) : []
+  );
+
+  const overrides = parse(pkg.overrides, {}) || {};
+  deleted.forEach(ref=>{
+    overrides[ref] = {
+      ...(overrides[ref] || {}),
+      deleted:true,
+      archived:true,
+      flow:{fab:0,fabricacion:0,pintura:0,almacen:0,entregado:0},
+      fase:"eliminado",
+      estado:"eliminado",
+      updatedAt:(overrides[ref] && overrides[ref].updatedAt) || new Date().toISOString()
+    };
+  });
+  clean.overrides = JSON.stringify(overrides);
+
+  clean.prepMeta = Object.fromEntries(
+    Object.entries(pkg.prepMeta || {}).filter(([ref])=>!deleted.has(String(ref || "").trim()))
+  );
+  clean.prepRecepcion = Object.fromEntries(
+    Object.entries(pkg.prepRecepcion || {}).filter(([ref])=>!deleted.has(String(ref || "").trim()))
+  );
+
+  const refs = new Set();
+  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+    ldh[pool].forEach(item=>{
+      const ref = refValue(item);
+      if(ref) refs.add(ref);
+    });
+  });
+  Object.keys(clean.prepMeta).forEach(ref=>refs.add(ref));
+  clean.counts = {
+    refs:refs.size,
+    deliveries:ldh.deliveries.length,
+    fabricacion:ldh.fabricacion.length,
+    fab:ldh.fab.length,
+    trabajos:ldh.trabajos.length,
+    prepMeta:Object.keys(clean.prepMeta).length,
+    prepRecepcion:Object.keys(clean.prepRecepcion).length
+  };
+  return clean;
+}
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
+  pkg = withoutDeletedRefs(pkg);
   ignorePublish = true;
   setStore(DB_KEY, pkg.ldh_db);
   setStore(INBOX_KEY, pkg.inbox || "[]");
@@ -850,8 +980,13 @@ function applyRemotePackage(pkg){
   Object.entries(pkg.prepRecepcion || {}).forEach(([ref, raw])=>setStore("prep_recepcion_" + ref, raw));
 
   setTimeout(()=>{
+    try{
+      if(window.App && window.App.purgeDeletedRefs){
+        window.App.purgeDeletedRefs(Array.from(localDeletedRefSet()));
+      }
+      if(window.App && window.App.reload) window.App.reload(false);
+    }catch(e){}
     ignorePublish = false;
-    try{ window.App && window.App.reload && window.App.reload(false); }catch(e){}
   }, 200);
   return true;
 }
@@ -859,7 +994,7 @@ async function restoreIfRemoteBetter(){
   try{
     const snap = await getDoc(DOC_REF);
     if(!snap.exists()) return false;
-    const remote = snap.data() || {};
+    const remote = withoutDeletedRefs(snap.data() || {});
     const lScore = localScore();
     const rScore = localScore(remote);
     if(rScore > lScore){
@@ -886,7 +1021,7 @@ async function publish(force=false){
       // Protección: si la nube tiene más referencias, no publicar encima; restaurar.
       const snap = await getDoc(DOC_REF);
       if(snap.exists()){
-        const remote = snap.data() || {};
+        const remote = withoutDeletedRefs(snap.data() || {});
         const remoteScore = localScore(remote);
         if(remoteScore > score){
           applyRemotePackage(remote);
@@ -906,6 +1041,72 @@ async function publish(force=false){
       status("Nube error", "bad");
     }
   }, force ? 100 : 900);
+}
+function deletedDocId(ref){
+  return encodeURIComponent(String(ref || "").trim());
+}
+function applyKnownDeletedRefs(){
+  if(!deletedRefs.size || !window.App || !window.App.purgeDeletedRefs) return;
+  const previousIgnore = ignorePublish;
+  ignorePublish = true;
+  try{
+    window.App.purgeDeletedRefs(Array.from(deletedRefs));
+  }finally{
+    ignorePublish = previousIgnore;
+  }
+}
+function absorbDeletedRefs(refs,republish=false){
+  let changed = false;
+  (refs || []).forEach(ref=>{
+    ref = String(ref || "").trim();
+    if(ref && !deletedRefs.has(ref)){
+      deletedRefs.add(ref);
+      changed = true;
+    }
+  });
+  applyKnownDeletedRefs();
+  if(changed && republish) publish(true);
+  return changed;
+}
+async function loadDeletedRefs(){
+  const snapshot = await getDocs(DELETED_COL);
+  absorbDeletedRefs(snapshot.docs.map(item=>{
+    const data = item.data() || {};
+    return data.ref || data.reference || "";
+  }));
+  deleteSyncReady = true;
+
+  if(!deletedListenerStarted){
+    deletedListenerStarted = true;
+    onSnapshot(DELETED_COL,snapshot=>{
+      absorbDeletedRefs(snapshot.docs.map(item=>{
+        const data = item.data() || {};
+        return data.ref || data.reference || "";
+      }),true);
+    },error=>{
+      deleteSyncReady = false;
+      console.warn("deleted refs snapshot error",error);
+      status("Nube: borrado no disponible","bad");
+    });
+  }
+}
+async function deleteRefPermanently(ref){
+  ref = String(ref || "").trim();
+  if(!ref) throw new Error("Referencia vacía");
+  if(!authReady || !deleteSyncReady) throw new Error("Sincronización de borrado no preparada");
+
+  await setDoc(doc(DELETED_COL,deletedDocId(ref)),{
+    ref,
+    deleted:true,
+    deletedAtMs:Date.now(),
+    deletedAt:serverTimestamp(),
+    source:"fabricacion.html"
+  },{merge:true});
+
+  deletedRefs.add(ref);
+  applyKnownDeletedRefs();
+  publish(true);
+  status("Pedido eliminado · nube actualizada","ok");
 }
 function hookApp(){
   const appObj = window.App;
@@ -931,6 +1132,7 @@ function hookApp(){
 }
 window.LDH_fabricacionPublishNow = () => publish(true);
 window.LDH_fabricacionRestoreCloudNow = restoreIfRemoteBetter;
+window.LDH_fabricacionDeleteRef = deleteRefPermanently;
 
 onAuthStateChanged(auth, async user=>{
   if(!user){
@@ -943,13 +1145,21 @@ onAuthStateChanged(auth, async user=>{
   }
   authReady = true;
   status("Nube comprobando...", "warn");
+  try{
+    await loadDeletedRefs();
+  }catch(error){
+    deleteSyncReady = false;
+    console.warn("No se pudo cargar el registro de borrados",error);
+    status("Nube: borrado no disponible","bad");
+  }
   await restoreIfRemoteBetter();
+  applyKnownDeletedRefs();
   hookApp();
   publish(true);
 
   onSnapshot(DOC_REF, snap=>{
     if(!snap.exists() || ignorePublish) return;
-    const remote = snap.data() || {};
+    const remote = withoutDeletedRefs(snap.data() || {});
     const remoteStamp = String(remote.updatedAtISO || "");
     if(remoteStamp && remoteStamp === lastRemoteUpdated) return;
     lastRemoteUpdated = remoteStamp;
@@ -974,5 +1184,6 @@ setTimeout(hookApp, 500);
 setTimeout(hookApp, 1500);
 </script>
 
+<!-- LDH_FABRICACION_BORRADO_PERSISTENTE_DETAILS_ESTABLES_V2_20260724 -->
 </body>
 </html>
