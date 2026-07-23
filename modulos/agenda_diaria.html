@@ -1354,7 +1354,9 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 .wo-check input{width:18px;height:18px}
 .wo-dialog-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;padding:0 20px 20px}
 .wo-cancel{border:1px solid rgba(255,255,255,.18);background:#162033;color:#d8e2ef;border-radius:11px;padding:11px 16px;font-weight:850;cursor:pointer}
-.wo-save-print{border:1px solid #22c55e;background:linear-gradient(180deg,#15803d,#14532d);color:#fff;border-radius:11px;padding:11px 18px;font-weight:950;cursor:pointer}
+.wo-save{border:1px solid #22c55e;background:linear-gradient(180deg,#15803d,#14532d);color:#fff;border-radius:11px;padding:11px 18px;font-weight:950;cursor:pointer}
+.wo-save-print{border:1px solid #38bdf8;background:linear-gradient(180deg,#0369a1,#075985);color:#fff;border-radius:11px;padding:11px 18px;font-weight:950;cursor:pointer}
+.wo-save:disabled,.wo-save-print:disabled{opacity:.6;cursor:wait}
 .wo-required{color:#fda4af}
 @media(max-width:820px){
   .wo-field,.wo-field.w6,.wo-field.w8{grid-column:span 12}
@@ -1523,7 +1525,8 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 
       <div class="wo-dialog-actions">
         <button type="button" class="wo-cancel" onclick="WorkOrders.closeModal()">Cancelar</button>
-        <button type="button" id="woSavePrintBtn" class="wo-save-print" onclick="WorkOrders.saveAndPrint()">Guardar e imprimir orden</button>
+        <button type="button" id="woSaveBtn" class="wo-save" onclick="WorkOrders.saveWork()">Guardar trabajo</button>
+        <button type="button" id="woSavePrintBtn" class="wo-save-print" onclick="WorkOrders.saveAndPrint()">🖨 Imprimir orden</button>
       </div>
     </div>
   </div>
@@ -7696,21 +7699,33 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return '';
     },
 
+    async saveWork(){
+      return this.saveOrder(false);
+    },
+
     async saveAndPrint(){
-      const printWindow = window.open('', '_blank');
-      const button = document.getElementById('woSavePrintBtn');
-      if(button){ button.disabled = true; button.textContent = 'Guardando…'; }
+      return this.saveOrder(true);
+    },
+
+    async saveOrder(shouldPrint){
+      const printWindow = shouldPrint ? this.createPrintTarget() : null;
+      const saveButton = document.getElementById('woSaveBtn');
+      const printButton = document.getElementById('woSavePrintBtn');
+      if(saveButton) saveButton.disabled = true;
+      if(printButton) printButton.disabled = true;
+      if(shouldPrint && printButton) printButton.textContent = 'Preparando impresión…';
+      if(!shouldPrint && saveButton) saveButton.textContent = 'Guardando…';
       try{
         const row = this.collectForm();
         const validation = this.validate(row);
         if(validation){
-          try{ printWindow?.close(); }catch(e){}
+          this.discardPrintTarget(printWindow);
           alert(validation);
           return;
         }
         const isNew = !this.orders.some(o=>o.id===row.id);
         if(isNew && !this.cloud?.reserveReference){
-          try{ printWindow?.close(); }catch(e){}
+          this.discardPrintTarget(printWindow);
           alert('Espera a que el indicador muestre “Sincronización: conectada”. La referencia debe reservarse en la nube para garantizar que nunca se repita.');
           return;
         }
@@ -7719,7 +7734,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
             row.reference = await this.cloud.reserveReference(row.entryDate,row.reference);
           }catch(e){
             console.error('No se pudo reservar la referencia única',e);
-            try{ printWindow?.close(); }catch(_){}
+            this.discardPrintTarget(printWindow);
             alert('No se ha podido generar una referencia única. La orden no se ha guardado ni impreso; comprueba la conexión e inténtalo de nuevo.');
             return;
           }
@@ -7740,9 +7755,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
         }else{
           this.updateSyncStatus('Sin conexión · guardado local',false);
         }
-        this.printOrder(row,printWindow);
+        if(shouldPrint) this.printOrder(row,printWindow);
       }finally{
-        if(button){ button.disabled = false; button.textContent = 'Guardar e imprimir orden'; }
+        if(saveButton){ saveButton.disabled = false; saveButton.textContent = 'Guardar trabajo'; }
+        if(printButton){ printButton.disabled = false; printButton.textContent = '🖨 Imprimir orden'; }
       }
     },
 
@@ -7766,7 +7782,25 @@ window.ejecutarDevolucion = function(matId, maxQty){
     printExisting(id){
       const order = this.orders.find(o=>o.id===id);
       if(!order) return;
-      this.printOrder(order,window.open('','_blank'));
+      this.printOrder(order,this.createPrintTarget());
+    },
+
+    createPrintTarget(){
+      const frame = document.createElement('iframe');
+      frame.setAttribute('aria-hidden','true');
+      frame.tabIndex = -1;
+      frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0;pointer-events:none';
+      document.body.appendChild(frame);
+      return frame.contentWindow;
+    },
+
+    discardPrintTarget(targetWindow){
+      if(!targetWindow) return;
+      try{
+        const frame = targetWindow.frameElement;
+        if(frame) frame.remove();
+        else targetWindow.close();
+      }catch(e){}
     },
 
     printOrder(order,targetWindow){
@@ -7815,6 +7849,16 @@ window.ejecutarDevolucion = function(matId, maxQty){
       </div><script>
         (function(){
           var done=false;
+          function cleanup(){
+            setTimeout(function(){
+              try{
+                var frame=window.frameElement;
+                if(frame) frame.remove();
+                else window.close();
+              }catch(e){}
+            },150);
+          }
+          window.addEventListener('afterprint',cleanup,{once:true});
           function go(){if(done)return;done=true;setTimeout(function(){window.focus();window.print();},250)}
           var img=document.getElementById('woPrintImage');
           if(img&&img.complete)go();else if(img)img.onload=go;
@@ -7949,6 +7993,14 @@ window.ejecutarDevolucion = function(matId, maxQty){
     const metaRef = doc(db,'taller_data','stock');
 
     function parse(raw,fallback){ try{return raw?JSON.parse(raw):fallback;}catch(e){return fallback;} }
+    function showLocalFallback(unavailableText){
+      const count = Number(window.WorkOrders?.companies?.length||0);
+      if(count){
+        window.WorkOrders?.updateCompaniesStatus(`Empresas de Stock: ${count} · copia local`,true);
+      }else{
+        window.WorkOrders?.updateCompaniesStatus(unavailableText,false);
+      }
+    }
     async function readCompanies(){
       const metaSnap = await getDoc(metaRef);
       if(!metaSnap.exists()) throw new Error('No existe taller_data/stock');
@@ -7979,16 +8031,20 @@ window.ejecutarDevolucion = function(matId, maxQty){
       await readCompanies();
       onSnapshot(metaRef,()=>readCompanies().catch(e=>{
         console.warn('Recarga de empresas Stock',e);
-        window.WorkOrders?.updateCompaniesStatus('Empresas de Stock: error de actualización',false);
+        showLocalFallback('Empresas de Stock: error de actualización');
       }));
     }
     start().catch(e=>{
       console.error(e);
-      window.WorkOrders?.updateCompaniesStatus('Empresas de Stock: no disponibles',false);
+      showLocalFallback('Empresas de Stock: no disponibles');
     });
   }catch(error){
     console.error('Carga de empresas Stock',error);
-    window.WorkOrders?.updateCompaniesStatus('Empresas de Stock: usando copia local',false);
+    const count = Number(window.WorkOrders?.companies?.length||0);
+    window.WorkOrders?.updateCompaniesStatus(
+      count ? `Empresas de Stock: ${count} · copia local` : 'Empresas de Stock: no disponibles',
+      count > 0
+    );
   }
 })();
 </script>
@@ -8019,4 +8075,5 @@ window.ejecutarDevolucion = function(matId, maxQty){
 <!-- LDH_AGENDA_ORDENES_PRINT_ALINEADO_V2_20260723 -->
 <!-- LDH_AGENDA_PRIORIDAD_NUMERICA_PRINT_V3_20260723 -->
 <!-- LDH_AGENDA_EMPRESAS_STOCK_DIRECTO_PRINT_V4_20260723 -->
+<!-- LDH_AGENDA_GUARDAR_IMPRIMIR_SIN_PESTANA_V5_20260723 -->
 </body></html>
