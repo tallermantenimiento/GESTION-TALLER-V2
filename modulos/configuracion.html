@@ -3731,6 +3731,8 @@ _uaPill(item){
         // Si hay stockMatId, intenta enriquecer la pill con datos del material
         if(stockMatId) {
           try{ App._decorateCfgRowStockPill(tr); }catch(e){}
+        } else {
+          try{ App._autoLinkCfgRowByExactName(tr); }catch(e){}
         }
     },
 
@@ -3775,6 +3777,7 @@ _uaPill(item){
         
         parse(document.getElementById('cfgTxtLines').value, 'cfgTblLines');
         parse(document.getElementById('cfgTxtUnits').value, 'cfgTblUnits');
+        try{ this.autoLinkCfgRowsByExactName(); }catch(e){}
     },
 
 
@@ -3806,6 +3809,11 @@ _uaPill(item){
       const mainDB = parse('ldh_v2_company_stock_v1') || {};
       const ferDB  = parse('taller_stock_v3_data') || parse('ldh_v2_ferreteria_stock_v1') || parse('terminal_ferreteria_stock_v1') || {};
       const tabDB  = parse('ldh_v2_tableros_stock_v1') || {};
+      const remoteDB = {
+        materials: Array.isArray(window.LDH_CFG_REMOTE_STOCK?.materials)
+          ? window.LDH_CFG_REMOTE_STOCK.materials
+          : []
+      };
 
       const out = [];
       const byKey = new Map();
@@ -3942,6 +3950,7 @@ _uaPill(item){
       };
 
       ingestDB(mainDB, 'stock', '');
+      ingestDB(remoteDB, 'stock', '');
       ingestDB(ferDB, 'ferreteria', 'Ferretería', true);
       ingestDB(tabDB, 'tableros', 'Tableros');
 
@@ -3955,10 +3964,96 @@ _uaPill(item){
 
       const srcs = [];
       if(localStorage.getItem('ldh_v2_company_stock_v1')) srcs.push('Stock');
+      if(remoteDB.materials.length) srcs.push('Stock Firestore');
       if(localStorage.getItem('taller_stock_v3_data') || localStorage.getItem('ldh_v2_ferreteria_stock_v1') || localStorage.getItem('terminal_ferreteria_stock_v1')) srcs.push('Ferretería');
       if(localStorage.getItem('ldh_v2_tableros_stock_v1')) srcs.push('Tableros');
 
       return { ok: out.length>0, materials:out, source:srcs.join(' + ') || 'sin datos' };
+    },
+
+    _cfgExactNameKey(value){
+      return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    },
+
+    _cfgFindExactStockMaterial(name, preferredCat=''){
+      const key = this._cfgExactNameKey(name);
+      if(!key) return null;
+      const st = this._loadStockForConfig();
+      const exact = (st.materials || []).filter(m => this._cfgExactNameKey(m && m.name) === key);
+      if(!exact.length) return null;
+      const preferred = this._cfgExactNameKey(preferredCat);
+      if(preferred){
+        const hit = exact.find(m => this._cfgExactNameKey(m && m.cat) === preferred);
+        if(hit) return hit;
+      }
+      return exact[0];
+    },
+
+    _autoLinkCfgRowByExactName(tr){
+      if(!tr || tr.dataset.stockMatId) return false;
+      const nameInp = tr.querySelector('td input');
+      const name = (nameInp ? nameInp.value : '').trim();
+      if(!name) return false;
+      const tableId = tr.closest('table')?.id || '';
+      const preferredCat = tableId === 'cfgTblLines' ? 'Hierro' : '';
+      const mat = this._cfgFindExactStockMaterial(name, preferredCat);
+      if(!mat || !mat.id) return false;
+      tr.dataset.stockMatId = mat.id;
+      this._decorateCfgRowStockPill(tr);
+      return true;
+    },
+
+    _autoLinkConceptsByExactName(){
+      if(!this.state || !Array.isArray(this.state.concepts)) return 0;
+      const st = this._loadStockForConfig();
+      if(!st.ok || !(st.materials || []).length) return 0;
+
+      let changed = 0;
+      const materialFor = (name, preferredCat='') => this._cfgFindExactStockMaterial(name, preferredCat);
+      const formulaName = (formula) => String(formula || '').split('=')[0].trim();
+
+      this.state.concepts.forEach(concept => {
+        if(!concept) return;
+        const current = concept.stockLinks && typeof concept.stockLinks === 'object'
+          ? concept.stockLinks
+          : {};
+        const links = {
+          lines: current.lines && typeof current.lines === 'object' ? current.lines : {},
+          units: current.units && typeof current.units === 'object' ? current.units : {}
+        };
+
+        const fill = (formulas, map, preferredCat='') => {
+          (Array.isArray(formulas) ? formulas : []).forEach(formula => {
+            const name = formulaName(formula);
+            if(!name || map[name]) return;
+            const mat = materialFor(name, preferredCat);
+            if(!mat || !mat.id) return;
+            map[name] = mat.id;
+            changed++;
+          });
+        };
+
+        fill(concept.lines, links.lines, 'Hierro');
+        fill(concept.units, links.units, '');
+        concept.stockLinks = links;
+      });
+
+      if(changed) this.saveData();
+      return changed;
+    },
+
+    autoLinkCfgRowsByExactName(){
+      const changedConcepts = this._autoLinkConceptsByExactName();
+      let changedRows = 0;
+      document.querySelectorAll('#cfgTblLines tbody tr, #cfgTblUnits tbody tr').forEach(tr => {
+        if(this._autoLinkCfgRowByExactName(tr)) changedRows++;
+      });
+      return { concepts: changedConcepts, rows: changedRows };
     },
 
     _decorateCfgRowStockPill(tr){
@@ -3984,6 +4079,7 @@ _uaPill(item){
       const search = document.getElementById('cfgStockSearch');
       if(!modal) return;
 
+      try{ this.autoLinkCfgRowsByExactName(); }catch(e){}
       const st = this._loadStockForConfig();
       warn.style.display = st.ok ? 'none' : 'block';
       const info = document.getElementById('cfgStockInfo');
@@ -4211,6 +4307,7 @@ _uaPill(item){
               applyLinks('cfgTblLines', links.lines);
               applyLinks('cfgTblUnits', links.units);
             }catch(e){}
+            try{ this.autoLinkCfgRowsByExactName(); }catch(e){}
         }
     },
 
@@ -7689,6 +7786,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       setInfo('Firestore: docs ' + fromDocs.length + ' / chunks ' + fromChunks.length);
 
       try{
+        if(window.App && typeof App.autoLinkCfgRowsByExactName === 'function') App.autoLinkCfgRowsByExactName();
         if(window.App && typeof App.renderCfgStockResults === 'function') App.renderCfgStockResults();
       }catch(e){}
     }catch(e){
@@ -7709,6 +7807,17 @@ window.ejecutarDevolucion = function(matId, maxQty){
       alert('No se pudo actualizar Stock real: ' + (e && (e.message || e)));
     }
   };
+
+  const startRemoteStock = () => {
+    setTimeout(() => {
+      try{ window.LDH_cfgLoadRemoteStock(false); }catch(e){}
+    }, 250);
+  };
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', startRemoteStock, {once:true});
+  }else{
+    startRemoteStock();
+  }
 })();
 </script>
 
