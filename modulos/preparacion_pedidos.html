@@ -814,6 +814,182 @@ function normName(s){
     .replace(/×/g,"x");
 }
 
+/* ========= CONSOLIDACIÓN DE MATERIALES IDÉNTICOS =========
+   Cálculo puede enviar el mismo material desde el cuerpo principal y desde
+   carros/subconjuntos. Preparación debe mostrar una sola línea y sumar sus
+   cantidades, conservando vínculo, recepción y trazabilidad. */
+function LDH_materialLineName(line){
+  return String(
+    line && (
+      line.mat ?? line.material ?? line.name ?? line.nombre ??
+      line.title ?? line.label ?? line.concepto ?? ""
+    )
+  ).trim();
+}
+
+function LDH_materialMergeUnit(line){
+  const raw = String(
+    line && (line.unit ?? line.unidad ?? line.ud ?? line.tipo ?? line.type ?? "")
+  ).trim().toLowerCase();
+  if(raw.includes("barra") || raw === "bar") return "barra";
+  if(raw.includes("ud") || raw.includes("unidad") || raw.includes("pieza")) return "ud";
+  return raw || "ud";
+}
+
+function LDH_materialMergeName(value){
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[×*]/g,"x")
+    .replace(/,/g,".")
+    .replace(/\s+/g,"");
+}
+
+function LDH_lineNumber(line, fields){
+  for(const field of fields){
+    if(line && line[field] !== undefined && line[field] !== null && line[field] !== ""){
+      const value = parseFloat(String(line[field]).replace(",", "."));
+      if(Number.isFinite(value)) return Math.max(0, value);
+    }
+  }
+  return 0;
+}
+
+function LDH_joinUniqueText(a,b){
+  const values = [a,b]
+    .flatMap(value => String(value || "").split(/\s+·\s+/))
+    .map(value => value.trim())
+    .filter(Boolean);
+  return Array.from(new Set(values)).join(" · ");
+}
+
+function LDH_mergeLineInto(target, source){
+  const requested =
+    LDH_lineNumber(target,["qty_pedida","pedida","qty","cantidad"]) +
+    LDH_lineNumber(source,["qty_pedida","pedida","qty","cantidad"]);
+  const received =
+    LDH_lineNumber(target,["qty_recibida","recibida"]) +
+    LDH_lineNumber(source,["qty_recibida","recibida"]);
+  const receivedFinal = requested > 0 ? Math.min(requested,received) : received;
+  const appliedFinal = Math.min(
+    receivedFinal,
+    LDH_lineNumber(target,["aplicado_qty","aplicado"]) +
+    LDH_lineNumber(source,["aplicado_qty","aplicado"])
+  );
+  const consumedFinal = Math.min(
+    receivedFinal,
+    LDH_lineNumber(target,["stock_consumed_qty"]) +
+    LDH_lineNumber(source,["stock_consumed_qty"])
+  );
+
+  target.qty_pedida = requested;
+  target.pedida = requested;
+  target.qty = requested;
+  target.cantidad = requested;
+  target.qty_recibida = receivedFinal;
+  target.recibida = receivedFinal;
+  target.aplicado_qty = appliedFinal;
+  target.aplicado = appliedFinal;
+  target.stock_consumed_qty = consumedFinal;
+
+  const completed = requested > 0 && receivedFinal >= requested;
+  target.ok = completed;
+  target.completo = completed;
+  target.done = completed;
+  target.isDone = completed;
+  target.isCompleted = completed;
+
+  if(!target.unit && source.unit) target.unit = source.unit;
+  if(!target.unidad && source.unidad) target.unidad = source.unidad;
+  if(!target.mat && LDH_materialLineName(source)) target.mat = LDH_materialLineName(source);
+  if(!target.material && target.mat) target.material = target.mat;
+  if(!target.name && target.mat) target.name = target.mat;
+
+  [
+    "linked_matId","linkedMatId","stockMatId","stock_matId",
+    "stockLinkId","stockId","matId","linked_matName","stockLinkLabel",
+    "stockLinkEmpresa","cat","category","grp","group"
+  ].forEach(field=>{
+    if((target[field] === undefined || target[field] === null || target[field] === "") &&
+       source[field] !== undefined && source[field] !== null && source[field] !== ""){
+      target[field] = source[field];
+    }
+  });
+
+  target.toBuy = !!(target.toBuy || source.toBuy);
+  target.pedido_compras_info = !!(target.pedido_compras_info || source.pedido_compras_info);
+  if(!target.pedido_compras_fecha && source.pedido_compras_fecha){
+    target.pedido_compras_fecha = source.pedido_compras_fecha;
+  }
+  target.note = LDH_joinUniqueText(target.note,source.note);
+
+  const traces = [
+    ...(Array.isArray(target.trace) ? target.trace : []),
+    ...(Array.isArray(source.trace) ? source.trace : [])
+  ];
+  const seenTrace = new Set();
+  target.trace = traces.filter(trace=>{
+    let key = "";
+    try{ key = JSON.stringify(trace); }catch(_){ key = String(trace); }
+    if(seenTrace.has(key)) return false;
+    seenTrace.add(key);
+    return true;
+  });
+
+  return target;
+}
+
+function LDH_consolidarMaterialesDuplicados(lines){
+  const rows = Array.isArray(lines) ? lines : [];
+  const merged = [];
+  const byKey = new Map();
+
+  rows.forEach(line=>{
+    if(!line || typeof line !== "object"){
+      merged.push(line);
+      return;
+    }
+
+    const name = LDH_materialLineName(line);
+    const normalizedName = LDH_materialMergeName(name);
+    if(!normalizedName){
+      merged.push(line);
+      return;
+    }
+
+    const key = LDH_materialMergeUnit(line) + "|" + normalizedName;
+    const existing = byKey.get(key);
+    if(!existing){
+      const copy = {...line};
+      if(!copy.mat) copy.mat = name;
+      if(!copy.material) copy.material = copy.mat;
+      if(!copy.name) copy.name = copy.mat;
+      byKey.set(key,copy);
+      merged.push(copy);
+      return;
+    }
+
+    LDH_mergeLineInto(existing,line);
+  });
+
+  return merged;
+}
+
+function LDH_consolidarEstadoActual(){
+  if(!Array.isArray(estadoMateriales)) return false;
+  const before = estadoMateriales.length;
+  const consolidated = LDH_consolidarMaterialesDuplicados(estadoMateriales);
+  if(consolidated.length === before) return false;
+  estadoMateriales = consolidated;
+  try{
+    if(refActual) setAny(KP(refActual),JSON.stringify(estadoMateriales));
+  }catch(e){
+    console.warn("[PREP] No se pudo persistir la consolidación de materiales",e);
+  }
+  return true;
+}
+
 function getLineText(line){
   try{
     if(!line) return '';
@@ -2296,7 +2472,8 @@ try{
         return l;
       });
 
-      setAny(KP(ref), JSON.stringify(materialesImport));
+      const materialesConsolidados = LDH_consolidarMaterialesDuplicados(materialesImport);
+      setAny(KP(ref), JSON.stringify(materialesConsolidados));
       try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); setAny("prep_import_guard_ts", String(Date.now())); }catch(_){ }
 removeAny("latest_materials_v1");
           removeAny("pedido_en_preparacion");
@@ -2594,6 +2771,16 @@ if(gBorrow && typeof gBorrow === "object" && Array.isArray(gBorrow.items) && gBo
 return l;
       });
 
+  // Unifica también pedidos ya guardados antes de esta corrección.
+  try{
+    const cantidadAntes = estadoMateriales.length;
+    estadoMateriales = LDH_consolidarMaterialesDuplicados(estadoMateriales);
+    if(estadoMateriales.length !== cantidadAntes){
+      setAny(KP(ref),JSON.stringify(estadoMateriales));
+    }
+  }catch(e){
+    console.warn("[PREP] No se pudo consolidar el pedido abierto",e);
+  }
 
   document.getElementById("ref").textContent = ref;
   document.getElementById("concepto").textContent = metaActual.concepto || "";
@@ -4558,6 +4745,9 @@ function LDH_trazabilidadPrestamosStockLinea(line){
 }
 
 function renderTabla() {
+  // Blindaje final: ninguna recarga o sincronización debe volver a mostrar
+  // dos filas para el mismo material/unidad.
+  try{ LDH_consolidarEstadoActual(); }catch(e){}
   try{ if(typeof LDH_limpiarTrazasDevolucionAntiguas === 'function') LDH_limpiarTrazasDevolucionAntiguas(); }catch(e){}
   try{ if(typeof LDH_syncDevolucionesStock === 'function') LDH_syncDevolucionesStock(); }catch(e){}
   try{ if(typeof LDH_syncDevolucionesStockRobusto === 'function') LDH_syncDevolucionesStockRobusto(); }catch(e){}
@@ -4900,7 +5090,14 @@ function renderTabla() {
         </div>
       </td>
       <td>${pedida} <span style="font-size:10px;opacity:0.5">${linea.unit || 'ud'}</span></td>
-      <td><input type="number" value="${recibida}" oninput="updateQty(${index}, this)"></td>
+      <td>
+        <div class="ldh-recibida-cell">
+          <input type="number" value="${recibida}" oninput="updateQty(${index}, this)">
+          <button type="button" class="btn-mini ldh-recibido-btn${isComplete ? " disabled" : ""}"
+            onclick="LDH_marcarRecibidoCompleto(${index})" ${isComplete ? "disabled" : ""}
+            title="Completar automáticamente la cantidad recibida de esta fila">Recibido</button>
+        </div>
+      </td>
       <td>${btnHtml}${btnComprasInfo}${btnVincular}</td>
       <td><input type="text" value="${linea.note || ''}" onchange="updateNote(${index}, this.value)" style="width:100%"></td>
     `;
@@ -6456,6 +6653,27 @@ function toggleOk(index, isChecked) {
   renderTabla();
   cargarLista();
 }
+
+function LDH_marcarRecibidoCompleto(index){
+  const linea = estadoMateriales[index];
+  if(!linea) return;
+  const pedida = toNum(linea.qty_pedida);
+  if(pedida <= 0) return;
+
+  linea.qty_recibida = pedida;
+  linea.recibida = pedida;
+  linea.ok = true;
+  linea.completo = true;
+  linea.done = true;
+  linea.isDone = true;
+  linea.isCompleted = true;
+
+  guardarEstadoLocal();
+  renderTabla();
+  cargarLista();
+}
+window.LDH_marcarRecibidoCompleto = LDH_marcarRecibidoCompleto;
+
 function updateQty(index, inputEl) {
   let val = parseFloat(inputEl.value);
   if (isNaN(val)) val = 0;
@@ -13198,4 +13416,28 @@ Libre restante: ${libre - qty}`);
 })();
 </script>
 
+<style id="LDH_PREP_RECIBIDO_FILA_Y_CONSOLIDADO_2407">
+  .ldh-recibida-cell{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    min-width:148px;
+  }
+  .ldh-recibida-cell input[type="number"]{
+    width:72px;
+    min-width:72px;
+  }
+  .ldh-recibido-btn{
+    border-color:#22c55e;
+    background:linear-gradient(180deg,#15803d,#166534);
+    color:#fff;
+    white-space:nowrap;
+  }
+  .ldh-recibido-btn.disabled,
+  .ldh-recibido-btn:disabled{
+    opacity:.55;
+    cursor:default;
+  }
+</style>
+<!-- LDH_PREP_CONSOLIDA_MATERIAL_Y_BOTON_RECIBIDO_V1_20260724 -->
 </body></html>
