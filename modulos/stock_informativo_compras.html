@@ -159,7 +159,7 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
   <section id="workOrdersSection" class="cardbox ordersSection">
     <div class="ordersSectionHeader">
       <div>
-        <h2>Órdenes de trabajo <span id="woPendingCount" class="ordersCount">0</span></h2>
+        <h2>Órdenes de trabajo</h2>
         <p>Dirección / Compras · creación, prioridad, edición, impresión y anulación.</p>
         <div class="wo-statuses">
           <span id="woSyncStatus" class="wo-status warn">Sincronización: iniciando…</span>
@@ -168,6 +168,15 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
         <div class="ordersReadOnlyNote">El estado «EN PROCESO» lo controla únicamente el taller y aquí se muestra en modo informativo.</div>
       </div>
       <button type="button" class="wo-new-btn" onclick="WorkOrders.openNew()">＋ Nueva orden de trabajo</button>
+    </div>
+
+    <div class="wo-tabs" aria-label="Apartados de órdenes de trabajo">
+      <button type="button" id="woTabOrders" class="wo-tab active" onclick="WorkOrders.showPanel('orders')">
+        Trabajos pendientes <span id="woPendingCount" class="ordersCount">0</span>
+      </button>
+      <button type="button" id="woTabHistory" class="wo-tab" onclick="WorkOrders.showPanel('history')">
+        Histórico <span id="woHistoryCount" class="ordersCount">0</span>
+      </button>
     </div>
 
     <div id="woOrdersPanel" class="wo-panel">
@@ -189,6 +198,49 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
           <tbody id="woOrdersBody"></tbody>
         </table>
         <div id="woOrdersEmpty" class="wo-empty">Todavía no hay órdenes de trabajo pendientes.</div>
+      </div>
+    </div>
+
+    <div id="woHistoryPanel" class="wo-panel" hidden>
+      <div class="ordersReadOnlyNote">Histórico sincronizado con el taller. Este apartado es exclusivamente informativo y no permite modificar ni borrar trabajos.</div>
+      <div class="wo-history-tools">
+        <div>
+          <label for="woHistoryCompany">Empresa</label>
+          <select id="woHistoryCompany" onchange="WorkOrders.renderHistory()">
+            <option value="">Todas las empresas</option>
+          </select>
+        </div>
+        <div>
+          <label for="woHistoryFrom">Terminado desde</label>
+          <input type="date" id="woHistoryFrom" onchange="WorkOrders.renderHistory()">
+        </div>
+        <div>
+          <label for="woHistoryTo">Terminado hasta</label>
+          <input type="date" id="woHistoryTo" onchange="WorkOrders.renderHistory()">
+        </div>
+        <div>
+          <label for="woHistorySearch">Buscar</label>
+          <input type="search" id="woHistorySearch" placeholder="Referencia, empresa, descripción o material…" oninput="WorkOrders.renderHistory()">
+        </div>
+        <button type="button" class="wo-small-btn" onclick="WorkOrders.clearHistoryFilters()">Limpiar filtros</button>
+      </div>
+
+      <div class="wo-table-wrap">
+        <table class="wo-table">
+          <thead>
+            <tr>
+              <th>Finalización</th>
+              <th>Referencia</th>
+              <th>Entrada</th>
+              <th>Entrega prevista</th>
+              <th>Cant.</th>
+              <th>Descripción</th>
+              <th>Acabado</th>
+            </tr>
+          </thead>
+          <tbody id="woHistoryBody"></tbody>
+        </table>
+        <div id="woHistoryEmpty" class="wo-empty">Todavía no hay trabajos terminados en el histórico.</div>
       </div>
     </div>
   </section>
@@ -1433,7 +1485,7 @@ ensureAutomaticAccess();
             normText(item.companyName) === normText(order.companyName) &&
             this.completionDate(item) === completedDate
           ).length;
-          html.push(`<tr class="wo-history-group"><td colspan="8">${esc(order.companyName || 'Sin empresa')} · ${esc(fmtDate(completedDate))} · ${groupCount} ${groupCount === 1 ? 'trabajo' : 'trabajos'}</td></tr>`);
+          html.push(`<tr class="wo-history-group"><td colspan="7">${esc(order.companyName || 'Sin empresa')} · ${esc(fmtDate(completedDate))} · ${groupCount} ${groupCount === 1 ? 'trabajo' : 'trabajos'}</td></tr>`);
           previousGroup = groupKey;
         }
         html.push(`<tr>
@@ -1444,10 +1496,6 @@ ensureAutomaticAccess();
           <td>${esc(order.quantity)}</td>
           <td class="wo-desc"><strong>${esc(order.description)}</strong>${order.material?`<div class="wo-history-meta">Material: ${esc(order.material)}</div>`:''}</td>
           <td>${esc(finishText(order))}</td>
-          <td><div class="wo-actions">
-            <button type="button" class="wo-small-btn" onclick="WorkOrders.printExisting('${esc(order.id)}')">🖨 Imprimir</button>
-            <button type="button" class="wo-small-btn wo-danger-btn" onclick="WorkOrders.deleteHistoryOrder('${esc(order.id)}')">🗑 Eliminar</button>
-          </div></td>
         </tr>`);
       });
       body.innerHTML = html.join('');
@@ -1769,44 +1817,6 @@ ensureAutomaticAccess();
       );
     },
 
-    deleteHistoryOrder(id){
-      const order = this.orders.find(o=>o.id===id && o.status === 'completed');
-      if(!order) return;
-      return this.deleteOrderPermanently(
-        order,
-        'history-manual',
-        `¿Eliminar definitivamente del histórico el trabajo ${order.reference} de ${order.companyName}?`
-      );
-    },
-
-    async purgeHistoryBefore(){
-      const cutoff = normText(document.getElementById('woPurgeBefore')?.value);
-      if(!cutoff){
-        alert('Selecciona una fecha límite para la limpieza del histórico.');
-        return;
-      }
-      const rows = this.sortedHistory().filter(order=>this.completionDate(order) < cutoff);
-      if(!rows.length){
-        alert(`No hay trabajos históricos anteriores al ${fmtDate(cutoff)}.`);
-        return;
-      }
-      if(!this.cloud?.deleteOrders){
-        alert('Espera a que la sincronización esté conectada. La limpieza debe guardarse en la nube para que los trabajos no reaparezcan.');
-        return;
-      }
-      if(!confirm(`Se eliminarán definitivamente ${rows.length} ${rows.length === 1 ? 'trabajo histórico' : 'trabajos históricos'} anteriores al ${fmtDate(cutoff)}. ¿Continuar?`)) return;
-      try{
-        this.updateSyncStatus(`Sincronización: eliminando ${rows.length} históricos…`,true);
-        await this.cloud.deleteOrders(rows,'history-age');
-        this.applyDeletedIds(rows.map(order=>order.id));
-        this.updateSyncStatus(`Sincronización: ${rows.length} históricos eliminados`,true);
-      }catch(e){
-        console.error('No se pudo limpiar el histórico',e);
-        this.updateSyncStatus('La limpieza no se ha completado',false);
-        alert('No se ha completado la limpieza del histórico. Ningún trabajo se quitará localmente hasta confirmar el borrado en la nube.');
-      }
-    },
-
     printExisting(id){
       const order = this.orders.find(o=>o.id===id);
       if(!order) return;
@@ -2126,5 +2136,6 @@ ensureAutomaticAccess();
 <!-- LDH_STOCK_INFORMATIVO_COMPRAS_ORDENES_DIRECCION_V1_20260724 -->
 <!-- LDH_STOCK_COMPRAS_ACCESO_AUTOMATICO_SIN_PASSWORD_V2_20260724 -->
 <!-- LDH_STOCK_COMPRAS_FIREBASE_ONLY_SIN_LOCAL_V3_20260724 -->
+<!-- LDH_STOCK_COMPRAS_HISTORICO_SOLO_LECTURA_V4_20260724 -->
 </body>
 </html>
