@@ -134,7 +134,7 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
   </div>
 </header>
 <main>
-<section id="loginBox" class="login">
+<section id="loginBox" class="login hidden">
   <h2 style="margin:0 0 6px">Acceso consulta</h2>
   <div class="sub">No crea, no borra y no modifica material.</div>
   <label>Email</label><input id="email" autocomplete="username" value="taller.mantenimiento@sklum.com">
@@ -142,7 +142,7 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
   <button id="loginBtn" style="width:100%;margin-top:16px" class="active">Entrar</button>
   <div id="loginErr" class="err"></div>
 </section>
-<section id="app" class="hidden">
+<section id="app">
   <div class="toolbar">
     <input id="search" placeholder="Buscar material, medida, color...">
     <select id="typeFilter"><option value="all">Hierro y pintura</option><option value="hierro">Solo hierro</option><option value="pintura">Solo pintura</option></select>
@@ -282,7 +282,7 @@ const firebaseConfig = {
   appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
 };
 const {initializeApp,getApps,getApp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-const {getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+const {getAuth,onAuthStateChanged,signInAnonymously,signInWithEmailAndPassword,signOut} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
 const {getFirestore,doc,getDoc,onSnapshot,collection,getDocs} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -779,40 +779,54 @@ function startWatch(){
 ['search','typeFilter','stockFilter'].forEach(id=>$(id).addEventListener('input',render));
 $('refresh').onclick = loadAll;
 let accessMounted = false;
+let automaticAccessRunning = false;
 
-function updateAccessState(){
+function mountApplication(){
   const stockUser = auth.currentUser;
   const ordersUser = workOrdersAuth.currentUser;
-  const fullyConnected = !!(stockUser && ordersUser);
-  if(fullyConnected){
-    $('loginBox').classList.add('hidden');
-    $('app').classList.remove('hidden');
-    $('logout').classList.remove('hidden');
-    $('loginErr').style.display='none';
-    setStatus('Conectado · Stock y órdenes',true);
-    if(!accessMounted){
-      accessMounted = true;
-      startWatch();
-      loadAll();
-    }
-    return;
-  }
-
-  $('loginBox').classList.remove('hidden');
-  $('app').classList.add('hidden');
+  $('loginBox').classList.add('hidden');
+  $('app').classList.remove('hidden');
   $('logout').classList.add('hidden');
-  setStatus('Sin conectar',false);
-  if(stockUser?.email) $('email').value = stockUser.email;
-  if(stockUser && !ordersUser){
-    $('loginErr').textContent='Introduce de nuevo la contraseña para conectar también las órdenes de trabajo.';
-    $('loginErr').style.display='block';
+  $('loginErr').style.display='none';
+  setStatus(
+    stockUser
+      ? (ordersUser ? 'Conectado · Stock y órdenes' : 'Conectado · Stock')
+      : 'Acceso automático',
+    !!stockUser
+  );
+  if(!ordersUser){
+    window.WorkOrders?.updateSyncStatus('Órdenes: conectando automáticamente…',false);
   }
-  if(accessMounted){
-    accessMounted = false;
-    if(unsubMeta) unsubMeta();
-    if(unsubMaterials) unsubMaterials();
-    unsubMeta = null;
-    unsubMaterials = null;
+  if(!accessMounted){
+    accessMounted = true;
+    startWatch();
+    loadAll();
+  }
+}
+
+async function ensureAutomaticAccess(){
+  if(automaticAccessRunning) return;
+  automaticAccessRunning = true;
+  try{
+    const attempts = [];
+    if(!auth.currentUser){
+      attempts.push(
+        signInAnonymously(auth).catch(error=>{
+          console.warn('Acceso automático a Stock no disponible',error);
+        })
+      );
+    }
+    if(!workOrdersAuth.currentUser){
+      attempts.push(
+        signInAnonymously(workOrdersAuth).catch(error=>{
+          console.warn('Acceso automático a órdenes no disponible',error);
+        })
+      );
+    }
+    await Promise.all(attempts);
+  }finally{
+    automaticAccessRunning = false;
+    mountApplication();
   }
 }
 
@@ -821,19 +835,23 @@ $('loginBtn').onclick = async ()=>{
   const password = $('password').value;
   try{
     $('loginErr').style.display='none';
-    await Promise.all([
-      signInWithEmailAndPassword(auth,email,password),
-      signInWithEmailAndPassword(workOrdersAuth,email,password)
-    ]);
+    await signInWithEmailAndPassword(auth,email,password);
+    await ensureAutomaticAccess();
   }catch(e){
-    await Promise.allSettled([signOut(auth),signOut(workOrdersAuth)]);
-    $('loginErr').textContent='No se ha podido conectar Stock y órdenes: '+(e.code||e.message);
+    $('loginErr').textContent='No se ha podido conectar: '+(e.code||e.message);
     $('loginErr').style.display='block';
   }
 };
 $('logout').onclick = ()=>Promise.allSettled([signOut(auth),signOut(workOrdersAuth)]);
-onAuthStateChanged(auth,updateAccessState);
-onAuthStateChanged(workOrdersAuth,updateAccessState);
+onAuthStateChanged(auth,user=>{
+  if(user) mountApplication();
+  else ensureAutomaticAccess();
+});
+onAuthStateChanged(workOrdersAuth,user=>{
+  if(user) mountApplication();
+  else ensureAutomaticAccess();
+});
+ensureAutomaticAccess();
 </script>
 
 
@@ -2087,7 +2105,7 @@ onAuthStateChanged(workOrdersAuth,updateAccessState);
         console.error(error);
         window.WorkOrders?.updateSyncStatus('Error conectando sincronización',false);
       });
-      else window.WorkOrders?.updateSyncStatus('Inicia sesión para sincronizar',false);
+      else window.WorkOrders?.updateSyncStatus('Órdenes: conectando automáticamente…',false);
     });
   }catch(error){
     console.error('WorkOrders Firestore init',error);
@@ -2096,5 +2114,6 @@ onAuthStateChanged(workOrdersAuth,updateAccessState);
 })();
 </script>
 <!-- LDH_STOCK_INFORMATIVO_COMPRAS_ORDENES_DIRECCION_V1_20260724 -->
+<!-- LDH_STOCK_COMPRAS_ACCESO_AUTOMATICO_SIN_PASSWORD_V2_20260724 -->
 </body>
 </html>
