@@ -3790,11 +3790,24 @@ _uaPill(item){
 
     _loadStockForConfig() {
       // Selector GENERAL de materiales para conceptos:
-      // - SOLO el catálogo actual publicado por el Stock nuevo en Firestore.
-      // - No lee copias locales ni catálogos del programa antiguo.
+      // - Stock actual publicado por el Stock nuevo en Firestore.
+      // - Catálogos actuales de Ferretería y Tableros.
+      // - Nunca lee taller_stock_v3_data: pertenece al programa antiguo.
       // No duplica por empresa. La empresa se decide después en Cálculo/Preparación.
       const norm = (v)=>String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
       const nice = (v)=>String(v||'').trim();
+
+      const parseCurrent = (key)=>{
+        try{
+          let raw = localStorage.getItem(key);
+          if(!raw){
+            try{ raw = sessionStorage.getItem(key); }catch(e){}
+          }
+          if(!raw) return null;
+          const db = JSON.parse(raw);
+          return (db && typeof db === 'object') ? db : null;
+        }catch(e){ return null; }
+      };
 
       const remoteState = window.LDH_CFG_REMOTE_STOCK || {};
       const remoteDB = {
@@ -3802,6 +3815,9 @@ _uaPill(item){
           ? remoteState.materials
           : []
       };
+      const ferDB = parseCurrent('ldh_v2_ferreteria_stock_v1') ||
+        parseCurrent('terminal_ferreteria_stock_v1') || {};
+      const tabDB = parseCurrent('ldh_v2_tableros_stock_v1') || {};
 
       const out = [];
       const byKey = new Map();
@@ -3938,6 +3954,8 @@ _uaPill(item){
       };
 
       ingestDB(remoteDB, 'stock', '');
+      ingestDB(ferDB, 'ferreteria', 'Ferretería', true);
+      ingestDB(tabDB, 'tableros', 'Tableros');
 
       out.sort((a,b)=>
         String(a.cat).localeCompare(String(b.cat),'es') ||
@@ -3947,10 +3965,26 @@ _uaPill(item){
         String(a.name).localeCompare(String(b.name),'es')
       );
 
-      const source = nice(remoteState.source) ||
-        (remoteState.loading ? 'cargando Firebase nuevo...' :
-          (remoteState.error ? 'Firebase nuevo no disponible' : 'Firebase nuevo sin datos'));
-      return { ok: out.length>0, materials:out, source };
+      const hasStored = (key)=>{
+        try{
+          if(localStorage.getItem(key)) return true;
+        }catch(e){}
+        try{
+          return !!sessionStorage.getItem(key);
+        }catch(e){ return false; }
+      };
+      const sources = [];
+      if(remoteDB.materials.length) sources.push(nice(remoteState.source) || 'Stock nuevo Firebase');
+      else if(remoteState.loading) sources.push('cargando Stock nuevo Firebase...');
+      else if(remoteState.error) sources.push('Stock nuevo Firebase no disponible');
+      if(hasStored('ldh_v2_ferreteria_stock_v1') || hasStored('terminal_ferreteria_stock_v1')) sources.push('Ferretería actual');
+      if(hasStored('ldh_v2_tableros_stock_v1')) sources.push('Tableros actuales');
+
+      return {
+        ok: out.length>0,
+        materials:out,
+        source:sources.join(' + ') || 'catálogos actuales sin datos'
+      };
     },
 
     _cfgExactNameKey(value){
@@ -3990,7 +4024,24 @@ _uaPill(item){
 
     _cfgHasAuthoritativeStockCatalog(){
       const remote = window.LDH_CFG_REMOTE_STOCK || {};
-      return !!(remote.loaded && Array.isArray(remote.materials) && remote.materials.length);
+      const hasStored = (key)=>{
+        try{
+          if(localStorage.getItem(key)) return true;
+        }catch(e){}
+        try{
+          return !!sessionStorage.getItem(key);
+        }catch(e){ return false; }
+      };
+      const hasFerreteria = hasStored('ldh_v2_ferreteria_stock_v1') ||
+        hasStored('terminal_ferreteria_stock_v1');
+      const hasTableros = hasStored('ldh_v2_tableros_stock_v1');
+      return !!(
+        remote.loaded &&
+        Array.isArray(remote.materials) &&
+        remote.materials.length &&
+        hasFerreteria &&
+        hasTableros
+      );
     },
 
     _autoLinkCfgRowByExactName(tr){
@@ -6003,7 +6054,7 @@ window.CarpetaPicker = (function(){
     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
       <div>
         <div style="font-weight:800; font-size:16px;">Seleccionar material del Stock</div>
-        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vincula el concepto exclusivamente con el catálogo actual del Stock nuevo sincronizado mediante Firebase. La empresa concreta se decide en Cálculo y Preparación consume el stock correspondiente.</div>
+        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vincula el concepto con los catálogos actuales de Stock, Ferretería, Tableros y Prefabricados. El Stock principal se sincroniza mediante Firebase y se ignora el catálogo del programa antiguo.</div>
       </div>
       <button class="btn btn-ghost" onclick="App.closeCfgStockModal()">✕</button>
     </div>
@@ -6015,7 +6066,7 @@ window.CarpetaPicker = (function(){
 \n
 </div>
 
-    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">Todavía no se ha cargado el catálogo del Stock nuevo desde Firebase. Pulsa <b>Diagnóstico</b> para volver a comprobar la conexión.</div>\n    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
+    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">Todavía no se han cargado los catálogos actuales de Stock, Ferretería o Tableros. Pulsa <b>Diagnóstico</b> para comprobar las fuentes disponibles.</div>\n    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
 
     <div id="cfgStockResults" style="margin-top:12px; max-height:58vh; overflow:auto; border:1px solid rgba(0,0,0,.08); border-radius:12px;"></div>
 
@@ -7269,7 +7320,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     document.body.classList.add('ldh-module-standalone');
     var bar=document.createElement('div');
     bar.className='ldh-module-topbar no-print';
-    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>v6 · Solo Stock nuevo Firebase</small><span class="spacer"></span>';
+    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>v7 · Catálogos actuales sin Stock antiguo</small><span class="spacer"></span>';
     document.body.insertBefore(bar, document.body.firstChild);
   }
   function route(){
@@ -7922,12 +7973,26 @@ function LDH_cfgStockDiagnostico(){
       byFam[k] = (byFam[k]||0)+1;
     });
     const remote = window.LDH_CFG_REMOTE_STOCK || {};
+    const storedCount = (key)=>{
+      try{
+        const raw = localStorage.getItem(key) || sessionStorage.getItem(key) || '';
+        if(!raw) return 0;
+        const db = JSON.parse(raw);
+        return ['materials','stock','items','catalog','catalogo','boards','tableros','ferreteria']
+          .reduce((total,k)=>total + (Array.isArray(db && db[k]) ? db[k].length : 0), 0);
+      }catch(e){ return 0; }
+    };
+    const ferCount = storedCount('ldh_v2_ferreteria_stock_v1') ||
+      storedCount('terminal_ferreteria_stock_v1');
+    const tabCount = storedCount('ldh_v2_tableros_stock_v1');
     const lines = Object.keys(byFam).sort().map(k=>k + ': ' + byFam[k]);
     alert('Materiales vinculables en Configuración\n' +
       'Fuente: ' + (st.source||'') + '\n' +
       'Firebase cargado: ' + (remote.loaded ? 'sí' : 'no') + '\n' +
       (remote.error ? ('Error Firebase: ' + remote.error + '\n') : '') +
-      'Fuentes antiguas locales: ignoradas\n' +
+      'Ferretería actual: ' + ferCount + ' registros\n' +
+      'Tableros actuales: ' + tabCount + ' registros\n' +
+      'Stock antiguo taller_stock_v3_data: ignorado\n' +
       'Total vinculables: ' + mats.length + '\n\n' +
       lines.join('\n')
     );
