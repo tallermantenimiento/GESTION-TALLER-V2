@@ -312,6 +312,7 @@ const dateShort = () => new Date().toLocaleTimeString('es-ES',{hour:'2-digit',mi
 
 const STOCK_META = ['taller_data','stock'];
 const STOCK_KEY = 'ldh_v2_company_stock_v1';
+const STOCK_LOCAL_KEYS = [STOCK_KEY,'taller_stock_v3_data'];
 
 let companies = [];
 let rows = [];
@@ -535,6 +536,41 @@ function normalizeMaterialCollection(docs){
   return out;
 }
 
+function readLocalStockPackage(){
+  for(const key of STOCK_LOCAL_KEYS){
+    const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
+    if(!raw) continue;
+    try{
+      let parsed = JSON.parse(raw);
+      if(parsed && parsed[STOCK_KEY]){
+        parsed = typeof parsed[STOCK_KEY] === 'string'
+          ? JSON.parse(parsed[STOCK_KEY])
+          : parsed[STOCK_KEY];
+      }
+      if(parsed && parsed.data && typeof parsed.data === 'object'){
+        const nested = parsed.data;
+        if(Array.isArray(nested.companies) || Array.isArray(nested.materials) || Array.isArray(nested.stock)){
+          parsed = nested;
+        }
+      }
+      if(!parsed || typeof parsed !== 'object') continue;
+      if(
+        !Array.isArray(parsed.companies) &&
+        !Array.isArray(parsed.materials) &&
+        !Array.isArray(parsed.stock)
+      ) continue;
+      return {
+        found:true,
+        key,
+        rows:normalizePackage(parsed)
+      };
+    }catch(error){
+      console.warn('Copia local de Stock no válida en '+key,error);
+    }
+  }
+  return {found:false,key:'',rows:[]};
+}
+
 async function readChunkPackage(){
   sourceStats.package = null;
   const metaSnap = await getDoc(doc(db,...STOCK_META));
@@ -560,6 +596,7 @@ async function readChunkPackage(){
     return [];
   }
   const parsed = JSON.parse(raw);
+  try{ localStorage.setItem(STOCK_KEY,JSON.stringify(parsed)); }catch(e){}
   const normalized = normalizePackage(parsed);
   sourceStats.package = {
     exists:true,
@@ -611,6 +648,7 @@ async function readDirectStockDoc(){
         try{ parsed = JSON.parse(parsed[STOCK_KEY]); }catch(e){}
       }
       if(parsed && typeof parsed === 'object' && (Array.isArray(parsed.stock) || Array.isArray(parsed.materials))){
+        try{ localStorage.setItem(STOCK_KEY,JSON.stringify(parsed)); }catch(e){}
         const normalized = normalizePackage(parsed);
         sourceStats.direct = {
           exists:true,
@@ -701,8 +739,22 @@ async function loadAll(){
       ' · stock_materials docs: ' + (sm.docs ?? 0);
   }catch(e){
     console.error(e);
-    $('content').innerHTML = '<div class="empty">No se pudo leer el stock. Revisa consola, login o reglas.</div>';
-    $('debug').textContent = String(e && (e.code || e.message || e));
+    const local = readLocalStockPackage();
+    if(local.found){
+      rows = local.rows;
+      lastSource = 'copia local sincronizada';
+      if(!activeCompany || !companies.some(c=>c.id===activeCompany)) activeCompany = companies[0]?.id || '';
+      window.WorkOrders?.setCompanies(companies,'Stock local');
+      render();
+      $('last').textContent = 'Última actualización local: ' + dateShort();
+      $('debug').textContent =
+        'Fuente: copia local · empresas: ' + companies.length +
+        ' · materiales visibles normalizados: ' + rows.length;
+      setStatus('Conectado · copia local de Stock',true);
+      return;
+    }
+    $('content').innerHTML = '<div class="empty">No hay una copia local de Stock disponible todavía.</div>';
+    $('debug').textContent = 'Stock remoto no disponible: ' + String(e && (e.code || e.message || e));
   }
 }
 
@@ -775,6 +827,10 @@ function startWatch(){
   unsubMeta = onSnapshot(doc(db,...STOCK_META), ()=>scheduleLoadAll(), err=>console.error('meta stock',err));
   unsubMaterials = onSnapshot(collection(db,'stock_materials'), ()=>scheduleLoadAll(), err=>console.warn('stock_materials listener',err));
 }
+
+window.addEventListener('storage',event=>{
+  if(STOCK_LOCAL_KEYS.includes(event.key)) scheduleLoadAll();
+});
 
 ['search','typeFilter','stockFilter'].forEach(id=>$(id).addEventListener('input',render));
 $('refresh').onclick = loadAll;
@@ -2115,5 +2171,6 @@ ensureAutomaticAccess();
 </script>
 <!-- LDH_STOCK_INFORMATIVO_COMPRAS_ORDENES_DIRECCION_V1_20260724 -->
 <!-- LDH_STOCK_COMPRAS_ACCESO_AUTOMATICO_SIN_PASSWORD_V2_20260724 -->
+<!-- LDH_STOCK_COMPRAS_FALLBACK_LOCAL_EMPRESAS_MATERIALES_V3_20260724 -->
 </body>
 </html>
