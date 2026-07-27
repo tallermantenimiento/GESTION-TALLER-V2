@@ -5564,6 +5564,43 @@ function LDH_stockComunMaterialMatches(obj, materialId, materialNames){
   ].map(_v2Norm).filter(Boolean);
   return names.some(n => materialNames.includes(n));
 }
+function LDH_stockComunMaterialReferenciado(pack, obj){
+  const objId = String(_v2First(
+    obj && obj.materialId,
+    obj && obj.matId,
+    obj && obj.material_id,
+    obj && obj.idMaterial
+  ) || "").trim();
+  if(!objId) return null;
+  return (pack && pack.materials || []).find(m =>
+    String(_v2IdOfMaterial(m) || "").trim() === objId
+  ) || null;
+}
+function LDH_stockComunNombreRealObjeto(pack, obj){
+  const referenciado = LDH_stockComunMaterialReferenciado(pack, obj);
+  return _v2Norm(_v2First(
+    referenciado && _v2MaterialLabel(referenciado),
+    obj && obj.materialName,
+    obj && obj.material_nombre,
+    obj && obj.nombreMaterial,
+    obj && obj.name,
+    obj && obj.nombre,
+    obj && obj.label,
+    obj && obj.material,
+    obj && obj.mat
+  ));
+}
+function LDH_stockComunObjetoCoincide(pack, obj, candidatos){
+  const ids = [
+    obj && obj.materialId,
+    obj && obj.matId,
+    obj && obj.material_id,
+    obj && obj.idMaterial
+  ].map(v=>String(v||"").trim()).filter(Boolean);
+  if(ids.some(id=>candidatos.ids.includes(id))) return true;
+  const nombreReal = LDH_stockComunNombreRealObjeto(pack, obj);
+  return !!nombreReal && candidatos.names.includes(nombreReal);
+}
 function LDH_stockComunMovementSign(type){
   const t = _v2Norm(type || "entrada").replace(/\s+/g,"_");
   if(["salida","out","ajuste_neg","consumo","consumo_terminal"].includes(t)) return -1;
@@ -5584,23 +5621,38 @@ function LDH_stockComunInfoParaLinea(line){
     const cand = LDH_stockComunMaterialCandidates(line);
 
     const commonLots = (pack.lots || []).filter(row=>LDH_stockComunCompanyMatches(row, company));
-    let rowHit = commonLots.find(row=>{
-      const rowId = String(_v2StockRowMatId(row)||"").trim();
-      return rowId && cand.ids.includes(rowId);
-    }) || null;
-    if(!rowHit){
-      rowHit = commonLots.find(row=>cand.names.includes(_v2Norm(_v2StockRowMatLabel(row)))) || null;
-    }
+    const commonMovements = (pack.movements || []).filter(m=>LDH_stockComunCompanyMatches(m, company));
+
+    /*
+     * El catálogo copiado a otra empresa puede crear un ID diferente para el
+     * mismo nombre. Por eso se resuelve cada fila de STOCK COMÚN contra su
+     * propia ficha de material antes de comparar por nombre exacto.
+     */
+    let rowHit = commonLots.find(row=>LDH_stockComunObjetoCoincide(pack, row, cand)) || null;
+    let movementHit = commonMovements.find(m=>LDH_stockComunObjetoCoincide(pack, m, cand)) || null;
 
     let material = null;
     let materialId = "";
-    if(rowHit){
-      materialId = String(_v2StockRowMatId(rowHit)||"").trim();
+    const sourceHit = rowHit || movementHit;
+    if(sourceHit){
+      materialId = String(_v2First(
+        sourceHit.materialId,
+        sourceHit.matId,
+        sourceHit.material_id,
+        sourceHit.idMaterial,
+        rowHit && _v2StockRowMatId(rowHit)
+      ) || "").trim();
       material = (pack.materials || []).find(m=>String(_v2IdOfMaterial(m)) === materialId) || null;
     }
     if(!material){
       material = (pack.materials || []).find(m=>{
         const mid = String(_v2IdOfMaterial(m)||"").trim();
+        const perteneceComun = commonLots.some(row=>
+          String(_v2StockRowMatId(row)||"").trim() === mid
+        ) || commonMovements.some(mov=>
+          String(_v2First(mov.materialId,mov.matId,mov.material_id,mov.idMaterial)||"").trim() === mid
+        );
+        if(!perteneceComun) return false;
         if(mid && cand.ids.includes(mid)) return true;
         return cand.names.includes(_v2Norm(_v2MaterialLabel(m)));
       }) || null;
@@ -5614,12 +5666,17 @@ function LDH_stockComunInfoParaLinea(line){
 
     const matNames = Array.from(new Set([
       _v2Norm(_v2MaterialLabel(material)),
-      _v2Norm(rowHit && _v2StockRowMatLabel(rowHit)),
+      LDH_stockComunNombreRealObjeto(pack, rowHit),
+      LDH_stockComunNombreRealObjeto(pack, movementHit),
       ...cand.names
     ].filter(Boolean)));
-    const matMatch = obj=>LDH_stockComunMaterialMatches(obj, materialId, matNames);
+    const matMatch = obj=>{
+      if(LDH_stockComunMaterialMatches(obj, materialId, matNames)) return true;
+      const nombreReal = LDH_stockComunNombreRealObjeto(pack, obj);
+      return !!nombreReal && matNames.includes(nombreReal);
+    };
     const lots = commonLots.filter(matMatch);
-    const movs = (pack.movements || []).filter(m=>LDH_stockComunCompanyMatches(m,company) && matMatch(m));
+    const movs = commonMovements.filter(matMatch);
     const physicalMoves = movs.filter(m=>LDH_stockComunMovementSign(_v2First(m.type,m.tipo,"entrada")) !== 0);
     const physical = physicalMoves.length
       ? physicalMoves.reduce((sum,m)=>{
