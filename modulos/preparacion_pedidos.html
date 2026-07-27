@@ -6885,6 +6885,95 @@ function LDH_addFabricacionInbox(record){
   }
 }
 
+/* ========= SNAPSHOT DE MATERIALES PARA FABRICACIÓN =========
+   Fabricación e Index no deben depender de que prep_recepcion_<ref> siga
+   disponible. Cada trabajo conserva una copia completa de sus líneas.
+*/
+function LDH_materialSnapshotForFabricacion(lines){
+  if(!Array.isArray(lines)) return [];
+  return lines.map(function(line){
+    line = (line && typeof line === "object") ? line : {};
+    let copy = {};
+    try{ copy = JSON.parse(JSON.stringify(line)); }catch(e){ copy = Object.assign({}, line); }
+
+    const material = String(
+      line.material || line.name || line.nombre || line.perfil ||
+      line.stockLinkLabel || line.linked_matName || ""
+    ).trim();
+    const unit = String(line.unit || line.unidad || "").trim();
+
+    copy.material = material;
+    if(!copy.name && material) copy.name = material;
+    copy.unit = unit;
+    if(!copy.unidad && unit) copy.unidad = unit;
+
+    // Campos normalizados que entiende el informe del Index.
+    if(copy.pedida === undefined || copy.pedida === null || copy.pedida === ""){
+      copy.pedida = toNum(line.qty_pedida ?? line.qty ?? line.cantidad ?? line.barras ?? line.unidades ?? 0);
+    }
+    if(copy.recibida === undefined || copy.recibida === null || copy.recibida === ""){
+      copy.recibida = toNum(line.qty_recibida ?? line.received ?? 0);
+    }
+    if(!copy.stockLinkId){
+      copy.stockLinkId = line.linked_matId || line.materialId || line.matId || line.stockMatId || "";
+    }
+    if(!copy.stockLinkLabel){
+      copy.stockLinkLabel = line.linked_matName || material;
+    }
+    return copy;
+  }).filter(function(line){
+    return !!String(line.material || line.stockLinkLabel || line.stockLinkId || "").trim();
+  });
+}
+
+function LDH_backfillFabricacionMaterialSnapshots(){
+  try{
+    const rawDb = getAny("ldh_db");
+    if(!rawDb) return 0;
+    const db = JSON.parse(rawDb) || {};
+    const pools = ["deliveries","trabajos","fabricacion","fab"];
+    let changed = 0;
+
+    pools.forEach(function(pool){
+      const arr = Array.isArray(db[pool]) ? db[pool] : [];
+      arr.forEach(function(item){
+        const ref = String(item && (item.ref || item.referencia || item.jobRef) || "").trim();
+        if(!ref) return;
+        const rawLines = getAny("prep_recepcion_" + ref);
+        if(!rawLines) return;
+
+        let lines = [];
+        try{ lines = JSON.parse(rawLines) || []; }catch(e){ lines = []; }
+        const snapshot = LDH_materialSnapshotForFabricacion(lines);
+        if(!snapshot.length) return;
+
+        let current = "";
+        try{ current = JSON.stringify(Array.isArray(item.materials) ? item.materials : []); }catch(e){}
+        const next = JSON.stringify(snapshot);
+        if(current === next) return;
+
+        item.materials = snapshot;
+        item.materialsSnapshotAt = new Date().toISOString();
+        changed++;
+      });
+    });
+
+    if(!changed) return 0;
+    const payload = JSON.stringify(db);
+    const ok = (typeof LDH_writeSharedLocalKey === "function")
+      ? LDH_writeSharedLocalKey("ldh_db", payload)
+      : (setAny("ldh_db", payload), true);
+    if(ok){
+      try{ window.dispatchEvent(new StorageEvent("storage", {key:"ldh_db", newValue:payload})); }catch(e){}
+      try{ if(window.LDH_fabricacionPublishNow) window.LDH_fabricacionPublishNow(); }catch(e){}
+    }
+    return changed;
+  }catch(e){
+    console.warn("No se pudieron recuperar snapshots de materiales para Fabricación", e);
+    return 0;
+  }
+}
+
 /* ========= MANDAR A FABRICACIÓN (MANUAL) ========= */
 function confirmarTodoRecepcion() {
   const hayBarras = estadoMateriales.some(l => (String(l.unit||"").toLowerCase() === 'barra'));
@@ -6915,6 +7004,7 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
   const notaHierro = metaActual.tipo_hierro ? `[PERFILERÍA: ${metaActual.tipo_hierro.toUpperCase()}] ` : "";
   const notasFinales = notaHierro + "Enviado desde Preparación.";
   const empresaFinal = String(metaActual.empresa || metaActual.company || "").trim();
+  const materialSnapshot = LDH_materialSnapshotForFabricacion(estadoMateriales);
 
   const record = {
     unassignedBorrow: ((metaActual.unassignedBorrow || getGlobalBorrow(refActual) || { items: [], updatedAt: Date.now() })),
@@ -6943,7 +7033,9 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
     hideFromFab: false,
     archived: false,
     history: [],
-    notes: notasFinales
+    notes: notasFinales,
+    materials: materialSnapshot,
+    materialsSnapshotAt: new Date().toISOString()
   };
 
   const upsert = (arr)=>{
@@ -6969,6 +7061,10 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
       arr[idx].keepInFab = true;
       arr[idx].hideFromFab = false;
       arr[idx].archived = false;
+      if(materialSnapshot.length){
+        arr[idx].materials = materialSnapshot;
+        arr[idx].materialsSnapshotAt = record.materialsSnapshotAt;
+      }
 
       if (!arr[idx].notes) arr[idx].notes = "";
       if (!arr[idx].notes.includes("Enviado desde Preparación")) {
@@ -7084,6 +7180,9 @@ async function init(){
   }
 
   cargarLista();
+  try{ LDH_backfillFabricacionMaterialSnapshots(); }catch(e){}
+  setTimeout(function(){ try{ LDH_backfillFabricacionMaterialSnapshots(); }catch(e){} }, 1500);
+  setTimeout(function(){ try{ LDH_backfillFabricacionMaterialSnapshots(); }catch(e){} }, 5000);
   // si venimos desde el index con ?openRef=...
   autoAbrirDesdeQuery();
   try{ if(typeof LDH_runOpenPrepAfterInit === 'function') LDH_runOpenPrepAfterInit(); }catch(e){}
