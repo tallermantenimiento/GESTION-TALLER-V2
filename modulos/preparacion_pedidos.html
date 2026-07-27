@@ -13881,4 +13881,275 @@ Libre restante: ${libre - qty}`);
   }
 </style>
 <!-- LDH_PREP_CONSOLIDA_MATERIAL_Y_BOTON_RECIBIDO_V1_20260724 -->
+<script type="module" id="LDH_PREP_STOCK_FIREBASE_REAL_V28">
+/*
+ * V28 · Lectura directa y en tiempo real del Stock v2 publicado en
+ * GESTION-TALLER-STOCK. Este conector es exclusivamente de lectura:
+ * no modifica existencias, empresas, préstamos, deudas ni devoluciones.
+ */
+import { initializeApp, getApp, getApps } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInAnonymously
+} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
+import {
+  doc,
+  getDoc,
+  getFirestore,
+  onSnapshot
+} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+
+const LDH_PREP_STOCK_KEY_V28 = "ldh_v2_company_stock_v1";
+const LDH_PREP_STOCK_CONFIG_V28 = {
+  apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
+  authDomain: "gestion-taller-stock.firebaseapp.com",
+  projectId: "gestion-taller-stock",
+  storageBucket: "gestion-taller-stock.firebasestorage.app",
+  messagingSenderId: "164944519480",
+  appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
+};
+
+const LDH_PREP_STOCK_APP_NAME_V28 = "ldh-preparacion-stock-real-v28";
+const LDH_PREP_STOCK_APP_V28 = getApps().find((app) => app.name === LDH_PREP_STOCK_APP_NAME_V28)
+  || initializeApp(LDH_PREP_STOCK_CONFIG_V28, LDH_PREP_STOCK_APP_NAME_V28);
+const LDH_PREP_STOCK_AUTH_V28 = getAuth(LDH_PREP_STOCK_APP_V28);
+const LDH_PREP_STOCK_DB_V28 = getFirestore(LDH_PREP_STOCK_APP_V28);
+
+let LDH_PREP_STOCK_REFRESH_V28 = null;
+let LDH_PREP_STOCK_LAST_RAW_V28 = "";
+
+function LDH_prepParseStockDBV28(raw) {
+  let value = raw;
+  for (let pass = 0; pass < 4; pass += 1) {
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (!text) return null;
+      try { value = JSON.parse(text); }
+      catch (_) { return null; }
+      continue;
+    }
+    if (value && typeof value === "object" && value[LDH_PREP_STOCK_KEY_V28] != null) {
+      value = value[LDH_PREP_STOCK_KEY_V28];
+      continue;
+    }
+    break;
+  }
+  return value && typeof value === "object" ? value : null;
+}
+
+function LDH_prepReadLocalStockV28() {
+  const candidates = [];
+  try { candidates.push(localStorage.getItem(LDH_PREP_STOCK_KEY_V28)); } catch (_) {}
+  try { candidates.push(sessionStorage.getItem(LDH_PREP_STOCK_KEY_V28)); } catch (_) {}
+  if (window.__LDH_STOCK_MEMORY_DB) candidates.push(window.__LDH_STOCK_MEMORY_DB);
+  for (const value of candidates) {
+    const parsed = LDH_prepParseStockDBV28(value);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function LDH_prepRecordIdV28(row, key) {
+  if (!row || typeof row !== "object") return "";
+  const direct = row.id ?? row.assignmentId ?? row.reservationId ?? row.debtId ?? row.uid;
+  if (direct != null && String(direct).trim()) return String(direct).trim();
+  const parts = [
+    key,
+    row.refKey ?? row.reference ?? row.ref ?? row.jobId ?? "",
+    row.materialId ?? row.stockMaterialId ?? row.itemId ?? "",
+    row.companyId ?? row.fromCompanyId ?? row.empresaId ?? "",
+    row.assignmentType ?? row.type ?? "",
+    row.createdAt ?? row.timestamp ?? row.date ?? ""
+  ];
+  return parts.map((part) => String(part ?? "")).join("|");
+}
+
+function LDH_prepRecordTimeV28(row) {
+  if (!row || typeof row !== "object") return 0;
+  const value = row.updatedAt ?? row.releasedAt ?? row.deletedAt
+    ?? row.createdAt ?? row.timestamp ?? row.date ?? 0;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value.toMillis === "function") {
+    try { return Number(value.toMillis()) || 0; } catch (_) {}
+  }
+  const millis = Date.parse(String(value || ""));
+  return Number.isFinite(millis) ? millis : 0;
+}
+
+/*
+ * Conserva únicamente operaciones locales todavía no publicadas para que una
+ * actualización de Firebase no haga desaparecer una asignación recién pulsada.
+ * El catálogo, las cantidades físicas y las empresas siempre proceden de nube.
+ */
+function LDH_prepMergeOperationalV28(remoteDB, localDB) {
+  if (!remoteDB || !localDB || remoteDB === localDB) return remoteDB;
+  const keys = [
+    "assignments",
+    "reservations",
+    "reservationDebts",
+    "debts",
+    "loans",
+    "transfers"
+  ];
+  for (const key of keys) {
+    const remoteRows = Array.isArray(remoteDB[key]) ? remoteDB[key] : [];
+    const localRows = Array.isArray(localDB[key]) ? localDB[key] : [];
+    if (!localRows.length) continue;
+    const map = new Map();
+    remoteRows.forEach((row) => map.set(LDH_prepRecordIdV28(row, key), row));
+    localRows.forEach((row) => {
+      const id = LDH_prepRecordIdV28(row, key);
+      if (!id) return;
+      const current = map.get(id);
+      if (!current || LDH_prepRecordTimeV28(row) > LDH_prepRecordTimeV28(current)) {
+        map.set(id, row);
+      }
+    });
+    remoteDB[key] = Array.from(map.values());
+  }
+  return remoteDB;
+}
+
+async function LDH_prepReadFirebasePackageV28() {
+  const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+  const metaSnap = await getDoc(metaRef);
+  if (!metaSnap.exists()) throw new Error("No existe taller_data/stock");
+  const meta = metaSnap.data() || {};
+  const total = Math.max(0, Number(meta.totalChunks || 0) || 0);
+  let packed = "";
+
+  if (total > 0) {
+    for (let index = 0; index < total; index += 1) {
+      const chunkSnap = await getDoc(doc(
+        LDH_PREP_STOCK_DB_V28,
+        "taller_data",
+        "stock",
+        "chunks",
+        String(index)
+      ));
+      if (!chunkSnap.exists()) throw new Error(`Falta chunk ${index}`);
+      const chunk = chunkSnap.data() || {};
+      packed += String(chunk.part ?? chunk.data ?? chunk.payload ?? chunk.content ?? "");
+    }
+  } else {
+    const direct = meta[LDH_PREP_STOCK_KEY_V28] ?? meta.payload ?? meta.data ?? meta.stock;
+    if (direct != null) {
+      packed = typeof direct === "string"
+        ? direct
+        : JSON.stringify({ [LDH_PREP_STOCK_KEY_V28]: direct });
+    }
+  }
+
+  if (!packed) throw new Error("El paquete de Stock está vacío");
+  const outer = JSON.parse(packed);
+  const raw = outer?.[LDH_PREP_STOCK_KEY_V28]
+    ?? outer?.payload
+    ?? outer?.data
+    ?? outer?.stock
+    ?? outer;
+  const stockDB = LDH_prepParseStockDBV28(raw);
+  if (!stockDB) throw new Error("Formato de Stock no reconocido");
+  return {
+    stockDB,
+    rawMarker: packed,
+    updatedAt: meta.updatedAt ?? meta.publishedAt ?? meta.timestamp ?? null,
+    revision: meta.revision ?? meta.version ?? null
+  };
+}
+
+function LDH_prepRerenderStockV28() {
+  clearTimeout(LDH_PREP_STOCK_REFRESH_V28);
+  LDH_PREP_STOCK_REFRESH_V28 = setTimeout(() => {
+    try {
+      if (typeof window.renderTabla === "function") window.renderTabla();
+    } catch (error) {
+      console.warn("[Preparación V28] No se pudo redibujar la tabla:", error);
+    }
+    try {
+      if (typeof window.cargarLista === "function") window.cargarLista();
+    } catch (_) {}
+    try {
+      window.dispatchEvent(new CustomEvent("ldh:stock-cloud-updated", {
+        detail: { source: "gestion-taller-stock", readOnly: true }
+      }));
+    } catch (_) {}
+  }, 120);
+}
+
+async function LDH_prepApplyFirebaseStockV28(force = false) {
+  const result = await LDH_prepReadFirebasePackageV28();
+  if (!force && result.rawMarker === LDH_PREP_STOCK_LAST_RAW_V28) return;
+  LDH_PREP_STOCK_LAST_RAW_V28 = result.rawMarker;
+
+  const localDB = LDH_prepReadLocalStockV28();
+  const stockDB = LDH_prepMergeOperationalV28(result.stockDB, localDB);
+  const rawText = JSON.stringify(stockDB);
+
+  try { localStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+  try { sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+  window.__LDH_STOCK_MEMORY_DB = stockDB;
+  window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+    connected: true,
+    projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+    updatedAt: result.updatedAt,
+    revision: result.revision,
+    lastReadAt: new Date().toISOString(),
+    error: ""
+  };
+  LDH_prepRerenderStockV28();
+}
+
+function LDH_prepStartLiveStockV28() {
+  const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+  onSnapshot(
+    metaRef,
+    () => {
+      LDH_prepApplyFirebaseStockV28(true).catch((error) => {
+        window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+          connected: false,
+          projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+          lastReadAt: new Date().toISOString(),
+          error: String(error?.message || error)
+        };
+        console.warn("[Preparación V28] Stock Firebase no disponible:", error);
+      });
+    },
+    (error) => {
+      window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+        connected: false,
+        projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+        lastReadAt: new Date().toISOString(),
+        error: String(error?.message || error)
+      };
+      console.warn("[Preparación V28] Escucha de Stock interrumpida:", error);
+    }
+  );
+  LDH_prepApplyFirebaseStockV28(true).catch((error) => {
+    console.warn("[Preparación V28] Primera lectura de Stock fallida:", error);
+  });
+}
+
+let LDH_PREP_STOCK_STARTED_V28 = false;
+onAuthStateChanged(LDH_PREP_STOCK_AUTH_V28, async (user) => {
+  if (!user) {
+    try { await signInAnonymously(LDH_PREP_STOCK_AUTH_V28); }
+    catch (error) {
+      window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+        connected: false,
+        projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+        lastReadAt: new Date().toISOString(),
+        error: String(error?.message || error)
+      };
+      console.warn("[Preparación V28] No se pudo iniciar sesión anónima:", error);
+    }
+    return;
+  }
+  if (LDH_PREP_STOCK_STARTED_V28) return;
+  LDH_PREP_STOCK_STARTED_V28 = true;
+  LDH_prepStartLiveStockV28();
+});
+
+window.LDH_actualizarStockComunDesdeFirebase = () => LDH_prepApplyFirebaseStockV28(true);
+</script>
 </body></html>
