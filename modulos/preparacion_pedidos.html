@@ -5601,6 +5601,38 @@ function LDH_stockComunObjetoCoincide(pack, obj, candidatos){
   const nombreReal = LDH_stockComunNombreRealObjeto(pack, obj);
   return !!nombreReal && candidatos.names.includes(nombreReal);
 }
+function LDH_stockComunFilaNubeParaLinea(line){
+  const rows = Array.isArray(window.__LDH_PREP_STOCK_CLOUD_ROWS)
+    ? window.__LDH_PREP_STOCK_CLOUD_ROWS
+    : [];
+  if(!rows.length) return null;
+  const cand = LDH_stockComunMaterialCandidates(line);
+  return rows.find(row=>{
+    const companyKeys = [
+      row && row.companyId,
+      row && row.companyName,
+      row && row.empresa,
+      row && row.company
+    ].map(_v2Norm).filter(Boolean);
+    const isCommon = companyKeys.some(k=>
+      k === "stock comun" || k === "stock comun global" || k === "almacen comun"
+    );
+    if(!isCommon) return false;
+    const rowId = String(_v2First(
+      row && row.materialId,
+      row && row.matId,
+      row && row.material_id
+    ) || "").trim();
+    if(rowId && cand.ids.includes(rowId)) return true;
+    const rowName = _v2Norm(_v2First(
+      row && row.materialName,
+      row && row.name,
+      row && row.nombre,
+      row && row.material
+    ));
+    return !!rowName && cand.names.includes(rowName);
+  }) || null;
+}
 function LDH_stockComunMovementSign(type){
   const t = _v2Norm(type || "entrada").replace(/\s+/g,"_");
   if(["salida","out","ajuste_neg","consumo","consumo_terminal"].includes(t)) return -1;
@@ -5615,9 +5647,19 @@ function LDH_stockComunInfoParaLinea(line){
     const pack = _v2LoadCompanyStockDB();
     if(!pack) return {ok:false, reason:"Stock no disponible", free:0};
 
-    const company = (pack.companies || []).find(LDH_esEmpresaStockComun);
+    const cloudHit = LDH_stockComunFilaNubeParaLinea(line);
+    const company = (pack.companies || []).find(LDH_esEmpresaStockComun) || (cloudHit ? {
+      id:_v2First(cloudHit.companyId,cloudHit.companyName,"STOCK COMUN"),
+      name:_v2First(cloudHit.companyName,cloudHit.companyId,"STOCK COMUN"),
+      nombre:_v2First(cloudHit.companyName,cloudHit.companyId,"STOCK COMUN"),
+      sharedStock:true,
+      __fromCloudRow:true
+    } : null);
     if(!company) return {ok:false, reason:"STOCK COMÚN no existe", free:0};
-    const companyId = _v2IdOfCompany(company);
+    const companyId = String(_v2First(
+      cloudHit && cloudHit.companyId,
+      _v2IdOfCompany(company)
+    ));
     const cand = LDH_stockComunMaterialCandidates(line);
 
     const commonLots = (pack.lots || []).filter(row=>LDH_stockComunCompanyMatches(row, company));
@@ -5633,8 +5675,35 @@ function LDH_stockComunInfoParaLinea(line){
 
     let material = null;
     let materialId = "";
+    if(cloudHit){
+      materialId = String(_v2First(
+        cloudHit.materialId,
+        cloudHit.matId,
+        cloudHit.material_id
+      ) || "").trim();
+      material = (pack.materials || []).find(m=>
+        String(_v2IdOfMaterial(m) || "").trim() === materialId
+      ) || null;
+      if(!material){
+        const cloudName = String(_v2First(
+          cloudHit.materialName,
+          cloudHit.name,
+          cloudHit.nombre,
+          cloudHit.material,
+          materialId
+        ) || "").trim();
+        material = {
+          id:materialId || cloudName,
+          materialId:materialId || cloudName,
+          name:cloudName,
+          nombre:cloudName,
+          __fromCloudRow:true
+        };
+        materialId = String(material.id || "");
+      }
+    }
     const sourceHit = rowHit || movementHit;
-    if(sourceHit){
+    if(!material && sourceHit){
       materialId = String(_v2First(
         sourceHit.materialId,
         sourceHit.matId,
@@ -5678,7 +5747,16 @@ function LDH_stockComunInfoParaLinea(line){
     const lots = commonLots.filter(matMatch);
     const movs = commonMovements.filter(matMatch);
     const physicalMoves = movs.filter(m=>LDH_stockComunMovementSign(_v2First(m.type,m.tipo,"entrada")) !== 0);
-    const physical = physicalMoves.length
+    const cloudPhysical = cloudHit ? _v2Num(_v2First(
+      cloudHit.physical,
+      cloudHit.fisico,
+      cloudHit.qty,
+      cloudHit.cantidad,
+      0
+    )) : null;
+    const physical = cloudHit
+      ? cloudPhysical
+      : physicalMoves.length
       ? physicalMoves.reduce((sum,m)=>{
           const qty = _v2Num(_v2First(m.qty,m.cantidad,m.quantity,m.amount,0));
           return sum + LDH_stockComunMovementSign(_v2First(m.type,m.tipo,"entrada")) * qty;
@@ -14007,6 +14085,185 @@ function LDH_prepReadLocalStockV28() {
   return null;
 }
 
+function LDH_prepNormCloudV30(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/ø/g, "o")
+    .replace(/[^\w]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function LDH_prepFirstCloudV30(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") return value;
+  }
+  return "";
+}
+
+function LDH_prepNumCloudV30(value) {
+  const number = Number.parseFloat(String(value ?? 0).replace(",", "."));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function LDH_prepArrayCloudV30(value, kind) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).map(([key, item]) => {
+    if (item && typeof item === "object") {
+      return {
+        id: key,
+        name: item.name ?? item.nombre ?? (kind === "company" ? item.empresa : item.material) ?? key,
+        ...item
+      };
+    }
+    return { id: key, name: String(item ?? key), value: item };
+  });
+}
+
+function LDH_prepMovementSignCloudV30(type) {
+  const normalized = LDH_prepNormCloudV30(type || "entrada").replace(/\s+/g, "_");
+  if ([
+    "recepcion_preparacion", "stock_recibido_ok", "prep_ok", "traza_recepcion",
+    "reserva", "reservado", "asignacion", "asignado"
+  ].includes(normalized)) return 0;
+  if ([
+    "salida", "out", "ajuste_neg", "consumo", "consumo_terminal", "prestamo"
+  ].includes(normalized)) return -1;
+  return 1;
+}
+
+/*
+ * Vista plana idéntica al criterio del Stock informativo:
+ * empresa + nombre real de material + cantidad física. Evita que un mismo
+ * nombre copiado a otra empresa dependa del ID que recibió esa copia.
+ */
+function LDH_prepBuildCloudRowsV30(stockDB) {
+  const companies = LDH_prepArrayCloudV30(stockDB?.companies, "company");
+  const materials = LDH_prepArrayCloudV30(stockDB?.materials, "material");
+  const stockRows = LDH_prepArrayCloudV30(
+    stockDB?.stock ?? stockDB?.stocks ?? stockDB?.stockLots,
+    "stock"
+  );
+  const movements = LDH_prepArrayCloudV30(
+    stockDB?.movements ?? stockDB?.movimientos,
+    "movement"
+  );
+
+  const companyId = (company) => String(LDH_prepFirstCloudV30(
+    company?.id, company?.companyId, company?.empresaId,
+    company?.code, company?.codigo, company?.name, company?.nombre
+  ));
+  const companyName = (company) => String(LDH_prepFirstCloudV30(
+    company?.name, company?.nombre, company?.empresa, company?.company,
+    company?.code, company?.codigo, company?.id
+  ));
+  const materialId = (material) => String(LDH_prepFirstCloudV30(
+    material?.id, material?.materialId, material?.matId,
+    material?.code, material?.codigo, material?.name, material?.nombre
+  ));
+  const materialName = (material) => String(LDH_prepFirstCloudV30(
+    material?.name, material?.nombre, material?.material, material?.mat,
+    material?.label, material?.id
+  ));
+
+  function resolveCompany(raw) {
+    const target = LDH_prepNormCloudV30(raw);
+    return companies.find((company) => {
+      const aliases = [
+        companyId(company), companyName(company), company?.empresa,
+        company?.company, company?.code, company?.codigo
+      ].map(LDH_prepNormCloudV30).filter(Boolean);
+      return aliases.includes(target);
+    }) || null;
+  }
+
+  function resolveMaterial(rawId, rawName) {
+    const idTarget = String(rawId || "").trim();
+    const nameTarget = LDH_prepNormCloudV30(rawName);
+    return materials.find((material) => idTarget && materialId(material) === idTarget)
+      || materials.find((material) =>
+        nameTarget && LDH_prepNormCloudV30(materialName(material)) === nameTarget
+      )
+      || null;
+  }
+
+  function rowPhysical(row) {
+    return LDH_prepNumCloudV30(LDH_prepFirstCloudV30(
+      row?.physicalQty, row?.physical, row?.fisico, row?.físico,
+      row?.qtyPhysical, row?.realQty, row?.stockFisico, row?.stockFísico,
+      row?.stockReal, row?.stockActual, row?.existencias, row?.actualQty,
+      row?.onHand, row?.currentQty, row?.current, row?.totalQty, row?.total,
+      row?.freeQty, row?.free, row?.libre, row?.qty, row?.cantidad,
+      row?.quantity, 0
+    ));
+  }
+
+  const groups = new Map();
+  function ensureGroup(source) {
+    const rawCompany = LDH_prepFirstCloudV30(
+      source?.companyId, source?.empresaId, source?.company, source?.empresa,
+      source?.companyName, source?.empresaNombre
+    );
+    const rawMaterialId = String(LDH_prepFirstCloudV30(
+      source?.materialId, source?.matId, source?.material_id, source?.idMaterial
+    ) || "").trim();
+    const rawMaterialName = LDH_prepFirstCloudV30(
+      source?.materialName, source?.material_nombre, source?.nombreMaterial,
+      source?.material, source?.mat, source?.name, source?.nombre
+    );
+    const company = resolveCompany(rawCompany);
+    const material = resolveMaterial(rawMaterialId, rawMaterialName);
+    const resolvedCompanyId = String(company ? companyId(company) : rawCompany);
+    const resolvedCompanyName = String(company ? companyName(company) : rawCompany);
+    const resolvedMaterialId = String(material ? materialId(material) : rawMaterialId);
+    const resolvedMaterialName = String(material ? materialName(material) : rawMaterialName);
+    if (!resolvedCompanyId || (!resolvedMaterialId && !resolvedMaterialName)) return null;
+    const key = [
+      LDH_prepNormCloudV30(resolvedCompanyId || resolvedCompanyName),
+      resolvedMaterialId || LDH_prepNormCloudV30(resolvedMaterialName)
+    ].join("|");
+    if (!groups.has(key)) {
+      groups.set(key, {
+        companyId: resolvedCompanyId,
+        companyName: resolvedCompanyName,
+        materialId: resolvedMaterialId,
+        materialName: resolvedMaterialName,
+        rowPhysical: 0,
+        movementPhysical: 0,
+        movementCount: 0
+      });
+    }
+    return groups.get(key);
+  }
+
+  stockRows.forEach((row) => {
+    const group = ensureGroup(row);
+    if (group) group.rowPhysical += rowPhysical(row);
+  });
+
+  movements.forEach((movement) => {
+    const group = ensureGroup(movement);
+    if (!group) return;
+    const sign = LDH_prepMovementSignCloudV30(
+      LDH_prepFirstCloudV30(movement?.type, movement?.tipo, "entrada")
+    );
+    if (sign === 0) return;
+    const quantity = LDH_prepNumCloudV30(LDH_prepFirstCloudV30(
+      movement?.qty, movement?.cantidad, movement?.quantity, movement?.amount, 0
+    ));
+    group.movementPhysical += sign * quantity;
+    group.movementCount += 1;
+  });
+
+  return Array.from(groups.values()).map((group) => ({
+    ...group,
+    physical: group.movementCount ? group.movementPhysical : group.rowPhysical,
+    qty: group.movementCount ? group.movementPhysical : group.rowPhysical
+  }));
+}
+
 function LDH_prepRecordIdV28(row, key) {
   if (!row || typeof row !== "object") return "";
   const direct = row.id ?? row.assignmentId ?? row.reservationId ?? row.debtId ?? row.uid;
@@ -14146,6 +14403,7 @@ async function LDH_prepApplyFirebaseStockV28(force = false) {
   try { localStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
   try { sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
   window.__LDH_STOCK_MEMORY_DB = stockDB;
+  window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(stockDB);
   window.__LDH_PREP_STOCK_FIREBASE_STATE = {
     connected: true,
     projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
