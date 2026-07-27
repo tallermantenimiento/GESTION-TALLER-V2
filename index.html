@@ -2905,6 +2905,15 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const s = norm(name);
     return s.includes("chapa") || s.includes("malla") || s.includes("panel") || s.includes("plancha");
   }
+  function isSandwichPanelName(name){
+    const s = norm(name);
+    return isSheetMaterialName(name) && (
+      s.includes("sandwich") ||
+      s.includes("sadwich") ||
+      s.includes("sandwitch") ||
+      s.includes("panel aislante")
+    );
+  }
   function sheetMaterialFactor(name){
     const s = norm(name);
     // Chapa perforada: no pesa como chapa lisa. Aproximamos un 40% de hueco,
@@ -2918,6 +2927,13 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function kgPerUnitFromName(name){
     const s = norm(name);
     const d = extractDims(name);
+    // Un panel sándwich de 40 mm no es una chapa maciza de acero de 40 mm.
+    // Se calcula por superficie con 13,2 kg/m² (panel de 40 mm, estimación conservadora).
+    if(isSandwichPanelName(name) && d.length >= 2){
+      const L = d[0] / 1000, W = d[1] / 1000;
+      const kg = L * W * 13.2;
+      return isFinite(kg) && kg > 0 ? kg : 0;
+    }
     if(isSheetMaterialName(name) && d.length >= 3){
       const L = d[0] / 1000, W = d[1] / 1000, T = d[2] / 1000;
       const kgSolid = L * W * T * 7850;
@@ -2933,11 +2949,12 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const kgm = num(line && line.kgm);
     const kgu = kgPerUnitFromName(material);
 
+    // Chapa/malla/panel/plancha: el nombre del material prevalece sobre una
+    // unidad antigua mal guardada como "barra". Nunca se multiplica por 6 m.
+    if(kgu > 0) return qty * kgu;
+
     // Barras/perfiles: cantidad = número de barras, largo estándar 6 m.
     if(unit.includes("barra") || unit.includes("bar")) return qty * kgm * BAR_LENGTH_M;
-
-    // Chapa/malla/plancha: cantidad = unidades o fracción de unidad. No se multiplica por 6 m.
-    if(kgu > 0) return qty * kgu;
 
     // Compatibilidad con datos antiguos sin unidad: se mantiene el criterio anterior de barra estándar.
     if(!unit) return qty * kgm * BAR_LENGTH_M;
@@ -2949,8 +2966,11 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
     const unit = norm((line && (line.unit || line.unidad)) || "");
     const material = String((line && line.material) || "");
     const kgu = kgPerUnitFromName(material);
-    if(kgu > 0 && !(unit.includes("barra") || unit.includes("bar"))) return fmt(kgu) + " kg/ud";
+    if(kgu > 0) return fmt(kgu) + " kg/ud";
     return fmt((line && line.kgm) || 0) + " kg/m";
+  }
+  function quantityInfoForMaterial(name, qty){
+    return fmt(qty) + (isSheetMaterialName(name) ? " uds" : " barras");
   }
 
   function assignmentQty(a){
@@ -3386,7 +3406,7 @@ function collectAssignments(db){
       const kg = kgForLine(r);
       const cur = map.get(r.companyId) || {companyId:r.companyId, company:r.company, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
-      cur.bars += r.qty;
+      if(!isSheetMaterialName(r.material)) cur.bars += r.qty;
       if(r.ref) cur.refs.add(r.ref);
       cur.lines.push({...r, kg});
       map.set(r.companyId, cur);
@@ -3481,7 +3501,7 @@ function collectAssignments(db){
       });
     });
     box.innerHTML = rows.length ? `<table>
-      <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Barras</th><th>Kg/m aprox.</th><th>Kg estimados</th><th>Origen</th></tr></thead>
+      <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Cantidad</th><th>Peso unitario</th><th>Kg estimados</th><th>Origen</th></tr></thead>
       <tbody>${rows.join("")}</tbody>
     </table>` : "";
   }
@@ -3591,12 +3611,12 @@ function collectAssignments(db){
             <div class="ldh-iron-material-name">${esc(g.material)}</div>
             <div class="ldh-iron-material-sub">${fmt(g.refs.size)} trabajos donde aparece este material</div>
           </div>
-          <div class="ldh-iron-material-kpi">${fmt(g.qty)} barras</div>
-          <div class="ldh-iron-material-kpi">${fmt(g.kgm)} kg/m</div>
+          <div class="ldh-iron-material-kpi">${quantityInfoForMaterial(g.material, g.qty)}</div>
+          <div class="ldh-iron-material-kpi">${weightInfoForLine(g.rows[0])}</div>
           <div class="ldh-iron-material-kpi">${fmt(g.kg)} kg est.</div>
         </div>
         <table class="ldh-iron-company-table">
-          <thead><tr><th>Trabajo</th><th>Origen</th><th class="num">Barras</th><th class="num">Kg/m</th><th class="num">Kg estimados</th></tr></thead>
+          <thead><tr><th>Trabajo</th><th>Origen</th><th class="num">Cantidad</th><th class="num">Peso unitario</th><th class="num">Kg estimados</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
@@ -3927,9 +3947,25 @@ function collectAssignments(db){
     const s = norm(name);
     return s.includes("chapa") || s.includes("malla") || s.includes("panel") || s.includes("plancha");
   }
+  function isSandwichPanelName(name){
+    const s = norm(name);
+    return isSheetMaterialName(name) && (
+      s.includes("sandwich") ||
+      s.includes("sadwich") ||
+      s.includes("sandwitch") ||
+      s.includes("panel aislante")
+    );
+  }
   function kgPerUnitFromName(name){
     const s = norm(name);
     const d = extractDims(name);
+    // Un panel sándwich de 40 mm no es una chapa maciza de acero de 40 mm.
+    // Se calcula por superficie con 13,2 kg/m² (panel de 40 mm, estimación conservadora).
+    if(isSandwichPanelName(name) && d.length >= 2){
+      const L = d[0] / 1000, W = d[1] / 1000;
+      const kg = L * W * 13.2;
+      return isFinite(kg) && kg > 0 ? kg : 0;
+    }
     if(isSheetMaterialName(name) && d.length >= 3){
       const L = d[0] / 1000, W = d[1] / 1000, T = d[2] / 1000;
       const kg = L * W * T * 7850;
@@ -3944,11 +3980,12 @@ function collectAssignments(db){
     const kgm = num(line && line.kgm);
     const kgu = kgPerUnitFromName(material);
 
+    // Chapa/malla/panel/plancha: el nombre del material prevalece sobre una
+    // unidad antigua mal guardada como "barra". Nunca se multiplica por 6 m.
+    if(kgu > 0) return qty * kgu;
+
     // Barras/perfiles: cantidad = número de barras, largo estándar 6 m.
     if(unit.includes("barra") || unit.includes("bar")) return qty * kgm * BAR_LENGTH_M;
-
-    // Chapa/malla/plancha: cantidad = unidades o fracción de unidad. No se multiplica por 6 m.
-    if(kgu > 0) return qty * kgu;
 
     // Compatibilidad con datos antiguos sin unidad: se mantiene el criterio anterior de barra estándar.
     if(!unit) return qty * kgm * BAR_LENGTH_M;
@@ -3960,8 +3997,11 @@ function collectAssignments(db){
     const unit = norm((line && (line.unit || line.unidad)) || "");
     const material = String((line && line.material) || "");
     const kgu = kgPerUnitFromName(material);
-    if(kgu > 0 && !(unit.includes("barra") || unit.includes("bar"))) return fmt(kgu) + " kg/ud";
+    if(kgu > 0) return fmt(kgu) + " kg/ud";
     return fmt((line && line.kgm) || 0) + " kg/m";
+  }
+  function quantityInfoForMaterial(name, qty){
+    return fmt(qty) + (isSheetMaterialName(name) ? " uds" : " barras");
   }
 
   function assignmentQty(a){
@@ -4336,7 +4376,7 @@ function collectAssignments(db){
       const kg = kgForLine(r);
       const cur = map.get(key) || {companyId:key, company:compName, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
-      cur.bars += r.qty;
+      if(!isSheetMaterialName(r.material)) cur.bars += r.qty;
       if(r.ref) cur.refs.add(r.ref);
       cur.lines.push({...r, companyId:key, company:compName, kg});
       map.set(key, cur);
@@ -4469,7 +4509,7 @@ function collectAssignments(db){
       });
     });
     box.innerHTML = rows.length ? `<table>
-      <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Barras</th><th>Kg/m aprox.</th><th>Kg estimados</th><th>Origen</th></tr></thead>
+      <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Cantidad</th><th>Peso unitario</th><th>Kg estimados</th><th>Origen</th></tr></thead>
       <tbody>${rows.join("")}</tbody>
     </table>` : "";
   }
@@ -4540,12 +4580,12 @@ function collectAssignments(db){
       return `<div class="ldh-iron-material-group">
         <div class="ldh-iron-material-summary">
           <div><div class="ldh-iron-material-name">${esc(g.material)}</div><div class="ldh-iron-material-sub">${fmt(g.refs.size)} trabajos donde aparece este material</div></div>
-          <div class="ldh-iron-material-kpi">${fmt(g.qty)} barras</div>
-          <div class="ldh-iron-material-kpi">${fmt(g.kgm)} kg/m</div>
+          <div class="ldh-iron-material-kpi">${quantityInfoForMaterial(g.material, g.qty)}</div>
+          <div class="ldh-iron-material-kpi">${weightInfoForLine(g.rows[0])}</div>
           <div class="ldh-iron-material-kpi">${fmt(g.kg)} kg est.</div>
         </div>
         <table class="ldh-iron-company-table">
-          <thead><tr><th>Trabajo</th><th>Origen</th><th class="num">Barras</th><th class="num">Kg/m</th><th class="num">Kg estimados</th></tr></thead>
+          <thead><tr><th>Trabajo</th><th>Origen</th><th class="num">Cantidad</th><th class="num">Peso unitario</th><th class="num">Kg estimados</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
