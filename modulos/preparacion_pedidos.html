@@ -3491,8 +3491,23 @@ function _v2MovementsForLine(pack, company, material, line){
 }
 function _v2QtyFromRows(rows){
   return (Array.isArray(rows) ? rows : []).reduce((a,s)=> a + _v2Num(_v2First(
+    s && s.physicalQty,
+    s && s.physical,
+    s && s.qtyPhysical,
+    s && s.realQty,
+    s && s.stockFisico,
+    s && s.stockReal,
+    s && s.stockActual,
+    s && s.existencias,
+    s && s.actualQty,
+    s && s.onHand,
+    s && s.currentQty,
+    s && s.current,
+    s && s.totalQty,
+    s && s.total,
     s && s.qty,
     s && s.cantidad,
+    s && s.quantity,
     s && s.stock,
     s && s.cantidadActual,
     s && s.real,
@@ -3540,7 +3555,9 @@ function _v2LooksLikeStockRow(o){
   const keys = Object.keys(o);
   return [
     "materialId","matId","material_id","material","mat","materialName","material_nombre",
-    "name","nombre","qty","cantidad","stock","cantidadActual","real","fisico","libre"
+    "name","nombre","qty","cantidad","quantity","stock","cantidadActual","real","fisico","libre",
+    "physicalQty","physical","qtyPhysical","realQty","stockFisico","stockReal","stockActual",
+    "existencias","actualQty","onHand","currentQty","current","totalQty","total"
   ].some(k => keys.includes(k));
 }
 function _v2NormalizeStockRows(src, companyHint, materialHint, out){
@@ -3565,7 +3582,12 @@ function _v2NormalizeStockRows(src, companyHint, materialHint, out){
     row.empresa = _v2First(row.empresa,row.company,row.companyName,row.empresaNombre,companyHint);
     row.materialId = _v2First(row.materialId,row.matId,row.material_id,materialHint,row.material,row.mat,row.name,row.nombre);
     row.material = _v2First(row.material,row.mat,row.materialName,row.material_nombre,row.name,row.nombre,materialHint);
-    row.qty = _v2First(row.qty,row.cantidad,row.stock,row.cantidadActual,row.real,row.fisico,row.libre,0);
+    row.qty = _v2First(
+      row.physicalQty,row.physical,row.qtyPhysical,row.realQty,row.stockFisico,row.stockReal,
+      row.stockActual,row.existencias,row.actualQty,row.onHand,row.currentQty,row.current,
+      row.totalQty,row.total,row.qty,row.cantidad,row.quantity,row.stock,row.cantidadActual,
+      row.real,row.fisico,row.libre,0
+    );
     out.push(row);
     return out;
   }
@@ -3924,7 +3946,13 @@ function LDH_exactMovementSign(type){
   return 0;
 }
 function LDH_exactRowQty(r){
-  return Number(String(LDH_exactFirst(r && r.qty, r && r.cantidad, r && r.stock, r && r.cantidadActual, r && r.real, r && r.fisico, r && r.libre, 0)).replace(",", ".")) || 0;
+  return Number(String(LDH_exactFirst(
+    r && r.physicalQty, r && r.physical, r && r.qtyPhysical, r && r.realQty,
+    r && r.stockFisico, r && r.stockReal, r && r.stockActual, r && r.existencias,
+    r && r.actualQty, r && r.onHand, r && r.currentQty, r && r.current,
+    r && r.totalQty, r && r.total, r && r.qty, r && r.cantidad, r && r.quantity,
+    r && r.stock, r && r.cantidadActual, r && r.real, r && r.fisico, r && r.libre, 0
+  )).replace(",", ".")) || 0;
 }
 function LDH_exactRealStock(db, companyId, materialId){
   const movs = (db.movements||[]).filter(m =>
@@ -5478,7 +5506,7 @@ function _v2Reserved(pack, companyId, materialId){
     .reduce((a,r)=>a+_v2ReservationQty(r),0);
 }
 
-/* === LDH_PREP_STOCK_COMUN_SIN_DEUDA_V26_20260727 ===
+/* === LDH_PREP_STOCK_COMUN_LECTURA_FISICA_V27_20260727 ===
    STOCK COMÚN es un almacén separado. Sus asignaciones:
    - no se suman al stock particular de la empresa destinataria;
    - no usan los campos toCompanyId/toEmpresa de los préstamos;
@@ -5536,6 +5564,15 @@ function LDH_stockComunMaterialMatches(obj, materialId, materialNames){
   ].map(_v2Norm).filter(Boolean);
   return names.some(n => materialNames.includes(n));
 }
+function LDH_stockComunMovementSign(type){
+  const t = _v2Norm(type || "entrada").replace(/\s+/g,"_");
+  if(["salida","out","ajuste_neg","consumo","consumo_terminal"].includes(t)) return -1;
+  if(["recepcion_preparacion","stock_recibido_ok","prep_ok","traza_recepcion","reserva","reservado","asignacion","asignado"].includes(t)) return 0;
+  if(["entrada","in","ajuste_pos","devolucion","devolucion_fisica","entrada_preparacion","entrada_prep","entrada_desde_preparacion","stock_entrada","recepcion_stock","add_stock"].includes(t)) return 1;
+  // Compatibilidad con el Stock actual: los movimientos antiguos sin tipo
+  // normalizado son entradas físicas, no trazas informativas.
+  return 1;
+}
 function LDH_stockComunInfoParaLinea(line){
   try{
     const pack = _v2LoadCompanyStockDB();
@@ -5583,7 +5620,13 @@ function LDH_stockComunInfoParaLinea(line){
     const matMatch = obj=>LDH_stockComunMaterialMatches(obj, materialId, matNames);
     const lots = commonLots.filter(matMatch);
     const movs = (pack.movements || []).filter(m=>LDH_stockComunCompanyMatches(m,company) && matMatch(m));
-    const physical = movs.length ? _v2QtyFromMovements(movs) : _v2QtyFromRows(lots);
+    const physicalMoves = movs.filter(m=>LDH_stockComunMovementSign(_v2First(m.type,m.tipo,"entrada")) !== 0);
+    const physical = physicalMoves.length
+      ? physicalMoves.reduce((sum,m)=>{
+          const qty = _v2Num(_v2First(m.qty,m.cantidad,m.quantity,m.amount,0));
+          return sum + LDH_stockComunMovementSign(_v2First(m.type,m.tipo,"entrada")) * qty;
+        },0)
+      : _v2QtyFromRows(lots);
     const reserved = (pack.reservations || [])
       .filter(r=>LDH_stockComunCompanyMatches(r,company) && matMatch(r) && _v2IsActiveReservation(r))
       .reduce((sum,r)=>sum+_v2ReservationQty(r),0);
