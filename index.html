@@ -2756,7 +2756,12 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   function now(){ return new Date().toISOString(); }
   function readDB(){
     try{
-      const db = JSON.parse(localStorage.getItem(KEY) || "null") || {};
+      const raw =
+        window.__LDH_INDEX_STOCK_REMOTE_RAW ||
+        sessionStorage.getItem(KEY) ||
+        localStorage.getItem(KEY) ||
+        "";
+      const db = JSON.parse(raw || "null") || {};
       db.companies = Array.isArray(db.companies) ? db.companies : [];
       db.materials = Array.isArray(db.materials) ? db.materials : [];
       db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -3744,7 +3749,12 @@ function collectAssignments(db){
 
   function readDB(){
     try{
-      const db = JSON.parse(localStorage.getItem(KEY) || "null") || {};
+      const raw =
+        window.__LDH_INDEX_STOCK_REMOTE_RAW ||
+        sessionStorage.getItem(KEY) ||
+        localStorage.getItem(KEY) ||
+        "";
+      const db = JSON.parse(raw || "null") || {};
       db.companies = Array.isArray(db.companies) ? db.companies : [];
       db.materials = Array.isArray(db.materials) ? db.materials : [];
       db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -3786,11 +3796,15 @@ function collectAssignments(db){
     }catch(e){ return []; }
   }
   function stockCompaniesFromDB(db){
-    const master = readCompanyMaster();
-    if(master.length) return master;
+    // La lista del Stock descargada de Firebase es la fuente oficial.
+    // El maestro local antiguo solo se usa como respaldo si Stock no trae empresas.
+    const source = Array.isArray(db && db.companies) && db.companies.length
+      ? db.companies
+      : readCompanyMaster();
     const seen = new Set();
     const out = [];
-    (db.companies||[]).forEach(c=>{
+    source.forEach(c=>{
+      if(c && c.statDemo) return;
       const id = String(c && (c.id || c.companyId || c.name || c.nombre || c.empresa) || "").trim();
       const name = String(c && (c.name || c.nombre || c.empresa || c.code || c.codigo || c.id) || "").trim();
       const code = String(c && (c.code || c.codigo || "") || "").trim();
@@ -4909,6 +4923,7 @@ const firebaseConfig = {
 
 const STOCK_KEY = "ldh_v2_company_stock_v1";
 const META_PATH = ["taller_data", "stock"];
+const STOCK_REFRESH_PATCH = "LDH_INDEX_STOCK_FIRESTORE_PRIORITY_MEMORY_2707";
 
 function parseJSON(raw, fallback){
   try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; }
@@ -4939,23 +4954,25 @@ function setSmallStatus(txt){
   }catch(e){}
 }
 function saveLocalStock(raw){
+  // El informe usa inmediatamente la copia descargada aunque localStorage esté lleno.
+  window.__LDH_INDEX_STOCK_REMOTE_RAW = raw;
   try{ localStorage.setItem(STOCK_KEY, raw); }
   catch(e){ try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(e2){} }
 }
 async function restoreStockFromFirestore(){
+  let hadLocalStock = false;
   try{
-    if(localStockHasData()){
-      setSmallStatus("Stock local disponible.");
-      return;
-    }
-
-    setSmallStatus("Descargando Stock desde Firestore...");
+    hadLocalStock = localStockHasData();
+    setSmallStatus(hadLocalStock ? "Actualizando Stock desde Firestore..." : "Descargando Stock desde Firestore...");
 
     const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
     const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
     const {getFirestore,doc,getDoc} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
 
-    const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+    const appName = "ldh-index-stock-v2";
+    const app = getApps().some(a => a.name === appName)
+      ? getApp(appName)
+      : initializeApp(firebaseConfig, appName);
     const auth = getAuth(app);
     const db = getFirestore(app);
 
@@ -4973,7 +4990,9 @@ async function restoreStockFromFirestore(){
 
     const metaSnap = await getDoc(doc(db, ...META_PATH));
     if(!metaSnap.exists()){
-      setSmallStatus("Stock Firestore: sin documento taller_data/stock.");
+      setSmallStatus(hadLocalStock
+        ? "Stock Firebase no disponible; usando copia local."
+        : "Stock Firestore: sin documento taller_data/stock.");
       return;
     }
 
@@ -4998,7 +5017,9 @@ async function restoreStockFromFirestore(){
     const stock = parseJSON(raw, null);
 
     if(!stock || !Array.isArray(stock.materials) || !stock.materials.length){
-      setSmallStatus("Stock Firestore descargado, pero sin materiales válidos.");
+      setSmallStatus(hadLocalStock
+        ? "Stock Firebase sin datos válidos; usando copia local."
+        : "Stock Firestore descargado, pero sin materiales válidos.");
       return;
     }
 
@@ -5010,7 +5031,7 @@ async function restoreStockFromFirestore(){
     }, 150);
   }catch(e){
     console.error("Index restore Stock Firestore error", e);
-    setSmallStatus("Error leyendo Stock Firestore: " + String((e && (e.code || e.message)) || e));
+    setSmallStatus((hadLocalStock ? "Firebase no respondió; usando copia local. " : "Error leyendo Stock Firestore: ") + String((e && (e.code || e.message)) || e));
   }
 }
 
@@ -5024,8 +5045,10 @@ if(document.readyState === "loading"){
 
 <script type="module" id="LDH_INDEX_FABRICACION_FIRESTORE_STATS_2107">
 /*
-  LDH INDEX · Lee Fabricación desde Firestore para estadística de hierro.
+  LDH INDEX · Lee Fabricación y el detalle de Preparación desde Firestore
+  para la estadística de hierro.
   Evita diferencias entre modo normal e incógnito por localStorage antiguo.
+  PATCH: LDH_INDEX_PREPARACION_FIRESTORE_JOIN_2707
 */
 const firebaseConfigFab = {
   apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
@@ -5054,9 +5077,50 @@ function setFabStatus(txt){
     if(el) el.textContent = txt;
   }catch(e){}
 }
+
+function preparationParts(preparationDoc){
+  const data = preparationDoc && preparationDoc.data && typeof preparationDoc.data === "object"
+    ? preparationDoc.data
+    : {};
+  const prepMeta = {};
+  const prepRecepcion = {};
+
+  Object.keys(data).forEach(key=>{
+    if(key.startsWith("prep_meta_")){
+      const ref = key.slice("prep_meta_".length).trim();
+      if(ref) prepMeta[ref] = data[key];
+    }else if(key.startsWith("prep_recepcion_")){
+      const ref = key.slice("prep_recepcion_".length).trim();
+      if(ref) prepRecepcion[ref] = data[key];
+    }
+  });
+
+  return {prepMeta, prepRecepcion};
+}
+
+function joinFabricacionWithPreparacion(fabricacionDoc, preparationDoc){
+  const fab = fabricacionDoc && typeof fabricacionDoc === "object" ? fabricacionDoc : {};
+  const prep = preparationParts(preparationDoc);
+  const joined = Object.assign({}, fab);
+
+  // Preparación es la fuente autoritativa de las líneas de material.
+  // Se conservan como respaldo las que Fabricación ya pudiera contener.
+  joined.prepMeta = Object.assign({}, fab.prepMeta || {}, prep.prepMeta);
+  joined.prepRecepcion = Object.assign({}, fab.prepRecepcion || {}, prep.prepRecepcion);
+  joined.counts = Object.assign({}, fab.counts || {}, {
+    prepMeta: Object.keys(joined.prepMeta).length,
+    prepRecepcion: Object.keys(joined.prepRecepcion).length
+  });
+  joined.preparacionUpdatedAt = preparationDoc && preparationDoc.updatedAt
+    ? preparationDoc.updatedAt
+    : null;
+
+  return joined;
+}
+
 async function readFabricacionCloudForStats(){
   try{
-    setFabStatus("Leyendo Fabricación nube...");
+    setFabStatus("Leyendo Fabricación y Preparación nube...");
     const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
     const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
     const {getFirestore,doc,getDoc,onSnapshot} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
@@ -5065,7 +5129,20 @@ async function readFabricacionCloudForStats(){
     const app = getApps().some(a => a.name === appName) ? getApp(appName) : initializeApp(firebaseConfigFab, appName);
     const auth = getAuth(app);
     const db = getFirestore(app);
-    const docRef = doc(db, "taller_data", "fabricacion");
+    const fabricacionRef = doc(db, "taller_data", "fabricacion");
+    const preparacionRef = doc(db, "taller_data", "preparacion");
+    let fabricacionDoc = {};
+    let preparacionDoc = {};
+
+    function publishJoined(prefix){
+      window.__LDH_FABRICACION_REMOTE_PACKAGE = joinFabricacionWithPreparacion(fabricacionDoc, preparacionDoc);
+      const c = window.__LDH_FABRICACION_REMOTE_PACKAGE.counts || {};
+      setFabStatus(
+        prefix + ": " + (c.refs || 0) + " refs · " +
+        (c.prepRecepcion || 0) + " recepciones."
+      );
+      try{ window.LDH_IronStats_render && window.LDH_IronStats_render(); }catch(e){}
+    }
 
     await new Promise(resolve=>{
       let done = false;
@@ -5079,26 +5156,45 @@ async function readFabricacionCloudForStats(){
       setTimeout(finish, 3500);
     });
 
-    const snap = await getDoc(docRef);
-    if(snap.exists()){
-      window.__LDH_FABRICACION_REMOTE_PACKAGE = snap.data() || {};
-      const c = window.__LDH_FABRICACION_REMOTE_PACKAGE.counts || {};
-      setFabStatus("Fabricación nube leída: " + (c.refs || 0) + " refs · " + (c.prepRecepcion || 0) + " recepciones.");
-      setTimeout(()=>{ try{ window.LDH_IronStats_render && window.LDH_IronStats_render(); }catch(e){} }, 100);
+    const [fabricacionResult, preparacionResult] = await Promise.allSettled([
+      getDoc(fabricacionRef),
+      getDoc(preparacionRef)
+    ]);
+    const fabricacionSnap = fabricacionResult.status === "fulfilled" ? fabricacionResult.value : null;
+    const preparacionSnap = preparacionResult.status === "fulfilled" ? preparacionResult.value : null;
+
+    if(fabricacionSnap && fabricacionSnap.exists()){
+      fabricacionDoc = fabricacionSnap.data() || {};
     }else{
       setFabStatus("Fabricación nube: sin documento.");
     }
+    if(preparacionSnap && preparacionSnap.exists()) preparacionDoc = preparacionSnap.data() || {};
+    if(preparacionResult.status === "rejected"){
+      console.warn("Index Preparación Firestore stats read", preparacionResult.reason);
+    }
 
-    onSnapshot(docRef, snap2=>{
+    if(fabricacionSnap && fabricacionSnap.exists()){
+      publishJoined("Fabricación + Preparación leídas");
+    }
+
+    onSnapshot(fabricacionRef, snap2=>{
       if(!snap2.exists()) return;
-      window.__LDH_FABRICACION_REMOTE_PACKAGE = snap2.data() || {};
-      const c = window.__LDH_FABRICACION_REMOTE_PACKAGE.counts || {};
-      setFabStatus("Fabricación nube actualizada: " + (c.refs || 0) + " refs · " + (c.prepRecepcion || 0) + " recepciones.");
-      try{ window.LDH_IronStats_render && window.LDH_IronStats_render(); }catch(e){}
+      fabricacionDoc = snap2.data() || {};
+      publishJoined("Fabricación nube actualizada");
+    }, e=>{
+      console.warn("Index Fabricación Firestore stats snapshot", e);
+    });
+
+    onSnapshot(preparacionRef, snap2=>{
+      if(!snap2.exists()) return;
+      preparacionDoc = snap2.data() || {};
+      publishJoined("Preparación nube actualizada");
+    }, e=>{
+      console.warn("Index Preparación Firestore stats snapshot", e);
     });
   }catch(e){
-    console.error("Index Fabricación Firestore stats error", e);
-    setFabStatus("Error leyendo Fabricación nube: " + String((e && (e.code || e.message)) || e));
+    console.error("Index Fabricación/Preparación Firestore stats error", e);
+    setFabStatus("Error leyendo Fabricación/Preparación nube: " + String((e && (e.code || e.message)) || e));
   }
 }
 
