@@ -2,8 +2,8 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<!-- BUILD: VINCULO-CONFIG-AUTORITATIVO-V41-20260728 -->
-<meta name="ldh-build" content="VINCULO-CONFIG-AUTORITATIVO-V41-20260728" />
+<!-- BUILD: FERRETERIA-ACTUAL-V45-20260728 -->
+<meta name="ldh-build" content="FERRETERIA-ACTUAL-V45-20260728" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -773,7 +773,12 @@ const UNASSIGNED_GLOBAL_KEY = "unassigned_borrow_global_v1";
 window.addEventListener('storage', (ev)=>{
   try{
     if(!ev) return;
-    if(ev.key===STOCK_DB_KEY || ev.key===UNASSIGNED_GLOBAL_KEY){
+    if(
+      ev.key===STOCK_DB_KEY ||
+      ev.key===UNASSIGNED_GLOBAL_KEY ||
+      ev.key==="ldh_v2_ferreteria_stock_v1" ||
+      ev.key==="terminal_ferreteria_stock_v1"
+    ){
       // Si hay un pedido abierto, refrescamos esa ficha; si no, refrescamos el listado.
       if(typeof refActual==='string' && refActual){
         if(typeof abrirPedido==='function') abrirPedido(refActual);
@@ -2101,6 +2106,346 @@ function LDH_unitCompatibleForLink(line, mat){
   if(isUnit(lu) && isUnit(mu)) return true;
   return false;
 }
+
+/*
+ * V45 · FERRETERÍA ACTUAL
+ * Configuración vincula los accesorios contra ldh_v2_ferreteria_stock_v1.
+ * Preparación no puede buscarlos únicamente en ldh_v2_company_stock_v1:
+ * son dos almacenes diferentes. Estas funciones leen la misma fuente actual
+ * que Configuración y normalizan catálogo + existencias sin consultar el
+ * antiguo taller_stock_v3_data.
+ */
+const LDH_FERRETERIA_KEYS_V45 = [
+  "ldh_v2_ferreteria_stock_v1",
+  "terminal_ferreteria_stock_v1"
+];
+
+function LDH_parseObjectV45(value, wrapperKey){
+  let parsed = value;
+  for(let pass=0; pass<5; pass+=1){
+    if(typeof parsed === "string"){
+      const text = parsed.trim();
+      if(!text) return null;
+      try{ parsed = JSON.parse(text); }catch(_){ return null; }
+      continue;
+    }
+    if(parsed && typeof parsed === "object" && wrapperKey && parsed[wrapperKey] != null){
+      parsed = parsed[wrapperKey];
+      continue;
+    }
+    if(parsed && typeof parsed === "object" && parsed.data && typeof parsed.data === "object"){
+      const ownCollections = [
+        "materials","items","catalog","catalogo","stock","stocks",
+        "movements","movimientos","ferreteria","articulos","productos"
+      ].some(key => parsed[key] != null);
+      if(!ownCollections){
+        parsed = parsed.data;
+        continue;
+      }
+    }
+    break;
+  }
+  return parsed && typeof parsed === "object" ? parsed : null;
+}
+
+function LDH_collectionRowsV45(value, depth=0){
+  if(Array.isArray(value)){
+    return value.flatMap(item => {
+      if(item && typeof item === "object") return [item];
+      return [];
+    });
+  }
+  if(!value || typeof value !== "object" || depth > 3) return [];
+
+  const looksLikeRow = [
+    "id","materialId","matId","name","nombre","material","qty","cantidad",
+    "physical","fisico","físico","stock","existencias","unit","unidad"
+  ].some(key => value[key] !== undefined && value[key] !== null);
+  if(looksLikeRow) return [value];
+
+  return Object.entries(value).flatMap(([key,item]) => {
+    if(item && typeof item === "object"){
+      return LDH_collectionRowsV45(item, depth+1).map(row => {
+        if(
+          row.id == null && row.materialId == null && row.matId == null &&
+          row.name == null && row.nombre == null && row.material == null
+        ){
+          return {id:key, name:key, ...row};
+        }
+        return row;
+      });
+    }
+    return [];
+  });
+}
+
+function LDH_readFerreteriaDBV45(){
+  const memoryCandidates = [
+    window.__LDH_FERRETERIA_MEMORY_DB,
+    window.__LDH_HARDWARE_MEMORY_DB,
+    window.__LDH_TERMINAL_FERRETERIA_DB
+  ].filter(Boolean);
+
+  for(const key of LDH_FERRETERIA_KEYS_V45){
+    const values = [];
+    if(key === LDH_FERRETERIA_KEYS_V45[0]) values.push(...memoryCandidates);
+    try{ values.push(localStorage.getItem(key)); }catch(_){}
+    try{ values.push(sessionStorage.getItem(key)); }catch(_){}
+
+    const candidates = values
+      .map(value => LDH_parseObjectV45(value,key))
+      .filter(Boolean)
+      .map(db => {
+        const collections = [
+          db.materials,db.items,db.catalog,db.catalogo,db.stockItems,
+          db.ferreteria,db.hardware,db.articulos,db.productos,db.stock,db.stocks
+        ];
+        const count = collections.reduce(
+          (sum,value)=>sum+LDH_collectionRowsV45(value).length,0
+        );
+        const updated = Date.parse(String(
+          db.updatedAt || db.actualizadoEn || db.fechaActualizacion || ""
+        )) || 0;
+        return {db,count,updated};
+      })
+      .filter(item => item.count > 0)
+      .sort((a,b)=>b.updated-a.updated || b.count-a.count);
+
+    if(candidates.length) return candidates[0].db;
+  }
+  return null;
+}
+
+function LDH_firstV45(){
+  for(let index=0; index<arguments.length; index+=1){
+    const value = arguments[index];
+    if(value !== undefined && value !== null && String(value).trim() !== ""){
+      return value;
+    }
+  }
+  return "";
+}
+
+function LDH_numberV45(value){
+  if(value === undefined || value === null || value === "") return null;
+  if(typeof value === "object") return null;
+  const number = Number.parseFloat(String(value).replace(",","."));
+  return Number.isFinite(number) ? number : null;
+}
+
+function LDH_idV45(row){
+  return String(LDH_firstV45(
+    row && row.id,row && row.materialId,row && row.matId,row && row.material_id,
+    row && row.idMaterial,row && row.code,row && row.codigo
+  ) || "").trim();
+}
+
+function LDH_nameV45(row){
+  return String(LDH_firstV45(
+    row && row.name,row && row.nombre,row && row.materialName,
+    row && row.nombreMaterial,row && row.material,row && row.mat,
+    row && row.label,row && row.title
+  ) || "").trim();
+}
+
+function LDH_rowMatchesMaterialV45(row, material){
+  const rowId = LDH_idV45(row);
+  const materialId = LDH_idV45(material);
+  if(rowId && materialId && rowId === materialId) return true;
+  const foreignId = String(LDH_firstV45(
+    row && row.materialId,row && row.matId,row && row.material_id,
+    row && row.idMaterial
+  ) || "").trim();
+  if(foreignId && materialId && foreignId === materialId) return true;
+  const rowName = normName(LDH_nameV45(row));
+  const materialName = normName(LDH_nameV45(material));
+  return !!rowName && !!materialName && rowName === materialName;
+}
+
+function LDH_quantityFieldV45(row, kind="physical"){
+  if(!row || typeof row !== "object") return null;
+  const fields = kind === "free"
+    ? ["freeQty","free","libre","disponible","available","stockLibre"]
+    : kind === "reserved"
+      ? ["reservedQty","reserved","reservado","reservada","stockReservado"]
+      : kind === "assigned"
+        ? ["assignedQty","assigned","asignado","asignada","stockAsignado"]
+        : [
+          "physicalQty","physical","fisico","físico","qtyPhysical","realQty",
+          "stockFisico","stockFísico","stockReal","stockActual","existencias",
+          "onHand","currentQty","current","totalQty","total","qty","cantidad",
+          "quantity","unidades","uds","stock"
+        ];
+  for(const field of fields){
+    const number = LDH_numberV45(row[field]);
+    if(number !== null) return number;
+  }
+  return null;
+}
+
+function LDH_movementSignV45(row){
+  const type = normName(LDH_firstV45(
+    row && row.type,row && row.tipo,row && row.movementType,row && row.movimiento,
+    "entrada"
+  )).replace(/\s+/g,"_");
+  if([
+    "salida","out","ajuste_neg","consumo","consumo_terminal","prestamo",
+    "baja","retirada"
+  ].includes(type)) return -1;
+  if([
+    "reserva","reservado","asignacion","asignado","recepcion_preparacion",
+    "stock_recibido_ok","prep_ok","traza_recepcion"
+  ].includes(type)) return 0;
+  return 1;
+}
+
+function LDH_buildFerreteriaCatalogV45(){
+  const db = LDH_readFerreteriaDBV45();
+  if(!db) return [];
+
+  const catalogSources = [
+    db.materials,db.items,db.catalog,db.catalogo,db.stockItems,
+    db.ferreteria,db.hardware,db.articulos,db.productos
+  ];
+  const stockRows = [
+    ...LDH_collectionRowsV45(db.stock),
+    ...LDH_collectionRowsV45(db.stocks),
+    ...LDH_collectionRowsV45(db.stockRows),
+    ...LDH_collectionRowsV45(db.existencias)
+  ];
+  const movementRows = [
+    ...LDH_collectionRowsV45(db.movements),
+    ...LDH_collectionRowsV45(db.movimientos),
+    ...LDH_collectionRowsV45(db.history),
+    ...LDH_collectionRowsV45(db.historico)
+  ];
+  const reservationRows = [
+    ...LDH_collectionRowsV45(db.reservations),
+    ...LDH_collectionRowsV45(db.reservas)
+  ];
+  const assignmentRows = [
+    ...LDH_collectionRowsV45(db.assignments),
+    ...LDH_collectionRowsV45(db.asignaciones)
+  ];
+
+  const rawMaterials = catalogSources.flatMap(source =>
+    LDH_collectionRowsV45(source)
+  );
+  stockRows.forEach(row => {
+    if(!rawMaterials.some(material => LDH_rowMatchesMaterialV45(row,material))){
+      const materialId = String(LDH_firstV45(
+        row.materialId,row.matId,row.material_id,row.idMaterial,row.id
+      ) || "").trim();
+      rawMaterials.push(materialId ? {...row,id:materialId} : row);
+    }
+  });
+
+  const byIdentity = new Map();
+  rawMaterials.forEach((raw,index)=>{
+    const name = LDH_nameV45(raw);
+    if(!name) return;
+    const originalId = LDH_idV45(raw);
+    const id = originalId || `ferreteria_${normName(name).replace(/[^a-z0-9]+/g,"_")}_${index}`;
+    const identity = originalId ? `id:${originalId}` : `name:${normName(name)}`;
+    if(byIdentity.has(identity)) return;
+
+    const matchingStock = stockRows.filter(row => LDH_rowMatchesMaterialV45(row,raw));
+    const matchingMovements = movementRows.filter(row => LDH_rowMatchesMaterialV45(row,raw));
+    const matchingReservations = reservationRows.filter(row => LDH_rowMatchesMaterialV45(row,raw));
+    const matchingAssignments = assignmentRows.filter(row => LDH_rowMatchesMaterialV45(row,raw));
+
+    const explicitPhysicalRows = matchingStock
+      .map(row => LDH_quantityFieldV45(row,"physical"))
+      .filter(value => value !== null);
+    const directPhysical = LDH_quantityFieldV45(raw,"physical");
+    const movementPhysical = matchingMovements.reduce((sum,row)=>{
+      const qty = LDH_numberV45(LDH_firstV45(
+        row.qty,row.cantidad,row.quantity,row.amount,row.unidades,row.uds
+      )) || 0;
+      return sum + LDH_movementSignV45(row) * qty;
+    },0);
+
+    let physical = explicitPhysicalRows.length
+      ? explicitPhysicalRows.reduce((sum,value)=>sum+value,0)
+      : directPhysical !== null
+        ? directPhysical
+        : matchingMovements.length
+          ? movementPhysical
+          : 0;
+
+    const explicitFreeRows = matchingStock
+      .map(row => LDH_quantityFieldV45(row,"free"))
+      .filter(value => value !== null);
+    const reserved = Math.max(0,
+      matchingStock.reduce((sum,row)=>sum+(LDH_quantityFieldV45(row,"reserved") || 0),0) +
+      matchingReservations.reduce((sum,row)=>{
+        const status = normName(LDH_firstV45(row.status,row.estado,"activa"));
+        if(["cancelada","cancelado","cerrada","cerrado","consumida","consumido"].includes(status)) return sum;
+        return sum + (LDH_numberV45(LDH_firstV45(row.qty,row.cantidad,row.quantity)) || 0);
+      },0)
+    );
+    const assigned = Math.max(0,
+      matchingStock.reduce((sum,row)=>sum+(LDH_quantityFieldV45(row,"assigned") || 0),0) +
+      matchingAssignments.reduce((sum,row)=>{
+        const status = normName(LDH_firstV45(row.status,row.estado,"activa"));
+        if(["cancelada","cancelado","cerrada","cerrado","consumida","consumido"].includes(status)) return sum;
+        return sum + (LDH_numberV45(LDH_firstV45(row.qty,row.cantidad,row.quantity)) || 0);
+      },0)
+    );
+    physical = Math.max(0,physical);
+    const free = explicitFreeRows.length
+      ? Math.max(0,explicitFreeRows.reduce((sum,value)=>sum+value,0))
+      : Math.max(0,physical-reserved-assigned);
+
+    const material = {
+      ...raw,
+      id:String(id),
+      materialId:String(id),
+      name,
+      nombre:name,
+      cat:String(LDH_firstV45(raw.cat,raw.categoria,raw.type,raw.tipo,"Ferretería")),
+      grp:String(LDH_firstV45(
+        raw.grp,raw.grupo,raw.family,raw.familia,raw.category,raw.categoria,
+        "accesorios"
+      )),
+      unit:String(LDH_firstV45(raw.unit,raw.unidad,"und")),
+      unidad:String(LDH_firstV45(raw.unidad,raw.unit,"und")),
+      qty:free,
+      physical,
+      reserved,
+      assigned,
+      free,
+      __v2:true,
+      __ferreteriaActualV45:true
+    };
+    byIdentity.set(identity,material);
+  });
+
+  return Array.from(byIdentity.values());
+}
+
+function LDH_getCurrentHardwareByIdV45(id){
+  const target = String(id || "").trim();
+  if(!target) return null;
+  return LDH_buildFerreteriaCatalogV45().find(material =>
+    String(material.id || material.materialId || "") === target
+  ) || null;
+}
+
+function LDH_findCurrentHardwareMaterialV45(line){
+  const target = normName(line && (
+    line.mat || line.material || line.name || line.title ||
+    line.stockLinkLabel || line.linked_matName
+  ));
+  if(!target) return null;
+  return LDH_buildFerreteriaCatalogV45()
+    .filter(material =>
+      normName(LDH_nameV45(material)) === target &&
+      LDH_unitCompatibleForLink(line,material)
+    )
+    .sort((a,b)=>(Number(b.free)||0)-(Number(a.free)||0))[0] || null;
+}
+
 function LDH_findExactLegacyMaterialForLine(line){
   const target = LDH_lineBaseNameForLink(line);
   if(!target) return null;
@@ -2127,7 +2472,11 @@ function LDH_getFirebaseStockPackForLink(){
 function LDH_findExactV2MaterialForLine(line){
   try{
     const pack = LDH_getFirebaseStockPackForLink();
-    if(!pack) return null;
+    if(!pack){
+      return !_unitIsBarra(line && (line.unit || line.unidad))
+        ? LDH_findCurrentHardwareMaterialV45(line)
+        : null;
+    }
     const target = (typeof _v2Norm === "function") ? _v2Norm((line && (line.mat || line.material || line.name || line.title)) || "") : LDH_lineBaseNameForLink(line);
     if(!target) return null;
 
@@ -2138,7 +2487,16 @@ function LDH_findExactV2MaterialForLine(line){
       const label = (typeof _v2Norm === "function") ? _v2Norm(labelOf(m)) : normName(labelOf(m));
       return label === target;
     });
-    if(!candidates.length) return null;
+    if(!candidates.length){
+      /*
+       * Los accesorios actuales de Ferretería viven en su propia base local,
+       * no en el Stock por empresa publicado en gestion-taller-stock.
+       */
+      if(!_unitIsBarra(line && (line.unit || line.unidad))){
+        return LDH_findCurrentHardwareMaterialV45(line);
+      }
+      return null;
+    }
 
     // Preferir material que tenga fila de stock en la empresa del pedido.
     try{
@@ -2173,7 +2531,9 @@ function LDH_getV2MaterialById(id){
     const pack = LDH_getFirebaseStockPackForLink();
     const materials = pack && (pack.materials || (pack.db && pack.db.materials) || []);
     const m = (materials || []).find(x => String(x.id || x.materialId || "") === String(id||""));
-    if(!m) return null;
+    if(!m){
+      return LDH_getCurrentHardwareByIdV45(id);
+    }
     const label = (typeof _v2MaterialLabel === "function") ? _v2MaterialLabel(m) : (m.name || m.nombre || m.material || id);
     return Object.assign({}, m, {
       id:String(m.id || m.materialId || id),
@@ -2845,6 +3205,64 @@ function LDH_aplicarVinculosConfiguracionActuales(lines, meta){
   }
 }
 
+/*
+ * V45: si el concepto conserva el nombre pero su ID de Ferretería se perdió
+ * durante una restauración, recuperar el enlace exacto desde el catálogo
+ * actual. Solo actúa sobre accesorios y exige coincidencia exacta de nombre.
+ */
+function LDH_aplicarVinculosFerreteriaActualV45(lines){
+  try{
+    if(!Array.isArray(lines) || !lines.length) return false;
+    let changed = false;
+    lines.forEach(line=>{
+      if(!line || typeof line !== "object") return;
+      if(_unitIsBarra(line.unit || line.unidad)) return;
+      try{ if(typeof isPaintLine === "function" && isPaintLine(line)) return; }catch(_){}
+
+      const material = LDH_findCurrentHardwareMaterialV45(line);
+      if(!material) return;
+      const materialId = String(material.id || material.materialId || "").trim();
+      if(!materialId) return;
+
+      const currentId = String(
+        line.linked_matId || line.stockMatId || line.matId ||
+        line.stockLinkId || line.stockId || ""
+      ).trim();
+      const currentMaterial = currentId
+        ? LDH_getCurrentHardwareByIdV45(currentId)
+        : null;
+      const exactCurrent = currentMaterial &&
+        normName(LDH_nameV45(currentMaterial)) === normName(LDH_nameV45(material)) &&
+        LDH_unitCompatibleForLink(line,currentMaterial);
+      const finalId = exactCurrent ? currentId : materialId;
+      const name = String(material.name || material.nombre || LDH_nameV45(material));
+
+      if(
+        currentId !== finalId ||
+        String(line.linked_matName || "") !== name ||
+        String(line.stockLinkLabel || "") !== name
+      ) changed = true;
+
+      line.linked_matId = finalId;
+      line.linkedMatId = finalId;
+      line.stockMatId = finalId;
+      line.stock_matId = finalId;
+      line.matId = finalId;
+      line.stockLinkId = finalId;
+      line.stockId = finalId;
+      line.linked_matName = name;
+      line.stockLinkLabel = name;
+      line.linkSource = line.linkSource === "configuracion_concepto_actual"
+        ? line.linkSource
+        : "ferreteria_actual_nombre_exacto";
+    });
+    return changed;
+  }catch(error){
+    console.warn("[PREP V45] No se pudieron aplicar vínculos de Ferretería actual",error);
+    return false;
+  }
+}
+
 /* ========= ABRIR PEDIDO ========= */
 function abrirPedido(ref) {
   refActual = ref;
@@ -2971,6 +3389,14 @@ return l;
     }
   }catch(e){
     console.warn("[PREP V40] No se pudo persistir el vínculo del concepto",e);
+  }
+
+  try{
+    if(LDH_aplicarVinculosFerreteriaActualV45(estadoMateriales)){
+      setAny(KP(ref),JSON.stringify(estadoMateriales));
+    }
+  }catch(e){
+    console.warn("[PREP V45] No se pudo persistir el vínculo de Ferretería actual",e);
   }
 
   // Unifica también pedidos ya guardados antes de esta corrección.
@@ -3575,14 +4001,13 @@ function renderLinkResults(){
     .filter(m => LDH_unitCompatibleForLink(currentLine,m));
 
   /*
-   * V39: Ferretería común conserva su catálogo y movimientos en
-   * taller_stock_v3_data. Solo se incorpora para líneas de accesorios; jamás
-   * para barras ni pintura. La coincidencia posterior por búsqueda/nombre
-   * impide mezclar fichas.
+   * V45: incorporar el catálogo ACTUAL de Ferretería. Es la misma fuente que
+   * utiliza Configuración para vincular accesorios. No se consulta aquí el
+   * antiguo taller_stock_v3_data.
    */
   if(!currentIsBar){
     const existingResultIds = new Set(arr.map(m=>String(m.id)));
-    (Array.isArray(stockMaterials) ? stockMaterials : []).forEach(m=>{
+    LDH_buildFerreteriaCatalogV45().forEach(m=>{
       const id = String(m && m.id || "").trim();
       if(!id || existingResultIds.has(id)) return;
       if(!LDH_unitCompatibleForLink(currentLine,m)) return;
@@ -3591,11 +4016,15 @@ function renderLinkResults(){
       arr.push({
         id,
         name:String(first(m.name,m.nombre,m.material,id)),
-        cat:String(first(m.cat,m.categoria,m.tipo,"Ferretería común")),
+        cat:String(first(m.cat,m.categoria,m.tipo,"Ferretería")),
         grp:String(first(m.grp,m.grupo,m.familia,"accesorios")),
         unit,
-        qty:(typeof getStockQty === "function") ? getStockQty(id) : 0,
-        __commonHardware:true
+        qty:Number(first(m.free,m.qty,0)) || 0,
+        physical:Number(first(m.physical,m.qty,0)) || 0,
+        reserved:Number(m.reserved || 0),
+        assigned:Number(m.assigned || 0),
+        __commonHardware:true,
+        __ferreteriaActualV45:true
       });
       existingResultIds.add(id);
     });
@@ -7251,31 +7680,32 @@ function _getCommonHardwareStockInfo(linea){
     if(unit.includes("barra")) return null;
     if(typeof isPaintLine === "function" && isPaintLine(linea)) return null;
 
-    const target = (typeof _v2Norm === "function")
-      ? _v2Norm(linea && (linea.mat || linea.material || linea.name || linea.title || ""))
-      : normName(linea && (linea.mat || linea.material || linea.name || linea.title || ""));
-    if(!target) return null;
-
-    const mat = (Array.isArray(stockMaterials) ? stockMaterials : []).find(m=>{
-      const name = (typeof _v2Norm === "function")
-        ? _v2Norm(m && (m.name || m.nombre || m.material || ""))
-        : normName(m && (m.name || m.nombre || m.material || ""));
-      return name === target && LDH_unitCompatibleForLink(linea,m);
-    });
+    /*
+     * V45: únicamente Ferretería actual. `stockMaterials` pertenece a
+     * taller_stock_v3_data y podía mostrar existencias antiguas.
+     */
+    const mat = LDH_findCurrentHardwareMaterialV45(linea);
     if(!mat) return null;
 
     const materialId = String(mat.id || mat.materialId || "").trim();
     if(!materialId) return null;
-    const physical = (typeof getStockQty === "function") ? toNum(getStockQty(materialId)) : 0;
+    const physical = Math.max(0,toNum(
+      mat.physical !== undefined ? mat.physical : mat.qty
+    ));
+    const reserved = Math.max(0,toNum(mat.reserved || 0));
+    const assigned = Math.max(0,toNum(mat.assigned || 0));
+    const free = Math.max(0,toNum(
+      mat.free !== undefined ? mat.free : physical-reserved-assigned
+    ));
     return {
       stockKnown:true,
       matId:materialId,
       mat,
-      stock:Math.max(0,physical),
+      stock:free,
       physical,
-      reserved:0,
-      assigned:0,
-      source:"ferreteria_comun"
+      reserved,
+      assigned,
+      source:"ferreteria_actual_v45"
     };
   }catch(e){
     return null;
