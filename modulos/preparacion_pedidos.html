@@ -6885,17 +6885,97 @@ function _fmtUnit(unit, qty){
 
 function _getStockInfoForCompra(linea){
   try{
-    const isBar = _unitIsBarra(linea.unit);
-    const ironType = isBar ? (metaActual && metaActual.tipo_hierro) : null;
-    const check = _addToRealStock_byLinkedOrName(linea, ironType);
-    if(check && check.success){
-      return {
-        stockKnown: true,
-        matId: check.matId,
-        mat: check.mat,
-        stock: toNum(getStockQty(check.matId))
-      };
+    /*
+     * V35: Compras lee exclusivamente la copia autoritativa de Firebase y la
+     * empresa del pedido. "En stock" significa stock libre real:
+     * físico - reservado - asignado.
+     */
+    const pack = (typeof LDH_getFirebaseStockPackForLink === "function")
+      ? LDH_getFirebaseStockPackForLink()
+      : null;
+    if(!pack || !pack.db) return {stockKnown:false, matId:null, mat:null, stock:0};
+
+    const companyName = (typeof _v2GetPedidoEmpresa === "function")
+      ? _v2GetPedidoEmpresa()
+      : String((metaActual && (metaActual.empresa || metaActual.company)) || "");
+    const company = (typeof _v2FindCompany === "function")
+      ? _v2FindCompany(pack, companyName)
+      : null;
+    if(!company) return {stockKnown:false, matId:null, mat:null, stock:0};
+
+    const companyId = String(
+      (typeof _v2IdOfCompany === "function")
+        ? _v2IdOfCompany(company)
+        : (company.id || company.companyId || company.empresaId || "")
+    );
+    const norm = (v)=>(typeof _v2Norm === "function" ? _v2Norm(v) : normName(v));
+    const sameCompany = (row)=>{
+      const value = String(
+        row && (row.companyId || row.empresaId || row.empresa || row.company ||
+        row.companyName || row.empresaNombre) || ""
+      );
+      return value === companyId ||
+        norm(value) === norm(companyId) ||
+        norm(value) === norm(companyName);
+    };
+    const stockRows = (pack.lots || []).filter(sameCompany);
+    const movementRows = (pack.movements || []).filter(sameCompany);
+    const availableIds = new Set();
+    stockRows.concat(movementRows).forEach((row)=>{
+      const id = String(
+        row && (row.materialId || row.matId || row.material_id ||
+        row.idMaterial || row.material || row.mat) || ""
+      ).trim();
+      if(id) availableIds.add(id);
+    });
+
+    const materials = Array.isArray(pack.materials) ? pack.materials : [];
+    const idOf = (m)=>String(
+      m && (m.id || m.materialId || m.matId || m.material_id) || ""
+    ).trim();
+    const labelOf = (m)=>String(
+      m && (m.name || m.nombre || m.material || m.mat || m.label) || ""
+    ).trim();
+    const linkedId = String(
+      linea && (linea.linked_matId || linea.stockMatId || linea.matId ||
+      linea.stockLinkId || linea.materialId) || ""
+    ).trim();
+    let mat = linkedId && availableIds.has(linkedId)
+      ? materials.find(m=>idOf(m) === linkedId)
+      : null;
+
+    if(!mat){
+      const target = norm(
+        linea && (linea.stockLinkLabel || linea.linked_matName || linea.mat ||
+        linea.material || linea.name || "")
+      );
+      mat = materials.find(m=>{
+        const id = idOf(m);
+        return id && availableIds.has(id) && norm(labelOf(m)) === target;
+      }) || null;
     }
+    if(!mat) return {stockKnown:false, matId:null, mat:null, stock:0};
+
+    const materialId = idOf(mat);
+    const physical = (typeof _v2MovementReal === "function")
+      ? _v2MovementReal(pack, companyId, materialId)
+      : 0;
+    const reserved = (typeof _v2Reserved === "function")
+      ? _v2Reserved(pack, companyId, materialId)
+      : 0;
+    const assigned = (typeof _v2Assigned === "function")
+      ? _v2Assigned(pack, companyId, materialId)
+      : 0;
+    const free = Math.max(0, toNum(physical) - toNum(reserved) - toNum(assigned));
+    return {
+      stockKnown:true,
+      matId:materialId,
+      mat,
+      stock:free,
+      physical:toNum(physical),
+      reserved:toNum(reserved),
+      assigned:toNum(assigned)
+    };
   }catch(e){}
   return { stockKnown:false, matId:null, mat:null, stock:0 };
 }
@@ -7098,14 +7178,6 @@ function _buildCompraLines(lines){
     if(it.stockKnown){
       const st = toNum(it.stock);
       const pedirNum = Math.max(0, need - st);
-
-      // REGLA: si el stock SUPERA lo necesario, en vez de "pedir 0" mostramos "PEDIR ?".
-      // (Solo cuando need>0, para no marcar como duda cosas ya completadas)
-      if(need > 0 && st > need){
-        const uQ = _fmtUnit(it.unit, 2); // plural por defecto ("barras"/"uds")
-        return `${it.name} - necesarias ${_fmtNum(need)} ${_fmtUnit(it.unit, need)} / en stock ${_fmtNum(st)} ${_fmtUnit(it.unit, st)} / PEDIR ? ${uQ}`;
-      }
-
       return `${it.name} - necesarias ${_fmtNum(need)} ${_fmtUnit(it.unit, need)} / en stock ${_fmtNum(st)} ${_fmtUnit(it.unit, st)} / pedir ${_fmtNum(pedirNum)} ${_fmtUnit(it.unit, pedirNum)}`;
     }else{
       const pedir = Math.max(0, need);
@@ -7142,7 +7214,7 @@ async function copiarListaCompras(){
 
   const txt = outLines.join("\n").trim();
 
-  // HTML (si el navegador/portapapeles lo admite) para poder poner el "?" en negrita.
+  // HTML para conservar el formato al pegar en aplicaciones compatibles.
   const esc = (s)=>String(s||'')
     .replace(/&/g,'&amp;')
     .replace(/</g,'&lt;')
@@ -7154,8 +7226,6 @@ async function copiarListaCompras(){
     if(l === '') return '<div><br></div>';
     const isTitle = /:\s*$/.test(l) && (/^perfileria:/i.test(l) || /^accesorios:/i.test(l));
     let h = esc(l);
-    // Negrita SOLO al interrogante de "PEDIR ?"
-    h = h.replace(/PEDIR \?/g, 'PEDIR <b>?</b>');
     if(isTitle){
       return `<div style="font-weight:800; text-transform:uppercase; margin-top:6px;">${h}</div>`;
     }
