@@ -2,8 +2,8 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<!-- BUILD: REHIDRATA-VINCULOS-CONFIG-V40-20260728 -->
-<meta name="ldh-build" content="REHIDRATA-VINCULOS-CONFIG-V40-20260728" />
+<!-- BUILD: VINCULO-CONFIG-AUTORITATIVO-V41-20260728 -->
+<meta name="ldh-build" content="VINCULO-CONFIG-AUTORITATIVO-V41-20260728" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -2178,9 +2178,33 @@ function LDH_getV2MaterialById(id){
 function getLinkedMatForLine(line){
   const id = getLinkedMatIdForLine(line);
   if(!id) return null;
-  // Prioridad absoluta al Stock real v2. El legacy puede tener IDs/nombres antiguos y mostrar cantidades falsas.
-  const found = LDH_getV2MaterialById(id) || getMatById(id);
-  if(found) return found;
+  // Prioridad absoluta al Stock real v2.
+  const foundV2 = LDH_getV2MaterialById(id);
+  if(foundV2) return foundV2;
+  /*
+   * V41: un enlace recuperado del concepto es autoritativo. Si el catálogo
+   * Firebase todavía está cargando, se muestra la ficha sintética con el
+   * nombre correcto; nunca se consulta un catálogo antiguo cuyo ID podría
+   * coincidir por casualidad con el de otro material.
+   */
+  if(line && line.linkSource === "configuracion_concepto_actual"){
+    const name = String(
+      line.linked_matName || line.stockLinkLabel || line.mat ||
+      line.material || line.name || id
+    ).trim();
+    return {
+      id:String(id),
+      name,
+      nombre:name,
+      unit:String(line.unit || line.unidad || "ud"),
+      cat:_unitIsBarra(line.unit || line.unidad) ? "Hierro" : "Ferretería",
+      grp:_unitIsBarra(line.unit || line.unidad) ? "" : "accesorios",
+      __linkedFromConfig:true
+    };
+  }
+  // Compatibilidad histórica solo cuando el vínculo no procede de Configuración.
+  const foundLegacy = getMatById(id);
+  if(foundLegacy) return foundLegacy;
   try{
     if(!_unitIsBarra(line && (line.unit || line.unidad))){
       const name = String(
@@ -2782,7 +2806,12 @@ function LDH_aplicarVinculosConfiguracionActuales(lines, meta){
         line.linked_matId || line.stockMatId || line.matId ||
         line.stockLinkId || line.stockId || ""
       ).trim();
-      if(currentId !== linkedId) changed = true;
+      if(
+        currentId !== linkedId ||
+        line.linkSource !== "configuracion_concepto_actual" ||
+        String(line.linked_matName || "") !== name ||
+        String(line.stockLinkLabel || "") !== name
+      ) changed = true;
 
       line.linked_matId = linkedId;
       line.linkedMatId = linkedId;
@@ -3137,6 +3166,21 @@ function getLinkedMatIdForLine(line){
       if(line.linked_matId && LDH_getV2MaterialById(line.linked_matId)) return line.linked_matId;
       if(line.linked_matId && getMatById(line.linked_matId)) return line.linked_matId;
       return null;
+    }
+  }catch(e){}
+
+  /*
+   * V41: Configuración es la autoridad del vínculo de los accesorios.
+   * Preparación no debe descartarlo mientras Firebase termina de cargar ni
+   * sustituirlo por una coincidencia de otro catálogo.
+   */
+  try{
+    if(line && line.linkSource === "configuracion_concepto_actual"){
+      const configuredId = String(
+        line.linked_matId || line.stockMatId || line.matId ||
+        line.stockLinkId || line.stockId || ""
+      ).trim();
+      if(configuredId) return configuredId;
     }
   }catch(e){}
 
