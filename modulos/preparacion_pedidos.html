@@ -2,8 +2,8 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<!-- BUILD: FIX-ACCESORIOS-V36-20260728-1145 -->
-<meta name="ldh-build" content="FIX-ACCESORIOS-V36-20260728-1145" />
+<!-- BUILD: FIX-VINCULO-ACCESORIOS-V37-20260728 -->
+<meta name="ldh-build" content="FIX-VINCULO-ACCESORIOS-V37-20260728" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -2964,7 +2964,25 @@ function LDH_resolveV2LinkIdByExactName(line){
   try{
     if(!line || typeof line !== "object") return "";
     const existing = line.linked_matId || line.stockMatId || line.matId || line.stockLinkId || line.stockId || line.materialId;
-    if(existing && LDH_getV2MaterialById(existing)) return String(existing);
+    if(existing){
+      const existingMat = LDH_getV2MaterialById(existing);
+      const lineName = (typeof _v2Norm === "function")
+        ? _v2Norm(line.mat || line.material || line.name || line.title || "")
+        : normName(line.mat || line.material || line.name || line.title || "");
+      const existingName = existingMat
+        ? ((typeof _v2Norm === "function")
+          ? _v2Norm(existingMat.name || existingMat.nombre || existingMat.material || "")
+          : normName(existingMat.name || existingMat.nombre || existingMat.material || ""))
+        : "";
+      /*
+       * V37: un ID heredado solo se acepta si además corresponde al mismo
+       * nombre y a una unidad compatible. Evita que un accesorio (ud), como
+       * una bisagra, reutilice accidentalmente el ID de una barra.
+       */
+      if(existingMat && lineName && existingName === lineName && LDH_unitCompatibleForLink(line, existingMat)){
+        return String(existing);
+      }
+    }
 
     const pack = LDH_getFirebaseStockPackForLink();
     if(!pack) return "";
@@ -2984,10 +3002,8 @@ function LDH_resolveV2LinkIdByExactName(line){
       const n = (typeof _v2Norm === "function") ? _v2Norm(label) : normName(label);
       if(n !== target) return false;
 
-      // Separación mínima: barras solo con unidad/familia compatible; accesorios no se obligan.
-      const mu = String(m.unit || m.unidad || "").toLowerCase();
-      if(wantsBar && mu && !mu.includes("barra")) return false;
-      return true;
+      // V37: la compatibilidad de unidad es obligatoria también para accesorios.
+      return LDH_unitCompatibleForLink(line, m);
     });
 
     if(!candidates.length) return "";
@@ -3030,12 +3046,15 @@ function getLinkedMatIdForLine(line){
 
   /*
    * Los accesorios conservan el vínculo del catálogo de Ferretería enviado
-   * desde Configuración/Cálculo. Esta compatibilidad no se aplica a barras,
-   * que deben resolverse exclusivamente contra el Stock Firebase por empresa.
+   * desde Configuración/Cálculo, pero solo cuando nombre y unidad coinciden.
+   * Un ID antiguo o cruzado nunca puede convertir una bisagra en una barra.
    */
   try{
     const isBar = _unitIsBarra(line && (line.unit || line.unidad));
     if(!isBar){
+      const targetName = (typeof _v2Norm === "function")
+        ? _v2Norm(line && (line.mat || line.material || line.name || line.title || ""))
+        : normName(line && (line.mat || line.material || line.name || line.title || ""));
       const accessoryIds = [
         line && line.linked_matId,
         line && line.linkedMatId,
@@ -3047,14 +3066,15 @@ function getLinkedMatIdForLine(line){
         line && line.v2MaterialId,
         line && line.matId
       ].map(v=>String(v||"").trim()).filter(Boolean);
-      const legacyAccessoryId = accessoryIds.find(id=>getMatById(id));
-      if(legacyAccessoryId) return legacyAccessoryId;
-      /*
-       * Si Configuración envía el id pero el catálogo de Ferretería aún no ha
-       * terminado de cargar, se conserva igualmente. No se debe borrar un
-       * vínculo válido solo porque su catálogo llegue unos instantes después.
-       */
-      if(accessoryIds.length) return accessoryIds[0];
+      const validAccessoryId = accessoryIds.find(id=>{
+        const m = LDH_getV2MaterialById(id) || getMatById(id);
+        if(!m || !LDH_unitCompatibleForLink(line,m)) return false;
+        const materialName = (typeof _v2Norm === "function")
+          ? _v2Norm(m.name || m.nombre || m.material || "")
+          : normName(m.name || m.nombre || m.material || "");
+        return !!targetName && materialName === targetName;
+      });
+      if(validAccessoryId) return validAccessoryId;
     }
   }catch(e){}
 
@@ -3090,6 +3110,10 @@ function setLinkForLine(index, matId){
   const mat = (typeof LDH_getV2MaterialById === "function" ? LDH_getV2MaterialById(matId) : null) || getMatById(matId);
   if(!mat){
     alert("No se ha podido validar este material contra el Stock actual de Firebase. Actualiza y vuelve a intentarlo.");
+    return false;
+  }
+  if(!LDH_unitCompatibleForLink(line,mat)){
+    alert("Ese material no tiene una unidad compatible con la línea del pedido. Un accesorio no puede vincularse con una barra.");
     return false;
   }
 
@@ -3132,7 +3156,11 @@ function abrirModalVincular(index){
   document.getElementById("linkLineName").textContent = `${line.mat} (${line.unit || "ud"})`;
 
   const input = document.getElementById("linkSearch");
-  input.value = "";
+  /*
+   * V37: abrir buscando el nombre de la línea. Así un accesorio muestra su
+   * ficha exacta y no una barra cualquiera del primer resultado.
+   */
+  input.value = String(line.mat || line.material || line.name || "").trim();
   input.oninput = () => renderLinkResults();
 
   renderLinkResults();
@@ -3286,6 +3314,9 @@ function renderLinkResults(){
 
   // Mostrar solo materiales reales v2. Si hay empresa, se prioriza su stock/lotes; si no, todos los materiales v2.
   const ids = new Set();
+  const currentLine = linkModalCtx && estadoMateriales[linkModalCtx.lineIndex];
+  const currentUnit = normName(currentLine && (currentLine.unit || currentLine.unidad || ""));
+  const currentIsBar = currentUnit.includes("barra");
   if(companyId){
     (pack.lots || []).forEach(r=>{
       if(String(first(r.companyId,r.empresaId,r.empresa,r.company)) === String(companyId) || normName(first(r.companyId,r.empresaId,r.empresa,r.company,r.companyName,r.empresaNombre)) === normName(companyId) || (company && [idCompany(company), labelCompany(company), company && company.code, company && company.codigo].map(normName).includes(normName(first(r.companyId,r.empresaId,r.empresa,r.company,r.companyName,r.empresaNombre))))){
@@ -3301,6 +3332,23 @@ function renderLinkResults(){
     });
   }
 
+  /*
+   * V37: los accesorios proceden del almacén común de Ferretería y no del
+   * stock particular de hierro de la empresa del pedido. Para unidades,
+   * incorporamos también los materiales presentes en cualquier fila/movimiento
+   * de Firebase; las barras siguen limitadas a la empresa del trabajo.
+   */
+  if(!currentIsBar){
+    (pack.lots || []).forEach(r=>{
+      const id = String(first(r.materialId,r.matId,r.material_id,r.material,r.mat));
+      if(id) ids.add(id);
+    });
+    (pack.movements || []).forEach(m=>{
+      const id = String(first(m.materialId,m.matId,m.material_id,m.material,m.mat));
+      if(id) ids.add(id);
+    });
+  }
+
   let arr = Array.from(ids)
     .map(id => {
       const m = matsById.get(String(id)) || {id, materialId:id, name:id, nombre:id};
@@ -3308,10 +3356,32 @@ function renderLinkResults(){
       const cat = first(m.cat,m.categoria,m.category,m.tipo,m.type,"Stock v2");
       const grp = first(m.grp,m.grupo,m.familia,m.family,"");
       const unit = first(m.unit,m.unidad,"");
-      const qty = companyId ? qtyFor(pack, companyId, id) : 0;
+      let qty = companyId ? qtyFor(pack, companyId, id) : 0;
+      if(!currentIsBar){
+        const sourceCompanies = new Set();
+        (pack.lots || []).forEach(r=>{
+          if(String(first(r.materialId,r.matId,r.material_id,r.material,r.mat)) === String(id)){
+            const cid = String(first(r.companyId,r.empresaId,r.empresa,r.company));
+            if(cid) sourceCompanies.add(cid);
+          }
+        });
+        (pack.movements || []).forEach(mv=>{
+          if(String(first(mv.materialId,mv.matId,mv.material_id,mv.material,mv.mat)) === String(id)){
+            const cid = String(first(mv.companyId,mv.empresaId,mv.empresa,mv.company));
+            if(cid) sourceCompanies.add(cid);
+          }
+        });
+        const preferred = Array.from(sourceCompanies).find(cid=>{
+          const ncid = normName(cid);
+          return ncid.includes("ferreteria comun") || ncid.includes("stock comun");
+        });
+        if(preferred) qty = qtyFor(pack, preferred, id);
+        else if(sourceCompanies.size === 1) qty = qtyFor(pack, Array.from(sourceCompanies)[0], id);
+      }
       return {id:String(id), name, cat, grp, unit, qty, __v2:true};
     })
-    .filter(m => m.id && m.name);
+    .filter(m => m.id && m.name)
+    .filter(m => LDH_unitCompatibleForLink(currentLine,m));
 
   if(q){
     arr = arr.filter(m => {
@@ -6994,6 +7064,8 @@ function _getStockInfoForCompra(linea){
     };
     const stockRows = (pack.lots || []).filter(sameCompany);
     const movementRows = (pack.movements || []).filter(sameCompany);
+    const unitText = String(linea && (linea.unit || linea.unidad) || "").toLowerCase();
+    const isBarLine = unitText.includes("barra");
     const availableIds = new Set();
     stockRows.concat(movementRows).forEach((row)=>{
       const id = String(
@@ -7002,6 +7074,22 @@ function _getStockInfoForCompra(linea){
       ).trim();
       if(id) availableIds.add(id);
     });
+    /*
+     * V37: el hierro es por empresa, pero los accesorios pueden pertenecer al
+     * almacén común de Ferretería. Para accesorios permitimos resolver el ID
+     * real usando todas las filas Firebase; para barras se mantiene el filtro
+     * estricto de la empresa del pedido.
+     */
+    const resolvableIds = new Set(availableIds);
+    if(!isBarLine){
+      (pack.lots || []).concat(pack.movements || []).forEach((row)=>{
+        const id = String(
+          row && (row.materialId || row.matId || row.material_id ||
+          row.idMaterial || row.material || row.mat) || ""
+        ).trim();
+        if(id) resolvableIds.add(id);
+      });
+    }
 
     const materials = Array.isArray(pack.materials) ? pack.materials : [];
     const idOf = (m)=>String(
@@ -7027,11 +7115,22 @@ function _getStockInfoForCompra(linea){
     const exactLinkedMat = linkedId
       ? materials.find(m=>idOf(m) === linkedId)
       : null;
-    let mat = exactLinkedMat && (availableIds.size === 0 || availableIds.has(idOf(exactLinkedMat)))
+    const lineTargetName = norm(
+      linea && (linea.mat || linea.material || linea.name ||
+      linea.stockLinkLabel || linea.linked_matName || "")
+    );
+    const exactLinkedCompatible = exactLinkedMat &&
+      norm(labelOf(exactLinkedMat)) === lineTargetName &&
+      (typeof LDH_unitCompatibleForLink !== "function" ||
+       LDH_unitCompatibleForLink(linea, exactLinkedMat));
+    let mat = exactLinkedCompatible && (resolvableIds.size === 0 || resolvableIds.has(idOf(exactLinkedMat)))
       ? exactLinkedMat
       : null;
-    if(!mat && linkedId && availableIds.has(linkedId)){
-      const row = stockRows.concat(movementRows).find(r=>String(
+    if(!mat && linkedId && resolvableIds.has(linkedId)){
+      const candidateRows = isBarLine
+        ? stockRows.concat(movementRows)
+        : (pack.lots || []).concat(pack.movements || []);
+      const row = candidateRows.find(r=>String(
         r && (r.materialId || r.matId || r.material_id || r.idMaterial ||
         r.material || r.mat) || ""
       ).trim() === linkedId);
@@ -7051,27 +7150,52 @@ function _getStockInfoForCompra(linea){
     }
 
     if(!mat){
-      const target = norm(
-        linea && (linea.stockLinkLabel || linea.linked_matName || linea.mat ||
-        linea.material || linea.name || "")
-      );
+      const target = lineTargetName;
       mat = materials.find(m=>{
         const id = idOf(m);
         return id && norm(labelOf(m)) === target &&
-          (availableIds.size === 0 || availableIds.has(id));
+          (resolvableIds.size === 0 || resolvableIds.has(id));
       }) || null;
     }
     if(!mat) return {stockKnown:false, matId:null, mat:null, stock:0};
 
     const materialId = idOf(mat);
+    let sourceCompanyId = companyId;
+    if(!isBarLine){
+      const hasOwnSource = stockRows.concat(movementRows).some(row=>String(
+        row && (row.materialId || row.matId || row.material_id ||
+        row.idMaterial || row.material || row.mat) || ""
+      ).trim() === materialId);
+      if(!hasOwnSource){
+        const sourceIds = [];
+        (pack.lots || []).concat(pack.movements || []).forEach(row=>{
+          const rowMatId = String(
+            row && (row.materialId || row.matId || row.material_id ||
+            row.idMaterial || row.material || row.mat) || ""
+          ).trim();
+          if(rowMatId !== materialId) return;
+          const cid = String(
+            row && (row.companyId || row.empresaId || row.empresa ||
+            row.company || row.companyName || row.empresaNombre) || ""
+          ).trim();
+          if(cid && !sourceIds.includes(cid)) sourceIds.push(cid);
+        });
+        const commonId = sourceIds.find(cid=>{
+          const n = norm(cid);
+          return n.includes("ferreteria comun") || n.includes("stock comun");
+        });
+        if(commonId) sourceCompanyId = commonId;
+        else if(sourceIds.length === 1) sourceCompanyId = sourceIds[0];
+      }
+    }
     const physical = (typeof _v2MovementReal === "function")
-      ? _v2MovementReal(pack, companyId, materialId)
+      ? _v2MovementReal(pack, sourceCompanyId, materialId)
       : 0;
     const reserved = (typeof _v2Reserved === "function")
-      ? _v2Reserved(pack, companyId, materialId)
+      ? _v2Reserved(pack, sourceCompanyId, materialId)
       : 0;
     const assigned = (typeof _v2Assigned === "function")
-      ? _v2Assigned(pack, companyId, materialId)
+      ? _v2Assigned(pack, sourceCompanyId, materialId)
       : 0;
     const free = Math.max(0, toNum(physical) - toNum(reserved) - toNum(assigned));
     return {
