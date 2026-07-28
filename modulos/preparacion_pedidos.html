@@ -3138,38 +3138,26 @@ function renderLinkResults(){
     return rows.filter(r => String(first(r.materialId,r.matId,r.material_id,r.material,r.mat,"")).trim());
   }
   function loadV2Pack(){
+    /*
+     * V33: el vinculador usa exclusivamente la última copia autoritativa
+     * recibida de Firebase. Nunca consulta bases locales antiguas ni claves de
+     * compatibilidad, aunque todavía existan en el navegador.
+     */
     try{
-      const pack = (typeof _v2LoadCompanyStockDB === "function") ? _v2LoadCompanyStockDB() : null;
-      if(pack && pack.db){
-        const db = pack.db;
-        return {
-          key: pack.key,
-          db,
-          companies: Array.isArray(pack.companies) ? pack.companies : (Array.isArray(db.companies) ? db.companies : []),
-          materials: Array.isArray(pack.materials) ? pack.materials : (Array.isArray(db.materials) ? db.materials : []),
-          lots: normalizeLots(db),
-          movements: Array.isArray(pack.movements) ? pack.movements : (Array.isArray(db.movements) ? db.movements : []),
-        };
-      }
-    }catch(e){}
-
-    const keys = ["ldh_v2_company_stock_v1","ldh_v2_clean_base","ldh_v2_old_flow_base"];
-    for(const key of keys){
-      try{
-        const raw = getAny(key);
-        if(!raw) continue;
-        const db = JSON.parse(raw);
-        if(!db || typeof db !== "object") continue;
-        return {
-          key, db,
-          companies: Array.isArray(db.companies) ? db.companies : [],
-          materials: Array.isArray(db.materials) ? db.materials : [],
-          lots: normalizeLots(db),
-          movements: Array.isArray(db.movements) ? db.movements : []
-        };
-      }catch(e){}
+      const db = window.__LDH_PREP_STOCK_CLOUD_DB;
+      if(!db || typeof db !== "object") return null;
+      return {
+        key:"firebase:gestion-taller-stock/taller_data/stock",
+        db,
+        companies:Array.isArray(db.companies) ? db.companies : [],
+        materials:Array.isArray(db.materials) ? db.materials : [],
+        lots:normalizeLots(db),
+        movements:Array.isArray(db.movements) ? db.movements : []
+      };
+    }catch(e){
+      console.warn("El vinculador no puede leer todavía el Stock Firebase actual",e);
+      return null;
     }
-    return null;
   }
   function qtyFor(pack, companyId, materialId){
     const movs = (pack.movements || []).filter(m =>
@@ -3187,7 +3175,7 @@ function renderLinkResults(){
 
   const pack = loadV2Pack();
   if(!pack){
-    host.innerHTML = `<div style="padding:12px; opacity:.7;">No hay Stock real v2 cargado.</div>`;
+    host.innerHTML = `<div style="padding:12px; opacity:.8;">Esperando el Stock actual de Firebase. Cierra esta ventana y vuelve a pulsar VINCULAR cuando la conexión haya terminado.</div>`;
     return;
   }
 
@@ -3198,6 +3186,10 @@ function renderLinkResults(){
     return empresaNorm && vals.some(v => v === empresaNorm || v.includes(empresaNorm) || empresaNorm.includes(v));
   }) || null;
   const companyId = company ? idCompany(company) : "";
+  if(!companyId){
+    host.innerHTML = `<div style="padding:12px; opacity:.8;">No se encuentra la empresa «${String(empresaPedido||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}» en el Stock actual de Firebase.</div>`;
+    return;
+  }
 
   const matsById = new Map();
   (pack.materials || []).forEach(m => {
@@ -3220,8 +3212,6 @@ function renderLinkResults(){
         if(id) ids.add(id);
       }
     });
-  }else{
-    (pack.materials || []).forEach(m=>ids.add(idMaterial(m)));
   }
 
   let arr = Array.from(ids)
@@ -3235,19 +3225,6 @@ function renderLinkResults(){
       return {id:String(id), name, cat, grp, unit, qty, __v2:true};
     })
     .filter(m => m.id && m.name);
-
-  // Si la empresa no tiene lotes/movimientos aún, listamos materiales v2 globales para poder vincular.
-  if(arr.length === 0){
-    arr = (pack.materials || []).map(m=>({
-      id:idMaterial(m),
-      name:labelMaterial(m),
-      cat:first(m.cat,m.categoria,m.category,m.tipo,m.type,"Stock v2"),
-      grp:first(m.grp,m.grupo,m.familia,m.family,""),
-      unit:first(m.unit,m.unidad,""),
-      qty:0,
-      __v2:true
-    })).filter(m=>m.id && m.name);
-  }
 
   if(q){
     arr = arr.filter(m => {
