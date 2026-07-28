@@ -5762,12 +5762,36 @@ function LDH_stockComunInfoParaLinea(line){
           return sum + LDH_stockComunMovementSign(_v2First(m.type,m.tipo,"entrada")) * qty;
         },0)
       : _v2QtyFromRows(lots);
-    const reserved = (pack.reservations || [])
+    /*
+     * Las asignaciones operativas se leen de la última copia autoritativa de
+     * Firebase. Así, al salir al menú y volver, una copia local antigua no
+     * puede volver a enseñar como libre una barra que sigue asignada.
+     */
+    const cloudOperationalDB =
+      window.__LDH_PREP_STOCK_CLOUD_DB &&
+      typeof window.__LDH_PREP_STOCK_CLOUD_DB === "object"
+        ? window.__LDH_PREP_STOCK_CLOUD_DB
+        : null;
+    const operationalReservations = cloudOperationalDB &&
+      Array.isArray(cloudOperationalDB.reservations)
+        ? cloudOperationalDB.reservations
+        : (pack.reservations || []);
+    const operationalAssignments = cloudOperationalDB &&
+      Array.isArray(cloudOperationalDB.assignments)
+        ? cloudOperationalDB.assignments
+        : (pack.assignments || (pack.db && pack.db.assignments) || []);
+    const reserved = operationalReservations
       .filter(r=>LDH_stockComunCompanyMatches(r,company) && matMatch(r) && _v2IsActiveReservation(r))
       .reduce((sum,r)=>sum+_v2ReservationQty(r),0);
-    const assigned = (pack.assignments || (pack.db && pack.db.assignments) || [])
+    const assignedCloud = operationalAssignments
       .filter(a=>LDH_stockComunCompanyMatches(a,company) && matMatch(a) && _v2IsActiveAssignment(a))
       .reduce((sum,a)=>sum+_v2AssignmentQty(a),0);
+    const assignedTrace = !(metaActual && metaActual.en_fabricacion)
+      ? (Array.isArray(line && line.trace) ? line.trace : [])
+          .filter(t=>_v2Norm(t && t.source) === "stock comun")
+          .reduce((sum,t)=>sum+_v2Num(_v2First(t && t.qty,t && t.cantidad,0)),0)
+      : 0;
+    const assigned = Math.max(assignedCloud, assignedTrace);
     const free = Math.max(0, physical - reserved - assigned);
     return {ok:true, pack, company, companyId, material, materialId, physical, reserved, assigned, free};
   }catch(e){
@@ -14057,10 +14081,11 @@ Libre restante: ${libre - qty}`);
 <!-- LDH_PREP_CONSOLIDA_MATERIAL_Y_BOTON_RECIBIDO_V1_20260724 -->
 <script type="module" id="LDH_PREP_STOCK_FIREBASE_REAL_V28">
 /*
- * V31 · Lectura directa y en tiempo real del Stock v2 publicado en
- * GESTION-TALLER-STOCK. Solo escribe, mediante transacción, las asignaciones
- * creadas expresamente desde STOCK COMÚN. No modifica existencias físicas,
- * empresas, préstamos, deudas ni devoluciones.
+ * V32 · Lectura directa y en tiempo real del Stock v2 publicado en
+ * GESTION-TALLER-STOCK. Escribe mediante transacción las asignaciones creadas
+ * expresamente desde STOCK COMÚN y, al mandar el trabajo a Fabricación,
+ * convierte esas asignaciones en salidas físicas. No modifica empresas,
+ * préstamos, deudas ni devoluciones.
  */
 import { initializeApp, getApp, getApps } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
 import {
@@ -14553,6 +14578,7 @@ async function LDH_prepPublishCommonAssignmentsV31(assignmentOrAssignments) {
   });
 
   window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(result.remoteDB);
+  window.__LDH_PREP_STOCK_CLOUD_DB = result.remoteDB;
   window.__LDH_PREP_STOCK_FIREBASE_STATE = {
     connected: true,
     projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
@@ -14564,6 +14590,250 @@ async function LDH_prepPublishCommonAssignmentsV31(assignmentOrAssignments) {
 }
 
 window.LDH_publicarStockComunEnFirebase = LDH_prepPublishCommonAssignmentsV31;
+
+function LDH_prepSameRefV32(a, b) {
+  return LDH_prepNormCloudV30(a) === LDH_prepNormCloudV30(b);
+}
+
+function LDH_prepCommonAssignmentActiveV32(row) {
+  if (!LDH_prepIsCommonAssignmentV31(row)) return false;
+  const status = LDH_prepNormCloudV30(row.status ?? row.estado ?? "activa");
+  const phase = LDH_prepNormCloudV30(row.phase ?? row.fase ?? "preparacion");
+  const closed = [
+    "consumida", "consumido", "liberada", "liberado", "cancelada", "cancelado",
+    "anulada", "anulado", "cerrada", "cerrado", "devuelta", "devuelto"
+  ].includes(status);
+  return !closed && (phase === "preparacion" || phase === "fabricacion" || !phase);
+}
+
+/*
+ * Convierte de forma atómica las asignaciones activas de STOCK COMÚN del
+ * trabajo indicado en movimientos físicos de salida. El id fijo del movimiento
+ * impide descontar dos veces aunque se repita el clic o la transacción.
+ */
+async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
+  const reference = String(workRef ?? "").trim();
+  if (!reference) throw new Error("El trabajo no tiene referencia.");
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    throw new Error("Stock nube todavía no está autenticado.");
+  }
+
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const metaSnap = await transaction.get(metaRef);
+    if (!metaSnap.exists()) throw new Error("No existe taller_data/stock.");
+
+    const meta = metaSnap.data() || {};
+    const total = Math.max(0, Number(meta.totalChunks || 0) || 0);
+    let packed = "";
+    if (total > 0) {
+      for (let index = 0; index < total; index += 1) {
+        const chunkRef = doc(
+          LDH_PREP_STOCK_DB_V28, "taller_data", "stock", "chunks", String(index)
+        );
+        const chunkSnap = await transaction.get(chunkRef);
+        if (!chunkSnap.exists()) throw new Error(`Falta chunk remoto ${index}.`);
+        const chunk = chunkSnap.data() || {};
+        packed += String(chunk.part ?? chunk.data ?? chunk.payload ?? chunk.content ?? "");
+      }
+    } else {
+      const direct = meta[LDH_PREP_STOCK_KEY_V28] ?? meta.payload ?? meta.data ?? meta.stock;
+      if (direct != null) {
+        packed = typeof direct === "string"
+          ? direct
+          : JSON.stringify({ [LDH_PREP_STOCK_KEY_V28]: direct });
+      }
+    }
+    if (!packed) throw new Error("El paquete remoto de Stock está vacío.");
+
+    const outer = JSON.parse(packed);
+    const remoteRaw = outer?.[LDH_PREP_STOCK_KEY_V28]
+      ?? outer?.payload ?? outer?.data ?? outer?.stock ?? outer;
+    const remoteDB = LDH_prepParseStockDBV28(remoteRaw);
+    if (!remoteDB) throw new Error("El Stock remoto no tiene un formato válido.");
+
+    const assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
+    const movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
+    const movementIds = new Set(movements.map((row) => String(row?.id ?? "")));
+    const now = new Date().toISOString();
+    let consumedQty = 0;
+    let consumedAssignments = 0;
+
+    assignments.forEach((assignment) => {
+      const assignmentRef = assignment?.consumerRef ?? assignment?.jobRef
+        ?? assignment?.ref ?? assignment?.reference ?? "";
+      if (!LDH_prepSameRefV32(assignmentRef, reference)) return;
+      if (!LDH_prepCommonAssignmentActiveV32(assignment)) return;
+
+      const qty = Math.max(0, Number(assignment.qty ?? assignment.cantidad ?? 0) || 0);
+      if (qty <= 0) return;
+      const assignmentId = String(
+        assignment.id ?? assignment.assignmentId
+        ?? `${assignment.companyId}_${assignment.materialId}_${reference}`
+      );
+      const movementId = "mov_stock_comun_fabricacion_" +
+        assignmentId.replace(/[^a-zA-Z0-9_-]+/g, "_");
+
+      if (!movementIds.has(movementId)) {
+        movements.push({
+          id: movementId,
+          companyId: assignment.companyId ?? assignment.empresaId ?? "",
+          materialId: assignment.materialId ?? assignment.matId ?? "",
+          type: "salida",
+          tipo: "salida",
+          qty,
+          cantidad: qty,
+          date: now,
+          createdAt: now,
+          ref: reference,
+          jobRef: reference,
+          concept: assignment.concept ?? "",
+          reason: "consumo_stock_comun_al_mandar_fabricacion",
+          source: "preparacion_pedidos_stock_comun_fabricacion",
+          assignmentId,
+          debtExempt: true,
+          returnRequired: false
+        });
+        movementIds.add(movementId);
+        consumedQty += qty;
+      }
+
+      assignment.status = "consumida";
+      assignment.estado = "consumida";
+      assignment.phase = "fabricacion";
+      assignment.fase = "fabricacion";
+      assignment.consumedQty = qty;
+      assignment.consumedAt = now;
+      assignment.updatedAt = now;
+      assignment.movementId = movementId;
+      consumedAssignments += 1;
+    });
+
+    if (!consumedAssignments) {
+      return { remoteDB, consumedQty: 0, consumedAssignments: 0 };
+    }
+
+    remoteDB.assignments = assignments;
+    remoteDB.movements = movements;
+    remoteDB.updatedAt = now;
+    const packageObj = {
+      [LDH_PREP_STOCK_KEY_V28]: JSON.stringify(remoteDB),
+      updatedAt: now,
+      schema: "ldh_stock_chunked_v2_full"
+    };
+    const chunks = LDH_prepChunkTextV31(JSON.stringify(packageObj));
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      transaction.set(doc(
+        LDH_PREP_STOCK_DB_V28, "taller_data", "stock", "chunks", String(index)
+      ), {
+        part: chunks[index],
+        index,
+        updatedAt: serverTimestamp()
+      });
+    }
+    transaction.set(metaRef, {
+      totalChunks: chunks.length,
+      chunkSize: 350000,
+      updatedAt: serverTimestamp(),
+      updatedAtISO: now,
+      key: LDH_PREP_STOCK_KEY_V28,
+      rawCompanies: Array.isArray(remoteDB.companies) ? remoteDB.companies.length : 0,
+      rawMaterials: Array.isArray(remoteDB.materials) ? remoteDB.materials.length : 0,
+      rawStock: Array.isArray(remoteDB.stock) ? remoteDB.stock.length : 0,
+      rawMovements: movements.length,
+      rawReservations: Array.isArray(remoteDB.reservations) ? remoteDB.reservations.length : 0,
+      rawAssignments: assignments.length,
+      source: "preparacion_pedidos_consumo_stock_comun_fabricacion"
+    }, { merge: true });
+
+    return { remoteDB, consumedQty, consumedAssignments };
+  });
+
+  if (result.consumedAssignments > 0) {
+    const rawText = JSON.stringify(result.remoteDB);
+    try { localStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+    try { sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+    window.__LDH_STOCK_MEMORY_DB = result.remoteDB;
+    window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(result.remoteDB);
+    window.__LDH_PREP_STOCK_CLOUD_DB = result.remoteDB;
+  }
+  return {
+    consumedQty: result.consumedQty,
+    consumedAssignments: result.consumedAssignments
+  };
+}
+
+window.LDH_consumirStockComunAlMandarFabricacion =
+  LDH_prepConsumeCommonAtFabricationV32;
+
+/*
+ * Última capa efectiva del botón. Primero confirma y consolida el consumo en
+ * Firebase; solo después crea el trabajo en Fabricación. Si falla la nube, el
+ * pedido permanece en Preparación y no se descuenta nada.
+ */
+const LDH_confirmarFabricacionAnteriorV32 = window.confirmarTodoRecepcion;
+window.confirmarTodoRecepcion = async function () {
+  const stage = typeof window.LDH_getTrabajoStage === "function"
+    ? window.LDH_getTrabajoStage(window.refActual ?? refActual)
+    : "preparacion";
+  if (stage && stage !== "preparacion") {
+    alert("Este trabajo ya no está en Preparación.\n\nNo se vuelve a mandar para evitar duplicados.");
+    return;
+  }
+
+  const ironLines = Array.isArray(window.estadoMateriales ?? estadoMateriales)
+    ? (window.estadoMateriales ?? estadoMateriales)
+    : [];
+  if (ironLines.some((line) => String(line?.unit ?? "").toLowerCase() === "barra")
+      && !(window.metaActual ?? metaActual)?.tipo_hierro) {
+    (window.metaActual ?? metaActual).tipo_hierro = "Negro";
+    try { setAny(KM(window.refActual ?? refActual), JSON.stringify(window.metaActual ?? metaActual)); } catch (_) {}
+  }
+
+  const input = document.getElementById("inputUnidades");
+  const currentMeta = window.metaActual ?? metaActual;
+  const units = parseFloat(input?.value) || currentMeta?.unidades || 0;
+  if (units <= 0) {
+    alert("⛔ Indica las UNIDADES.");
+    input?.focus();
+    return;
+  }
+  if (!confirm(
+    `Mandar a FABRICACIÓN:\nUnidades: ${units}\n\n` +
+    "El material asignado desde STOCK COMÚN se descontará ahora del stock físico."
+  )) return;
+
+  const button = document.getElementById("btnFaseTrabajo");
+  const oldText = button?.textContent || "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Actualizando Stock…";
+  }
+  try {
+    const reference = String(window.refActual ?? refActual ?? "");
+    const consumed = await LDH_prepConsumeCommonAtFabricationV32(reference);
+    mandarAFabricacion(units, false);
+    alert(
+      "✅ Enviado a Fabricación." +
+      (consumed.consumedQty > 0
+        ? `\n\nSTOCK COMÚN consumido físicamente: ${consumed.consumedQty}`
+        : "")
+    );
+  } catch (error) {
+    console.error("No se pudo consolidar STOCK COMÚN al mandar a Fabricación", error);
+    alert(
+      "No se ha enviado el trabajo a Fabricación.\n\n" +
+      "No se ha descontado material físico porque no se pudo confirmar la actualización en la nube.\n\n" +
+      String(error?.code || error?.message || error || "Error de sincronización")
+    );
+  } finally {
+    if (button && !currentMeta?.en_fabricacion) {
+      button.disabled = false;
+      button.textContent = oldText || "💾 Mandar a fabricación";
+    }
+  }
+};
 
 function LDH_prepRerenderStockV28() {
   clearTimeout(LDH_PREP_STOCK_REFRESH_V28);
@@ -14597,6 +14867,7 @@ async function LDH_prepApplyFirebaseStockV28(force = false) {
   try { sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
   window.__LDH_STOCK_MEMORY_DB = stockDB;
   window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(stockDB);
+  window.__LDH_PREP_STOCK_CLOUD_DB = stockDB;
   window.__LDH_PREP_STOCK_FIREBASE_STATE = {
     connected: true,
     projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
