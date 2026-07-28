@@ -2177,7 +2177,26 @@ function getLinkedMatForLine(line){
   const id = getLinkedMatIdForLine(line);
   if(!id) return null;
   // Prioridad absoluta al Stock real v2. El legacy puede tener IDs/nombres antiguos y mostrar cantidades falsas.
-  return LDH_getV2MaterialById(id) || getMatById(id);
+  const found = LDH_getV2MaterialById(id) || getMatById(id);
+  if(found) return found;
+  try{
+    if(!_unitIsBarra(line && (line.unit || line.unidad))){
+      const name = String(
+        line && (line.linked_matName || line.stockLinkLabel || line.mat ||
+        line.material || line.name) || id
+      ).trim();
+      return {
+        id:String(id),
+        name,
+        nombre:name,
+        unit:String(line && (line.unit || line.unidad) || "ud"),
+        cat:"Ferretería",
+        grp:"accesorios",
+        __linkedFromConfig:true
+      };
+    }
+  }catch(e){}
+  return null;
 }
 
 /* ========= LINKMAP ========= */
@@ -2479,9 +2498,14 @@ try{
         }
 
         // normaliza el vínculo a stock
+        if(!l.linked_matId && l.linkedMatId) l.linked_matId = l.linkedMatId;
         if(!l.linked_matId && l.stockMatId) l.linked_matId = l.stockMatId;
         if(!l.linked_matId && l.matId)      l.linked_matId = l.matId;
         if(!l.linked_matId && l.stock_matId) l.linked_matId = l.stock_matId;
+        if(!l.linked_matId && l.stockLinkId) l.linked_matId = l.stockLinkId;
+        if(!l.linked_matId && l.stockId) l.linked_matId = l.stockId;
+        if(!l.linked_matId && l.stockMaterialId) l.linked_matId = l.stockMaterialId;
+        if(!l.linked_matId && l.v2MaterialId) l.linked_matId = l.v2MaterialId;
 
           // Auto-link PINTURA si llega sin vínculo (usa empresa receptora del pedido)
           try{
@@ -2742,6 +2766,13 @@ if(gBorrow && typeof gBorrow === "object" && Array.isArray(gBorrow.items) && gBo
         if(l.stockLinkId==null && l.stockId!=null) l.stockLinkId = l.stockId;
         if(l.stockLinkId==null && l.matId!=null) l.stockLinkId = l.matId;
         if(l.stockLinkId==null && l.linked_matId!=null) l.stockLinkId = l.linked_matId;
+        if(l.linked_matId==null && l.linkedMatId!=null) l.linked_matId = l.linkedMatId;
+        if(l.linked_matId==null && l.stockMatId!=null) l.linked_matId = l.stockMatId;
+        if(l.linked_matId==null && l.stock_matId!=null) l.linked_matId = l.stock_matId;
+        if(l.linked_matId==null && l.stockLinkId!=null) l.linked_matId = l.stockLinkId;
+        if(l.linked_matId==null && l.stockId!=null) l.linked_matId = l.stockId;
+        if(l.linked_matId==null && l.stockMaterialId!=null) l.linked_matId = l.stockMaterialId;
+        if(l.linked_matId==null && l.v2MaterialId!=null) l.linked_matId = l.v2MaterialId;
 
         // Mantén compatibilidad: si existe stockLinkId y falta stockId, rellénalo
         if(l.stockId==null && l.stockLinkId!=null) l.stockId = l.stockLinkId;
@@ -2992,6 +3023,36 @@ function getLinkedMatIdForLine(line){
       if(line.linked_matId && LDH_getV2MaterialById(line.linked_matId)) return line.linked_matId;
       if(line.linked_matId && getMatById(line.linked_matId)) return line.linked_matId;
       return null;
+    }
+  }catch(e){}
+
+  /*
+   * Los accesorios conservan el vínculo del catálogo de Ferretería enviado
+   * desde Configuración/Cálculo. Esta compatibilidad no se aplica a barras,
+   * que deben resolverse exclusivamente contra el Stock Firebase por empresa.
+   */
+  try{
+    const isBar = _unitIsBarra(line && (line.unit || line.unidad));
+    if(!isBar){
+      const accessoryIds = [
+        line && line.linked_matId,
+        line && line.linkedMatId,
+        line && line.stockMatId,
+        line && line.stock_matId,
+        line && line.stockLinkId,
+        line && line.stockId,
+        line && line.stockMaterialId,
+        line && line.v2MaterialId,
+        line && line.matId
+      ].map(v=>String(v||"").trim()).filter(Boolean);
+      const legacyAccessoryId = accessoryIds.find(id=>getMatById(id));
+      if(legacyAccessoryId) return legacyAccessoryId;
+      /*
+       * Si Configuración envía el id pero el catálogo de Ferretería aún no ha
+       * terminado de cargar, se conserva igualmente. No se debe borrar un
+       * vínculo válido solo porque su catálogo llegue unos instantes después.
+       */
+      if(accessoryIds.length) return accessoryIds[0];
     }
   }catch(e){}
 
