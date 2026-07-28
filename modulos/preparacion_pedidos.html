@@ -14732,8 +14732,10 @@ import {
   signInAnonymously
 } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
   getFirestore,
   onSnapshot,
   runTransaction,
@@ -14758,6 +14760,134 @@ const LDH_PREP_STOCK_DB_V28 = getFirestore(LDH_PREP_STOCK_APP_V28);
 
 let LDH_PREP_STOCK_REFRESH_V28 = null;
 let LDH_PREP_STOCK_LAST_RAW_V28 = "";
+
+/*
+ * V44 · CATÁLOGO AUXILIAR DE STOCK
+ * Stock publica también una ficha por material en stock_materials. Esta
+ * colección permite completar accesorios que existen en Stock pero todavía
+ * no aparecen dentro de materials[] en el paquete principal por chunks.
+ * Es una lectura auxiliar: Preparación no escribe en esta colección.
+ */
+async function LDH_prepReadStockMaterialsMirrorV44() {
+  try {
+    const snapshot = await getDocs(collection(
+      LDH_PREP_STOCK_DB_V28,
+      "stock_materials"
+    ));
+    return snapshot.docs.map((item) => ({
+      id: item.id,
+      ...(item.data() || {})
+    }));
+  } catch (error) {
+    console.warn("[Preparación V44] Espejo stock_materials no disponible:", error);
+    return [];
+  }
+}
+
+function LDH_prepMergeStockMaterialsMirrorV44(stockDB, mirrorRows) {
+  const db = stockDB && typeof stockDB === "object" ? stockDB : {};
+  db.materials = Array.isArray(db.materials) ? db.materials : [];
+  db.stock = Array.isArray(db.stock) ? db.stock : [];
+
+  const first = (...values) => {
+    for (const value of values) {
+      if (value !== undefined && value !== null && String(value).trim() !== "") {
+        return value;
+      }
+    }
+    return "";
+  };
+  const materialIdOf = (row) => String(first(
+    row?.materialId, row?.matId, row?.material_id, row?.idMaterial
+  ) || "").trim();
+  const materialNameOf = (row) => String(first(
+    row?.name, row?.nombre, row?.materialName, row?.material_nombre,
+    row?.nombreMaterial, row?.material, row?.mat
+  ) || "").trim();
+
+  const materialsById = new Map(db.materials.map((material) => [
+    String(first(material?.id, material?.materialId, material?.matId) || ""),
+    material
+  ]));
+
+  (Array.isArray(mirrorRows) ? mirrorRows : []).forEach((row) => {
+    const materialId = materialIdOf(row);
+    const name = materialNameOf(row);
+    if (!materialId || !name) return;
+
+    let material = materialsById.get(materialId);
+    if (!material) {
+      material = {
+        id: materialId,
+        materialId,
+        name,
+        nombre: name,
+        type: first(row?.type, row?.tipo, "ferreteria"),
+        tipo: first(row?.tipo, row?.type, "ferreteria"),
+        family: first(row?.family, row?.familia, "accesorios"),
+        familia: first(row?.familia, row?.family, "accesorios"),
+        unit: first(row?.unit, row?.unidad, "ud"),
+        unidad: first(row?.unidad, row?.unit, "ud"),
+        __fromStockMaterialsMirror: true
+      };
+      db.materials.push(material);
+      materialsById.set(materialId, material);
+    } else {
+      if (!material.name && !material.nombre) {
+        material.name = name;
+        material.nombre = name;
+      }
+      if (!material.unit && !material.unidad) {
+        material.unit = first(row?.unit, row?.unidad, "ud");
+        material.unidad = first(row?.unidad, row?.unit, "ud");
+      }
+    }
+
+    const companyId = String(first(
+      row?.companyId, row?.empresaId, row?.company, row?.empresa
+    ) || "").trim();
+    if (!companyId) return;
+
+    const stockId = String(first(row?.stockId, row?.id) || "").trim();
+    let stockRow = db.stock.find((item) => {
+      const itemStockId = String(first(item?.stockId, item?.id) || "").trim();
+      const itemCompanyId = String(first(
+        item?.companyId, item?.empresaId, item?.company, item?.empresa
+      ) || "").trim();
+      return (stockId && itemStockId === stockId)
+        || (
+          itemCompanyId === companyId
+          && materialIdOf(item) === materialId
+        );
+    });
+
+    if (!stockRow) {
+      stockRow = {
+        id: stockId || `${companyId}_${materialId}`,
+        stockId: stockId || `${companyId}_${materialId}`,
+        companyId,
+        materialId,
+        name,
+        materialName: name,
+        unit: first(row?.unit, row?.unidad, "ud"),
+        unidad: first(row?.unidad, row?.unit, "ud"),
+        qty: Number(first(row?.qty, row?.cantidad, 0)) || 0,
+        cantidad: Number(first(row?.cantidad, row?.qty, 0)) || 0,
+        __fromStockMaterialsMirror: true
+      };
+      db.stock.push(stockRow);
+    } else {
+      if (!stockRow.materialName && !stockRow.name) {
+        stockRow.materialName = name;
+      }
+      if (!stockRow.unit && !stockRow.unidad) {
+        stockRow.unit = first(row?.unit, row?.unidad, "ud");
+      }
+    }
+  });
+
+  return db;
+}
 
 function LDH_prepParseStockDBV28(raw) {
   let value = raw;
@@ -15494,11 +15624,24 @@ function LDH_prepRerenderStockV28() {
 
 async function LDH_prepApplyFirebaseStockV28(force = false) {
   const result = await LDH_prepReadFirebasePackageV28();
-  if (!force && result.rawMarker === LDH_PREP_STOCK_LAST_RAW_V28) return;
-  LDH_PREP_STOCK_LAST_RAW_V28 = result.rawMarker;
+  const mirrorRows = await LDH_prepReadStockMaterialsMirrorV44();
+  const mirrorMarker = mirrorRows
+    .map((row) => [
+      row?.id, row?.stockId, row?.companyId, row?.materialId,
+      row?.name, row?.unit, row?.qty
+    ].map((value) => String(value ?? "")).join("|"))
+    .sort()
+    .join(";");
+  const combinedMarker = `${result.rawMarker}|stock_materials:${mirrorMarker}`;
+  if (!force && combinedMarker === LDH_PREP_STOCK_LAST_RAW_V28) return;
+  LDH_PREP_STOCK_LAST_RAW_V28 = combinedMarker;
 
   const localDB = LDH_prepReadLocalStockV28();
-  const stockDB = LDH_prepMergeOperationalV28(result.stockDB, localDB);
+  const completedRemoteDB = LDH_prepMergeStockMaterialsMirrorV44(
+    result.stockDB,
+    mirrorRows
+  );
+  const stockDB = LDH_prepMergeOperationalV28(completedRemoteDB, localDB);
   const rawText = JSON.stringify(stockDB);
 
   try { localStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
@@ -15509,6 +15652,7 @@ async function LDH_prepApplyFirebaseStockV28(force = false) {
   window.__LDH_PREP_STOCK_FIREBASE_STATE = {
     connected: true,
     projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+    mirrorMaterials: mirrorRows.length,
     updatedAt: result.updatedAt,
     revision: result.revision,
     lastReadAt: new Date().toISOString(),
@@ -15545,6 +15689,11 @@ function LDH_prepStartLiveStockV28() {
   LDH_prepApplyFirebaseStockV28(true).catch((error) => {
     console.warn("[Preparación V28] Primera lectura de Stock fallida:", error);
   });
+  setTimeout(() => {
+    LDH_prepApplyFirebaseStockV28(true).catch((error) => {
+      console.warn("[Preparación V44] Segunda lectura del catálogo auxiliar fallida:", error);
+    });
+  }, 1800);
 }
 
 let LDH_PREP_STOCK_STARTED_V28 = false;
