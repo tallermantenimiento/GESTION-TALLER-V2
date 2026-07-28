@@ -5782,7 +5782,7 @@ function LDH_stockComunCerrarModal(){
   const el = document.getElementById("ldhStockComunModal");
   if(el) el.remove();
 }
-function LDH_stockComunAplicar(index, qty){
+async function LDH_stockComunAplicar(index, qty){
   const line = estadoMateriales[index];
   if(!line) return;
   const info = LDH_stockComunInfoParaLinea(line);
@@ -5820,6 +5820,31 @@ function LDH_stockComunAplicar(index, qty){
       if(pos >= 0) arr.splice(pos,1);
     }
     alert("No se ha podido guardar la asignación de STOCK COMÚN.");
+    return;
+  }
+
+  /*
+   * La asignación no se aplica al pedido hasta que Firestore confirma que ha
+   * quedado guardada. Así Preparación nunca muestra un descuento que los demás
+   * equipos todavía no pueden ver.
+   */
+  try{
+    if(typeof window.LDH_publicarStockComunEnFirebase !== "function"){
+      throw new Error("El conector de escritura de STOCK COMÚN todavía no está disponible.");
+    }
+    await window.LDH_publicarStockComunEnFirebase(assignment);
+  }catch(e){
+    const arr = info.pack.db && info.pack.db.assignments;
+    if(Array.isArray(arr)){
+      const pos = arr.findIndex(a=>String(a && a.id || "") === String(assignment.id || ""));
+      if(pos >= 0) arr.splice(pos,1);
+    }
+    _v2SaveCompanyStockDB(info.pack);
+    alert(
+      "No se ha podido guardar el uso de STOCK COMÚN en la nube.\n\n" +
+      "No se ha descontado nada del pedido ni del Stock.\n\n" +
+      String((e && (e.code || e.message)) || e || "Error de sincronización")
+    );
     return;
   }
 
@@ -5894,6 +5919,7 @@ function LDH_cancelarAsignacionesStockComun(ref, line){
     const lineKey = line ? LDH_stockComunLineaKey(line) : "";
     const cand = line ? LDH_stockComunMaterialCandidates(line) : {ids:[],names:[]};
     let count = 0;
+    const changedAssignments = [];
     list.forEach(a=>{
       const typ = _v2Norm(_v2First(a.assignmentType,a.reason,a.source,""));
       if(!(typ === "stock comun" || typ.includes("asignado desde stock comun") || a.sharedStock === true)) return;
@@ -5912,9 +5938,22 @@ function LDH_cancelarAsignacionesStockComun(ref, line){
       a.releasedReason = line ? "limpiar_linea_preparacion" : "eliminar_o_limpiar_pedido";
       a.pendingQty = 0;
       a.qtyPending = 0;
+      changedAssignments.push(a);
       count++;
     });
-    if(count) _v2SaveCompanyStockDB(pack);
+    if(count){
+      _v2SaveCompanyStockDB(pack);
+      if(typeof window.LDH_publicarStockComunEnFirebase === "function"){
+        window.LDH_publicarStockComunEnFirebase(changedAssignments).catch(e=>{
+          console.error("No se pudo liberar STOCK COMÚN en la nube", e);
+          alert(
+            "La liberación de STOCK COMÚN no se ha podido sincronizar.\n\n" +
+            "No repitas la operación y revisa la conexión de Stock.\n\n" +
+            String((e && (e.code || e.message)) || e || "Error de sincronización")
+          );
+        });
+      }
+    }
     return count;
   }catch(e){
     console.warn("No se pudo liberar STOCK COMÚN",e);
@@ -14018,9 +14057,10 @@ Libre restante: ${libre - qty}`);
 <!-- LDH_PREP_CONSOLIDA_MATERIAL_Y_BOTON_RECIBIDO_V1_20260724 -->
 <script type="module" id="LDH_PREP_STOCK_FIREBASE_REAL_V28">
 /*
- * V28 · Lectura directa y en tiempo real del Stock v2 publicado en
- * GESTION-TALLER-STOCK. Este conector es exclusivamente de lectura:
- * no modifica existencias, empresas, préstamos, deudas ni devoluciones.
+ * V31 · Lectura directa y en tiempo real del Stock v2 publicado en
+ * GESTION-TALLER-STOCK. Solo escribe, mediante transacción, las asignaciones
+ * creadas expresamente desde STOCK COMÚN. No modifica existencias físicas,
+ * empresas, préstamos, deudas ni devoluciones.
  */
 import { initializeApp, getApp, getApps } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
 import {
@@ -14032,7 +14072,9 @@ import {
   doc,
   getDoc,
   getFirestore,
-  onSnapshot
+  onSnapshot,
+  runTransaction,
+  serverTimestamp
 } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
 
 const LDH_PREP_STOCK_KEY_V28 = "ldh_v2_company_stock_v1";
@@ -14371,6 +14413,157 @@ async function LDH_prepReadFirebasePackageV28() {
     revision: meta.revision ?? meta.version ?? null
   };
 }
+
+function LDH_prepIsCommonAssignmentV31(row) {
+  if (!row || typeof row !== "object") return false;
+  if (row.sharedStock === true) return true;
+  const type = LDH_prepNormCloudV30(
+    row.assignmentType ?? row.reason ?? row.source ?? ""
+  );
+  return type === "stock comun"
+    || type.includes("asignado desde stock comun")
+    || type.includes("preparacion pedidos stock comun");
+}
+
+function LDH_prepChunkTextV31(text, size = 350000) {
+  const chunks = [];
+  for (let index = 0; index < text.length; index += size) {
+    chunks.push(text.slice(index, index + size));
+  }
+  return chunks.length ? chunks : [""];
+}
+
+/*
+ * Publica exclusivamente las asignaciones de STOCK COMÚN sobre la copia
+ * remota más reciente. La transacción se reintenta si Stock cambia mientras
+ * Preparación está guardando, evitando pisar entradas, salidas o catálogos.
+ */
+async function LDH_prepPublishCommonAssignmentsV31(assignmentOrAssignments) {
+  const assignmentsToPublish = (Array.isArray(assignmentOrAssignments)
+    ? assignmentOrAssignments
+    : [assignmentOrAssignments]
+  ).filter(LDH_prepIsCommonAssignmentV31);
+  if (!assignmentsToPublish.length) {
+    throw new Error("La asignación de STOCK COMÚN no es válida.");
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    throw new Error("Stock nube todavía no está autenticado.");
+  }
+
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const metaSnap = await transaction.get(metaRef);
+    if (!metaSnap.exists()) throw new Error("No existe taller_data/stock.");
+
+    const meta = metaSnap.data() || {};
+    const total = Math.max(0, Number(meta.totalChunks || 0) || 0);
+    let packed = "";
+
+    if (total > 0) {
+      for (let index = 0; index < total; index += 1) {
+        const chunkRef = doc(
+          LDH_PREP_STOCK_DB_V28,
+          "taller_data",
+          "stock",
+          "chunks",
+          String(index)
+        );
+        const chunkSnap = await transaction.get(chunkRef);
+        if (!chunkSnap.exists()) throw new Error(`Falta chunk remoto ${index}.`);
+        const chunk = chunkSnap.data() || {};
+        packed += String(chunk.part ?? chunk.data ?? chunk.payload ?? chunk.content ?? "");
+      }
+    } else {
+      const direct = meta[LDH_PREP_STOCK_KEY_V28] ?? meta.payload ?? meta.data ?? meta.stock;
+      if (direct != null) {
+        packed = typeof direct === "string"
+          ? direct
+          : JSON.stringify({ [LDH_PREP_STOCK_KEY_V28]: direct });
+      }
+    }
+
+    if (!packed) throw new Error("El paquete remoto de Stock está vacío.");
+    const outer = JSON.parse(packed);
+    const remoteRaw = outer?.[LDH_PREP_STOCK_KEY_V28]
+      ?? outer?.payload
+      ?? outer?.data
+      ?? outer?.stock
+      ?? outer;
+    const remoteDB = LDH_prepParseStockDBV28(remoteRaw);
+    if (!remoteDB) throw new Error("El Stock remoto no tiene un formato válido.");
+
+    const remoteAssignments = Array.isArray(remoteDB.assignments)
+      ? remoteDB.assignments
+      : [];
+    const assignmentMap = new Map();
+    remoteAssignments.forEach((row) => {
+      assignmentMap.set(LDH_prepRecordIdV28(row, "assignments"), row);
+    });
+    assignmentsToPublish.forEach((assignment) => {
+      const assignmentId = LDH_prepRecordIdV28(assignment, "assignments");
+      if (!assignmentId) {
+        throw new Error("La asignación de STOCK COMÚN no tiene identificador.");
+      }
+      const current = assignmentMap.get(assignmentId);
+      if (!current || LDH_prepRecordTimeV28(assignment) >= LDH_prepRecordTimeV28(current)) {
+        assignmentMap.set(assignmentId, assignment);
+      }
+    });
+
+    remoteDB.assignments = Array.from(assignmentMap.values());
+    remoteDB.updatedAt = new Date().toISOString();
+    const rawText = JSON.stringify(remoteDB);
+    const packageObj = {
+      [LDH_PREP_STOCK_KEY_V28]: rawText,
+      updatedAt: new Date().toISOString(),
+      schema: "ldh_stock_chunked_v2_full"
+    };
+    const chunks = LDH_prepChunkTextV31(JSON.stringify(packageObj));
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      transaction.set(doc(
+        LDH_PREP_STOCK_DB_V28,
+        "taller_data",
+        "stock",
+        "chunks",
+        String(index)
+      ), {
+        part: chunks[index],
+        index,
+        updatedAt: serverTimestamp()
+      });
+    }
+
+    transaction.set(metaRef, {
+      totalChunks: chunks.length,
+      chunkSize: 350000,
+      updatedAt: serverTimestamp(),
+      updatedAtISO: new Date().toISOString(),
+      key: LDH_PREP_STOCK_KEY_V28,
+      rawCompanies: Array.isArray(remoteDB.companies) ? remoteDB.companies.length : 0,
+      rawMaterials: Array.isArray(remoteDB.materials) ? remoteDB.materials.length : 0,
+      rawStock: Array.isArray(remoteDB.stock) ? remoteDB.stock.length : 0,
+      rawMovements: Array.isArray(remoteDB.movements) ? remoteDB.movements.length : 0,
+      rawReservations: Array.isArray(remoteDB.reservations) ? remoteDB.reservations.length : 0,
+      rawAssignments: remoteDB.assignments.length,
+      source: "preparacion_pedidos_stock_comun"
+    }, { merge: true });
+
+    return { remoteDB, chunks: chunks.length };
+  });
+
+  window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(result.remoteDB);
+  window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+    connected: true,
+    projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+    lastReadAt: new Date().toISOString(),
+    lastWriteAt: new Date().toISOString(),
+    error: ""
+  };
+  return true;
+}
+
+window.LDH_publicarStockComunEnFirebase = LDH_prepPublishCommonAssignmentsV31;
 
 function LDH_prepRerenderStockV28() {
   clearTimeout(LDH_PREP_STOCK_REFRESH_V28);
