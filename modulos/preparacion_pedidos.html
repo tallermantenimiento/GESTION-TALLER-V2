@@ -2,8 +2,8 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<!-- BUILD: FERRETERIA-STOCK-ASIGNACION-V46-20260728 -->
-<meta name="ldh-build" content="FERRETERIA-STOCK-ASIGNACION-V46-20260728" />
+<!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
+<meta name="ldh-build" content="COMPRAS-STOCK-EXACTO-V47-20260728" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -7911,8 +7911,126 @@ function _getCommonHardwareStockInfo(linea){
   }
 }
 
+function LDH_getExactCompanyStockForCompraV47(linea){
+  try{
+    if(typeof LDH_exactResolveStockLine !== "function") return null;
+    const exact = LDH_exactResolveStockLine(linea);
+    if(!exact || !exact.db || !exact.materialId || !exact.companyId) return null;
+
+    let reserved = 0;
+    let assigned = 0;
+    try{
+      const pack = (typeof _v2LoadCompanyStockDB === "function")
+        ? _v2LoadCompanyStockDB()
+        : null;
+      if(pack){
+        if(typeof _v2Reserved === "function"){
+          reserved = Math.max(0,toNum(
+            _v2Reserved(pack,exact.companyId,exact.materialId)
+          ));
+        }
+        if(typeof _v2Assigned === "function"){
+          assigned = Math.max(0,toNum(
+            _v2Assigned(pack,exact.companyId,exact.materialId)
+          ));
+        }
+      }
+    }catch(_){}
+
+    const physical = Math.max(0,toNum(exact.real));
+    const free = Math.max(0,physical-reserved-assigned);
+    return {
+      stockKnown:true,
+      matId:String(exact.materialId),
+      mat:exact.material,
+      stock:free,
+      physical,
+      reserved,
+      assigned,
+      companyId:String(exact.companyId),
+      companyName:String(exact.companyName || ""),
+      source:"stock_empresa_exacto_v47"
+    };
+  }catch(error){
+    console.warn("[Compras V47] No se pudo leer el Stock exacto de empresa",error);
+    return null;
+  }
+}
+
+function LDH_getKnownZeroOrUnknownForCompraV47(linea){
+  try{
+    const hardware = _getCommonHardwareStockInfo(linea);
+    if(hardware && hardware.stockKnown) return hardware;
+  }catch(_){}
+
+  const unit = String(linea && (linea.unit || linea.unidad) || "").toLowerCase();
+  const isBar = unit.includes("barra");
+
+  if(!isBar){
+    try{
+      if(typeof LDH_readFerreteriaDBV45 === "function" && LDH_readFerreteriaDBV45()){
+        return {
+          stockKnown:true,
+          matId:null,
+          mat:null,
+          stock:0,
+          physical:0,
+          reserved:0,
+          assigned:0,
+          source:"ferreteria_actual_sin_ficha_v47"
+        };
+      }
+    }catch(_){}
+  }
+
+  try{
+    if(
+      typeof LDH_exactStockRawDB === "function" &&
+      typeof LDH_exactFindCompany === "function" &&
+      typeof LDH_exactPedidoEmpresa === "function"
+    ){
+      const db = LDH_exactStockRawDB();
+      const company = db
+        ? LDH_exactFindCompany(db,LDH_exactPedidoEmpresa())
+        : null;
+      if(db && company){
+        return {
+          stockKnown:true,
+          matId:null,
+          mat:null,
+          stock:0,
+          physical:0,
+          reserved:0,
+          assigned:0,
+          source:"stock_actual_sin_ficha_v47"
+        };
+      }
+    }
+  }catch(_){}
+
+  return {stockKnown:false,matId:null,mat:null,stock:0};
+}
+
 function _getStockInfoForCompra(linea){
   try{
+    const unitTextV47 = String(
+      linea && (linea.unit || linea.unidad) || ""
+    ).toLowerCase();
+    const isBarLineV47 = unitTextV47.includes("barra");
+
+    /*
+     * V47: la lista de compras debe utilizar exactamente las mismas fuentes
+     * que la pantalla de Preparación:
+     * - accesorios: Ferretería actual;
+     * - barras: Stock exacto de la empresa del trabajo.
+     */
+    if(!isBarLineV47){
+      const hardware = _getCommonHardwareStockInfo(linea);
+      if(hardware && hardware.stockKnown) return hardware;
+    }
+    const exactCompany = LDH_getExactCompanyStockForCompraV47(linea);
+    if(exactCompany && exactCompany.stockKnown) return exactCompany;
+
     /*
      * V35: Compras lee exclusivamente la copia autoritativa de Firebase y la
      * empresa del pedido. "En stock" significa stock libre real:
@@ -7922,8 +8040,7 @@ function _getStockInfoForCompra(linea){
       ? LDH_getFirebaseStockPackForLink()
       : null;
     if(!pack || !pack.db){
-      return _getCommonHardwareStockInfo(linea) ||
-        {stockKnown:false, matId:null, mat:null, stock:0};
+      return LDH_getKnownZeroOrUnknownForCompraV47(linea);
     }
 
     const companyName = (typeof _v2GetPedidoEmpresa === "function")
@@ -7933,8 +8050,7 @@ function _getStockInfoForCompra(linea){
       ? _v2FindCompany(pack, companyName)
       : null;
     if(!company){
-      return _getCommonHardwareStockInfo(linea) ||
-        {stockKnown:false, matId:null, mat:null, stock:0};
+      return LDH_getKnownZeroOrUnknownForCompraV47(linea);
     }
 
     const companyId = String(
@@ -8048,8 +8164,7 @@ function _getStockInfoForCompra(linea){
       }) || null;
     }
     if(!mat){
-      return _getCommonHardwareStockInfo(linea) ||
-        {stockKnown:false, matId:null, mat:null, stock:0};
+      return LDH_getKnownZeroOrUnknownForCompraV47(linea);
     }
 
     const materialId = idOf(mat);
@@ -8101,8 +8216,7 @@ function _getStockInfoForCompra(linea){
       assigned:toNum(assigned)
     };
   }catch(e){}
-  return _getCommonHardwareStockInfo(linea) ||
-    { stockKnown:false, matId:null, mat:null, stock:0 };
+  return LDH_getKnownZeroOrUnknownForCompraV47(linea);
 }
 
 function _needForCompra(linea){
