@@ -7938,31 +7938,71 @@ function LDH_freeSmallSharedStorage(){
 }
 
 function LDH_writeSharedLocalKey(key, value){
-  // Guardado para que otros módulos lo vean. Debe ser localStorage, no sessionStorage.
+  /*
+   * PROTECCIÓN DE DATOS V42
+   * Preparación puede actualizar pedidos y snapshots dentro de ldh_db, pero
+   * nunca es el módulo autorizado para cambiar o eliminar los conceptos.
+   *
+   * Reglas:
+   *  - conserva siempre concepts[] de la versión que ya existe;
+   *  - deja una copia de emergencia en sessionStorage;
+   *  - si localStorage está lleno, NO elimina la clave anterior;
+   *  - no borra Stock ni ninguna otra clave real para hacer espacio.
+   */
+  const targetKey = String(key || "");
+  let payload = String(value ?? "");
+  let previous = null;
+
+  try{ previous = localStorage.getItem(targetKey); }catch(e){}
+  if(previous === null){
+    try{ previous = sessionStorage.getItem(targetKey); }catch(e){}
+  }
+
+  if(targetKey === "ldh_db"){
+    try{
+      const oldDb = previous ? JSON.parse(previous) : null;
+      const nextDb = payload ? JSON.parse(payload) : null;
+      const oldConcepts = Array.isArray(oldDb && oldDb.concepts) ? oldDb.concepts : [];
+
+      if(oldConcepts.length){
+        if(!nextDb || typeof nextDb !== "object"){
+          console.warn("Preparación bloqueó una escritura inválida de ldh_db.");
+          return false;
+        }
+        nextDb.concepts = JSON.parse(JSON.stringify(oldConcepts));
+        payload = JSON.stringify(nextDb);
+      }
+
+      if(previous){
+        try{ sessionStorage.setItem("ldh_db_SAFE_BACKUP_V42", previous); }catch(e){}
+      }
+    }catch(e){
+      console.warn("Preparación bloqueó una escritura no válida de ldh_db.", e);
+      return false;
+    }
+  }
+
   try{
-    localStorage.setItem(key, value);
+    localStorage.setItem(targetKey, payload);
     return true;
   }catch(e1){
-    try{ localStorage.removeItem(key); }catch(e){}
     LDH_freeSmallSharedStorage();
     try{
-      localStorage.setItem(key, value);
+      localStorage.setItem(targetKey, payload);
       return true;
     }catch(e2){
-      // Último recurso si el causante es la clave enorme de Stock local.
-      // Stock ya publica a nube; eliminamos SOLO la copia local antigua para poder comunicar Fabricación.
       try{
-        const stockRaw = localStorage.getItem("ldh_v2_company_stock_v1");
-        if(stockRaw){
-          try{ sessionStorage.setItem("ldh_v2_company_stock_v1", stockRaw); }catch(e){}
-          localStorage.removeItem("ldh_v2_company_stock_v1");
+        sessionStorage.setItem(targetKey + "_PENDING_SAFE_V42", payload);
+        if(targetKey === "ldh_db" && previous){
+          sessionStorage.setItem("ldh_db_SAFE_BACKUP_V42", previous);
         }
-        localStorage.setItem(key, value);
-        return true;
-      }catch(e3){
-        console.warn("No se pudo escribir clave compartida", key, e3);
-        return false;
-      }
+      }catch(e){}
+      console.warn(
+        "No se pudo actualizar " + targetKey +
+        " porque el almacenamiento está lleno. Se conserva intacta la versión anterior.",
+        e2
+      );
+      return false;
     }
   }
 }
@@ -8363,6 +8403,21 @@ init();
     try{
       const db = firebase.firestore();
       const cid = getClientId();
+      const protectedLdhRaw = localStorage.getItem("ldh_db");
+      if(!protectedLdhRaw){
+        console.warn("⛔ AutoSync: copia omitida porque falta ldh_db; no se sobrescribe la nube con una base incompleta.");
+        return;
+      }
+      try{
+        const protectedLdhDb = JSON.parse(protectedLdhRaw);
+        if(!Array.isArray(protectedLdhDb && protectedLdhDb.concepts) || !protectedLdhDb.concepts.length){
+          console.warn("⛔ AutoSync: copia omitida porque ldh_db no contiene conceptos.");
+          return;
+        }
+      }catch(e){
+        console.warn("⛔ AutoSync: copia omitida porque ldh_db no es válido.");
+        return;
+      }
       const all = {};
       for(let i=0;i<localStorage.length;i++){
         const k = localStorage.key(i);
@@ -8418,6 +8473,22 @@ init();
       json += (cSnap.data().part || "");
     }
     const all = JSON.parse(json);
+    const protectedLocalLdh = localStorage.getItem("ldh_db");
+    let incomingHasConcepts = false;
+    try{
+      const incomingLdh = JSON.parse(all.ldh_db || "");
+      incomingHasConcepts = Array.isArray(incomingLdh && incomingLdh.concepts) && incomingLdh.concepts.length > 0;
+    }catch(e){}
+    if(!incomingHasConcepts && protectedLocalLdh){
+      try{
+        const localLdh = JSON.parse(protectedLocalLdh);
+        if(Array.isArray(localLdh && localLdh.concepts) && localLdh.concepts.length){
+          all.ldh_db = protectedLocalLdh;
+          try{ sessionStorage.setItem("ldh_db_SAFE_BACKUP_V42", protectedLocalLdh); }catch(e){}
+          console.warn("🛡️ AutoSync: la nube no contenía conceptos; se conserva ldh_db local.");
+        }
+      }catch(e){}
+    }
     const preservedPrep = {};
     try{
       for(let i=0;i<localStorage.length;i++){
