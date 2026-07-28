@@ -2,8 +2,8 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<!-- BUILD: FERRETERIA-ACTUAL-V45-20260728 -->
-<meta name="ldh-build" content="FERRETERIA-ACTUAL-V45-20260728" />
+<!-- BUILD: FERRETERIA-STOCK-ASIGNACION-V46-20260728 -->
+<meta name="ldh-build" content="FERRETERIA-STOCK-ASIGNACION-V46-20260728" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -2358,6 +2358,10 @@ function LDH_buildFerreteriaCatalogV45(){
       .map(row => LDH_quantityFieldV45(row,"physical"))
       .filter(value => value !== null);
     const directPhysical = LDH_quantityFieldV45(raw,"physical");
+    const hasPhysicalSource =
+      explicitPhysicalRows.length > 0 ||
+      directPhysical !== null ||
+      matchingMovements.length > 0;
     const movementPhysical = matchingMovements.reduce((sum,row)=>{
       const qty = LDH_numberV45(LDH_firstV45(
         row.qty,row.cantidad,row.quantity,row.amount,row.unidades,row.uds
@@ -2380,7 +2384,10 @@ function LDH_buildFerreteriaCatalogV45(){
       matchingStock.reduce((sum,row)=>sum+(LDH_quantityFieldV45(row,"reserved") || 0),0) +
       matchingReservations.reduce((sum,row)=>{
         const status = normName(LDH_firstV45(row.status,row.estado,"activa"));
-        if(["cancelada","cancelado","cerrada","cerrado","consumida","consumido"].includes(status)) return sum;
+        if([
+          "cancelada","cancelado","cerrada","cerrado","consumida","consumido",
+          "liberada","liberado","devuelta","devuelto","anulada","anulado"
+        ].includes(status)) return sum;
         return sum + (LDH_numberV45(LDH_firstV45(row.qty,row.cantidad,row.quantity)) || 0);
       },0)
     );
@@ -2388,14 +2395,22 @@ function LDH_buildFerreteriaCatalogV45(){
       matchingStock.reduce((sum,row)=>sum+(LDH_quantityFieldV45(row,"assigned") || 0),0) +
       matchingAssignments.reduce((sum,row)=>{
         const status = normName(LDH_firstV45(row.status,row.estado,"activa"));
-        if(["cancelada","cancelado","cerrada","cerrado","consumida","consumido"].includes(status)) return sum;
+        if([
+          "cancelada","cancelado","cerrada","cerrado","consumida","consumido",
+          "liberada","liberado","devuelta","devuelto","anulada","anulado"
+        ].includes(status)) return sum;
         return sum + (LDH_numberV45(LDH_firstV45(row.qty,row.cantidad,row.quantity)) || 0);
       },0)
     );
+    const explicitFree = explicitFreeRows.reduce((sum,value)=>sum+value,0);
+    if(!hasPhysicalSource && explicitFreeRows.length){
+      physical = explicitFree + reserved + assigned;
+    }
     physical = Math.max(0,physical);
+    const calculatedFree = Math.max(0,physical-reserved-assigned);
     const free = explicitFreeRows.length
-      ? Math.max(0,explicitFreeRows.reduce((sum,value)=>sum+value,0))
-      : Math.max(0,physical-reserved-assigned);
+      ? Math.max(0,Math.min(explicitFree,calculatedFree))
+      : calculatedFree;
 
     const material = {
       ...raw,
@@ -2444,6 +2459,166 @@ function LDH_findCurrentHardwareMaterialV45(line){
       LDH_unitCompatibleForLink(line,material)
     )
     .sort((a,b)=>(Number(b.free)||0)-(Number(a.free)||0))[0] || null;
+}
+
+function LDH_saveFerreteriaDBV46(db){
+  if(!db || typeof db !== "object") return false;
+  db.updatedAt = new Date().toISOString();
+  const raw = JSON.stringify(db);
+  let saved = false;
+  try{
+    localStorage.setItem(LDH_FERRETERIA_KEYS_V45[0],raw);
+    saved = true;
+  }catch(_){}
+  try{
+    sessionStorage.setItem(LDH_FERRETERIA_KEYS_V45[0],raw);
+    saved = true;
+  }catch(_){}
+  if(!saved) return false;
+
+  window.__LDH_FERRETERIA_MEMORY_DB = db;
+  try{
+    window.dispatchEvent(new StorageEvent("storage",{
+      key:LDH_FERRETERIA_KEYS_V45[0],
+      newValue:raw
+    }));
+  }catch(_){}
+  try{
+    if(typeof window.LDH_scheduleFerreteriaCloudPublish === "function"){
+      window.LDH_scheduleFerreteriaCloudPublish(true);
+    }
+  }catch(_){}
+  try{
+    if(typeof window.LDH_publishFerreteriaDirectFromMemory === "function"){
+      window.LDH_publishFerreteriaDirectFromMemory(db);
+    }
+  }catch(_){}
+  return true;
+}
+
+function LDH_reservarFerreteriaActualV46(index,qty){
+  const line = Array.isArray(estadoMateriales) ? estadoMateriales[index] : null;
+  if(!line) return {ok:false,reason:"No se encuentra la línea."};
+  const db = LDH_readFerreteriaDBV45();
+  const material = LDH_findCurrentHardwareMaterialV45(line);
+  if(!db || !material){
+    return {ok:false,reason:"No se encuentra el material en la Ferretería actual."};
+  }
+
+  const free = Math.max(0,Number(material.free ?? material.qty ?? 0) || 0);
+  qty = Math.max(0,Number(qty) || 0);
+  if(qty <= 0) return {ok:false,reason:"Cantidad incorrecta."};
+  if(qty > free){
+    return {ok:false,reason:"Ferretería solo tiene " + free + " unidades libres."};
+  }
+
+  if(!Array.isArray(db.assignments)) db.assignments = [];
+  const materialId = String(material.id || material.materialId || "").trim();
+  const materialName = String(material.name || material.nombre || "").trim();
+  const now = new Date().toISOString();
+  const assignment = {
+    id:"asg_ferreteria_"+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-5),
+    materialId,
+    matId:materialId,
+    material:materialName,
+    materialName,
+    qty,
+    cantidad:qty,
+    phase:"preparacion",
+    fase:"preparacion",
+    status:"activa",
+    estado:"activa",
+    ref:String(refActual || ""),
+    jobRef:String(refActual || ""),
+    concept:String((metaActual && (metaActual.concepto || metaActual.concept)) || ""),
+    company:String((metaActual && (metaActual.empresa || metaActual.company)) || ""),
+    empresa:String((metaActual && (metaActual.empresa || metaActual.company)) || ""),
+    assignmentType:"ferreteria_libre",
+    reason:"asignado_desde_ferreteria_actual",
+    source:"preparacion_pedidos",
+    createdAt:now,
+    updatedAt:now
+  };
+  db.assignments.push(assignment);
+  if(!LDH_saveFerreteriaDBV46(db)){
+    db.assignments.pop();
+    return {ok:false,reason:"No se ha podido guardar la asignación en Ferretería."};
+  }
+  return {
+    ok:true,
+    assignment,
+    material,
+    physical:Number(material.physical || 0),
+    reserved:Number(material.reserved || 0),
+    assigned:Number(material.assigned || 0),
+    freeBefore:free,
+    freeAfter:Math.max(0,free-qty)
+  };
+}
+
+function LDH_liberarAsignacionesFerreteriaV46(reference,line){
+  try{
+    const ref = String(reference || "").trim();
+    if(!ref) return 0;
+    const db = LDH_readFerreteriaDBV45();
+    if(!db || !Array.isArray(db.assignments)) return 0;
+
+    const targetId = line ? String(
+      line.linked_matId || line.stockMatId || line.matId ||
+      line.stockLinkId || line.stockId || ""
+    ).trim() : "";
+    const targetName = line ? normName(
+      line.mat || line.material || line.name || line.stockLinkLabel || ""
+    ) : "";
+    let released = 0;
+    db.assignments.forEach(assignment=>{
+      const type = normName(LDH_firstV45(
+        assignment.assignmentType,assignment.reason,assignment.source,""
+      ));
+      if(!type.includes("ferreteria")) return;
+      const assignmentRef = String(LDH_firstV45(
+        assignment.ref,assignment.jobRef,assignment.reference
+      ) || "").trim();
+      if(assignmentRef !== ref) return;
+      const status = normName(LDH_firstV45(
+        assignment.status,assignment.estado,"activa"
+      ));
+      if([
+        "cancelada","cancelado","cerrada","cerrado","consumida","consumido",
+        "liberada","liberado","devuelta","devuelto","anulada","anulado"
+      ].includes(status)) return;
+
+      if(line){
+        const assignmentId = String(LDH_firstV45(
+          assignment.materialId,assignment.matId,assignment.idMaterial
+        ) || "").trim();
+        const assignmentName = normName(LDH_firstV45(
+          assignment.materialName,assignment.material,assignment.name,assignment.nombre
+        ));
+        const sameId = !!targetId && !!assignmentId && targetId === assignmentId;
+        const sameName = !!targetName && !!assignmentName && targetName === assignmentName;
+        if(!sameId && !sameName) return;
+      }
+
+      assignment.status = "liberada";
+      assignment.estado = "liberada";
+      assignment.releasedAt = new Date().toISOString();
+      assignment.updatedAt = assignment.releasedAt;
+      assignment.releasedReason = line
+        ? "limpiar_linea_preparacion"
+        : "eliminar_o_limpiar_pedido";
+      assignment.pendingQty = 0;
+      assignment.qtyPending = 0;
+      released += 1;
+    });
+    if(released && !LDH_saveFerreteriaDBV46(db)){
+      return 0;
+    }
+    return released;
+  }catch(error){
+    console.warn("[PREP V46] No se pudo liberar la asignación de Ferretería",error);
+    return 0;
+  }
 }
 
 function LDH_findExactLegacyMaterialForLine(line){
@@ -5775,7 +5950,31 @@ function renderTabla() {
       : "";
 
     if(linkedMat){
-      if(linkedMat.__v2){
+      if(linkedMat.__ferreteriaActualV45){
+        const currentInfo = (typeof _getCommonHardwareStockInfo === "function")
+          ? _getCommonHardwareStockInfo(linea)
+          : null;
+        const physical = currentInfo && currentInfo.stockKnown
+          ? toNum(currentInfo.physical)
+          : 0;
+        const reserved = currentInfo && currentInfo.stockKnown
+          ? toNum(currentInfo.reserved)
+          : 0;
+        const assigned = currentInfo && currentInfo.stockKnown
+          ? toNum(currentInfo.assigned)
+          : 0;
+        const free = currentInfo && currentInfo.stockKnown
+          ? toNum(currentInfo.stock)
+          : 0;
+        let cls = "ok";
+        if(free <= 0) cls = "danger";
+        else if(pedida > 0 && free < pedida) cls = "warn";
+        stockPill =
+          `<span class="link-pill ok">Vinculado Ferretería: <b>${linkedMat.name}</b></span>` +
+          (currentInfo && currentInfo.stockKnown
+            ? `<span class="link-pill ${cls}">Físico <b>${physical}</b> · reservado <b>${reserved}</b> · asignado <b>${assigned}</b> · libre <b>${free}</b> ${linkedMat.unit || "ud"}</span>`
+            : `<span class="link-pill warn">Stock Ferretería: <b>N/D</b></span>`);
+      }else if(linkedMat.__v2){
         stockPill = `<span class="link-pill ok">Vinculado Stock v2: <b>${linkedMat.name}</b></span>`;
       }else{
         const unitTxt = String((linea && (linea.unit || linea.unidad)) || "").toLowerCase();
@@ -8239,6 +8438,7 @@ function limpiarConsumoLinea(index){
   if(!confirm(`Limpiar consumos/pruebas de "${mat}" en este pedido?\n\nEsto solo limpia la línea de Preparación:\n- Recibida = 0\n- OK quitado\n- Consumido parcial/stock/reserva quitado\n\nNo modifica el Stock general.`)) return;
 
   try{ LDH_cancelarAsignacionesStockComun(refActual,linea); }catch(e){}
+  try{ LDH_liberarAsignacionesFerreteriaV46(refActual,linea); }catch(e){}
 
   try{
     const ctx = _v2ResolveLine(linea);
@@ -8326,6 +8526,7 @@ function limpiarConsumosPedidoActual(){
   if(!confirm("Limpiar todos los consumos/pruebas de este pedido?\n\nNo modifica el Stock general. Solo deja Preparación a cero en recibidas/OK/consumos.")) return;
 
   try{ LDH_cancelarAsignacionesStockComun(refActual); }catch(e){}
+  try{ LDH_liberarAsignacionesFerreteriaV46(refActual); }catch(e){}
 
   estadoMateriales.forEach(linea=>{
     linea.qty_recibida = 0;
@@ -8731,6 +8932,7 @@ function mandarAFabricacionAutoSiHaceFalta(){
 function eliminarPedido() {
   if (confirm("⛔ ¿Eliminar?")) {
     try{ LDH_cancelarAsignacionesStockComun(refActual); }catch(e){}
+    try{ LDH_liberarAsignacionesFerreteriaV46(refActual); }catch(e){}
     removeAny(KP(refActual));
     removeAny(KM(refActual));
     clearGlobalBorrow(refActual);
@@ -14894,6 +15096,83 @@ function LDH_prepVolverMenu(){
     const falta = Math.max(0, pedida - recibida);
     if(falta <= 0){
       alert("Esta línea ya está completa.");
+      return;
+    }
+
+    /*
+     * V46: los accesorios vinculados al catálogo actual de Ferretería no
+     * pertenecen al Stock de hierro por empresa. Se reservan en su propia base
+     * y se reflejan inmediatamente como asignados/libres.
+     */
+    let hardwareInfo = null;
+    try{
+      if(typeof _getCommonHardwareStockInfo === "function"){
+        hardwareInfo = _getCommonHardwareStockInfo(line);
+      }
+    }catch(e){ hardwareInfo = null; }
+    if(hardwareInfo && hardwareInfo.stockKnown && hardwareInfo.mat && hardwareInfo.mat.__ferreteriaActualV45){
+      const fisico = n(hardwareInfo.physical);
+      const reservado = n(hardwareInfo.reserved);
+      const asignado = n(hardwareInfo.assigned);
+      const libre = n(hardwareInfo.stock);
+      if(libre <= 0){
+        alert(`No hay stock libre en Ferretería para asignar.
+
+Físico: ${fisico}
+Reservado: ${reservado}
+Asignado: ${asignado}
+Libre: ${libre}`);
+        return;
+      }
+
+      const defaultQty = Math.min(falta,libre);
+      const rawHardware = prompt(
+        `Asignar stock libre de Ferretería
+
+Material: ${hardwareInfo.mat.name || hardwareInfo.mat.nombre || line.mat}
+
+Físico: ${fisico}
+Reservado: ${reservado}
+Asignado: ${asignado}
+Libre: ${libre}
+
+Cantidad a asignar:`,
+        String(defaultQty)
+      );
+      if(rawHardware === null) return;
+      const qtyHardware = n(rawHardware);
+      if(qtyHardware <= 0){
+        alert("Cantidad incorrecta.");
+        return;
+      }
+      if(qtyHardware > falta){
+        alert(`No puedes asignar más de lo que falta en el pedido.\nFalta: ${falta}`);
+        return;
+      }
+      if(qtyHardware > libre){
+        alert(`No puedes asignar más de lo libre.\nLibre: ${libre}`);
+        return;
+      }
+
+      const resultHardware = LDH_reservarFerreteriaActualV46(index,qtyHardware);
+      if(!resultHardware.ok){
+        alert(resultHardware.reason || "No se ha podido asignar el stock de Ferretería.");
+        return;
+      }
+      completeLine(index,qtyHardware,"libre:ferreteria_actual");
+      const currentLine = Array.isArray(estadoMateriales) ? estadoMateriales[index] : line;
+      if(currentLine && Array.isArray(currentLine.trace) && currentLine.trace.length){
+        const trace = currentLine.trace[currentLine.trace.length-1];
+        trace.assignmentId = resultHardware.assignment.id;
+        trace.materialId = resultHardware.assignment.materialId;
+        trace.stockSource = "ldh_v2_ferreteria_stock_v1";
+        try{ guardarEstadoLocal(); }catch(e){}
+      }
+      alert(`✅ Stock libre de Ferretería asignado.
+
+Material: ${resultHardware.material.name || resultHardware.material.nombre}
+Cantidad: ${qtyHardware}
+Libre restante: ${resultHardware.freeAfter}`);
       return;
     }
 
