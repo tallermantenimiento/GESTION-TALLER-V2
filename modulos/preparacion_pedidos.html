@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V49-TRANSACCIONES-ESTABLES-20260729" />
+<meta name="ldh-build" content="PREPARACION-V50-BOTONES-ESTABLES-20260729" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -9495,7 +9495,7 @@ init();
 
 <script id="LDH_CONSUMO_UNICO_0506">
 (function(){
-  const VERSION = "Interempresas V49 · transacciones estables";
+  const VERSION = "Interempresas V50 · botones estables";
 
   function esc(s){
     return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -10083,7 +10083,7 @@ init();
 
 <script id="LDH_ASIGNAR_LIBRE_SEGURO_0506">
 (function(){
-  const VERSION_ASIG_LIBRE = "Interempresas V49 · transacciones estables";
+  const VERSION_ASIG_LIBRE = "Interempresas V50 · botones estables";
 
   function n(v){
     const x = parseFloat(String(v ?? 0).replace(",", "."));
@@ -10522,7 +10522,7 @@ init();
 
 <script id="LDH_ASIGNAR_OTRA_EMPRESA_SEGURO_0506">
 (function(){
-  const VERSION_OTRA = "Interempresas V49 · transacciones estables";
+  const VERSION_OTRA = "Interempresas V50 · botones estables";
 
   function n(v){
     const x = parseFloat(String(v ?? 0).replace(",", "."));
@@ -15063,6 +15063,20 @@ function LDH_prepVolverMenu(){
   function refreshViews(forceDetail){
     clearTimeout(renderTimer);
     renderTimer = setTimeout(function(){
+      /*
+       * V50: una actualización remota nunca puede reconstruir la ficha entre
+       * pointerdown y click ni mientras el usuario mantiene el puntero sobre
+       * un control.
+       */
+      try{
+        if(
+          typeof window.LDH_prepUiBusyV50 === "function" &&
+          window.LDH_prepUiBusyV50()
+        ){
+          refreshViews(forceDetail);
+          return;
+        }
+      }catch(e){}
       const ref = currentRef();
       try{ if(typeof cargarLista === "function") cargarLista(); }catch(e){}
       if(ref){
@@ -17928,8 +17942,135 @@ window.limpiarConsumoLinea = async function (lineIndex) {
   }
 };
 
+/*
+ * V50 · ESTABILIDAD DE LA INTERFAZ
+ *
+ * Stock publica metadatos (fecha/revisión) con mucha frecuencia. Eso no debe
+ * reconstruir la tabla cuando no ha cambiado ninguna cantidad, reserva,
+ * préstamo, empresa o material. Además, ningún redibujado puede sustituir un
+ * botón desde que el usuario pone el puntero encima hasta terminar el clic.
+ */
+const LDH_PREP_VOLATILE_STOCK_KEYS_V50 = new Set([
+  "updatedat",
+  "updatedatiso",
+  "publishedat",
+  "lastreadat",
+  "lastwriteat",
+  "lastsyncedat",
+  "savedat",
+  "syncedat",
+  "syncat",
+  "cloudupdatedat",
+  "timestamp",
+  "revision",
+  "rev",
+  "version"
+]);
+
+function LDH_prepNormalizeMarkerKeyV50(key) {
+  return String(key ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function LDH_prepCanonicalStockV50(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => LDH_prepCanonicalStockV50(item))
+      .sort((left, right) => {
+        const a = JSON.stringify(left);
+        const b = JSON.stringify(right);
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
+  }
+  if (value && typeof value === "object") {
+    const clean = {};
+    Object.keys(value)
+      .sort()
+      .forEach((key) => {
+        if (
+          LDH_PREP_VOLATILE_STOCK_KEYS_V50.has(
+            LDH_prepNormalizeMarkerKeyV50(key)
+          )
+        ) return;
+        clean[key] = LDH_prepCanonicalStockV50(value[key]);
+      });
+    return clean;
+  }
+  return value;
+}
+
+function LDH_prepSemanticStockMarkerV50(stockDB, mirrorRows) {
+  /*
+   * Se conservan todos los datos operativos. Solo se eliminan metadatos
+   * volátiles y se normaliza el orden de las colecciones.
+   */
+  const operational = LDH_prepCanonicalStockV50({
+    /*
+     * Se incluye el paquete completo para no dejar fuera futuros campos
+     * operativos. La limpieza recursiva superior elimina solo metadatos.
+     */
+    database: stockDB,
+    mirrorMaterials: (Array.isArray(mirrorRows) ? mirrorRows : []).map(
+      (row) => ({
+        id: row?.id,
+        stockId: row?.stockId,
+        companyId: row?.companyId,
+        materialId: row?.materialId,
+        name: row?.name,
+        unit: row?.unit,
+        qty: row?.qty
+      })
+    )
+  });
+  return JSON.stringify(operational);
+}
+
+let LDH_PREP_UI_INTERACTION_UNTIL_V50 = 0;
+let LDH_PREP_DEFERRED_RENDER_V50 = 0;
+
+function LDH_prepMarkUiInteractionV50(duration = 1200) {
+  LDH_PREP_UI_INTERACTION_UNTIL_V50 = Math.max(
+    LDH_PREP_UI_INTERACTION_UNTIL_V50,
+    Date.now() + duration
+  );
+}
+
+function LDH_prepIsActionTargetV50(target) {
+  return Boolean(
+    target instanceof Element &&
+    target.closest(
+      "button, a.btn, .btn, .btn-mini, [role='button'], input, select, textarea"
+    )
+  );
+}
+
+["pointerdown", "mousedown", "touchstart", "click"].forEach((eventName) => {
+  document.addEventListener(
+    eventName,
+    (event) => {
+      if (LDH_prepIsActionTargetV50(event.target)) {
+        LDH_prepMarkUiInteractionV50(eventName === "click" ? 900 : 1800);
+      }
+    },
+    true
+  );
+});
+
+function LDH_prepUiBusyV50() {
+  if (LDH_PREP_STOCK_MUTATING_V49) return true;
+  if (Date.now() < LDH_PREP_UI_INTERACTION_UNTIL_V50) return true;
+  try {
+    return Boolean(document.querySelector(
+      "button:hover, a.btn:hover, .btn:hover, .btn-mini:hover, " +
+      "[role='button']:hover, input:hover, select:hover, textarea:hover"
+    ));
+  } catch (_) {
+    return false;
+  }
+}
+window.LDH_prepUiBusyV50 = LDH_prepUiBusyV50;
+
 function LDH_prepRerenderStockV28() {
-  if (LDH_PREP_STOCK_MUTATING_V49) {
+  if (LDH_prepUiBusyV50()) {
     clearTimeout(LDH_PREP_STOCK_REFRESH_V28);
     LDH_PREP_STOCK_REFRESH_V28 = setTimeout(
       LDH_prepRerenderStockV28,
@@ -17939,6 +18080,10 @@ function LDH_prepRerenderStockV28() {
   }
   clearTimeout(LDH_PREP_STOCK_REFRESH_V28);
   LDH_PREP_STOCK_REFRESH_V28 = setTimeout(() => {
+    if (LDH_prepUiBusyV50()) {
+      LDH_prepRerenderStockV28();
+      return;
+    }
     try {
       if (typeof window.renderTabla === "function") window.renderTabla();
     } catch (error) {
@@ -17958,14 +18103,10 @@ function LDH_prepRerenderStockV28() {
 async function LDH_prepApplyFirebaseStockV28(force = false) {
   const result = await LDH_prepReadFirebasePackageV28();
   const mirrorRows = await LDH_prepReadStockMaterialsMirrorV44();
-  const mirrorMarker = mirrorRows
-    .map((row) => [
-      row?.id, row?.stockId, row?.companyId, row?.materialId,
-      row?.name, row?.unit, row?.qty
-    ].map((value) => String(value ?? "")).join("|"))
-    .sort()
-    .join(";");
-  const combinedMarker = `${result.rawMarker}|stock_materials:${mirrorMarker}`;
+  const combinedMarker = LDH_prepSemanticStockMarkerV50(
+    result.stockDB,
+    mirrorRows
+  );
   /*
    * La escucha y la lectura manual pueden entregar varias veces exactamente
    * la misma revisión. No se redibuja si el contenido no ha cambiado: así no
@@ -18055,5 +18196,31 @@ onAuthStateChanged(LDH_PREP_STOCK_AUTH_V28, async (user) => {
 });
 
 window.LDH_actualizarStockComunDesdeFirebase = () => LDH_prepApplyFirebaseStockV28(true);
+
+/*
+ * Último blindaje: otras sincronizaciones antiguas también llaman a
+ * renderTabla(). Se aplazan únicamente mientras el usuario está usando un
+ * control; al salir del control se ejecuta el último redibujado pendiente.
+ */
+if (
+  typeof window.renderTabla === "function" &&
+  !window.renderTabla.__LDH_PREP_V50_GUARDED
+) {
+  const LDH_PREP_RENDER_ORIGINAL_V50 = window.renderTabla;
+  const LDH_PREP_RENDER_GUARDED_V50 = function(...args) {
+    if (LDH_prepUiBusyV50()) {
+      clearTimeout(LDH_PREP_DEFERRED_RENDER_V50);
+      LDH_PREP_DEFERRED_RENDER_V50 = setTimeout(
+        () => LDH_PREP_RENDER_GUARDED_V50(...args),
+        250
+      );
+      return;
+    }
+    clearTimeout(LDH_PREP_DEFERRED_RENDER_V50);
+    return LDH_PREP_RENDER_ORIGINAL_V50.apply(this, args);
+  };
+  LDH_PREP_RENDER_GUARDED_V50.__LDH_PREP_V50_GUARDED = true;
+  window.renderTabla = LDH_PREP_RENDER_GUARDED_V50;
+}
 </script>
 </body></html>
