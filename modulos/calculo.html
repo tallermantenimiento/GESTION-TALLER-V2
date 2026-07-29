@@ -33,6 +33,8 @@
     .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:16px}
     .muted{color:var(--muted);font-size:12px}
     .warn{color:#fed7aa;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:10px;padding:10px;margin-top:10px}
+    .agenda-handoff{display:none;margin-bottom:16px;color:#cffafe;background:rgba(8,145,178,.15);border:1px solid rgba(34,211,238,.38);border-radius:12px;padding:11px 13px;font-weight:750}
+    .agenda-handoff.show{display:block}
     table{width:100%;border-collapse:collapse}
     th,td{padding:11px 10px;border-bottom:1px solid rgba(148,163,184,.15);vertical-align:middle;text-align:left}
     th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#93c5fd;background:rgba(15,23,42,.5)}
@@ -73,6 +75,7 @@
     </section>
 
     <section class="card no-print">
+      <div id="agendaHandoffNotice" class="agenda-handoff" role="status"></div>
       <div class="grid-2">
         <div>
           <label>Referencia / Cliente</label>
@@ -140,6 +143,7 @@
 <script>
 (function(){
   const DB_KEYS = ["ldh_db","TallerFlowDB"];
+  const AGENDA_HANDOFF_KEY = "ldh_agenda_to_calculo_v1";
   const BAR_MM = 6000;
 
   function getStore(k){
@@ -362,11 +366,13 @@
     dbInfo:{key:"", db:{concepts:[]}},
     concept:null,
     last:null,
+    agendaHandoff:null,
 
     init(){
       this.dbInfo = findDB();
       this.renderConcepts();
       this.renderCompanies();
+      this.applyAgendaHandoff();
       this.selectConcept();
       this.calculate();
     },
@@ -388,6 +394,73 @@
       const sel = document.getElementById("companySelect");
       const list = readCompanyMaster();
       sel.innerHTML = '<option value="">— Sin empresa —</option>' + list.map(c=>`<option value="${esc(c.name || c.code || c.id)}">${esc(c.name || c.code || c.id)}</option>`).join("");
+    },
+
+    applyAgendaHandoff(){
+      const params = new URLSearchParams(location.search);
+      if(params.get("fromAgenda") !== "1") return false;
+
+      const notice = document.getElementById("agendaHandoffNotice");
+      const expectedOrderId = String(params.get("orderId") || "").trim();
+      let payload = null;
+      for(const storage of [sessionStorage,localStorage]){
+        try{
+          const candidate = parse(storage.getItem(AGENDA_HANDOFF_KEY),null);
+          if(candidate && typeof candidate === "object"){
+            payload = candidate;
+            break;
+          }
+        }catch(error){
+          console.warn("No se pudo leer el envío de Agenda",error);
+        }
+      }
+
+      const valid = payload &&
+        Number(payload.version) === 1 &&
+        payload.source === "agenda_diaria" &&
+        (!expectedOrderId || String(payload.orderId || "") === expectedOrderId) &&
+        (!Number(payload.expiresAtMs) || Number(payload.expiresAtMs) >= Date.now());
+
+      if(!valid){
+        if(notice){
+          notice.textContent = "No se ha encontrado un envío válido desde Agenda. No se ha modificado ningún dato.";
+          notice.classList.add("show");
+        }
+        return false;
+      }
+
+      const reference = String(payload.reference || "").trim();
+      const description = String(payload.description || "").trim();
+      const combinedReference = [reference,description].filter(Boolean).join(" ");
+      const refInput = document.getElementById("refInput");
+      if(refInput) refInput.value = combinedReference;
+
+      const companySelect = document.getElementById("companySelect");
+      const companyCandidates = [
+        payload.companyName,
+        payload.companyId
+      ].map(value=>norm(value)).filter(Boolean);
+      let companyOption = companySelect
+        ? [...companySelect.options].find(option=>{
+            const values = [option.value,option.textContent].map(value=>norm(value));
+            return companyCandidates.some(candidate=>values.includes(candidate));
+          })
+        : null;
+
+      const companyLabel = String(payload.companyName || payload.companyId || "").trim();
+      if(companySelect && !companyOption && companyLabel){
+        companyOption = new Option(companyLabel,companyLabel);
+        companyOption.dataset.agendaTemporary = "1";
+        companySelect.add(companyOption);
+      }
+      if(companySelect && companyOption) companySelect.value = companyOption.value;
+
+      this.agendaHandoff = payload;
+      if(notice){
+        notice.textContent = `Recibido desde Agenda: ${reference || "sin referencia"}${companyLabel ? " · " + companyLabel : ""}. Revisa el concepto y calcula antes de enviarlo a Preparación.`;
+        notice.classList.add("show");
+      }
+      return true;
     },
 
     selectConcept(){
