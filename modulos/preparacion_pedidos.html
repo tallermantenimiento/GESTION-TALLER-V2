@@ -4484,11 +4484,15 @@ function _v2PhysicalForLine(pack, company, material, line){
   const movs = _v2MovementsForLine(pack, company, material, line);
   const rowReal = _v2QtyFromRows(rows);
   const movReal = _v2QtyFromMovements(movs);
+  const physicalMovs = movs.filter(m =>
+    LDH_stockTipoMovimientoFisico(_v2First(m && m.type, m && m.tipo, "entrada")) !== 0
+  );
 
   // El módulo Stock actual calcula el físico desde movements.
   // La fila stock puede existir con 0 y servir solo como ficha/material.
-  // Por eso: si hay movimientos coincidentes, son la fuente principal.
-  if(movs.length) return {real:movReal, rowReal, movReal, rowsMatched:rows.length, movementsMatched:movs.length};
+  // Solo los movimientos físicos sustituyen esa fila. Una asignación o una
+  // reserva es una traza informativa y no debe convertir el físico en cero.
+  if(physicalMovs.length) return {real:movReal, rowReal, movReal, rowsMatched:rows.length, movementsMatched:movs.length};
   return {real:rowReal, rowReal, movReal, rowsMatched:rows.length, movementsMatched:movs.length};
 }
 function _v2AsArrayWithIds(value, fallbackName){
@@ -6420,7 +6424,10 @@ function _v2MovementReal(pack, companyId, materialId){
   }) || {id:materialId, name:materialId, material:materialId};
 
   const movs = _v2MovementsForLine(pack, company, material, {mat:materialId, material:materialId, linked_matId:materialId});
-  if(movs.length) return _v2QtyFromMovements(movs);
+  const physicalMovs = movs.filter(m =>
+    LDH_stockTipoMovimientoFisico(_v2First(m && m.type, m && m.tipo, "entrada")) !== 0
+  );
+  if(physicalMovs.length) return _v2QtyFromMovements(physicalMovs);
 
   const rows = _v2RowsForLine(pack, company, material, {mat:materialId, material:materialId, linked_matId:materialId});
   return _v2QtyFromRows(rows);
@@ -10846,6 +10853,143 @@ init();
       return changed;
     }
 
+    /*
+     * La búsqueda entre empresas debe usar la misma lectura física que Stock.
+     * Un material puede tener movimientos informativos (asignación/reserva)
+     * sin movimientos físicos. En ese caso realStock() devuelve 0 aunque la
+     * fila autoritativa de Stock sí tenga existencias. La vista plana de nube
+     * ya resuelve empresa + nombre real y conserva ese físico correctamente.
+     */
+    function asCloudArray(value){
+      if(Array.isArray(value)) return value;
+      if(!value || typeof value !== "object") return [];
+      return Object.entries(value).map(([key,item])=>{
+        if(item && typeof item === "object"){
+          return Object.assign({id:key}, item);
+        }
+        return {id:key, name:String(item ?? key), value:item};
+      });
+    }
+    function companyKeys(value){
+      return [
+        value && value.companyId,
+        value && value.empresaId,
+        value && value.company,
+        value && value.empresa,
+        value && value.companyName,
+        value && value.empresaNombre,
+        value && value.id,
+        value && value.name,
+        value && value.nombre
+      ].map(norm).filter(Boolean);
+    }
+    function materialKeys(value, cloudMaterials){
+      const rawId = String(first(
+        value && value.materialId,
+        value && value.matId,
+        value && value.material_id,
+        value && value.idMaterial,
+        value && value.id,
+        ""
+      ) || "").trim();
+      const referenced = rawId
+        ? cloudMaterials.find(m=>String(first(m&&m.id,m&&m.materialId,m&&m.matId,""))===rawId)
+        : null;
+      return [
+        rawId,
+        value && value.materialName,
+        value && value.material_nombre,
+        value && value.nombreMaterial,
+        value && value.material,
+        value && value.mat,
+        value && value.name,
+        value && value.nombre,
+        referenced && matLabel(referenced)
+      ].map(norm).filter(Boolean);
+    }
+    function keysOverlap(left,right){
+      if(!left.length || !right.length) return false;
+      return left.some(a=>right.includes(a));
+    }
+    function isCurrentCompany(value){
+      return keysOverlap(
+        companyKeys(value),
+        companyKeys(ctx.company).concat([norm(ctx.companyId)])
+      );
+    }
+    function isCommonCompany(value){
+      try{
+        if(typeof LDH_esEmpresaStockComun === "function" && LDH_esEmpresaStockComun(value)) return true;
+      }catch(e){}
+      return companyKeys(value).some(k=>
+        k === "stock comun" || k === "stock comun global" || k === "almacen comun"
+      );
+    }
+    function activeOperational(row){
+      const status = norm(first(row&&row.status,row&&row.estado,"activa"));
+      const phase = norm(first(row&&row.phase,row&&row.fase,"preparacion"));
+      return status === "activa" && (phase === "preparacion" || phase === "fabricacion");
+    }
+    function cloudOperationalQty(list, cloudRow, cloudMaterials, kind){
+      const rowCompanyKeys = companyKeys(cloudRow);
+      const rowMaterialKeys = materialKeys(cloudRow, cloudMaterials)
+        .concat([norm(cloudRow && cloudRow.materialName)])
+        .filter(Boolean);
+      return asCloudArray(list)
+        .filter(activeOperational)
+        .filter(item=>keysOverlap(companyKeys(item),rowCompanyKeys))
+        .filter(item=>keysOverlap(materialKeys(item,cloudMaterials),rowMaterialKeys))
+        .filter(item=>kind !== "reserva" || !LDH_stockEsReservaAutoRecibida(item))
+        .reduce((sum,item)=>sum+n(first(
+          item&&item.qty,
+          item&&item.cantidad,
+          item&&item.cantidadReservada,
+          item&&item.reservado,
+          item&&item.asignado,
+          0
+        )),0);
+    }
+    function cloudCompanyForRow(cloudRow){
+      const rowKeys = companyKeys(cloudRow);
+      return (ctx.pack.companies || []).find(company=>
+        keysOverlap(companyKeys(company),rowKeys)
+      ) || {
+        id:first(cloudRow&&cloudRow.companyId,cloudRow&&cloudRow.companyName),
+        companyId:first(cloudRow&&cloudRow.companyId,cloudRow&&cloudRow.companyName),
+        name:first(cloudRow&&cloudRow.companyName,cloudRow&&cloudRow.companyId),
+        nombre:first(cloudRow&&cloudRow.companyName,cloudRow&&cloudRow.companyId),
+        __fromCloudRow:true
+      };
+    }
+    function cloudMaterialForRow(cloudRow, cloudMaterials){
+      const rowId = String(first(
+        cloudRow&&cloudRow.materialId,
+        cloudRow&&cloudRow.matId,
+        cloudRow&&cloudRow.material_id,
+        ""
+      ) || "").trim();
+      const rowName = String(first(
+        cloudRow&&cloudRow.materialName,
+        cloudRow&&cloudRow.name,
+        cloudRow&&cloudRow.nombre,
+        cloudRow&&cloudRow.material,
+        rowId
+      ) || "").trim();
+      return (ctx.pack.materials || []).find(material=>
+        rowId && String(matId(material)) === rowId
+      ) || (ctx.pack.materials || []).find(material=>
+        norm(matLabel(material)) === norm(rowName)
+      ) || cloudMaterials.find(material=>
+        rowId && String(first(material&&material.id,material&&material.materialId,material&&material.matId,"")) === rowId
+      ) || {
+        id:rowId || rowName,
+        materialId:rowId || rowName,
+        name:rowName,
+        nombre:rowName,
+        __fromCloudRow:true
+      };
+    }
+
     (ctx.pack.companies || []).forEach(c=>{
       const cid = compId(c);
       if(String(cid) === String(ctx.companyId)) return;
@@ -10915,6 +11059,82 @@ init();
           });
       });
     });
+
+    /*
+     * Refuerzo autoritativo: añade o sustituye la opción de stock libre con
+     * la lectura publicada por Stock. No escribe nada; únicamente prepara la
+     * lista que verá el usuario antes de confirmar el préstamo.
+     */
+    const cloudRows = Array.isArray(window.__LDH_PREP_STOCK_CLOUD_ROWS)
+      ? window.__LDH_PREP_STOCK_CLOUD_ROWS
+      : [];
+    const cloudDB = window.__LDH_PREP_STOCK_CLOUD_DB &&
+      typeof window.__LDH_PREP_STOCK_CLOUD_DB === "object"
+        ? window.__LDH_PREP_STOCK_CLOUD_DB
+        : (ctx.pack.db || {});
+    const cloudMaterials = asCloudArray(cloudDB.materials);
+
+    cloudRows
+      .filter(cloudRow=>!isCurrentCompany(cloudRow))
+      .filter(cloudRow=>!isCommonCompany(cloudRow))
+      .filter(cloudRow=>materialMatches(
+        first(cloudRow&&cloudRow.materialName,cloudRow&&cloudRow.name,cloudRow&&cloudRow.material),
+        target
+      ))
+      .forEach(cloudRow=>{
+        const company = cloudCompanyForRow(cloudRow);
+        const material = cloudMaterialForRow(cloudRow,cloudMaterials);
+        const companyId = String(first(
+          cloudRow&&cloudRow.companyId,
+          compId(company)
+        ));
+        const materialId = String(first(
+          cloudRow&&cloudRow.materialId,
+          matId(material)
+        ));
+        const fisico = n(first(
+          cloudRow&&cloudRow.physical,
+          cloudRow&&cloudRow.fisico,
+          cloudRow&&cloudRow.qty,
+          cloudRow&&cloudRow.cantidad,
+          0
+        ));
+        const res = cloudOperationalQty(
+          cloudDB.reservations || cloudDB.reservas,
+          cloudRow,
+          cloudMaterials,
+          "reserva"
+        );
+        const asig = cloudOperationalQty(
+          cloudDB.assignments || cloudDB.asignaciones,
+          cloudRow,
+          cloudMaterials,
+          "asignacion"
+        );
+        const libre = fisico - res - asig;
+        if(libre <= 0) return;
+
+        const sameCompanyKeys = companyKeys(cloudRow);
+        const sameMaterialKeys = materialKeys(cloudRow,cloudMaterials);
+        for(let rowIndex=rows.length-1; rowIndex>=0; rowIndex-=1){
+          const existing = rows[rowIndex];
+          if(
+            keysOverlap(companyKeys(existing.company),sameCompanyKeys) &&
+            keysOverlap(materialKeys(existing.material,cloudMaterials),sameMaterialKeys)
+          ){
+            rows.splice(rowIndex,1);
+          }
+        }
+
+        rows.push({
+          mode:"libre",
+          company, companyId,
+          material, materialId,
+          fisico, res, asig, libre,
+          source:"stock_nube_autoritativo",
+          label:`LIBRE · ${compLabel(company)} · ${matLabel(material)} · libre ${libre} · físico ${fisico} · res ${res} · asig ${asig}`
+        });
+      });
 
     const options = rows.concat(reserveRows).concat(assignedRows);
 
