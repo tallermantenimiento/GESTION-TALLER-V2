@@ -1313,6 +1313,10 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 .wo-tab.active{background:linear-gradient(180deg,#075985,#0c4a6e);border-color:#38bdf8;color:#fff;box-shadow:0 8px 22px rgba(2,132,199,.22)}
 .wo-panel[hidden]{display:none!important}
 .wo-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+.wo-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.wo-backup-btn{border:1px solid rgba(45,212,191,.48);background:linear-gradient(180deg,rgba(13,148,136,.34),rgba(15,118,110,.2));color:#ccfbf1;border-radius:10px;padding:10px 13px;font-weight:900;cursor:pointer}
+.wo-backup-btn.import{border-color:rgba(96,165,250,.48);background:linear-gradient(180deg,rgba(37,99,235,.32),rgba(30,64,175,.2));color:#dbeafe}
+.wo-backup-btn:hover{filter:brightness(1.15)}
 .wo-title-wrap h3{margin:0;color:#fff;font-size:20px}
 .wo-title-wrap p{margin:5px 0 0;color:#9fb0c8;font-size:12px}
 .wo-statuses{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
@@ -1504,7 +1508,12 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
               <span id="woCompaniesStatus" class="wo-status warn">Empresas de Stock: cargando…</span>
             </div>
           </div>
-          <button type="button" class="wo-new-btn" onclick="WorkOrders.openNew()">＋ Nueva orden de trabajo</button>
+          <div class="wo-head-actions">
+            <button type="button" class="wo-backup-btn" onclick="WorkOrders.exportJson()">⬇ Exportar JSON</button>
+            <button type="button" class="wo-backup-btn import" onclick="WorkOrders.openImportJson()">⬆ Importar JSON</button>
+            <input type="file" id="woImportJsonFile" accept=".json,application/json" hidden onchange="WorkOrders.importJsonFile(this)">
+            <button type="button" class="wo-new-btn" onclick="WorkOrders.openNew()">＋ Nueva orden de trabajo</button>
+          </div>
         </div>
 
         <div class="wo-table-wrap">
@@ -7917,6 +7926,182 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return this.orders.slice();
     },
 
+    buildJsonBackup(){
+      return {
+        format:'ldh_agenda_ordenes',
+        version:1,
+        exportedAt:new Date().toISOString(),
+        source:location.href,
+        storageKey:KEY,
+        orderCount:this.orders.length,
+        orders:this.orders.map(order=>normalizeOrder(order))
+      };
+    },
+
+    downloadJsonBackup(prefix){
+      const payload = this.buildJsonBackup();
+      const stamp = new Date().toISOString().replace(/[:.]/g,'-');
+      const blob = new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${prefix || 'COPIA_AGENDA'}_${stamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),1500);
+      return payload.orderCount;
+    },
+
+    exportJson(){
+      const count = this.downloadJsonBackup('COPIA_SEGURIDAD_AGENDA');
+      this.updateSyncStatus(`Copia JSON descargada · ${count} trabajos`,true);
+    },
+
+    openImportJson(){
+      const input = document.getElementById('woImportJsonFile');
+      if(!input) return;
+      input.value = '';
+      input.click();
+    },
+
+    ordersFromJsonBackup(payload){
+      if(Array.isArray(payload)) return payload;
+      if(payload && Array.isArray(payload.orders)) return payload.orders;
+
+      const parseStorageValue = value => {
+        if(Array.isArray(value)) return value;
+        if(typeof value !== 'string') return null;
+        const parsed = safeJson(value,null);
+        return Array.isArray(parsed) ? parsed : null;
+      };
+      const direct = parseStorageValue(payload?.[KEY]);
+      if(direct) return direct;
+      const local = parseStorageValue(payload?.localStorage?.[KEY]);
+      if(local) return local;
+      const session = parseStorageValue(payload?.sessionStorage?.[KEY]);
+      if(session) return session;
+      return null;
+    },
+
+    async importJsonFile(input){
+      const file = input?.files?.[0];
+      if(input) input.value = '';
+      if(!file) return;
+
+      let payload;
+      try{
+        payload = JSON.parse(await file.text());
+      }catch(error){
+        alert('El archivo no es un JSON válido. No se ha modificado ningún dato.');
+        return;
+      }
+
+      const rawRows = this.ordersFromJsonBackup(payload);
+      if(!Array.isArray(rawRows)){
+        alert('El JSON no contiene una copia reconocible de Agenda. No se ha modificado ningún dato.');
+        return;
+      }
+
+      const importedById = new Map();
+      rawRows.forEach(raw=>{
+        if(!raw || typeof raw !== 'object') return;
+        const id = normText(raw.id);
+        const reference = normText(raw.reference);
+        if(!id || !reference) return;
+        const order = normalizeOrder(raw);
+        const previous = importedById.get(order.id);
+        if(!previous || Number(order.updatedAtMs) >= Number(previous.updatedAtMs)){
+          importedById.set(order.id,order);
+        }
+      });
+      const imported = Array.from(importedById.values());
+      if(!imported.length){
+        alert('La copia no contiene trabajos válidos. No se ha modificado ningún dato.');
+        return;
+      }
+
+      const currentById = new Map(
+        this.orders.map(order=>[order.id,normalizeOrder(JSON.parse(JSON.stringify(order)))])
+      );
+      const changedIds = new Set();
+      let added = 0;
+      let updated = 0;
+      let preserved = 0;
+
+      imported.forEach(order=>{
+        const current = currentById.get(order.id);
+        if(!current){
+          currentById.set(order.id,order);
+          changedIds.add(order.id);
+          added++;
+          return;
+        }
+        if(Number(order.updatedAtMs) > Number(current.updatedAtMs)){
+          currentById.set(order.id,order);
+          changedIds.add(order.id);
+          updated++;
+        }else{
+          preserved++;
+        }
+      });
+
+      if(!changedIds.size){
+        alert(`La copia contiene ${imported.length} trabajos, pero los actuales son iguales o más recientes. No se ha cambiado nada.`);
+        return;
+      }
+      if(!this.cloud?.restoreOrders){
+        alert('Espera a que aparezca “Sincronización: conectada” antes de importar. Así la restauración quedará protegida también en la nube. No se ha cambiado nada.');
+        return;
+      }
+
+      const confirmed = confirm(
+        `IMPORTAR COPIA DE AGENDA\n\n` +
+        `Trabajos válidos en la copia: ${imported.length}\n` +
+        `Trabajos que se recuperarán: ${added}\n` +
+        `Trabajos que se actualizarán: ${updated}\n` +
+        `Trabajos actuales que se conservarán: ${preserved}\n\n` +
+        `La importación fusionará la copia y NO borrará ningún trabajo actual.\n` +
+        `Antes de importar se descargará automáticamente otra copia de seguridad.\n\n¿Continuar?`
+      );
+      if(!confirmed) return;
+
+      this.downloadJsonBackup('ANTES_DE_IMPORTAR_AGENDA');
+
+      const originalOrders = this.orders;
+      const stagedOrders = Array.from(currentById.values());
+      this.orders = stagedOrders;
+      const normalizedRows = [
+        ...this.normalizePendingPositions(true),
+        ...this.normalizeInProgress(true)
+      ];
+      const rowsToRestore = Array.from(new Map(
+        [...stagedOrders.filter(order=>changedIds.has(order.id)),...normalizedRows]
+          .map(order=>[order.id,order])
+      ).values());
+      const finalOrders = this.orders.slice();
+      this.orders = originalOrders;
+
+      try{
+        await this.cloud.restoreOrders(rowsToRestore);
+      }catch(error){
+        console.error('No se pudo importar la copia de Agenda',error);
+        alert('La nube no ha confirmado la restauración. No se ha modificado la copia local.');
+        return;
+      }
+
+      rowsToRestore.forEach(order=>this.deletedIds.delete(order.id));
+      this.orders = finalOrders;
+      writeOrders(this.orders);
+      this.render();
+      this.updateSyncStatus(`Copia importada · ${added} recuperados · ${updated} actualizados`,true);
+      alert(
+        `Importación terminada correctamente.\n\n` +
+        `Recuperados: ${added}\nActualizados: ${updated}\nConservados: ${preserved}\n\n` +
+        `No se ha eliminado ningún trabajo actual.`
+      );
+    },
+
     sortedPending(){
       return this.orders
         .filter(o=>o.status === 'pending')
@@ -8773,6 +8958,21 @@ window.ejecutarDevolucion = function(matId, maxQty){
           });
           await batch.commit();
         },
+        async restoreOrders(orders){
+          const rows = (Array.isArray(orders) ? orders : []).filter(order=>order && order.id);
+          if(!rows.length) return;
+          for(let start=0;start<rows.length;start+=200){
+            const batch = writeBatch(db);
+            const now = Date.now();
+            rows.slice(start,start+200).forEach(order=>{
+              const id = String(order.id);
+              const payload = cleanOrder({...order,updatedAt:serverTimestamp(),updatedAtMs:now});
+              batch.delete(doc(deletedCol,id));
+              batch.set(doc(ordersCol,id),payload,{merge:true});
+            });
+            await batch.commit();
+          }
+        },
         async createNotification(notification){
           if(!notification?.id) return;
           const payload = cleanOrder({
@@ -8952,7 +9152,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     document.body.classList.add('ldh-module-standalone');
     var bar=document.createElement('div');
     bar.className='ldh-module-topbar no-print';
-    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>Módulo independiente</small><span class="spacer"></span>';
+    bar.innerHTML='<a href="../index.html">← Menú</a><b>'+TITLE+'</b><small>Módulo independiente · Copias JSON v1</small><span class="spacer"></span>';
     document.body.insertBefore(bar, document.body.firstChild);
   }
   function route(){
