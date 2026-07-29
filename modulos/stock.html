@@ -1332,6 +1332,7 @@ html, body{
 </div>
     <div class="actions">
       <span id="LDH_stockCloudStatus" class="btn small" title="Pendiente de conectar con Firestore">Stock nube pendiente</span>
+      <span class="btn small" title="Préstamos y donaciones confirmados directamente en la nube">Interempresas V45</span>
       <button class="btn ldh-maint-btn" type="button" onclick="LDH_openMaintenanceModal()">Mantenimiento avanzado</button>
     </div>
     <button class="btn ldh-stock-menu-fixed" type="button" onclick="volverMenu()">← Menú</button>
@@ -1809,6 +1810,12 @@ function reservedStock(companyId,materialId){
 }
 function _isLoanAssignment(a){
   const typ = String((a && (a.assignmentType || a.reason)) || '').toLowerCase();
+  if(a && (
+    a.debtExempt === true ||
+    a.returnRequired === false ||
+    typ.includes('donacion') ||
+    typ.includes('donación')
+  )) return false;
   return typ.includes('otra_empresa') || typ.includes('otra empresa') || !!(a && a.toCompanyId);
 }
 function _companyNormForPrep(v){
@@ -2189,17 +2196,37 @@ function _assignmentStatusClosed(a){
   const st = String(a.status || a.estado || '').toLowerCase();
   return ['devuelta','devuelto','cerrada','cerrado','cancelada','cancelado','cancelada_prueba','cancelado_prueba','liberada','liberado','anulada','anulado','resuelta','resuelto'].includes(st);
 }
+function _assignmentIsDonation(a){
+  const typ = String((a && (a.assignmentType || a.reason || a.source || a.transferType)) || '').toLowerCase();
+  return !!(a && (
+    a.debtExempt === true ||
+    a.returnRequired === false ||
+    typ.includes('donacion') ||
+    typ.includes('donación')
+  ));
+}
+function _assignmentIsCloudConfirmedLoan(a){
+  return !!(a && (
+    a.cloudConfirmed === true ||
+    String(a.syncSource || '').indexOf('preparacion_intercompany') === 0 ||
+    Number(a.intercompanySchemaVersion || 0) >= 45
+  ));
+}
 function _assignmentVisibleDebt(a){
   if(_assignmentStatusClosed(a)) return false;
+  if(_assignmentIsDonation(a)) return false;
   if(String(a.assignmentType||a.reason||'').indexOf('otra_empresa') < 0) return false;
   if(assignmentPendingQty(a) <= 0) return false;
-  return _prepAssignmentAliveForDebt(a);
+  // Los préstamos V45 se confirman en la copia autoritativa de Firebase.
+  // No dependen de que este mismo navegador conserve la ficha local de Preparación.
+  return _assignmentIsCloudConfirmedLoan(a) || _prepAssignmentAliveForDebt(a);
 }
 function sanearDeudasAntiguasPreparacion(){
   try{
     let changed = false;
     (db.assignments || []).forEach(a=>{
       if(String(a.assignmentType||a.reason||'').indexOf('otra_empresa') < 0) return;
+      if(_assignmentIsDonation(a) || _assignmentIsCloudConfirmedLoan(a)) return;
       if(assignmentPendingQty(a) <= 0) return;
       if(!_prepAssignmentAliveForDebt(a)){
         a.status = 'cancelada_prueba';
@@ -2580,6 +2607,7 @@ function depurarDeudasHuerfanas(){
     // Segunda pasada: cualquier assignment de otra empresa con ref pero sin ficha viva ni deuda global viva.
     (db.assignments || []).forEach(a=>{
       if(String(a.assignmentType||a.reason||'').indexOf('otra_empresa') < 0) return;
+      if(_assignmentIsDonation(a) || _assignmentIsCloudConfirmedLoan(a)) return;
       if(_assignmentStatusClosed(a)) return;
       if(assignmentPendingQty(a) <= 0) return;
       if(!_prepAssignmentAliveForDebt(a)){
@@ -6020,14 +6048,25 @@ async function cloudPublishSafetyCheck(force){
   try{
     const remote = await readRemoteStockPackage();
     const remoteMaterials = remote && remote.data && remote.data.materials ? remote.data.materials.length : 0;
+    const localTime = Date.parse(String(local.data && local.data.updatedAt || '')) || 0;
+    const remoteTime = Date.parse(String(
+      remote && remote.meta && remote.meta.updatedAtISO
+      || remote && remote.data && remote.data.updatedAt
+      || ''
+    )) || 0;
 
-    if(remote && remote.raw && remoteMaterials > local.materials){
+    if(remote && remote.raw && (
+      remoteMaterials > local.materials ||
+      remoteTime > localTime + 500
+    )){
       writeStockEverywhere(remote.raw);
       lastRawPublished = remote.raw;
       setCloudStatus(
         'Stock nube restaurado · ' + remoteMaterials + ' materiales',
         'ok',
-        'Se evitó sobrescribir Firestore con un local menor. Local: ' + local.materials + ' · remoto: ' + remoteMaterials
+        'Se evitó sobrescribir Firestore con una copia local anterior. Local: ' +
+        local.materials + ' materiales · remoto: ' + remoteMaterials +
+        ' · revisión remota más reciente.'
       );
       setTimeout(()=>location.reload(), 350);
       return false;
