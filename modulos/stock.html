@@ -1,9 +1,10 @@
 <!doctype html>
+<!-- LDH_STOCK_V47_SIN_RECARGAS_FIREBASE · 29/07/2026 -->
 <html lang="es">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>LDH v2 · Stock por empresa</title>
+<title>LDH v2 · Stock por empresa · V47 sin recargas</title>
 <style>
 :root{
   --bg:#060b16;--panel:#0d1728;--panel2:#101d33;--card:#111f38;--line:rgba(255,255,255,.10);
@@ -1332,7 +1333,7 @@ html, body{
 </div>
     <div class="actions">
       <span id="LDH_stockCloudStatus" class="btn small" title="Pendiente de conectar con Firestore">Stock nube pendiente</span>
-      <span class="btn small" title="Préstamos y donaciones confirmados directamente en la nube">Interempresas V45</span>
+      <span class="btn small" title="Préstamos y donaciones confirmados directamente en la nube">Interempresas V47 · sin recargas</span>
       <button class="btn ldh-maint-btn" type="button" onclick="LDH_openMaintenanceModal()">Mantenimiento avanzado</button>
     </div>
     <button class="btn ldh-stock-menu-fixed" type="button" onclick="volverMenu()">← Menú</button>
@@ -4810,6 +4811,46 @@ function exportJSON(){const blob=new Blob([JSON.stringify(db,null,2)],{type:'app
 function importJSON(ev){const f=ev.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const obj=JSON.parse(r.result); if(!obj.companies||!obj.materials) throw new Error('JSON no válido'); db=obj; activeCompany=db.companies[0]?.id||''; save(); render(); alert('Importado correctamente');}catch(e){alert('No se pudo importar: '+e.message)}};r.readAsText(f);ev.target.value='';}
 
 load();refreshSelectors();render();
+
+/*
+ * Puente seguro para aplicar una copia remota sin recargar la página completa.
+ * Conserva la empresa, el tipo de stock y las familias abiertas.
+ */
+window.LDH_applyRemoteStockWithoutReload = function(){
+  try{
+    const previousCompany = activeCompany;
+    const previousType = activeType;
+    try{
+      if(typeof LDH_stockRememberOpenFamilies === "function"){
+        LDH_stockRememberOpenFamilies();
+      }
+    }catch(_){}
+
+    load();
+    if(
+      previousCompany &&
+      Array.isArray(db.companies) &&
+      db.companies.some(company => String(company.id || "") === String(previousCompany))
+    ){
+      activeCompany = previousCompany;
+    }
+    if(previousType) activeType = previousType;
+    refreshSelectors();
+    render();
+
+    setTimeout(()=>{
+      try{
+        if(typeof LDH_stockRestoreOpenFamilies === "function"){
+          LDH_stockRestoreOpenFamilies();
+        }
+      }catch(_){}
+    }, 60);
+    return true;
+  }catch(error){
+    console.error("No se pudo aplicar Stock remoto sin recargar", error);
+    return false;
+  }
+};
 </script>
 
 <script id="LDH_STOCK_FIX_DEUDAS_PARCIALES_0506">
@@ -6032,7 +6073,9 @@ async function restoreRemoteIfLocalMissing(){
       'ok',
       'Restaurado desde Firestore. Empresas: ' + remote.data.companies.length + ' · materiales: ' + remote.data.materials.length + ' · stock: ' + remote.data.stock.length
     );
-    setTimeout(()=>location.reload(), 350);
+    if(typeof window.LDH_applyRemoteStockWithoutReload === 'function'){
+      window.LDH_applyRemoteStockWithoutReload();
+    }
     return true;
   }
 
@@ -6049,10 +6092,15 @@ async function cloudPublishSafetyCheck(force){
     const remote = await readRemoteStockPackage();
     const remoteMaterials = remote && remote.data && remote.data.materials ? remote.data.materials.length : 0;
     const localTime = Date.parse(String(local.data && local.data.updatedAt || '')) || 0;
+    /*
+     * Se compara la revisión contenida en los DATOS, no la hora técnica de
+     * publicación del documento meta. La hora del meta cambia cada vez que
+     * Firebase confirma una publicación aunque el contenido sea idéntico; usarla
+     * aquí provocaba una restauración + recarga continua aproximadamente cada
+     * segundo.
+     */
     const remoteTime = Date.parse(String(
-      remote && remote.meta && remote.meta.updatedAtISO
-      || remote && remote.data && remote.data.updatedAt
-      || ''
+      remote && remote.data && remote.data.updatedAt || ''
     )) || 0;
 
     if(remote && remote.raw && (
@@ -6068,7 +6116,9 @@ async function cloudPublishSafetyCheck(force){
         local.materials + ' materiales · remoto: ' + remoteMaterials +
         ' · revisión remota más reciente.'
       );
-      setTimeout(()=>location.reload(), 350);
+      if(typeof window.LDH_applyRemoteStockWithoutReload === 'function'){
+        window.LDH_applyRemoteStockWithoutReload();
+      }
       return false;
     }
   }catch(e){
@@ -6094,7 +6144,9 @@ window.LDH_restoreStockFromCloudNow = async function(){
       writeStockEverywhere(remote.raw);
       lastRawPublished = remote.raw;
       setCloudStatus('Stock nube restaurado · ' + remote.data.materials.length + ' materiales','ok','Restaurado manual desde Firestore.');
-      setTimeout(()=>location.reload(), 350);
+      if(typeof window.LDH_applyRemoteStockWithoutReload === 'function'){
+        window.LDH_applyRemoteStockWithoutReload();
+      }
     }else{
       setCloudStatus('Stock nube sin copia válida','bad','Firestore no contiene una copia válida.');
     }
@@ -6245,7 +6297,10 @@ onAuthStateChanged(fbAuth, async user=>{
 });
 
 window.addEventListener('online', ()=>window.LDH_scheduleStockCloudPublish(true));
-setTimeout(()=>window.LDH_scheduleStockCloudPublish(true), 1600);
+setTimeout(()=>{
+  // Respaldo de arranque: no vuelve a publicar si la autenticación ya lo hizo.
+  if(authReady && !lastRawPublished) window.LDH_scheduleStockCloudPublish(true);
+}, 1600);
 </script>
 
 
