@@ -17183,7 +17183,18 @@ function LDH_prepSameRefV32(a, b) {
 }
 
 function LDH_prepCommonAssignmentActiveV32(row) {
-  if (!LDH_prepIsCommonAssignmentV31(row)) return false;
+  if (!row || typeof row !== "object") return false;
+  /*
+   * V51: al entrar en Fabricación se consume cualquier asignación propia del
+   * trabajo (stock libre, reserva propia, donación recibida o STOCK COMÚN).
+   * Los préstamos entre empresas se excluyen porque mantienen su circuito de
+   * deuda/devolución, y Ferretería conserva su base independiente.
+   */
+  if (LDH_prepIsLoanV45(row)) return false;
+  const assignmentType = LDH_prepNormCloudV30(
+    row.assignmentType ?? row.reason ?? row.source ?? ""
+  );
+  if (assignmentType.includes("ferreteria")) return false;
   const status = LDH_prepNormCloudV30(row.status ?? row.estado ?? "activa");
   const phase = LDH_prepNormCloudV30(row.phase ?? row.fase ?? "preparacion");
   const closed = [
@@ -17194,9 +17205,10 @@ function LDH_prepCommonAssignmentActiveV32(row) {
 }
 
 /*
- * Convierte de forma atómica las asignaciones activas de STOCK COMÚN del
- * trabajo indicado en movimientos físicos de salida. El id fijo del movimiento
- * impide descontar dos veces aunque se repita el clic o la transacción.
+ * Convierte de forma atómica las asignaciones propias activas del trabajo en
+ * movimientos físicos de salida. Incluye STOCK COMÚN. El id fijo de cada
+ * movimiento impide descontar dos veces aunque se repita el clic, se recargue
+ * la página o se regularice un trabajo que ya estaba en Fabricación.
  */
 async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
   const reference = String(workRef ?? "").trim();
@@ -17258,7 +17270,12 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
         assignment.id ?? assignment.assignmentId
         ?? `${assignment.companyId}_${assignment.materialId}_${reference}`
       );
-      const movementId = "mov_stock_comun_fabricacion_" +
+      const isCommonStock = LDH_prepIsCommonAssignmentV31(assignment);
+      const movementId = (
+        isCommonStock
+          ? "mov_stock_comun_fabricacion_"
+          : "mov_stock_propio_fabricacion_"
+      ) +
         assignmentId.replace(/[^a-zA-Z0-9_-]+/g, "_");
 
       if (!movementIds.has(movementId)) {
@@ -17275,8 +17292,10 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
           ref: reference,
           jobRef: reference,
           concept: assignment.concept ?? "",
-          reason: "consumo_stock_comun_al_mandar_fabricacion",
-          source: "preparacion_pedidos_stock_comun_fabricacion",
+          reason: isCommonStock
+            ? "consumo_stock_comun_al_mandar_fabricacion"
+            : "consumo_stock_propio_al_mandar_fabricacion",
+          source: "preparacion_pedidos_consumo_fabricacion_v51",
           assignmentId,
           debtExempt: true,
           returnRequired: false
@@ -17331,7 +17350,7 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
       rawMovements: movements.length,
       rawReservations: Array.isArray(remoteDB.reservations) ? remoteDB.reservations.length : 0,
       rawAssignments: assignments.length,
-      source: "preparacion_pedidos_consumo_stock_comun_fabricacion"
+      source: "preparacion_pedidos_consumo_stock_asignado_fabricacion_v51"
     }, { merge: true });
 
     return { remoteDB, consumedQty, consumedAssignments };
@@ -17352,6 +17371,8 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
 }
 
 window.LDH_consumirStockComunAlMandarFabricacion =
+  LDH_prepConsumeCommonAtFabricationV32;
+window.LDH_consumirStockAsignadoAlMandarFabricacion =
   LDH_prepConsumeCommonAtFabricationV32;
 
 /*
@@ -17388,7 +17409,7 @@ window.confirmarTodoRecepcion = async function () {
   }
   if (!confirm(
     `Mandar a FABRICACIÓN:\nUnidades: ${units}\n\n` +
-    "El material asignado desde STOCK COMÚN se descontará ahora del stock físico."
+    "El material reservado/asignado se descontará ahora del stock físico."
   )) return;
 
   const button = document.getElementById("btnFaseTrabajo");
@@ -17404,11 +17425,11 @@ window.confirmarTodoRecepcion = async function () {
     alert(
       "✅ Enviado a Fabricación." +
       (consumed.consumedQty > 0
-        ? `\n\nSTOCK COMÚN consumido físicamente: ${consumed.consumedQty}`
+        ? `\n\nStock consumido físicamente: ${consumed.consumedQty}`
         : "")
     );
   } catch (error) {
-    console.error("No se pudo consolidar STOCK COMÚN al mandar a Fabricación", error);
+    console.error("No se pudo consolidar el stock al mandar a Fabricación", error);
     alert(
       "No se ha enviado el trabajo a Fabricación.\n\n" +
       "No se ha descontado material físico porque no se pudo confirmar la actualización en la nube.\n\n" +
@@ -18222,5 +18243,66 @@ if (
   LDH_PREP_RENDER_GUARDED_V50.__LDH_PREP_V50_GUARDED = true;
   window.renderTabla = LDH_PREP_RENDER_GUARDED_V50;
 }
+
+/*
+ * V51 · Regularización segura de trabajos que ya estaban en Fabricación antes
+ * de instalar esta corrección. Solo actúa sobre la referencia abierta, exige
+ * una fase posterior a Preparación y reutiliza los ids deterministas de los
+ * movimientos. Por tanto, volver a abrir o recargar no duplica la salida.
+ */
+const LDH_PREP_RECONCILING_FAB_V51 = new Set();
+const LDH_PREP_RECONCILED_FAB_V51 = new Set();
+
+async function LDH_prepReconcileCurrentFabricationV51() {
+  const reference = String(window.refActual ?? refActual ?? "").trim();
+  if (!reference || LDH_PREP_RECONCILING_FAB_V51.has(reference)
+      || LDH_PREP_RECONCILED_FAB_V51.has(reference)) {
+    return;
+  }
+
+  const stage = typeof window.LDH_getTrabajoStage === "function"
+    ? LDH_prepNormCloudV30(window.LDH_getTrabajoStage(reference))
+    : LDH_prepNormCloudV30(
+      (window.metaActual ?? metaActual)?.workflow_stage
+      ?? (window.metaActual ?? metaActual)?.fase
+      ?? (window.metaActual ?? metaActual)?.estado
+      ?? ""
+    );
+  if (!["fabricacion", "pintura", "almacen", "entregado"].includes(stage)) {
+    return;
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) return;
+
+  LDH_PREP_RECONCILING_FAB_V51.add(reference);
+  try {
+    const result = await LDH_prepConsumeCommonAtFabricationV32(reference);
+    LDH_PREP_RECONCILED_FAB_V51.add(reference);
+    if (result.consumedQty > 0) {
+      try { await LDH_prepApplyFirebaseStockV28(true); } catch (_) {}
+      alert(
+        `✅ Stock de ${reference} regularizado.\n\n` +
+        `Descontado físicamente al estar en Fabricación: ${result.consumedQty}`
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `[Preparación V51] No se pudo regularizar el consumo de ${reference}:`,
+      error
+    );
+  } finally {
+    LDH_PREP_RECONCILING_FAB_V51.delete(reference);
+  }
+}
+
+window.LDH_regularizarConsumoFabricacionV51 =
+  LDH_prepReconcileCurrentFabricationV51;
+
+window.addEventListener("ldh:stock-cloud-updated", () => {
+  setTimeout(LDH_prepReconcileCurrentFabricationV51, 180);
+});
+window.addEventListener("DOMContentLoaded", () => {
+  setTimeout(LDH_prepReconcileCurrentFabricationV51, 1400);
+  setTimeout(LDH_prepReconcileCurrentFabricationV51, 3200);
+});
 </script>
 </body></html>
