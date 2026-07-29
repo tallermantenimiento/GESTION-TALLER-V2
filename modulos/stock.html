@@ -1,10 +1,10 @@
 <!doctype html>
-<!-- LDH_STOCK_V47_SIN_RECARGAS_FIREBASE · 29/07/2026 -->
+<!-- LDH_STOCK_V48_ASIGNACIONES_LOCAL_A_NUBE · 29/07/2026 -->
 <html lang="es">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>LDH v2 · Stock por empresa · V47 sin recargas</title>
+<title>LDH v2 · Stock por empresa · V48 asignaciones sincronizadas</title>
 <style>
 :root{
   --bg:#060b16;--panel:#0d1728;--panel2:#101d33;--card:#111f38;--line:rgba(255,255,255,.10);
@@ -1333,7 +1333,7 @@ html, body{
 </div>
     <div class="actions">
       <span id="LDH_stockCloudStatus" class="btn small" title="Pendiente de conectar con Firestore">Stock nube pendiente</span>
-      <span class="btn small" title="Préstamos y donaciones confirmados directamente en la nube">Interempresas V47 · sin recargas</span>
+      <span class="btn small" title="Préstamos, donaciones y asignaciones propias sincronizados con la nube">Interempresas V48 · libre real</span>
       <button class="btn ldh-maint-btn" type="button" onclick="LDH_openMaintenanceModal()">Mantenimiento avanzado</button>
     </div>
     <button class="btn ldh-stock-menu-fixed" type="button" onclick="volverMenu()">← Menú</button>
@@ -6614,5 +6614,228 @@ setTimeout(()=>{
 })();
 </script>
 
+<!--
+  V48 · Consolida en la base de Stock las asignaciones propias que versiones
+  anteriores solo podían reconstruir desde prep_recepcion_<referencia>.
+  No modifica el físico: únicamente materializa ASIGNADO para que Preparación,
+  Stock informativo y las transacciones de préstamo calculen el mismo libre.
+-->
+<script id="LDH_STOCK_V48_PUBLICAR_ASIGNACIONES_PREPARACION">
+(function(){
+  function txt(value){
+    return String(value == null ? "" : value).trim();
+  }
+
+  function safeId(value){
+    return txt(value)
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-zA-Z0-9_-]+/g,"_")
+      .replace(/^_+|_+$/g,"")
+      .slice(0,120) || "sin_id";
+  }
+
+  function activeOwnAssignment(row){
+    if(!row) return false;
+    const status = txt(row.status || row.estado || "activa").toLowerCase();
+    const phase = txt(row.phase || row.fase || "preparacion").toLowerCase();
+    if(status !== "activa") return false;
+    if(phase !== "preparacion" && phase !== "fabricacion") return false;
+    try{
+      if(typeof _isLoanAssignment === "function" && _isLoanAssignment(row)) return false;
+    }catch(_){}
+    return true;
+  }
+
+  function resolveCompanyId(value){
+    const companies = typeof db !== "undefined" && Array.isArray(db.companies)
+      ? db.companies
+      : [];
+    const found = companies.find(function(company){
+      try{
+        return typeof _companyMatchesForPrep === "function"
+          && _companyMatchesForPrep(value, company.id);
+      }catch(_){
+        return false;
+      }
+    });
+    return found ? txt(found.id) : "";
+  }
+
+  function resolveMaterialId(companyId,line){
+    const lots = typeof db !== "undefined" && Array.isArray(db.stock)
+      ? db.stock
+      : [];
+    const companyLots = lots.filter(function(row){
+      return txt(row && row.companyId) === txt(companyId);
+    });
+    for(const lot of companyLots){
+      try{
+        if(typeof _prepLineMaterialMatch === "function"
+          && _prepLineMaterialMatch(line,lot.materialId)){
+          return txt(lot.materialId);
+        }
+      }catch(_){}
+    }
+    return "";
+  }
+
+  function currentReferences(){
+    const refs = [];
+    try{
+      for(let index=0; index<localStorage.length; index+=1){
+        const key = localStorage.key(index) || "";
+        if(key.indexOf("prep_recepcion_") === 0){
+          refs.push(key.slice("prep_recepcion_".length).trim());
+        }
+      }
+    }catch(_){}
+    return Array.from(new Set(refs.filter(Boolean)));
+  }
+
+  function reconcile(){
+    try{
+      if(typeof db === "undefined" || !db || !Array.isArray(db.assignments)){
+        return false;
+      }
+      let changed = false;
+      const now = new Date().toISOString();
+
+      currentReferences().forEach(function(ref){
+        try{
+          if(typeof _stockRefExistsOutsidePrepReception === "function"
+            && !_stockRefExistsOutsidePrepReception(ref)) return;
+
+          const companyValue = typeof _refCompanyFromPrep === "function"
+            ? _refCompanyFromPrep(ref)
+            : "";
+          const companyId = resolveCompanyId(companyValue);
+          if(!companyId) return;
+
+          let lines = [];
+          try{
+            const parsed = JSON.parse(
+              localStorage.getItem("prep_recepcion_" + ref) || "[]"
+            );
+            lines = Array.isArray(parsed) ? parsed : [];
+          }catch(_){
+            lines = [];
+          }
+
+          lines.forEach(function(line){
+            const qty = Math.max(0,Number(
+              typeof _lineReceivedOwnQty === "function"
+                ? _lineReceivedOwnQty(line)
+                : (line && (line.aplicado_qty || line.stock_consumed_qty
+                  || line.qty_recibida || line.recibida || 0))
+            ) || 0);
+            if(qty <= 0) return;
+
+            const materialId = resolveMaterialId(companyId,line);
+            if(!materialId) return;
+
+            try{
+              if(typeof _activeBorrowDebtForRefMaterial === "function"
+                && _activeBorrowDebtForRefMaterial(
+                  companyId,materialId,ref
+                )) return;
+            }catch(_){}
+
+            const existing = db.assignments.find(function(row){
+              if(!activeOwnAssignment(row)) return false;
+              if(txt(row.companyId || row.empresaId) !== companyId) return false;
+              if(txt(row.ref || row.jobRef || row.reference) !== ref) return false;
+              try{
+                return typeof _sameDebtMaterial === "function"
+                  ? _sameDebtMaterial(
+                    row.materialId || row.matId,
+                    materialId
+                  )
+                  : txt(row.materialId || row.matId) === materialId;
+              }catch(_){
+                return txt(row.materialId || row.matId) === materialId;
+              }
+            });
+
+            if(existing){
+              const currentQty = Math.max(0,Number(
+                existing.qty || existing.cantidad || 0
+              ) || 0);
+              if(currentQty < qty){
+                existing.qty = qty;
+                existing.cantidad = qty;
+                existing.updatedAt = now;
+                existing.reconciledFromPreparation = true;
+                changed = true;
+              }
+              return;
+            }
+
+            const material = typeof materialById === "function"
+              ? (materialById(materialId) || {})
+              : {};
+            db.assignments.push({
+              id:"asg_prep_v48_" + safeId(ref) + "_"
+                + safeId(companyId) + "_" + safeId(materialId),
+              companyId,
+              empresaId:companyId,
+              materialId,
+              matId:materialId,
+              materialName:txt(
+                material.name || material.nombre
+                || line.mat || line.material || materialId
+              ),
+              qty,
+              cantidad:qty,
+              phase:"preparacion",
+              fase:"preparacion",
+              status:"activa",
+              estado:"activa",
+              ref,
+              jobRef:ref,
+              assignmentType:"libre",
+              reason:"asignado_desde_preparacion_reconciliado_v48",
+              source:"stock_v48_reconciliacion_preparacion",
+              reconciledFromPreparation:true,
+              createdAt:now,
+              updatedAt:now
+            });
+            changed = true;
+          });
+        }catch(error){
+          console.warn("[Stock V48] Referencia no reconciliada:",ref,error);
+        }
+      });
+
+      if(changed){
+        if(typeof save === "function") save();
+        if(typeof render === "function") render();
+        try{
+          if(window.LDH_scheduleStockCloudPublish){
+            window.LDH_scheduleStockCloudPublish(true);
+          }
+        }catch(_){}
+        console.info(
+          "[Stock V48] Asignaciones de Preparación consolidadas y pendientes de confirmación en nube."
+        );
+      }
+      return changed;
+    }catch(error){
+      console.warn("[Stock V48] No se pudo consolidar Preparación:",error);
+      return false;
+    }
+  }
+
+  window.LDH_reconciliarAsignacionesPreparacionV48 = reconcile;
+  const start = function(){
+    setTimeout(reconcile,700);
+    setTimeout(reconcile,2200);
+  };
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded",start,{once:true});
+  }else{
+    start();
+  }
+})();
+</script>
 </body>
 </html>
