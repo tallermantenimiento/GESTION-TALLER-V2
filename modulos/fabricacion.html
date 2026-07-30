@@ -123,6 +123,10 @@
   function n(v){ const x = Number(String(v ?? 0).replace(",", ".")); return Number.isFinite(x) ? x : 0; }
   function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  function isCloudDeleted(refOrItem){
+    const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
+    try{ return !!(ref && window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(e){ return false; }
+  }
   function fmtDate(v){ if(!v) return ""; const s = String(v); const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : s; }
   function todayISO(){ return new Date().toISOString().slice(0,10); }
   function uid(p){ return p + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7); }
@@ -241,8 +245,13 @@
 
     applyOverride(item){
       if(!item || !item.ref) return item;
-      const ov = this.overrides()[String(item.ref).trim()];
+      const ref = String(item.ref).trim();
+      const ov = this.overrides()[ref];
       if(!ov) return item;
+
+      // Un borrado solo es válido mientras exista su documento en la subcolección deleted.
+      // Si ese documento se elimina para recuperar un trabajo, se ignora el marcador local antiguo.
+      if(ov.deleted && !isCloudDeleted(ref)) return item;
       if(ov.deleted){
         item.deleted = true;
         item.archived = true;
@@ -401,7 +410,7 @@
     },
 
     counters(items){
-      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted);
+      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted && !isCloudDeleted(x));
       return all.reduce((a,it)=>{
         const f=this.ensureFlow(it);
         a.fab += n(f.fab);
@@ -430,7 +439,7 @@
       const companyFilter = document.getElementById("companyFilter").value;
       const stage = document.getElementById("stageFilter").value;
       return this.allItems()
-        .filter(it=>!it.archived && !it.deleted)
+        .filter(it=>!it.archived && !it.deleted && !isCloudDeleted(it))
         .filter(it=>{
           const f=this.ensureFlow(it);
           if(stage === "fab") return n(f.fab) > 0;
@@ -811,6 +820,7 @@ let ignorePublish = false;
 let publishTimer = null;
 let lastRemoteUpdated = "";
 const deletedRefs = new Set();
+window.LDH_isFabricacionDeletedRef = ref => deletedRefs.has(String(ref || "").trim());
 let deleteSyncReady = false;
 let deletedListenerStarted = false;
 
@@ -847,12 +857,7 @@ function storageKeys(prefix){
 function refFromKey(k){ return String(k || "").replace(/^prep_(meta|recepcion)_/,""); }
 function refValue(item){ return String(item && (item.ref || item.referencia || item.jobRef) || "").trim(); }
 function localDeletedRefSet(){
-  const out = new Set(deletedRefs);
-  const overrides = parse(getStore(OVERRIDE_KEY), {}) || {};
-  Object.entries(overrides).forEach(([ref, value])=>{
-    if(value && value.deleted) out.add(String(ref || "").trim());
-  });
-  return out;
+  return new Set(deletedRefs);
 }
 function activeRefSetFromDB(ldh){
   const set = new Set();
@@ -911,62 +916,9 @@ function localScore(pkg){
   return Number(c.refs||0) + Number(c.deliveries||0) + Number(c.fabricacion||0) + Number(c.fab||0) + Number(c.trabajos||0) + Number(c.prepMeta||0) + Number(c.prepRecepcion||0);
 }
 function withoutDeletedRefs(pkg){
-  if(!pkg || !pkg.ldh_db) return pkg;
-  const deleted = localDeletedRefSet();
-  if(!deleted.size) return pkg;
-
-  const clean = {...pkg};
-  const ldh = parse(pkg.ldh_db, {}) || {};
-  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
-    const rows = Array.isArray(ldh[pool]) ? ldh[pool] : [];
-    ldh[pool] = rows.filter(item=>!deleted.has(refValue(item)));
-  });
-  clean.ldh_db = JSON.stringify(ldh);
-
-  const inbox = parse(pkg.inbox, []) || [];
-  clean.inbox = JSON.stringify(
-    Array.isArray(inbox) ? inbox.filter(item=>!deleted.has(refValue(item))) : []
-  );
-
-  const overrides = parse(pkg.overrides, {}) || {};
-  deleted.forEach(ref=>{
-    overrides[ref] = {
-      ...(overrides[ref] || {}),
-      deleted:true,
-      archived:true,
-      flow:{fab:0,fabricacion:0,pintura:0,almacen:0,entregado:0},
-      fase:"eliminado",
-      estado:"eliminado",
-      updatedAt:(overrides[ref] && overrides[ref].updatedAt) || new Date().toISOString()
-    };
-  });
-  clean.overrides = JSON.stringify(overrides);
-
-  clean.prepMeta = Object.fromEntries(
-    Object.entries(pkg.prepMeta || {}).filter(([ref])=>!deleted.has(String(ref || "").trim()))
-  );
-  clean.prepRecepcion = Object.fromEntries(
-    Object.entries(pkg.prepRecepcion || {}).filter(([ref])=>!deleted.has(String(ref || "").trim()))
-  );
-
-  const refs = new Set();
-  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
-    ldh[pool].forEach(item=>{
-      const ref = refValue(item);
-      if(ref) refs.add(ref);
-    });
-  });
-  Object.keys(clean.prepMeta).forEach(ref=>refs.add(ref));
-  clean.counts = {
-    refs:refs.size,
-    deliveries:ldh.deliveries.length,
-    fabricacion:ldh.fabricacion.length,
-    fab:ldh.fab.length,
-    trabajos:ldh.trabajos.length,
-    prepMeta:Object.keys(clean.prepMeta).length,
-    prepRecepcion:Object.keys(clean.prepRecepcion).length
-  };
-  return clean;
+  // Conserva el paquete completo. Las referencias borradas se ocultan por la subcolección
+  // deleted, pero no se destruyen dentro de ldh_db; así pueden recuperarse con seguridad.
+  return pkg;
 }
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
@@ -981,9 +933,7 @@ function applyRemotePackage(pkg){
 
   setTimeout(()=>{
     try{
-      if(window.App && window.App.purgeDeletedRefs){
-        window.App.purgeDeletedRefs(Array.from(localDeletedRefSet()));
-      }
+      cleanupStaleDeletedMarkers();
       if(window.App && window.App.reload) window.App.reload(false);
     }catch(e){}
     ignorePublish = false;
@@ -1045,32 +995,60 @@ async function publish(force=false){
 function deletedDocId(ref){
   return encodeURIComponent(String(ref || "").trim());
 }
-function applyKnownDeletedRefs(){
-  if(!deletedRefs.size || !window.App || !window.App.purgeDeletedRefs) return;
-  const previousIgnore = ignorePublish;
-  ignorePublish = true;
-  try{
-    window.App.purgeDeletedRefs(Array.from(deletedRefs));
-  }finally{
-    ignorePublish = previousIgnore;
-  }
-}
-function absorbDeletedRefs(refs,republish=false){
+function cleanupStaleDeletedMarkers(){
   let changed = false;
-  (refs || []).forEach(ref=>{
-    ref = String(ref || "").trim();
-    if(ref && !deletedRefs.has(ref)){
-      deletedRefs.add(ref);
+  const overrides = parse(getStore(OVERRIDE_KEY), {}) || {};
+
+  Object.keys(overrides).forEach(ref=>{
+    const ov = overrides[ref];
+    if(ov && ov.deleted && !deletedRefs.has(String(ref || "").trim())){
+      delete overrides[ref];
       changed = true;
     }
   });
+  if(changed) setStore(OVERRIDE_KEY, JSON.stringify(overrides));
+
+  // Limpia solamente las marcas de eliminación antiguas de Preparación.
+  storageKeys("prep_meta_").forEach(key=>{
+    const ref = refFromKey(key);
+    if(!ref || deletedRefs.has(ref)) return;
+    const meta = parse(getStore(key), null);
+    if(!meta || (!meta.deleted && !meta.eliminado && !meta.eliminado_modulos)) return;
+    delete meta.deleted;
+    delete meta.eliminado;
+    delete meta.eliminado_modulos;
+    if(String(meta.fase || "").toLowerCase() === "eliminado") delete meta.fase;
+    if(String(meta.estado || "").toLowerCase() === "eliminado") delete meta.estado;
+    meta.lastUpdate = new Date().toISOString();
+    setStore(key, JSON.stringify(meta));
+  });
+}
+function applyKnownDeletedRefs(){
+  cleanupStaleDeletedMarkers();
+  try{
+    if(window.App && window.App.render) window.App.render();
+  }catch(e){}
+}
+function syncDeletedRefs(refs,republish=false){
+  const next = new Set(
+    (refs || []).map(ref=>String(ref || "").trim()).filter(Boolean)
+  );
+  let changed = next.size !== deletedRefs.size;
+  if(!changed){
+    for(const ref of next){
+      if(!deletedRefs.has(ref)){ changed = true; break; }
+    }
+  }
+
+  deletedRefs.clear();
+  next.forEach(ref=>deletedRefs.add(ref));
   applyKnownDeletedRefs();
   if(changed && republish) publish(true);
   return changed;
 }
 async function loadDeletedRefs(){
   const snapshot = await getDocs(DELETED_COL);
-  absorbDeletedRefs(snapshot.docs.map(item=>{
+  syncDeletedRefs(snapshot.docs.map(item=>{
     const data = item.data() || {};
     return data.ref || data.reference || "";
   }));
@@ -1079,7 +1057,7 @@ async function loadDeletedRefs(){
   if(!deletedListenerStarted){
     deletedListenerStarted = true;
     onSnapshot(DELETED_COL,snapshot=>{
-      absorbDeletedRefs(snapshot.docs.map(item=>{
+      syncDeletedRefs(snapshot.docs.map(item=>{
         const data = item.data() || {};
         return data.ref || data.reference || "";
       }),true);
@@ -1184,6 +1162,6 @@ setTimeout(hookApp, 500);
 setTimeout(hookApp, 1500);
 </script>
 
-<!-- LDH_FABRICACION_BORRADO_PERSISTENTE_DETAILS_ESTABLES_V2_20260724 -->
+<!-- LDH_FABRICACION_RECUPERACION_BORRADOS_NO_DESTRUCTIVA_V3_20260730 -->
 </body>
 </html>
