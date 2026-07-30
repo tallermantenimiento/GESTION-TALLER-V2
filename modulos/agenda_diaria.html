@@ -9340,4 +9340,238 @@ window.ejecutarDevolucion = function(matId, maxQty){
   </div>
 </div>
 <!-- LDH_WORKFLOW_V2_FIX_RENDER_LOOP_20260730 -->
+
+
+<!-- LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V3_20260730 -->
+<script type="module" id="LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V3_20260730">
+(async function(){
+  'use strict';
+  if(window.__LDH_DIRECT_FAB_PHASES_V3) return;
+  window.__LDH_DIRECT_FAB_PHASES_V3 = true;
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+  };
+
+  let byId = new Map();
+  let byRef = new Map();
+  let lastFlowSignature = '';
+  let patchedWorkOrders = null;
+
+  function text(v){ return String(v == null ? '' : v).trim(); }
+  function number(v){
+    const x = Number(String(v == null ? 0 : v).replace(',', '.'));
+    return Number.isFinite(x) ? Math.max(0, x) : 0;
+  }
+  function safeJson(raw, fallback){
+    try{ return raw ? JSON.parse(raw) : fallback; }
+    catch(error){ return fallback; }
+  }
+  function refKey(value){
+    const raw = text(value).toUpperCase();
+    const match = raw.match(/OT-\d{6}-\d{3}/i);
+    if(match) return match[0].toUpperCase();
+    return raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function toMs(value){
+    if(!value) return 0;
+    if(typeof value.toMillis === 'function'){
+      try{ return Number(value.toMillis()) || 0; }catch(error){}
+    }
+    if(typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function itemTime(item){
+    let out = Math.max(
+      toMs(item && item.localFlowUpdatedAt),
+      toMs(item && item.updatedAt),
+      toMs(item && item.updatedAtISO),
+      toMs(item && item.lastUpdate)
+    );
+    const history = Array.isArray(item && item.history) ? item.history : [];
+    history.forEach(row=>{ out = Math.max(out, toMs(row && (row.date || row.at || row.atMs || row.createdAt))); });
+    return out;
+  }
+  function flowOf(item){
+    item = item && typeof item === 'object' ? item : {};
+    const flow = item.flow && typeof item.flow === 'object' ? item.flow : {};
+    const total = Math.max(0, number(item.total || item.unidades || item.cantidad || item.uds || item.units));
+    let fabricacion = number(flow.fabricacion != null ? flow.fabricacion : (flow.fab != null ? flow.fab : (item.fab != null ? item.fab : item.enFabricacion)));
+    let pintura = number(flow.pintura != null ? flow.pintura : (flow.paint != null ? flow.paint : (item.pintura != null ? item.pintura : item.enPintura)));
+    let almacen = number(flow.almacen != null ? flow.almacen : (flow.alm != null ? flow.alm : (item.almacen != null ? item.almacen : item.enAlmacen)));
+    let entregado = number(flow.entregado != null ? flow.entregado : (item.delivered != null ? item.delivered : item.entregado));
+    if(fabricacion + pintura + almacen + entregado === 0 && total > 0 && !item.deleted){
+      const stage = text(item.fase || item.estado || item.status || item.tipo).toLowerCase();
+      if(stage.includes('pint')) pintura = total;
+      else if(stage.includes('almacen')) almacen = total;
+      else if(stage.includes('entreg')) entregado = total;
+      else if(!item.archived) fabricacion = total;
+    }
+    return {fabricacion, pintura, almacen, entregado};
+  }
+  function mergeItem(previous, incoming){
+    if(!previous) return {...incoming, flow:{...((incoming && incoming.flow) || {})}};
+    return {
+      ...previous,
+      ...incoming,
+      flow:{...((previous && previous.flow) || {}), ...((incoming && incoming.flow) || {})}
+    };
+  }
+  function addAggregate(map, key, flow, atMs){
+    key = text(key);
+    if(!key) return;
+    const current = map.get(key) || {fabricacion:0,pintura:0,almacen:0,entregado:0,atMs:0};
+    current.fabricacion += number(flow.fabricacion);
+    current.pintura += number(flow.pintura);
+    current.almacen += number(flow.almacen);
+    current.entregado += number(flow.entregado);
+    current.atMs = Math.max(number(current.atMs), number(atMs));
+    map.set(key, current);
+  }
+  function extractFlows(payload){
+    const dbRaw = payload && payload.ldh_db;
+    const db = typeof dbRaw === 'string' ? safeJson(dbRaw, {}) : (dbRaw && typeof dbRaw === 'object' ? dbRaw : {});
+    const exact = new Map();
+    ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
+      const rows = Array.isArray(db && db[pool]) ? db[pool] : [];
+      rows.forEach(raw=>{
+        const item = raw && typeof raw === 'object' ? raw : {};
+        if(item.deleted) return;
+        const reference = text(item.ref || item.referencia || item.jobRef);
+        if(!reference) return;
+        const orderId = text(item.agendaOrderId || item.orderId || item.workOrderId || item.pedido_uid || item.pedido_id);
+        const itemId = text(item.id || item.uid || item.jobId);
+        const concept = text(item.concept || item.concepto || item.nombreConcepto);
+        const exactKey = [orderId || refKey(reference), itemId || reference.toUpperCase(), concept.toUpperCase()].join('|');
+        exact.set(exactKey, mergeItem(exact.get(exactKey), item));
+      });
+    });
+
+    const nextById = new Map();
+    const nextByRef = new Map();
+    exact.forEach(item=>{
+      const reference = text(item.ref || item.referencia || item.jobRef);
+      const orderId = text(item.agendaOrderId || item.orderId || item.workOrderId || item.pedido_uid || item.pedido_id);
+      const flow = flowOf(item);
+      if(flow.fabricacion + flow.pintura + flow.almacen + flow.entregado <= 0) return;
+      const atMs = itemTime(item);
+      if(orderId) addAggregate(nextById, orderId, flow, atMs);
+      addAggregate(nextByRef, refKey(reference), flow, atMs);
+    });
+    return {nextById, nextByRef};
+  }
+  function stateFromFlow(flow){
+    if(number(flow.fabricacion) > 0) return 'fabrication';
+    if(number(flow.pintura) > 0) return 'painting';
+    if(number(flow.almacen) > 0 || number(flow.entregado) > 0) return 'finished';
+    return '';
+  }
+  function sameFlow(a,b){
+    return number(a && a.fabricacion) === number(b && b.fabricacion)
+      && number(a && a.pintura) === number(b && b.pintura)
+      && number(a && a.almacen) === number(b && b.almacen)
+      && number(a && a.entregado) === number(b && b.entregado);
+  }
+  function liveForOrder(order){
+    if(!order) return null;
+    return byId.get(text(order.id)) || byRef.get(refKey(order.reference));
+  }
+  function applyLiveFlows(orders){
+    let changed = false;
+    (Array.isArray(orders) ? orders : []).forEach(order=>{
+      if(!order || text(order.status || 'pending') !== 'pending') return;
+      const currentState = text(order.workflowStateV2).toLowerCase();
+      if(['cancelled','canceled','anulado','cancelado'].includes(currentState)) return;
+      const live = liveForOrder(order);
+      if(!live) return;
+      const liveFlow = {
+        fabricacion:number(live.fabricacion),
+        pintura:number(live.pintura),
+        almacen:number(live.almacen),
+        entregado:number(live.entregado)
+      };
+      if(liveFlow.fabricacion + liveFlow.pintura + liveFlow.almacen + liveFlow.entregado <= 0) return;
+      const manualAt = number(order.workflowUpdatedAtMs);
+      const liveAt = number(live.atMs);
+      if(text(order.workflowSourceV2) === 'agenda_manual' && (liveAt <= 0 || manualAt > liveAt)) return;
+      const nextState = stateFromFlow(liveFlow);
+      const currentFlow = order.phaseFlowV2 && typeof order.phaseFlowV2 === 'object' ? order.phaseFlowV2 : {};
+      if(!sameFlow(currentFlow, liveFlow) || currentState !== nextState){
+        order.phaseFlowV2 = liveFlow;
+        order.workflowStateV2 = nextState;
+        order.workflowState = ['fabrication','painting','finished'].includes(nextState) ? 'in_progress' : order.workflowState;
+        order.inProgress = ['fabrication','painting'].includes(nextState);
+        if(!order.inProgress) order.startedAtMs = 0;
+        if(liveAt > number(order.workflowUpdatedAtMs)) order.workflowUpdatedAtMs = liveAt;
+        order.workflowSourceV2 = 'fabricacion_directa';
+        changed = true;
+      }
+    });
+    return changed;
+  }
+  function patchWorkOrders(){
+    const workOrders = window.WorkOrders;
+    if(!workOrders || !Array.isArray(workOrders.orders)) return false;
+    if(patchedWorkOrders !== workOrders){
+      const originalRender = workOrders.render;
+      if(typeof originalRender === 'function'){
+        workOrders.render = function(){
+          applyLiveFlows(this.orders);
+          return originalRender.apply(this, arguments);
+        };
+      }
+      patchedWorkOrders = workOrders;
+    }
+    if(applyLiveFlows(workOrders.orders) && typeof workOrders.render === 'function') workOrders.render();
+    return true;
+  }
+  function mapSignature(idMap, refMap){
+    const rows = [];
+    idMap.forEach((flow,key)=>rows.push(['id',key,number(flow.fabricacion),number(flow.pintura),number(flow.almacen),number(flow.entregado)]));
+    refMap.forEach((flow,key)=>rows.push(['ref',key,number(flow.fabricacion),number(flow.pintura),number(flow.almacen),number(flow.entregado)]));
+    rows.sort((a,b)=>String(a[0]+a[1]).localeCompare(String(b[0]+b[1])));
+    return JSON.stringify(rows);
+  }
+  function receivePayload(payload){
+    const extracted = extractFlows(payload || {});
+    byId = extracted.nextById;
+    byRef = extracted.nextByRef;
+    const signature = mapSignature(byId, byRef);
+    if(signature === lastFlowSignature) return;
+    lastFlowSignature = signature;
+    patchWorkOrders();
+  }
+
+  const patchTimer = setInterval(()=>{
+    if(patchWorkOrders() && patchedWorkOrders) clearInterval(patchTimer);
+  }, 250);
+  setTimeout(()=>clearInterval(patchTimer), 15000);
+
+  try{
+    const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+    const {getAuth,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+    const {getFirestore,doc,onSnapshot} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+    let app = getApps().find(item=>item.options && item.options.projectId === firebaseConfig.projectId);
+    if(!app) app = initializeApp(firebaseConfig, 'ldh-direct-fabrication-phase-reader');
+    const auth = getAuth(app);
+    if(!auth.currentUser){
+      try{ await signInAnonymously(auth); }
+      catch(error){ console.warn('[Direct phases] anonymous login unavailable; trying current rules', error); }
+    }
+    const db = getFirestore(app);
+    onSnapshot(doc(db,'taller_data','fabricacion'), snapshot=>{
+      if(snapshot.exists()) receivePayload(snapshot.data() || {});
+    }, error=>console.warn('[Direct phases] read error', error));
+  }catch(error){
+    console.warn('[Direct phases] init error', error);
+  }
+})();
+</script>
+
 </body></html>
