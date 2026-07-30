@@ -677,12 +677,33 @@
 
     syncWorkflow(item,source,note){
       try{
-        if(!item || !window.LDH_WorkflowV2) return;
+        if(!item || !window.LDH_WorkflowV2) return Promise.resolve(false);
         const f=this.ensureFlow(item);
         const flow={fabricacion:n(f.fab??f.fabricacion),pintura:n(f.pintura),almacen:n(f.almacen),entregado:n(f.entregado)};
         const state=flow.fabricacion>0?'fabrication':flow.pintura>0?'painting':(flow.almacen>0||flow.entregado>0)?'finished':'';
-        window.LDH_WorkflowV2.update({orderId:item.agendaOrderId||item.orderId||'',reference:item.ref||item.referencia||'',state,flow,source:source||'fabricacion',note:note||''}).catch(error=>console.warn('Workflow Fabricación',error));
-      }catch(error){ console.warn('Workflow Fabricación',error); }
+        return window.LDH_WorkflowV2.update({orderId:item.agendaOrderId||item.orderId||'',reference:item.ref||item.referencia||'',state,flow,source:source||'fabricacion',note:note||''})
+          .catch(error=>{ console.warn('Workflow Fabricación',error); return false; });
+      }catch(error){ console.warn('Workflow Fabricación',error); return Promise.resolve(false); }
+    },
+
+    async syncAllWorkflow(source='fabricacion_reconciliacion'){
+      try{
+        if(!window.LDH_WorkflowV2) return false;
+        const items=this.allItems().filter(item=>{
+          if(!item || item.deleted || item.archived) return false;
+          const ref=String(item.ref||item.referencia||'').trim();
+          if(!ref) return false;
+          const f=this.ensureFlow(item);
+          return n(f.fab??f.fabricacion)+n(f.pintura)+n(f.almacen)+n(f.entregado)>0;
+        });
+        for(const item of items){
+          await this.syncWorkflow(item,source,'Sincronización de cantidades existentes por fase');
+        }
+        return true;
+      }catch(error){
+        console.warn('Workflow Fabricación reconciliación',error);
+        return false;
+      }
     },
 
     unassignedSummary(item){
@@ -1312,8 +1333,16 @@ setTimeout(hookApp, 1500);
     const ordersCol=collection(db,'taller_data','work_orders','orders');
     let authReady=false;
     onAuthStateChanged(auth,user=>{
-      if(user){ authReady=true; readyResolve(true); }
-      else signInAnonymously(auth).catch(error=>{ console.error('[Workflow V2] login',error); readyResolve(false); });
+      if(user){
+        authReady=true;
+        readyResolve(true);
+        const reconcile=delay=>setTimeout(()=>{
+          try{ window.App?.syncAllWorkflow?.('fabricacion_reconciliacion'); }
+          catch(error){ console.warn('[Workflow V2] reconciliación',error); }
+        },delay);
+        reconcile(2500);
+        reconcile(7000);
+      }else signInAnonymously(auth).catch(error=>{ console.error('[Workflow V2] login',error); readyResolve(false); });
     });
     setTimeout(()=>{ if(!authReady) readyResolve(false); },8000);
     api.findOrderId=async function(reference){
@@ -1349,15 +1378,14 @@ setTimeout(hookApp, 1500);
       const previousState=String(current.workflowStateV2||'');
       const previousFlow=cleanFlow(current.phaseFlowV2||{});
       const changed=previousState!==state || JSON.stringify(previousFlow)!==JSON.stringify(flow);
-      if(changed){
-        history.push({
-          atMs:now,
-          state,
-          phaseFlowV2:flow,
-          source:String(payload.source||'modulo'),
-          note:String(payload.note||'')
-        });
-      }
+      if(!changed) return true;
+      history.push({
+        atMs:now,
+        state,
+        phaseFlowV2:flow,
+        source:String(payload.source||'modulo'),
+        note:String(payload.note||'')
+      });
       await setDoc(ref,{
         workflowStateV2:state,
         phaseFlowV2:flow,
@@ -1375,5 +1403,6 @@ setTimeout(hookApp, 1500);
 })();
 </script>
 
+<!-- LDH_WORKFLOW_V2_SYNC_FASES_EXISTENTES_NO_LOOP_20260730 -->
 </body>
 </html>
