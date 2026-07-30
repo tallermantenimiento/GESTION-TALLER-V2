@@ -1464,6 +1464,7 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 <style id="LDH_WORKFLOW_V2_VIEW_20260730">
 .wo-view-dialog{width:min(900px,96vw)}.wo-view-content{padding:20px}.wo-view-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wo-view-card{border:1px solid rgba(148,163,184,.22);border-radius:13px;background:rgba(2,8,23,.55);padding:13px}.wo-view-card.wide{grid-column:1/-1}.wo-view-label{color:#93a4ba;font-size:10px;font-weight:950;letter-spacing:.07em;text-transform:uppercase;margin-bottom:6px}.wo-view-value{color:#fff;font-size:14px;font-weight:850;white-space:pre-wrap;overflow-wrap:anywhere}.wo-view-flow{display:flex;gap:6px;flex-wrap:wrap}.wo-view-history{display:grid;gap:7px}.wo-view-history-row{padding:9px 10px;border:1px solid rgba(148,163,184,.16);border-radius:10px;background:rgba(15,23,42,.55);color:#dbeafe;font-size:12px}.wo-view-history-row small{display:block;margin-top:3px;color:#94a3b8}.wo-view-check{margin-top:8px;color:#86efac;font-size:11px;font-weight:850}.wo-view-check.bad{color:#fca5a5}@media(max-width:700px){.wo-view-grid{grid-template-columns:1fr}}
 </style>
+<meta name="ldh-build" content="AGENDA-ESTADO-FUENTE-UNICA-V14-20260730">
 </head>
 <body>
 
@@ -9503,23 +9504,12 @@ window.ejecutarDevolucion = function(matId, maxQty){
       };
       if(liveFlow.fabricacion + liveFlow.pintura + liveFlow.almacen + liveFlow.entregado <= 0) return;
       const currentFlow = order.phaseFlowV2 && typeof order.phaseFlowV2 === 'object' ? order.phaseFlowV2 : {};
-      const manualSource = text(order.workflowSourceV2).toLowerCase();
-      const manualAt = number(order.workflowUpdatedAtMs);
-      const liveAt = number(live.atMs);
-      // Una corrección manual manda mientras Fabricación conserve exactamente el mismo reparto.
-      // Así una republicación/refresco de la nube no vuelve a imponer el estado automático.
-      if(manualSource.startsWith('agenda_manual') && sameFlow(currentFlow, liveFlow)) return;
-      // Compatibilidad con correcciones manuales anteriores basadas en fecha.
-      if(manualSource.startsWith('agenda_manual') && (liveAt <= 0 || manualAt > liveAt)) return;
-      const nextState = stateFromFlow(liveFlow);
-      if(!sameFlow(currentFlow, liveFlow) || currentState !== nextState){
+
+      // Esta lectura directa de Fabricación SOLO actualiza el reparto FAB/PINT/ALM/ENT.
+      // El estado general se lee y escribe exclusivamente en el documento principal
+      // de la orden (taller_data/work_orders/orders/{id}).
+      if(!sameFlow(currentFlow, liveFlow)){
         order.phaseFlowV2 = liveFlow;
-        order.workflowStateV2 = nextState;
-        order.workflowState = ['fabrication','painting','finished'].includes(nextState) ? 'in_progress' : order.workflowState;
-        order.inProgress = ['fabrication','painting'].includes(nextState);
-        if(!order.inProgress) order.startedAtMs = 0;
-        if(liveAt > number(order.workflowUpdatedAtMs)) order.workflowUpdatedAtMs = liveAt;
-        order.workflowSourceV2 = 'fabricacion_directa';
         changed = true;
       }
     });
@@ -9586,222 +9576,9 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
 <!-- LDH_CORRECCION_ESTADO_MANUAL_RESPETA_FASES_V4_20260730 -->
 
-<script type="module" id="LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9_20260730">
-(async function(){
-  'use strict';
-  if(window.__LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9) return;
-  window.__LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9 = true;
-
-  const PROJECT_ID = 'gestion-taller-2a439';
-  const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
-  const text = value => String(value == null ? '' : value).trim();
-  const number = value => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? Math.max(0,parsed) : 0;
-  };
-  const cleanFlow = flow => {
-    flow = flow && typeof flow === 'object' ? flow : {};
-    return {
-      fabricacion:number(flow.fabricacion ?? flow.fab),
-      pintura:number(flow.pintura),
-      almacen:number(flow.almacen),
-      entregado:number(flow.entregado ?? flow.delivered)
-    };
-  };
-
-  try{
-    const App = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-    const Auth = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-    const FS = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-
-    let app = null;
-    for(let attempt=0;attempt<100 && !app;attempt++){
-      app = App.getApps().find(item=>item.options && item.options.projectId===PROJECT_ID);
-      if(!app) await sleep(100);
-    }
-    if(!app) throw new Error('No se encontró el proyecto de Agenda.');
-
-    const auth = Auth.getAuth(app);
-    const db = FS.getFirestore(app);
-    const statesCol = FS.collection(db,'taller_data','work_orders','workflow_states');
-
-    if(!auth.currentUser){
-      await new Promise((resolve,reject)=>{
-        const stop = Auth.onAuthStateChanged(auth,user=>{
-          if(user){ stop(); resolve(user); }
-        },reject);
-        setTimeout(()=>{ stop(); reject(new Error('Agenda sin sesión de sincronización.')); },12000);
-      });
-    }
-
-    async function publish(order){
-      if(!order || !text(order.id)) return false;
-      const state = text(order.workflowStateV2 || order.workflowState);
-      const atMs = number(order.workflowUpdatedAtMs) || Date.now();
-      const payload = {
-        id:text(order.id),
-        orderId:text(order.id),
-        reference:text(order.reference),
-        workflowStateV2:state,
-        workflowState:text(order.workflowState),
-        phaseFlowV2:cleanFlow(order.phaseFlowV2),
-        workflowUpdatedAtMs:atMs,
-        workflowSourceV2:text(order.workflowSourceV2 || 'agenda'),
-        workflowHistoryV2:Array.isArray(order.workflowHistoryV2) ? order.workflowHistoryV2.slice(-80) : [],
-        updatedAt:FS.serverTimestamp()
-      };
-      await FS.setDoc(FS.doc(statesCol,text(order.id)),payload,{merge:true});
-      return true;
-    }
-
-    function hook(){
-      const workOrders = window.WorkOrders;
-      if(!workOrders || typeof workOrders.saveWorkflowState!=='function') return false;
-      if(workOrders.__LDH_STATE_CHANNEL_V9_HOOKED) return true;
-      workOrders.__LDH_STATE_CHANNEL_V9_HOOKED = true;
-      const original = workOrders.saveWorkflowState;
-      workOrders.saveWorkflowState = async function(){
-        const order = arguments[0];
-        const result = await original.apply(this,arguments);
-        if(result !== false){
-          try{ await publish(order); }
-          catch(error){ console.error('[Agenda estado autoritativo] no se pudo publicar',error); }
-        }
-        return result;
-      };
-      return true;
-    }
-
-    for(let attempt=0;attempt<80 && !hook();attempt++) await sleep(100);
-
-    // Publica las correcciones manuales que ya existían antes de instalar esta versión.
-    const currentOrders = Array.isArray(window.WorkOrders?.orders) ? window.WorkOrders.orders : [];
-    for(const order of currentOrders){
-      const source = text(order && order.workflowSourceV2).toLowerCase();
-      if(source.startsWith('agenda_manual') && number(order.workflowUpdatedAtMs)>0){
-        try{ await publish(order); }
-        catch(error){ console.warn('[Agenda estado autoritativo] pendiente',order && order.reference,error); }
-      }
-    }
-  }catch(error){
-    console.error('[Agenda estado autoritativo] inicialización',error);
-  }
-})();
-</script>
 <!-- LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9_20260730 -->
 
 
-<script type="module" id="LDH_AGENDA_REFERENCE_STATE_AUTHORITY_V11_20260730">
-(async function(){
-  'use strict';
-  if(window.__LDH_AGENDA_REFERENCE_STATE_AUTHORITY_V11) return;
-  window.__LDH_AGENDA_REFERENCE_STATE_AUTHORITY_V11 = true;
-
-  const PROJECT_ID = 'gestion-taller-2a439';
-  const sleep = ms => new Promise(resolve=>setTimeout(resolve,ms));
-  const text = value => String(value == null ? '' : value).trim();
-  const number = value => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? Math.max(0,parsed) : 0;
-  };
-  const canonicalReference = value => {
-    const raw = text(value).toUpperCase();
-    const match = raw.match(/OT-\d{6}-\d{3}/i);
-    if(match) return match[0].toUpperCase();
-    return raw.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
-  };
-  const documentId = reference => encodeURIComponent(canonicalReference(reference));
-  const cleanFlow = flow => {
-    flow = flow && typeof flow === 'object' ? flow : {};
-    return {
-      fabricacion:number(flow.fabricacion ?? flow.fab),
-      pintura:number(flow.pintura),
-      almacen:number(flow.almacen),
-      entregado:number(flow.entregado ?? flow.delivered)
-    };
-  };
-
-  try{
-    const App = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-    const Auth = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-    const FS = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-
-    let app = null;
-    for(let attempt=0;attempt<120 && !app;attempt++){
-      app = App.getApps().find(item=>item.options && item.options.projectId===PROJECT_ID);
-      if(!app) await sleep(100);
-    }
-    if(!app) throw new Error('No se encontro el proyecto principal de Agenda.');
-
-    const auth = Auth.getAuth(app);
-    if(!auth.currentUser){
-      await new Promise((resolve,reject)=>{
-        const stop = Auth.onAuthStateChanged(auth,user=>{
-          if(user){ stop(); resolve(user); }
-        },reject);
-        setTimeout(()=>{ stop(); reject(new Error('Agenda sin sesion de sincronizacion.')); },15000);
-      });
-    }
-
-    const db = FS.getFirestore(app);
-    const statesCol = FS.collection(db,'taller_data','work_orders','workflow_state_by_reference');
-
-    async function publish(order){
-      if(!order) return false;
-      const reference = canonicalReference(order.reference);
-      if(!reference) return false;
-      const atMs = number(order.workflowUpdatedAtMs) || Date.now();
-      const payload = {
-        reference,
-        orderId:text(order.id),
-        workflowStateV2:text(order.workflowStateV2 || order.workflowState),
-        workflowState:text(order.workflowState),
-        phaseFlowV2:cleanFlow(order.phaseFlowV2),
-        workflowUpdatedAtMs:atMs,
-        workflowSourceV2:text(order.workflowSourceV2 || 'agenda'),
-        workflowHistoryV2:Array.isArray(order.workflowHistoryV2) ? order.workflowHistoryV2.slice(-80) : [],
-        publishedBy:'agenda_diaria.html',
-        updatedAt:FS.serverTimestamp()
-      };
-      await FS.setDoc(FS.doc(statesCol,documentId(reference)),payload,{merge:true});
-      return true;
-    }
-
-    function installHook(){
-      const workOrders = window.WorkOrders;
-      if(!workOrders || typeof workOrders.saveWorkflowState!=='function') return false;
-      if(workOrders.__LDH_REFERENCE_STATE_AUTHORITY_V11_HOOKED) return true;
-      workOrders.__LDH_REFERENCE_STATE_AUTHORITY_V11_HOOKED = true;
-      const original = workOrders.saveWorkflowState;
-      workOrders.saveWorkflowState = async function(){
-        const order = arguments[0];
-        const result = await original.apply(this,arguments);
-        try{
-          await publish(order);
-        }catch(error){
-          console.error('[Agenda estado por referencia] no se pudo publicar',error);
-        }
-        return result;
-      };
-      return true;
-    }
-
-    for(let attempt=0;attempt<100 && !installHook();attempt++) await sleep(100);
-
-    // Recupera y publica correcciones manuales ya existentes en este ordenador.
-    const rows = Array.isArray(window.WorkOrders?.orders) ? window.WorkOrders.orders : [];
-    for(const order of rows){
-      const source = text(order && order.workflowSourceV2).toLowerCase();
-      if(source.startsWith('agenda_manual') && number(order.workflowUpdatedAtMs)>0){
-        try{ await publish(order); }
-        catch(error){ console.warn('[Agenda estado por referencia] publicacion pendiente',order && order.reference,error); }
-      }
-    }
-  }catch(error){
-    console.error('[Agenda estado por referencia] inicializacion',error);
-  }
-})();
-</script>
 <!-- LDH_AGENDA_REFERENCE_STATE_AUTHORITY_V11_20260730 -->
 
 </body></html>
