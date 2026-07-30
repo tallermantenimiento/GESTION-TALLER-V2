@@ -9581,4 +9581,108 @@ window.ejecutarDevolucion = function(matId, maxQty){
 </script>
 
 <!-- LDH_CORRECCION_ESTADO_MANUAL_RESPETA_FASES_V4_20260730 -->
+
+<script type="module" id="LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9_20260730">
+(async function(){
+  'use strict';
+  if(window.__LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9) return;
+  window.__LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9 = true;
+
+  const PROJECT_ID = 'gestion-taller-2a439';
+  const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
+  const text = value => String(value == null ? '' : value).trim();
+  const number = value => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0,parsed) : 0;
+  };
+  const cleanFlow = flow => {
+    flow = flow && typeof flow === 'object' ? flow : {};
+    return {
+      fabricacion:number(flow.fabricacion ?? flow.fab),
+      pintura:number(flow.pintura),
+      almacen:number(flow.almacen),
+      entregado:number(flow.entregado ?? flow.delivered)
+    };
+  };
+
+  try{
+    const App = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+    const Auth = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+    const FS = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+
+    let app = null;
+    for(let attempt=0;attempt<100 && !app;attempt++){
+      app = App.getApps().find(item=>item.options && item.options.projectId===PROJECT_ID);
+      if(!app) await sleep(100);
+    }
+    if(!app) throw new Error('No se encontró el proyecto de Agenda.');
+
+    const auth = Auth.getAuth(app);
+    const db = FS.getFirestore(app);
+    const statesCol = FS.collection(db,'taller_data','work_orders','workflow_states');
+
+    if(!auth.currentUser){
+      await new Promise((resolve,reject)=>{
+        const stop = Auth.onAuthStateChanged(auth,user=>{
+          if(user){ stop(); resolve(user); }
+        },reject);
+        setTimeout(()=>{ stop(); reject(new Error('Agenda sin sesión de sincronización.')); },12000);
+      });
+    }
+
+    async function publish(order){
+      if(!order || !text(order.id)) return false;
+      const state = text(order.workflowStateV2 || order.workflowState);
+      const atMs = number(order.workflowUpdatedAtMs) || Date.now();
+      const payload = {
+        id:text(order.id),
+        orderId:text(order.id),
+        reference:text(order.reference),
+        workflowStateV2:state,
+        workflowState:text(order.workflowState),
+        phaseFlowV2:cleanFlow(order.phaseFlowV2),
+        workflowUpdatedAtMs:atMs,
+        workflowSourceV2:text(order.workflowSourceV2 || 'agenda'),
+        workflowHistoryV2:Array.isArray(order.workflowHistoryV2) ? order.workflowHistoryV2.slice(-80) : [],
+        updatedAt:FS.serverTimestamp()
+      };
+      await FS.setDoc(FS.doc(statesCol,text(order.id)),payload,{merge:true});
+      return true;
+    }
+
+    function hook(){
+      const workOrders = window.WorkOrders;
+      if(!workOrders || typeof workOrders.saveWorkflowState!=='function') return false;
+      if(workOrders.__LDH_STATE_CHANNEL_V9_HOOKED) return true;
+      workOrders.__LDH_STATE_CHANNEL_V9_HOOKED = true;
+      const original = workOrders.saveWorkflowState;
+      workOrders.saveWorkflowState = async function(){
+        const order = arguments[0];
+        const result = await original.apply(this,arguments);
+        if(result !== false){
+          try{ await publish(order); }
+          catch(error){ console.error('[Agenda estado autoritativo] no se pudo publicar',error); }
+        }
+        return result;
+      };
+      return true;
+    }
+
+    for(let attempt=0;attempt<80 && !hook();attempt++) await sleep(100);
+
+    // Publica las correcciones manuales que ya existían antes de instalar esta versión.
+    const currentOrders = Array.isArray(window.WorkOrders?.orders) ? window.WorkOrders.orders : [];
+    for(const order of currentOrders){
+      const source = text(order && order.workflowSourceV2).toLowerCase();
+      if(source.startsWith('agenda_manual') && number(order.workflowUpdatedAtMs)>0){
+        try{ await publish(order); }
+        catch(error){ console.warn('[Agenda estado autoritativo] pendiente',order && order.reference,error); }
+      }
+    }
+  }catch(error){
+    console.error('[Agenda estado autoritativo] inicialización',error);
+  }
+})();
+</script>
+<!-- LDH_WORKFLOW_STATE_CHANNEL_AGENDA_V9_20260730 -->
 </body></html>
