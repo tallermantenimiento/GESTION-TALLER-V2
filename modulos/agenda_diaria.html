@@ -9044,6 +9044,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 })();
 </script>
 
+<!-- LDH_WORKFLOW_SINGLE_SOURCE_V16 -->
 <script type="module" id="LDH_WORK_ORDERS_FIRESTORE_V1">
 (async function(){
   const PROJECT_ID = 'gestion-taller-2a439';
@@ -9066,7 +9067,6 @@ window.ejecutarDevolucion = function(matId, maxQty){
     const ordersCol = collection(db,'taller_data','work_orders','orders');
     const deletedCol = collection(db,'taller_data','work_orders','deleted');
     const notificationsCol = collection(db,'taller_data','work_orders','notifications');
-    const stateAuthorityCol = collection(db,'taller_data','work_orders','state_authority');
     let mounted = false;
 
     function cleanOrder(order){
@@ -9115,19 +9115,18 @@ window.ejecutarDevolucion = function(matId, maxQty){
         async saveWorkflowState(order){
           if(!order?.id) throw new Error('Orden sin identificador');
           const now = Date.now();
-          const workflowAt = Number(order.workflowUpdatedAtMs) || now;
-          const batch = writeBatch(db);
-          const payload = cleanOrder({...order,updatedAt:serverTimestamp(),updatedAtMs:now});
-          batch.set(doc(ordersCol,order.id),payload,{merge:true});
-          batch.set(doc(stateAuthorityCol,order.id),cleanOrder({
-            orderId:String(order.id),
-            reference:String(order.reference||''),
-            state:String(order.workflowStateV2||''),
-            atMs:workflowAt,
-            source:String(order.workflowSourceV2||'agenda'),
-            updatedAt:serverTimestamp()
-          }),{merge:true});
-          await batch.commit();
+          // FUENTE UNICA: el estado general vive solamente en el documento principal
+          // de la orden. No se escribe en subcolecciones auxiliares, evitando que una
+          // regla o una copia antigua bloquee/contradiga el cambio manual de Agenda.
+          const payload = cleanOrder({
+            ...order,
+            workflowStateV2:String(order.workflowStateV2||''),
+            workflowUpdatedAtMs:Number(order.workflowUpdatedAtMs)||now,
+            workflowSourceV2:String(order.workflowSourceV2||'agenda'),
+            updatedAt:serverTimestamp(),
+            updatedAtMs:now
+          });
+          await setDoc(doc(ordersCol,order.id),payload,{merge:true});
         },
         async restoreOrders(orders){
           const rows = (Array.isArray(orders) ? orders : []).filter(order=>order && order.id);

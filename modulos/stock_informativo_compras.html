@@ -564,6 +564,7 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
   </section>
 </section>
 </main>
+<!-- LDH_WORKFLOW_SINGLE_SOURCE_V16 -->
 <script type="module">
 const firebaseConfig = {
   apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
@@ -1163,7 +1164,7 @@ let accessMounted = false;
 let automaticAccessRunning = false;
 let automaticAccessAttempt = 0;
 let automaticAccessRetryTimer = null;
-const MAX_AUTOMATIC_ACCESS_ATTEMPTS = 6;
+const MAX_AUTOMATIC_ACCESS_ATTEMPTS = 18;
 let stockAccessError = '';
 
 function mountApplication(){
@@ -1209,7 +1210,7 @@ function scheduleAutomaticAccessRetry(){
   if(auth.currentUser && workOrdersAuth.currentUser) return;
   if(automaticAccessAttempt >= MAX_AUTOMATIC_ACCESS_ATTEMPTS) return;
   clearTimeout(automaticAccessRetryTimer);
-  const delays = [800,1600,3000,5000,8000,12000];
+  const delays = [500,900,1500,2500,4000,6500,9000,12000,15000,18000];
   const delay = delays[Math.min(automaticAccessAttempt,delays.length-1)];
   automaticAccessRetryTimer = setTimeout(()=>ensureAutomaticAccess(),delay);
 }
@@ -1253,6 +1254,12 @@ $('loginBtn').onclick = async ()=>{
   try{
     $('loginErr').style.display='none';
     await signInWithEmailAndPassword(auth,email,password);
+    // El proyecto de ordenes puede usar la misma cuenta. Si no existe alli,
+    // se mantiene el acceso anonimo automatico como alternativa.
+    if(!workOrdersAuth.currentUser){
+      try{ await signInWithEmailAndPassword(workOrdersAuth,email,password); }
+      catch(error){ console.warn('La cuenta no esta disponible en el proyecto de ordenes; se intentara acceso automatico.',error); }
+    }
     await ensureAutomaticAccess();
   }catch(e){
     $('loginErr').textContent='No se ha podido conectar: '+(e.code||e.message);
@@ -1267,6 +1274,15 @@ onAuthStateChanged(auth,user=>{
 onAuthStateChanged(workOrdersAuth,user=>{
   if(user){ automaticAccessAttempt = 0; mountApplication(); }
   else ensureAutomaticAccess();
+});
+window.addEventListener('online',()=>{
+  automaticAccessAttempt = 0;
+  ensureAutomaticAccess();
+});
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible' && (!auth.currentUser || !workOrdersAuth.currentUser)){
+    ensureAutomaticAccess();
+  }
 });
 ensureAutomaticAccess();
 </script>
@@ -2465,26 +2481,7 @@ ensureAutomaticAccess();
     const ordersCol = collection(db,'taller_data','work_orders','orders');
     const deletedCol = collection(db,'taller_data','work_orders','deleted');
     const notificationsCol = collection(db,'taller_data','work_orders','notifications');
-    const stateAuthorityCol = collection(db,'taller_data','work_orders','state_authority');
     let mounted = false;
-    let authorityById = new Map();
-    let lastRemoteOrderRows = [];
-
-    function overlayAuthority(rows){
-      return (Array.isArray(rows) ? rows : []).map(row=>{
-        const authority = authorityById.get(String(row.id||''));
-        if(!authority) return row;
-        const authorityAt = Number(authority.atMs)||0;
-        const orderWorkflowAt = Number(row.workflowUpdatedAtMs)||0;
-        if(authorityAt < orderWorkflowAt) return row;
-        return {
-          ...row,
-          workflowStateV2:String(authority.state||''),
-          workflowUpdatedAtMs:authorityAt,
-          workflowSourceV2:String(authority.source||'agenda_authority')
-        };
-      });
-    }
 
     function cleanOrder(order){
       const out = {};
@@ -2580,17 +2577,12 @@ ensureAutomaticAccess();
       const startupLocalRows = window.WorkOrders?.getLocalOrders?.() || [];
       let firstOrdersSnapshot = true;
 
-      onSnapshot(stateAuthorityCol,snapshot=>{
-        authorityById = new Map(snapshot.docs.map(d=>[String(d.id),{id:d.id,...d.data()}]));
-        if(lastRemoteOrderRows.length) window.WorkOrders?.mergeFromCloud(overlayAuthority(lastRemoteOrderRows));
-      },error=>{
-        console.error('WorkOrders state authority onSnapshot',error);
-      });
 
       onSnapshot(ordersCol,async snapshot=>{
         const rows = snapshot.docs.map(d=>({id:d.id,...d.data()}));
-        lastRemoteOrderRows = rows;
-        window.WorkOrders?.mergeFromCloud(overlayAuthority(rows));
+        // FUENTE UNICA: el estado general procede del documento principal de la orden.
+        // Fabricacion solo complementa phaseFlowV2 para las pills FAB/PINT/ALM/ENT.
+        window.WorkOrders?.mergeFromCloud(rows);
         if(firstOrdersSnapshot){
           firstOrdersSnapshot = false;
           const remoteById = new Map(rows.map(order=>[String(order.id||''),order]));
