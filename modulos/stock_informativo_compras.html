@@ -573,10 +573,11 @@ const firebaseConfig = {
   messagingSenderId: "164944519480",
   appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
 };
-const {initializeApp,getApps,getApp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-const {getAuth,onAuthStateChanged,signInAnonymously,signInWithEmailAndPassword,signOut} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+const {getAuth,onAuthStateChanged,signInAnonymously,signInWithEmailAndPassword,signOut,setPersistence,browserLocalPersistence} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
 const {getFirestore,doc,getDoc,onSnapshot,collection,getDocs} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+const app = getApps().find(a=>a.options?.projectId===firebaseConfig.projectId)
+  || initializeApp(firebaseConfig,'ldh-compras-stock-main');
 const auth = getAuth(app);
 const db = getFirestore(app);
 
@@ -591,6 +592,10 @@ const workOrdersFirebaseConfig = {
 const workOrdersApp = getApps().find(a=>a.options?.projectId===workOrdersFirebaseConfig.projectId)
   || initializeApp(workOrdersFirebaseConfig,'ldh-compras-work-orders');
 const workOrdersAuth = getAuth(workOrdersApp);
+await Promise.allSettled([
+  setPersistence(auth,browserLocalPersistence),
+  setPersistence(workOrdersAuth,browserLocalPersistence)
+]);
 window.__COMPRAS_WORK_ORDERS__ = {app:workOrdersApp,auth:workOrdersAuth};
 console.log('✅ Compras OK: proyecto', firebaseConfig.projectId);
 
@@ -1156,6 +1161,9 @@ function startWatch(){
 $('refresh').onclick = ()=>auth.currentUser ? loadAll() : ensureAutomaticAccess();
 let accessMounted = false;
 let automaticAccessRunning = false;
+let automaticAccessAttempt = 0;
+let automaticAccessRetryTimer = null;
+const MAX_AUTOMATIC_ACCESS_ATTEMPTS = 6;
 let stockAccessError = '';
 
 function mountApplication(){
@@ -1197,9 +1205,23 @@ function mountApplication(){
   }
 }
 
+function scheduleAutomaticAccessRetry(){
+  if(auth.currentUser && workOrdersAuth.currentUser) return;
+  if(automaticAccessAttempt >= MAX_AUTOMATIC_ACCESS_ATTEMPTS) return;
+  clearTimeout(automaticAccessRetryTimer);
+  const delays = [800,1600,3000,5000,8000,12000];
+  const delay = delays[Math.min(automaticAccessAttempt,delays.length-1)];
+  automaticAccessRetryTimer = setTimeout(()=>ensureAutomaticAccess(),delay);
+}
+
 async function ensureAutomaticAccess(){
   if(automaticAccessRunning) return;
+  if(auth.currentUser && workOrdersAuth.currentUser){
+    mountApplication();
+    return;
+  }
   automaticAccessRunning = true;
+  automaticAccessAttempt += 1;
   try{
     const attempts = [];
     if(!auth.currentUser){
@@ -1217,10 +1239,11 @@ async function ensureAutomaticAccess(){
         })
       );
     }
-    await Promise.all(attempts);
+    await Promise.allSettled(attempts);
   }finally{
     automaticAccessRunning = false;
     mountApplication();
+    if(!auth.currentUser || !workOrdersAuth.currentUser) scheduleAutomaticAccessRetry();
   }
 }
 
@@ -1238,11 +1261,11 @@ $('loginBtn').onclick = async ()=>{
 };
 $('logout').onclick = ()=>Promise.allSettled([signOut(auth),signOut(workOrdersAuth)]);
 onAuthStateChanged(auth,user=>{
-  if(user) mountApplication();
+  if(user){ automaticAccessAttempt = 0; mountApplication(); }
   else ensureAutomaticAccess();
 });
 onAuthStateChanged(workOrdersAuth,user=>{
-  if(user) mountApplication();
+  if(user){ automaticAccessAttempt = 0; mountApplication(); }
   else ensureAutomaticAccess();
 });
 ensureAutomaticAccess();
@@ -2406,6 +2429,7 @@ ensureAutomaticAccess();
         })();
       <\/script><!-- LDH_INFORMATIVA_FASES_SOLO_PILLS_ESTADO_AGENDA_V5_20260730 -->
 <!-- LDH_INFORMATIVA_ESTADO_AGENDA_AUTORITATIVO_V8_20260730 -->
+<!-- LDH_ESTADO_AUTORITATIVO_LECTURA_Y_REINTENTO_AUTH_V15_20260730 -->
 </body></html>`);
       w.document.close();
     }
@@ -2441,7 +2465,26 @@ ensureAutomaticAccess();
     const ordersCol = collection(db,'taller_data','work_orders','orders');
     const deletedCol = collection(db,'taller_data','work_orders','deleted');
     const notificationsCol = collection(db,'taller_data','work_orders','notifications');
+    const stateAuthorityCol = collection(db,'taller_data','work_orders','state_authority');
     let mounted = false;
+    let authorityById = new Map();
+    let lastRemoteOrderRows = [];
+
+    function overlayAuthority(rows){
+      return (Array.isArray(rows) ? rows : []).map(row=>{
+        const authority = authorityById.get(String(row.id||''));
+        if(!authority) return row;
+        const authorityAt = Number(authority.atMs)||0;
+        const orderWorkflowAt = Number(row.workflowUpdatedAtMs)||0;
+        if(authorityAt < orderWorkflowAt) return row;
+        return {
+          ...row,
+          workflowStateV2:String(authority.state||''),
+          workflowUpdatedAtMs:authorityAt,
+          workflowSourceV2:String(authority.source||'agenda_authority')
+        };
+      });
+    }
 
     function cleanOrder(order){
       const out = {};
@@ -2537,9 +2580,17 @@ ensureAutomaticAccess();
       const startupLocalRows = window.WorkOrders?.getLocalOrders?.() || [];
       let firstOrdersSnapshot = true;
 
+      onSnapshot(stateAuthorityCol,snapshot=>{
+        authorityById = new Map(snapshot.docs.map(d=>[String(d.id),{id:d.id,...d.data()}]));
+        if(lastRemoteOrderRows.length) window.WorkOrders?.mergeFromCloud(overlayAuthority(lastRemoteOrderRows));
+      },error=>{
+        console.error('WorkOrders state authority onSnapshot',error);
+      });
+
       onSnapshot(ordersCol,async snapshot=>{
         const rows = snapshot.docs.map(d=>({id:d.id,...d.data()}));
-        window.WorkOrders?.mergeFromCloud(rows);
+        lastRemoteOrderRows = rows;
+        window.WorkOrders?.mergeFromCloud(overlayAuthority(rows));
         if(firstOrdersSnapshot){
           firstOrdersSnapshot = false;
           const remoteById = new Map(rows.map(order=>[String(order.id||''),order]));

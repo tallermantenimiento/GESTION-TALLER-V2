@@ -8637,9 +8637,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
       order.updatedAtMs = now;
       writeOrders(this.orders);
       this.render();
-      if(this.cloud?.saveOrders || this.cloud?.saveOrder){
+      if(this.cloud?.saveWorkflowState || this.cloud?.saveOrders || this.cloud?.saveOrder){
         try{
-          if(this.cloud.saveOrders) await this.cloud.saveOrders([order]);
+          if(this.cloud.saveWorkflowState) await this.cloud.saveWorkflowState(order);
+          else if(this.cloud.saveOrders) await this.cloud.saveOrders([order]);
           else await this.cloud.saveOrder(order);
           this.updateSyncStatus(`Sincronización: ${order.reference} · ${workflowView(order).label || 'sin estado'}`,true);
         }catch(error){
@@ -9028,6 +9029,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
 
 
+<!-- LDH_ESTADO_AUTORITATIVO_ATOMICO_V15_20260730 -->
 </body></html>`);
       w.document.close();
     }
@@ -9064,6 +9066,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     const ordersCol = collection(db,'taller_data','work_orders','orders');
     const deletedCol = collection(db,'taller_data','work_orders','deleted');
     const notificationsCol = collection(db,'taller_data','work_orders','notifications');
+    const stateAuthorityCol = collection(db,'taller_data','work_orders','state_authority');
     let mounted = false;
 
     function cleanOrder(order){
@@ -9107,6 +9110,23 @@ window.ejecutarDevolucion = function(matId, maxQty){
             const payload = cleanOrder({...order,updatedAt:serverTimestamp(),updatedAtMs:now});
             batch.set(doc(ordersCol,order.id),payload,{merge:true});
           });
+          await batch.commit();
+        },
+        async saveWorkflowState(order){
+          if(!order?.id) throw new Error('Orden sin identificador');
+          const now = Date.now();
+          const workflowAt = Number(order.workflowUpdatedAtMs) || now;
+          const batch = writeBatch(db);
+          const payload = cleanOrder({...order,updatedAt:serverTimestamp(),updatedAtMs:now});
+          batch.set(doc(ordersCol,order.id),payload,{merge:true});
+          batch.set(doc(stateAuthorityCol,order.id),cleanOrder({
+            orderId:String(order.id),
+            reference:String(order.reference||''),
+            state:String(order.workflowStateV2||''),
+            atMs:workflowAt,
+            source:String(order.workflowSourceV2||'agenda'),
+            updatedAt:serverTimestamp()
+          }),{merge:true});
           await batch.commit();
         },
         async restoreOrders(orders){
@@ -9196,6 +9216,16 @@ window.ejecutarDevolucion = function(matId, maxQty){
           if(newerLocalRows.length){
             try{ await cloud.saveOrders(newerLocalRows); }
             catch(e){ console.warn('Órdenes locales pendientes de sincronizar',e); }
+          }
+          const manualAuthorityRows = startupLocalRows.filter(local=>{
+            const source = String(local.workflowSourceV2||'');
+            if(!source.startsWith('agenda_manual')) return false;
+            const remote = remoteById.get(String(local.id||''));
+            return Number(local.workflowUpdatedAtMs||0) >= Number(remote?.workflowUpdatedAtMs||0);
+          });
+          for(const local of manualAuthorityRows){
+            try{ await cloud.saveWorkflowState(local); }
+            catch(e){ console.warn('Estado manual pendiente de sincronizar',local.reference,e); }
           }
         }
       },error=>{
