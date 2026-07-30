@@ -241,6 +241,8 @@
 
         const rec = {
           id: meta.pedido_uid || ("ALM-" + ref),
+          agendaOrderId: String(meta.agenda_order_id || meta.orderId || "").trim(),
+          orderId: String(meta.agenda_order_id || meta.orderId || "").trim(),
           ref, referencia: ref,
           concept, concepto: concept,
           company, empresa: company, empresaReceptora: company,
@@ -360,6 +362,16 @@
         </tr>`;
     },
 
+    syncWorkflow(item,source,note){
+      try{
+        if(!item || !window.LDH_WorkflowV2) return;
+        const f=item.flow||{};
+        const flow={fabricacion:n(f.fab??f.fabricacion),pintura:n(f.pintura),almacen:this.itemAlmacen(item),entregado:this.itemEntregado(item)};
+        const state=flow.fabricacion>0?'fabrication':flow.pintura>0?'painting':(flow.almacen>0||flow.entregado>0)?'finished':'';
+        window.LDH_WorkflowV2.update({orderId:item.agendaOrderId||item.orderId||'',reference:item.ref||item.referencia||'',state,flow,source:source||'almacen',note:note||''}).catch(error=>console.warn('Workflow Almacén',error));
+      }catch(error){ console.warn('Workflow Almacén',error); }
+    },
+
     deliveredItems(){
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
@@ -454,6 +466,7 @@
 
       this.updatePrepMeta(item);
       this.save();
+      this.syncWorkflow(item,'almacen_reabrir','Reabierto desde Entregados a Almacén');
       this.render();
       this.renderDelivered();
       this.toast("Pedido reabierto en Almacén");
@@ -487,6 +500,7 @@
 
       this.updatePrepMeta(item);
       this.save();
+      this.syncWorkflow(item,'almacen_entrega',`Entregadas ${qty} unidades`);
       this.render();
       this.renderDelivered();
       this.toast("Entrega registrada");
@@ -511,6 +525,7 @@
 
       this.updatePrepMeta(item);
       this.save();
+      this.syncWorkflow(item,'almacen_a_fabricacion',`Devueltas ${qty} unidades a Fabricación`);
       this.render();
       this.renderDelivered();
       this.toast("Devuelto a Fabricación");
@@ -623,5 +638,122 @@
   document.addEventListener("DOMContentLoaded", () => App.init());
 })();
 </script>
+
+<script type="module" id="LDH_WORKFLOW_V2_CLIENT_20260730">
+(async function(){
+  'use strict';
+  if(window.LDH_WorkflowV2) return;
+  const firebaseConfig = {
+    apiKey: "AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo",
+    authDomain: "gestion-taller-2a439.firebaseapp.com",
+    projectId: "gestion-taller-2a439",
+    storageBucket: "gestion-taller-2a439.firebasestorage.app",
+    messagingSenderId: "498579673950",
+    appId: "1:498579673950:web:eb626781a5b509957db5cf"
+  };
+  const api = {};
+  let readyResolve;
+  const ready = new Promise(resolve=>{ readyResolve=resolve; });
+  window.LDH_WorkflowV2 = {
+    ready,
+    async update(payload){
+      await ready;
+      return api.update(payload||{});
+    },
+    async findOrderId(reference){
+      await ready;
+      return api.findOrderId(reference);
+    }
+  };
+  function num(v){ const x=Number(v); return Number.isFinite(x) ? Math.max(0,x) : 0; }
+  function cleanFlow(flow){
+    flow=flow&&typeof flow==='object'?flow:{};
+    return {
+      fabricacion:num(flow.fabricacion ?? flow.fab),
+      pintura:num(flow.pintura),
+      almacen:num(flow.almacen),
+      entregado:num(flow.entregado ?? flow.delivered)
+    };
+  }
+  function stateFromFlow(flow,fallback){
+    const f=cleanFlow(flow);
+    if(f.fabricacion>0) return 'fabrication';
+    if(f.pintura>0) return 'painting';
+    if(f.almacen>0 || f.entregado>0) return 'finished';
+    return String(fallback||'').trim();
+  }
+  try{
+    const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+    const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+    const {getFirestore,collection,doc,getDoc,getDocs,query,where,setDoc} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+    let app=getApps().find(a=>a.options&&a.options.projectId===firebaseConfig.projectId);
+    if(!app) app=initializeApp(firebaseConfig,'ldh-workflow-v2-client');
+    const auth=getAuth(app), db=getFirestore(app);
+    const ordersCol=collection(db,'taller_data','work_orders','orders');
+    let authReady=false;
+    onAuthStateChanged(auth,user=>{
+      if(user){ authReady=true; readyResolve(true); }
+      else signInAnonymously(auth).catch(error=>{ console.error('[Workflow V2] login',error); readyResolve(false); });
+    });
+    setTimeout(()=>{ if(!authReady) readyResolve(false); },8000);
+    api.findOrderId=async function(reference){
+      reference=String(reference||'').trim();
+      if(!reference) return '';
+      try{
+        const candidates=[reference];
+        const prefix=(reference.match(/^(OT-\d{6}-\d{3})/i)||[])[1];
+        if(prefix && prefix!==reference) candidates.push(prefix.toUpperCase());
+        for(const candidate of candidates){
+          const snap=await getDocs(query(ordersCol,where('reference','==',candidate)));
+          const rows=snap.docs.map(d=>({id:d.id,...d.data()}))
+            .filter(x=>String(x.status||'pending')==='pending')
+            .sort((a,b)=>Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0));
+          if(rows[0]?.id) return rows[0].id;
+        }
+        return '';
+      }catch(error){ console.warn('[Workflow V2] buscar referencia',error); return ''; }
+    };
+    api.update=async function(payload){
+      if(!authReady) throw new Error('Workflow V2 sin autenticación');
+      let orderId=String(payload.orderId||payload.agendaOrderId||payload.workOrderId||'').trim();
+      const reference=String(payload.reference||payload.ref||'').trim();
+      if(!orderId) orderId=await api.findOrderId(reference);
+      if(!orderId){ console.warn('[Workflow V2] orden no vinculada',reference); return false; }
+      const ref=doc(ordersCol,orderId);
+      const snap=await getDoc(ref);
+      const current=snap.exists()?(snap.data()||{}):{};
+      const now=Date.now();
+      const flow=cleanFlow(payload.phaseFlowV2||payload.flow||current.phaseFlowV2||{});
+      const state=stateFromFlow(flow,payload.state||payload.workflowStateV2||current.workflowStateV2||'');
+      const history=Array.isArray(current.workflowHistoryV2)?current.workflowHistoryV2.slice(-79):[];
+      const previousState=String(current.workflowStateV2||'');
+      const previousFlow=cleanFlow(current.phaseFlowV2||{});
+      const changed=previousState!==state || JSON.stringify(previousFlow)!==JSON.stringify(flow);
+      if(changed){
+        history.push({
+          atMs:now,
+          state,
+          phaseFlowV2:flow,
+          source:String(payload.source||'modulo'),
+          note:String(payload.note||'')
+        });
+      }
+      await setDoc(ref,{
+        workflowStateV2:state,
+        phaseFlowV2:flow,
+        workflowUpdatedAtMs:now,
+        workflowSourceV2:String(payload.source||'modulo'),
+        workflowHistoryV2:history,
+        updatedAtMs:now
+      },{merge:true});
+      return true;
+    };
+  }catch(error){
+    console.error('[Workflow V2] inicialización',error);
+    readyResolve(false);
+  }
+})();
+</script>
+
 </body>
 </html>
