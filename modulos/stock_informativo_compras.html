@@ -1670,10 +1670,43 @@ ensureAutomaticAccess();
       const local = new Map(
         this.orders.filter(o=>!this.deletedIds.has(o.id)).map(o=>[o.id,o])
       );
+      const workflowFields = [
+        'workflowStateV2','workflowState','phaseFlowV2','workflowUpdatedAtMs',
+        'workflowSourceV2','workflowHistoryV2','inProgress','startedAtMs',
+        'archivedV2','archivedAtMs'
+      ];
       (remoteRows||[]).map(normalizeOrder).forEach(remote=>{
         if(this.deletedIds.has(remote.id)) return;
         const prev = local.get(remote.id);
-        if(!prev || Number(remote.updatedAtMs)>=Number(prev.updatedAtMs)) local.set(remote.id,remote);
+        if(!prev){
+          local.set(remote.id,remote);
+          return;
+        }
+
+        const remoteUpdatedAt = Number(remote.updatedAtMs)||0;
+        const localUpdatedAt = Number(prev.updatedAtMs)||0;
+        const remoteWorkflowAt = Number(remote.workflowUpdatedAtMs)||0;
+        const localWorkflowAt = Number(prev.workflowUpdatedAtMs)||0;
+
+        // Los datos generales siguen la versión más reciente, pero el estado de flujo
+        // se fusiona por su marca temporal propia. Así una copia local antigua de
+        // «ESPERANDO MATERIAL» no puede bloquear un cambio posterior realizado en Agenda.
+        const merged = remoteUpdatedAt >= localUpdatedAt
+          ? {...prev,...remote}
+          : {...remote,...prev};
+        const workflowWinner = remoteWorkflowAt >= localWorkflowAt ? remote : prev;
+        workflowFields.forEach(key=>{
+          if(workflowWinner[key] === undefined) return;
+          if(key === 'phaseFlowV2' && workflowWinner[key] && typeof workflowWinner[key] === 'object'){
+            merged[key] = {...workflowWinner[key]};
+          }else if(key === 'workflowHistoryV2' && Array.isArray(workflowWinner[key])){
+            merged[key] = workflowWinner[key].slice(-80);
+          }else{
+            merged[key] = workflowWinner[key];
+          }
+        });
+        merged.updatedAtMs = Math.max(remoteUpdatedAt,localUpdatedAt);
+        local.set(remote.id,normalizeOrder(merged));
       });
       this.orders = Array.from(local.values());
       const changed = Array.from(new Map([
@@ -2516,7 +2549,20 @@ ensureAutomaticAccess();
           const remoteById = new Map(rows.map(order=>[String(order.id||''),order]));
           const newerLocalRows = startupLocalRows.filter(local=>{
             const remote = remoteById.get(String(local.id||''));
-            return !remote || Number(local.updatedAtMs||0) > Number(remote.updatedAtMs||0);
+            if(!remote) return true;
+
+            const localWorkflowAt = Number(local.workflowUpdatedAtMs)||0;
+            const remoteWorkflowAt = Number(remote.workflowUpdatedAtMs)||0;
+            const localState = String(local.workflowStateV2 || local.workflowState || '').trim().toLowerCase();
+            const remoteState = String(remote.workflowStateV2 || remote.workflowState || '').trim().toLowerCase();
+
+            // En el arranque, el flujo confirmado en la nube manda sobre una caché local
+            // más antigua. Esto evita que la app informativa vuelva a publicar
+            // «ESPERANDO MATERIAL» después de cambiarlo a «EN FABRICACIÓN» en Agenda.
+            if(remoteWorkflowAt > localWorkflowAt) return false;
+            if(remoteWorkflowAt === localWorkflowAt && remoteWorkflowAt > 0 && remoteState !== localState) return false;
+
+            return Number(local.updatedAtMs||0) > Number(remote.updatedAtMs||0);
           });
           if(newerLocalRows.length){
             try{ await cloud.saveOrders(newerLocalRows); }
@@ -3847,5 +3893,6 @@ ensureAutomaticAccess();
 })();
 </script>
 
+<!-- LDH_FIX_CLOUD_WORKFLOW_PRIORITY_V6_20260730 -->
 </body>
 </html>
