@@ -3879,13 +3879,16 @@ ensureAutomaticAccess();
 
 <!-- LDH_FIX_CLOUD_WORKFLOW_PRIORITY_V6_20260730 -->
 
-<script type="module" id="LDH_WORKFLOW_STATE_CHANNEL_INFO_V9_20260730">
+
+<!-- LDH_INFO_ORDERS_CANONICAL_STATE_V10_20260730 -->
+<script type="module" id="LDH_INFO_ORDERS_CANONICAL_STATE_V10_20260730">
 (async function(){
   'use strict';
-  if(window.__LDH_WORKFLOW_STATE_CHANNEL_INFO_V9) return;
-  window.__LDH_WORKFLOW_STATE_CHANNEL_INFO_V9 = true;
+  if(window.__LDH_INFO_ORDERS_CANONICAL_STATE_V10) return;
+  window.__LDH_INFO_ORDERS_CANONICAL_STATE_V10 = true;
 
   const PROJECT_ID = 'gestion-taller-2a439';
+  const LOCAL_KEY = 'ldh_work_orders_v1';
   const sleep = ms => new Promise(resolve=>setTimeout(resolve,ms));
   const text = value => String(value == null ? '' : value).trim();
   const number = value => {
@@ -3907,87 +3910,109 @@ ensureAutomaticAccess();
       entregado:number(flow.entregado ?? flow.delivered)
     };
   };
-  const sameFlow = (a,b) => {
-    a=cleanFlow(a); b=cleanFlow(b);
-    return a.fabricacion===b.fabricacion && a.pintura===b.pintura && a.almacen===b.almacen && a.entregado===b.entregado;
+  const flowTotal = flow => {
+    const f=cleanFlow(flow);
+    return f.fabricacion+f.pintura+f.almacen+f.entregado;
   };
+  const stateTime = row => Math.max(
+    number(row && row.workflowUpdatedAtMs),
+    number(row && row.updatedAtMs),
+    number(row && row.createdAtMs)
+  );
 
-  const byId = new Map();
-  const byRef = new Map();
+  let latestById = new Map();
+  let latestByRef = new Map();
   let workOrders = null;
+  let originalRender = null;
+  let applying = false;
 
-  function overrideFor(order){
+  function sameArray(a,b){
+    try{ return JSON.stringify(a||[])===JSON.stringify(b||[]); }
+    catch(error){ return false; }
+  }
+
+  function remoteFor(order){
     if(!order) return null;
-    return byId.get(text(order.id)) || byRef.get(refKey(order.reference));
+    return latestById.get(text(order.id)) || latestByRef.get(refKey(order.reference));
   }
 
-  function applyAuthoritativeStates(orders){
+  function applyCanonicalStates(orders){
+    if(applying) return false;
+    applying = true;
     let changed = false;
-    (Array.isArray(orders) ? orders : []).forEach(order=>{
-      if(!order || text(order.status || 'pending')!=='pending') return;
-      const authoritative = overrideFor(order);
-      if(!authoritative) return;
+    try{
+      (Array.isArray(orders) ? orders : []).forEach(order=>{
+        if(!order) return;
+        const remote = remoteFor(order);
+        if(!remote) return;
 
-      const authoritativeAt = number(authoritative.workflowUpdatedAtMs);
-      const orderAt = number(order.workflowUpdatedAtMs);
-      const authoritativeSource = text(authoritative.workflowSourceV2).toLowerCase();
-      const orderSource = text(order.workflowSourceV2).toLowerCase();
-      const flowUnchanged = sameFlow(order.phaseFlowV2,authoritative.phaseFlowV2);
+        // The order document in taller_data/work_orders/orders is the only authority
+        // for the general state. The direct Fabrication reader is kept only for the
+        // compact FAB/PINT/ALM/ENT counters.
+        const nextStateV2 = text(remote.workflowStateV2);
+        const nextLegacy = text(remote.workflowState);
+        const nextAt = number(remote.workflowUpdatedAtMs);
+        const nextSource = text(remote.workflowSourceV2);
+        const nextHistory = Array.isArray(remote.workflowHistoryV2)
+          ? remote.workflowHistoryV2.slice(-80)
+          : [];
+        const nextStatus = text(remote.status || order.status || 'pending');
+        const nextInProgress = ['fabrication','painting'].includes(
+          (nextStateV2 || nextLegacy).toLowerCase()
+        );
 
-      // La corrección manual manda frente a lecturas/reconciliaciones de apertura.
-      // Una acción real posterior (Preparación, movimiento en Fabricación o Almacén)
-      // recupera el control aunque las cantidades coincidan.
-      const newerRealAction = orderAt > authoritativeAt && (
-        orderSource.startsWith('preparacion_')
-        || orderSource.startsWith('calculo_')
-        || orderSource.startsWith('almacen_')
-        || (orderSource.startsWith('fabricacion_') && !orderSource.includes('reconciliacion'))
-      );
-      const mustApply = !newerRealAction && (
-        (authoritativeSource.startsWith('agenda_manual') && flowUnchanged)
-        || authoritativeAt >= orderAt
-      );
-      if(!mustApply) return;
+        if(text(order.workflowStateV2)!==nextStateV2){ order.workflowStateV2=nextStateV2; changed=true; }
+        if(text(order.workflowState)!==nextLegacy){ order.workflowState=nextLegacy; changed=true; }
+        if(number(order.workflowUpdatedAtMs)!==nextAt){ order.workflowUpdatedAtMs=nextAt; changed=true; }
+        if(text(order.workflowSourceV2)!==nextSource){ order.workflowSourceV2=nextSource; changed=true; }
+        if(!sameArray(order.workflowHistoryV2,nextHistory)){ order.workflowHistoryV2=nextHistory; changed=true; }
+        if(text(order.status)!==nextStatus){ order.status=nextStatus; changed=true; }
+        if(Boolean(order.inProgress)!==nextInProgress){ order.inProgress=nextInProgress; changed=true; }
+        if(!nextInProgress && number(order.startedAtMs)!==0){ order.startedAtMs=0; changed=true; }
 
-      const nextState = text(authoritative.workflowStateV2 || authoritative.workflowState);
-      if(text(order.workflowStateV2)!==nextState
-        || number(order.workflowUpdatedAtMs)!==authoritativeAt
-        || text(order.workflowSourceV2)!==text(authoritative.workflowSourceV2)){
-        order.workflowStateV2 = nextState;
-        order.workflowState = text(authoritative.workflowState);
-        order.workflowUpdatedAtMs = authoritativeAt;
-        order.workflowSourceV2 = text(authoritative.workflowSourceV2);
-        if(Array.isArray(authoritative.workflowHistoryV2)){
-          order.workflowHistoryV2 = authoritative.workflowHistoryV2.slice(-80);
+        ['completedDate','completedAtMs','archivedV2','archivedAtMs'].forEach(key=>{
+          if(remote[key]===undefined) return;
+          const next = remote[key];
+          if(order[key]!==next){ order[key]=next; changed=true; }
+        });
+
+        // Use the remote phase flow only when the direct Fabrication bridge has not
+        // already supplied a non-empty, more precise live distribution.
+        const localFlow = cleanFlow(order.phaseFlowV2);
+        const remoteFlow = cleanFlow(remote.phaseFlowV2);
+        if(flowTotal(localFlow)<=0 && flowTotal(remoteFlow)>0){
+          order.phaseFlowV2=remoteFlow;
+          changed=true;
         }
-        order.inProgress = ['fabrication','painting'].includes(nextState);
-        if(!order.inProgress) order.startedAtMs = 0;
-        changed = true;
+      });
+
+      if(changed){
+        try{ localStorage.setItem(LOCAL_KEY,JSON.stringify(orders)); }catch(error){}
       }
-    });
-    return changed;
+      return changed;
+    }finally{
+      applying=false;
+    }
   }
 
-  function hook(){
-    const candidate = window.WorkOrders;
+  function installHook(){
+    const candidate=window.WorkOrders;
     if(!candidate || !Array.isArray(candidate.orders) || typeof candidate.render!=='function') return false;
-    workOrders = candidate;
-    if(candidate.__LDH_STATE_CHANNEL_INFO_V9_HOOKED) return true;
-    candidate.__LDH_STATE_CHANNEL_INFO_V9_HOOKED = true;
-    const originalRender = candidate.render;
-    candidate.render = function(){
-      applyAuthoritativeStates(this.orders);
+    workOrders=candidate;
+    if(candidate.__LDH_CANONICAL_STATE_V10_HOOKED) return true;
+    candidate.__LDH_CANONICAL_STATE_V10_HOOKED=true;
+    originalRender=candidate.render;
+    candidate.render=function(){
+      applyCanonicalStates(this.orders);
       return originalRender.apply(this,arguments);
     };
-    const originalMerge = candidate.mergeFromCloud;
-    if(typeof originalMerge==='function'){
-      candidate.mergeFromCloud = function(){
-        const result = originalMerge.apply(this,arguments);
-        if(applyAuthoritativeStates(this.orders)) originalRender.call(this);
-        return result;
-      };
-    }
     return true;
+  }
+
+  function refreshScreen(){
+    if(!installHook() || !workOrders) return;
+    const changed=applyCanonicalStates(workOrders.orders);
+    if(changed && originalRender) originalRender.call(workOrders);
   }
 
   try{
@@ -3995,51 +4020,50 @@ ensureAutomaticAccess();
     const Auth = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
     const FS = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
-    let app = null;
-    for(let attempt=0;attempt<100 && !app;attempt++){
-      app = App.getApps().find(item=>item.options && item.options.projectId===PROJECT_ID);
+    let app=null;
+    for(let attempt=0;attempt<120 && !app;attempt++){
+      app=App.getApps().find(item=>item.options && item.options.projectId===PROJECT_ID);
       if(!app) await sleep(100);
     }
-    if(!app) throw new Error('No se encontró el proyecto de órdenes.');
+    if(!app) throw new Error('No se encontró el proyecto principal de órdenes.');
 
-    const auth = Auth.getAuth(app);
-    const db = FS.getFirestore(app);
-    const statesCol = FS.collection(db,'taller_data','work_orders','workflow_states');
-
+    const auth=Auth.getAuth(app);
     if(!auth.currentUser){
       await new Promise((resolve,reject)=>{
-        const stop = Auth.onAuthStateChanged(auth,user=>{
+        const stop=Auth.onAuthStateChanged(auth,user=>{
           if(user){ stop(); resolve(user); }
         },reject);
-        setTimeout(()=>{ stop(); reject(new Error('Informativa sin sesión de órdenes.')); },12000);
+        setTimeout(()=>{ stop(); reject(new Error('Informativa sin sesión de órdenes.')); },15000);
       });
     }
 
-    for(let attempt=0;attempt<80 && !hook();attempt++) await sleep(100);
+    const db=FS.getFirestore(app);
+    const ordersCol=FS.collection(db,'taller_data','work_orders','orders');
+    for(let attempt=0;attempt<100 && !installHook();attempt++) await sleep(100);
 
-    FS.onSnapshot(statesCol,snapshot=>{
-      byId.clear(); byRef.clear();
+    FS.onSnapshot(ordersCol,snapshot=>{
+      const byId=new Map();
+      const byRef=new Map();
       snapshot.docs.forEach(document=>{
-        const row = {id:document.id,...document.data()};
-        const id = text(row.orderId || row.id || document.id);
-        const ref = refKey(row.reference);
+        const row={id:document.id,...document.data()};
+        const id=text(row.id || document.id);
+        const ref=refKey(row.reference);
         if(id) byId.set(id,row);
         if(ref){
-          const previous = byRef.get(ref);
-          if(!previous || number(row.workflowUpdatedAtMs)>=number(previous.workflowUpdatedAtMs)) byRef.set(ref,row);
+          const previous=byRef.get(ref);
+          if(!previous || stateTime(row)>=stateTime(previous)) byRef.set(ref,row);
         }
       });
-      hook();
-      if(workOrders){
-        applyAuthoritativeStates(workOrders.orders);
-        workOrders.render();
-      }
-    },error=>console.error('[Informativa estado autoritativo] lectura',error));
+      latestById=byId;
+      latestByRef=byRef;
+      refreshScreen();
+    },error=>console.error('[Informativa estado canónico] lectura',error));
   }catch(error){
-    console.error('[Informativa estado autoritativo] inicialización',error);
+    console.error('[Informativa estado canónico] inicialización',error);
   }
 })();
 </script>
-<!-- LDH_WORKFLOW_STATE_CHANNEL_INFO_V9_20260730 -->
+<!-- LDH_INFO_ORDERS_CANONICAL_STATE_V10_20260730 -->
+
 </body>
 </html>
