@@ -1670,11 +1670,6 @@ ensureAutomaticAccess();
       const local = new Map(
         this.orders.filter(o=>!this.deletedIds.has(o.id)).map(o=>[o.id,o])
       );
-      const workflowFields = [
-        'workflowStateV2','workflowState','phaseFlowV2','workflowUpdatedAtMs',
-        'workflowSourceV2','workflowHistoryV2','inProgress','startedAtMs',
-        'archivedV2','archivedAtMs'
-      ];
       (remoteRows||[]).map(normalizeOrder).forEach(remote=>{
         if(this.deletedIds.has(remote.id)) return;
         const prev = local.get(remote.id);
@@ -1685,43 +1680,42 @@ ensureAutomaticAccess();
 
         const remoteUpdatedAt = Number(remote.updatedAtMs)||0;
         const localUpdatedAt = Number(prev.updatedAtMs)||0;
-        const remoteWorkflowAt = Number(remote.workflowUpdatedAtMs)||0;
-        const localWorkflowAt = Number(prev.workflowUpdatedAtMs)||0;
+        const localFlow = phaseFlow(prev);
+        const remoteFlow = phaseFlow(remote);
+        const localFlowTotal = localFlow.fabricacion + localFlow.pintura + localFlow.almacen + localFlow.entregado;
 
-        // Los datos generales siguen la versión más reciente, pero el estado de flujo
-        // se fusiona por su marca temporal propia. Así una copia local antigua de
-        // «ESPERANDO MATERIAL» no puede bloquear un cambio posterior realizado en Agenda.
+        // La app informativa NO decide el estado general. El documento recibido de
+        // Agenda/Firestore es siempre la autoridad para EN PREPARACIÓN, ESPERANDO
+        // MATERIAL, EN FABRICACIÓN, EN PINTURA, TERMINADO o ANULADO.
+        // La lectura directa de Fabricación solo conserva las cantidades FAB/PINT/ALM/ENT.
         const merged = remoteUpdatedAt >= localUpdatedAt
           ? {...prev,...remote}
           : {...remote,...prev};
-        const workflowWinner = remoteWorkflowAt >= localWorkflowAt ? remote : prev;
-        workflowFields.forEach(key=>{
-          if(workflowWinner[key] === undefined) return;
-          if(key === 'phaseFlowV2' && workflowWinner[key] && typeof workflowWinner[key] === 'object'){
-            merged[key] = {...workflowWinner[key]};
-          }else if(key === 'workflowHistoryV2' && Array.isArray(workflowWinner[key])){
-            merged[key] = workflowWinner[key].slice(-80);
-          }else{
-            merged[key] = workflowWinner[key];
-          }
+
+        [
+          'status','completedDate','completedAtMs',
+          'workflowStateV2','workflowState','workflowUpdatedAtMs','workflowSourceV2',
+          'workflowHistoryV2','inProgress','startedAtMs','archivedV2','archivedAtMs'
+        ].forEach(key=>{
+          if(remote[key] === undefined) return;
+          merged[key] = key === 'workflowHistoryV2' && Array.isArray(remote[key])
+            ? remote[key].slice(-80)
+            : remote[key];
         });
+
+        // Las pills de fases pueden proceder de la lectura directa de Fabricación.
+        // Se conserva ese reparto local si ya existe; en caso contrario se usa el remoto.
+        merged.phaseFlowV2 = localFlowTotal > 0 ? localFlow : remoteFlow;
         merged.updatedAtMs = Math.max(remoteUpdatedAt,localUpdatedAt);
         local.set(remote.id,normalizeOrder(merged));
       });
+
       this.orders = Array.from(local.values());
-      const changed = Array.from(new Map([
-        ...this.normalizePendingPositions(true),
-        ...this.normalizeInProgress(true)
-      ].map(order=>[order.id,order])).values());
+      this.normalizePendingPositions(false);
+      this.normalizeInProgress(false);
       writeOrders(this.orders);
       this.render();
       this.updateSyncStatus('Sincronización: actualizada', true);
-      if(changed.length && this.cloud?.saveOrders){
-        this.cloud.saveOrders(changed).catch(error=>{
-          console.error('No se pudo normalizar la cola en Firestore',error);
-          this.updateSyncStatus('Orden corregido localmente · sincronización pendiente',false);
-        });
-      }
     },
 
     getLocalOrders(){
@@ -2410,6 +2404,7 @@ ensureAutomaticAccess();
           setTimeout(go,1200);
         })();
       <\/script><!-- LDH_INFORMATIVA_FASES_SOLO_PILLS_ESTADO_AGENDA_V5_20260730 -->
+<!-- LDH_INFORMATIVA_ESTADO_AGENDA_AUTORITATIVO_V8_20260730 -->
 </body></html>`);
       w.document.close();
     }
@@ -2547,26 +2542,15 @@ ensureAutomaticAccess();
         if(firstOrdersSnapshot){
           firstOrdersSnapshot = false;
           const remoteById = new Map(rows.map(order=>[String(order.id||''),order]));
-          const newerLocalRows = startupLocalRows.filter(local=>{
-            const remote = remoteById.get(String(local.id||''));
-            if(!remote) return true;
-
-            const localWorkflowAt = Number(local.workflowUpdatedAtMs)||0;
-            const remoteWorkflowAt = Number(remote.workflowUpdatedAtMs)||0;
-            const localState = String(local.workflowStateV2 || local.workflowState || '').trim().toLowerCase();
-            const remoteState = String(remote.workflowStateV2 || remote.workflowState || '').trim().toLowerCase();
-
-            // En el arranque, el flujo confirmado en la nube manda sobre una caché local
-            // más antigua. Esto evita que la app informativa vuelva a publicar
-            // «ESPERANDO MATERIAL» después de cambiarlo a «EN FABRICACIÓN» en Agenda.
-            if(remoteWorkflowAt > localWorkflowAt) return false;
-            if(remoteWorkflowAt === localWorkflowAt && remoteWorkflowAt > 0 && remoteState !== localState) return false;
-
-            return Number(local.updatedAtMs||0) > Number(remote.updatedAtMs||0);
-          });
-          if(newerLocalRows.length){
-            try{ await cloud.saveOrders(newerLocalRows); }
-            catch(e){ console.warn('Órdenes locales pendientes de sincronizar',e); }
+          // Nunca republicar una copia local de una orden que ya existe en la nube.
+          // La informativa podría conservar un estado antiguo y pisar el cambio hecho
+          // desde Agenda. Solo se suben órdenes creadas localmente que aún no existen.
+          const missingRemoteRows = startupLocalRows.filter(local=>
+            !remoteById.has(String(local.id||''))
+          );
+          if(missingRemoteRows.length){
+            try{ await cloud.saveOrders(missingRemoteRows); }
+            catch(e){ console.warn('Órdenes locales nuevas pendientes de sincronizar',e); }
           }
         }
       },error=>{
