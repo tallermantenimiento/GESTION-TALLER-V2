@@ -1067,7 +1067,7 @@ let __backupInProgress = false;
 let __lastBackupAt = 0;
 
 // Ajusta aquí la frecuencia (ms). Ej: 2 min = 120000, 5 min = 300000
-const AUTO_BACKUP_EVERY_MS = 120000;
+const AUTO_BACKUP_EVERY_MS = 0; // Desactivado: backup completo solo manual
 
 // Seguridad: mínimo tiempo entre backups (por si se llama desde varios sitios)
 const MIN_BACKUP_GAP_MS = 60000;
@@ -1107,13 +1107,13 @@ try {
 // Arrancar auto-backup cuando haya usuario logueado
 function startAutoBackup() {
   if (window.__CLOUD_SYNC_DISABLE_LEGACY) return;
-  if (__autoBackupTimer) return;
-
-  console.log("🔁 AutoBackup: activado cada", AUTO_BACKUP_EVERY_MS/1000, "seg");
-  __autoBackupTimer = setInterval(runAutoBackupOnce, AUTO_BACKUP_EVERY_MS);
-
-  // opcional: uno inmediato al arrancar
-  setTimeout(runAutoBackupOnce, 3000);
+  // PROTECCION DE CUOTA: el backup completo de localStorage queda solo manual.
+  // El boton "Publicar nube" sigue usando backupToFirestore("backup_main").
+  if (__autoBackupTimer) {
+    clearInterval(__autoBackupTimer);
+    __autoBackupTimer = null;
+  }
+  console.log("🛡 AutoBackup periódico desactivado · copia en nube solo manual");
 }
 
 // Parar cuando se desloguea
@@ -1268,17 +1268,8 @@ async function autoRestoreIfEmpty(docId="backup_main") {
 // Las expongo para usarlas desde consola si quieres
 window.backupToFirestore = backupToFirestore;
 window.restoreFromFirestore = restoreFromFirestore;
-/* AutoRestore (robusto):
-   - Se ejecuta DESPUÉS del login (onAuthStateChanged)
-   - Evita el error de permisos cuando aún no hay usuario autenticado (típico en Incógnito). */
-if (!window.__CLOUD_SYNC_DISABLE_LEGACY) {
-  const FB = window.__FIREBASE__;
-  if (FB?.onAuthStateChanged && FB?.auth) {
-    FB.onAuthStateChanged(FB.auth, (user) => {
-      if (user) setTimeout(() => autoRestoreIfEmpty("backup_main"), 800);
-    });
-  }
-}</script>
+/* AutoRestore se ejecuta una sola vez desde el listener principal de autenticación. */
+</script>
 
 
 <!-- ===== Devolución Express (modal) ===== -->
@@ -7916,43 +7907,30 @@ window.ejecutarDevolucion = function(matId, maxQty){
       const before = this.orders.length;
       this.orders = this.orders.filter(order=>!this.deletedIds.has(order.id));
       if(changed || before !== this.orders.length){
-        const shifted = before !== this.orders.length
-          ? this.normalizePendingPositions(true)
-          : [];
+        // Solo normalizacion local. Nunca escribir desde un listener de Firestore:
+        // evitamos el bucle snapshot -> renumerar -> escribir -> snapshot.
+        if(before !== this.orders.length) this.normalizePendingPositions(false);
         writeOrders(this.orders);
         this.render();
-        if(shifted.length && this.cloud?.saveOrders){
-          this.cloud.saveOrders(shifted).catch(error=>{
-            console.error('No se pudo renumerar la cola después de eliminar',error);
-            this.updateSyncStatus('Trabajo eliminado · renumeración pendiente',false);
-          });
-        }
       }
     },
 
     mergeFromCloud(remoteRows){
-      const local = new Map(
+      const localOnly = new Map(
         this.orders.filter(o=>!this.deletedIds.has(o.id)).map(o=>[o.id,o])
       );
       (remoteRows||[]).map(normalizeOrder).forEach(remote=>{
         if(this.deletedIds.has(remote.id)) return;
-        const prev = local.get(remote.id);
-        if(!prev || Number(remote.updatedAtMs)>=Number(prev.updatedAtMs)) local.set(remote.id,remote);
+        // FIRESTORE es la fuente de verdad para toda orden que ya existe en nube.
+        // No se republica ni se reescribe nada desde esta lectura.
+        localOnly.set(remote.id,remote);
       });
-      this.orders = Array.from(local.values());
-      const changed = Array.from(new Map([
-        ...this.normalizePendingPositions(true),
-        ...this.normalizeInProgress(true)
-      ].map(order=>[order.id,order])).values());
+      this.orders = Array.from(localOnly.values());
+      this.normalizePendingPositions(false);
+      this.normalizeInProgress(false);
       writeOrders(this.orders);
       this.render();
       this.updateSyncStatus('Sincronización: actualizada', true);
-      if(changed.length && this.cloud?.saveOrders){
-        this.cloud.saveOrders(changed).catch(error=>{
-          console.error('No se pudo normalizar la cola en Firestore',error);
-          this.updateSyncStatus('Orden corregido localmente · sincronización pendiente',false);
-        });
-      }
     },
 
     getLocalOrders(){
@@ -9181,9 +9159,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
       window.WorkOrders?.attachCloud(cloud);
 
-      const deletedSnapshot = await getDocs(deletedCol);
-      window.WorkOrders?.applyDeletedIds(deletedSnapshot.docs.map(item=>item.id));
-
+      // El primer onSnapshot ya entrega el contenido inicial: no hacer getDocs duplicado.
       onSnapshot(deletedCol,snapshot=>{
         window.WorkOrders?.applyDeletedIds(snapshot.docs.map(item=>item.id));
       },error=>{
@@ -9199,34 +9175,11 @@ window.ejecutarDevolucion = function(matId, maxQty){
         window.WorkOrders?.updateSyncStatus('Órdenes sincronizadas · avisos no disponibles',false);
       });
 
-      const startupLocalRows = window.WorkOrders?.getLocalOrders?.() || [];
-      let firstOrdersSnapshot = true;
-
-      onSnapshot(ordersCol,async snapshot=>{
+      onSnapshot(ordersCol,snapshot=>{
         const rows = snapshot.docs.map(d=>({id:d.id,...d.data()}));
+        // Listener estrictamente de lectura. Las escrituras se realizan solo por
+        // acciones expresas del usuario (guardar, cambiar estado, archivar, etc.).
         window.WorkOrders?.mergeFromCloud(rows);
-        if(firstOrdersSnapshot){
-          firstOrdersSnapshot = false;
-          const remoteById = new Map(rows.map(order=>[String(order.id||''),order]));
-          const newerLocalRows = startupLocalRows.filter(local=>{
-            const remote = remoteById.get(String(local.id||''));
-            return !remote || Number(local.updatedAtMs||0) > Number(remote.updatedAtMs||0);
-          });
-          if(newerLocalRows.length){
-            try{ await cloud.saveOrders(newerLocalRows); }
-            catch(e){ console.warn('Órdenes locales pendientes de sincronizar',e); }
-          }
-          const manualAuthorityRows = startupLocalRows.filter(local=>{
-            const source = String(local.workflowSourceV2||'');
-            if(!source.startsWith('agenda_manual')) return false;
-            const remote = remoteById.get(String(local.id||''));
-            return Number(local.workflowUpdatedAtMs||0) >= Number(remote?.workflowUpdatedAtMs||0);
-          });
-          for(const local of manualAuthorityRows){
-            try{ await cloud.saveWorkflowState(local); }
-            catch(e){ console.warn('Estado manual pendiente de sincronizar',local.reference,e); }
-          }
-        }
       },error=>{
         console.error('WorkOrders onSnapshot',error);
         window.WorkOrders?.updateSyncStatus('Sincronización no disponible · datos locales',false);
@@ -9584,15 +9537,11 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
   try{
     const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-    const {getAuth,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
     const {getFirestore,doc,onSnapshot} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
     let app = getApps().find(item=>item.options && item.options.projectId === firebaseConfig.projectId);
     if(!app) app = initializeApp(firebaseConfig, 'ldh-direct-fabrication-phase-reader');
-    const auth = getAuth(app);
-    if(!auth.currentUser){
-      try{ await signInAnonymously(auth); }
-      catch(error){ console.warn('[Direct phases] anonymous login unavailable; trying current rules', error); }
-    }
+    // El acceso anónimo está deshabilitado en este proyecto. No insistir en cada carga:
+    // la lectura se intenta directamente con las reglas actuales de Firestore.
     const db = getFirestore(app);
     onSnapshot(doc(db,'taller_data','fabricacion'), snapshot=>{
       if(snapshot.exists()) receivePayload(snapshot.data() || {});

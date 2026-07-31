@@ -1154,8 +1154,11 @@ function cardHTML(m){
 function startWatch(){
   if(unsubMeta) unsubMeta();
   if(unsubMaterials) unsubMaterials();
+  // El paquete taller_data/stock es la fuente autoritativa publicada por Stock.
+  // Escuchar tambien stock_materials provocaba una lectura completa adicional por
+  // cada cambio. La fuente de respaldo queda disponible mediante el boton Actualizar.
   unsubMeta = onSnapshot(doc(db,...STOCK_META), ()=>scheduleLoadAll(), err=>console.error('meta stock',err));
-  unsubMaterials = onSnapshot(collection(db,'stock_materials'), ()=>scheduleLoadAll(), err=>console.warn('stock_materials listener',err));
+  unsubMaterials = null;
 }
 
 ['search','typeFilter','stockFilter'].forEach(id=>$(id).addEventListener('input',render));
@@ -1164,8 +1167,14 @@ let accessMounted = false;
 let automaticAccessRunning = false;
 let automaticAccessAttempt = 0;
 let automaticAccessRetryTimer = null;
-const MAX_AUTOMATIC_ACCESS_ATTEMPTS = 18;
+const MAX_AUTOMATIC_ACCESS_ATTEMPTS = 3;
 let stockAccessError = '';
+let stockAnonymousUnavailable = false;
+let ordersAnonymousUnavailable = false;
+function hardAnonymousError(error){
+  const code = String(error?.code || '');
+  return code.includes('admin-restricted-operation') || code.includes('operation-not-allowed');
+}
 
 function mountApplication(){
   const stockUser = auth.currentUser;
@@ -1207,10 +1216,12 @@ function mountApplication(){
 }
 
 function scheduleAutomaticAccessRetry(){
-  if(auth.currentUser && workOrdersAuth.currentUser) return;
+  const stockPending = !auth.currentUser && !stockAnonymousUnavailable;
+  const ordersPending = !workOrdersAuth.currentUser && !ordersAnonymousUnavailable;
+  if(!stockPending && !ordersPending) return;
   if(automaticAccessAttempt >= MAX_AUTOMATIC_ACCESS_ATTEMPTS) return;
   clearTimeout(automaticAccessRetryTimer);
-  const delays = [500,900,1500,2500,4000,6500,9000,12000,15000,18000];
+  const delays = [700,1800,4500];
   const delay = delays[Math.min(automaticAccessAttempt,delays.length-1)];
   automaticAccessRetryTimer = setTimeout(()=>ensureAutomaticAccess(),delay);
 }
@@ -1225,18 +1236,20 @@ async function ensureAutomaticAccess(){
   automaticAccessAttempt += 1;
   try{
     const attempts = [];
-    if(!auth.currentUser){
+    if(!auth.currentUser && !stockAnonymousUnavailable){
       attempts.push(
         signInAnonymously(auth).catch(error=>{
           console.warn('Acceso automático a Stock no disponible',error);
           stockAccessError = String(error?.code || error?.message || error);
+          if(hardAnonymousError(error)) stockAnonymousUnavailable = true;
         })
       );
     }
-    if(!workOrdersAuth.currentUser){
+    if(!workOrdersAuth.currentUser && !ordersAnonymousUnavailable){
       attempts.push(
         signInAnonymously(workOrdersAuth).catch(error=>{
           console.warn('Acceso automático a órdenes no disponible',error);
+          if(hardAnonymousError(error)) ordersAnonymousUnavailable = true;
         })
       );
     }
@@ -1692,17 +1705,9 @@ ensureAutomaticAccess();
       const before = this.orders.length;
       this.orders = this.orders.filter(order=>!this.deletedIds.has(order.id));
       if(changed || before !== this.orders.length){
-        const shifted = before !== this.orders.length
-          ? this.normalizePendingPositions(true)
-          : [];
+        if(before !== this.orders.length) this.normalizePendingPositions(false);
         writeOrders(this.orders);
         this.render();
-        if(shifted.length && this.cloud?.saveOrders){
-          this.cloud.saveOrders(shifted).catch(error=>{
-            console.error('No se pudo renumerar la cola después de eliminar',error);
-            this.updateSyncStatus('Trabajo eliminado · renumeración pendiente',false);
-          });
-        }
       }
     },
 
@@ -2564,9 +2569,7 @@ ensureAutomaticAccess();
 
       window.WorkOrders?.attachCloud(cloud);
 
-      const deletedSnapshot = await getDocs(deletedCol);
-      window.WorkOrders?.applyDeletedIds(deletedSnapshot.docs.map(item=>item.id));
-
+      // El listener entrega tambien el estado inicial; evitamos una lectura duplicada.
       onSnapshot(deletedCol,snapshot=>{
         window.WorkOrders?.applyDeletedIds(snapshot.docs.map(item=>item.id));
       },error=>{
@@ -2574,29 +2577,10 @@ ensureAutomaticAccess();
         window.WorkOrders?.updateSyncStatus('No se puede verificar el registro de eliminaciones',false);
       });
 
-      const startupLocalRows = window.WorkOrders?.getLocalOrders?.() || [];
-      let firstOrdersSnapshot = true;
-
-
-      onSnapshot(ordersCol,async snapshot=>{
+      onSnapshot(ordersCol,snapshot=>{
         const rows = snapshot.docs.map(d=>({id:d.id,...d.data()}));
-        // FUENTE UNICA: el estado general procede del documento principal de la orden.
-        // Fabricacion solo complementa phaseFlowV2 para las pills FAB/PINT/ALM/ENT.
+        // La informativa escucha y representa. No republica su cache local al abrir.
         window.WorkOrders?.mergeFromCloud(rows);
-        if(firstOrdersSnapshot){
-          firstOrdersSnapshot = false;
-          const remoteById = new Map(rows.map(order=>[String(order.id||''),order]));
-          // Nunca republicar una copia local de una orden que ya existe en la nube.
-          // La informativa podría conservar un estado antiguo y pisar el cambio hecho
-          // desde Agenda. Solo se suben órdenes creadas localmente que aún no existen.
-          const missingRemoteRows = startupLocalRows.filter(local=>
-            !remoteById.has(String(local.id||''))
-          );
-          if(missingRemoteRows.length){
-            try{ await cloud.saveOrders(missingRemoteRows); }
-            catch(e){ console.warn('Órdenes locales nuevas pendientes de sincronizar',e); }
-          }
-        }
       },error=>{
         console.error('WorkOrders onSnapshot',error);
         window.WorkOrders?.updateSyncStatus('Sincronización no disponible · datos locales',false);
@@ -3530,17 +3514,8 @@ ensureAutomaticAccess();
       state.cloud = cloud;
       setCloudState('Sincronización: conectada · sin alertas en este departamento',true);
 
-      const [deletedDepartmentsSnapshot,deletedOrdersSnapshot] = await Promise.all([
-        FS.getDocs(deletedDepartmentsCol),
-        FS.getDocs(deletedOrdersCol)
-      ]);
-      applyDeletedDepartments(deletedDepartmentsSnapshot.docs.map(item => item.id));
-      applyDeletedOrders(deletedOrdersSnapshot.docs.map(item => item.id));
-
-      const startupDepartments = state.departments.slice();
-      const startupOrders = state.orders.slice();
-      let firstDepartments = true;
-      let firstOrders = true;
+      // Los onSnapshot siguientes entregan tambien el contenido inicial.
+      // No se hacen getDocs duplicados ni se republican caches locales al arrancar.
 
       FS.onSnapshot(deletedDepartmentsCol,snapshot => {
         applyDeletedDepartments(snapshot.docs.map(item => item.id));
@@ -3550,29 +3525,17 @@ ensureAutomaticAccess();
         applyDeletedOrders(snapshot.docs.map(item => item.id));
       },error => console.error('Órdenes eliminadas no disponibles',error));
 
-      FS.onSnapshot(departmentsCol,async snapshot => {
+      FS.onSnapshot(departmentsCol,snapshot => {
         const remote = snapshot.docs.map(document => ({id:document.id,...document.data()}));
         mergeDepartments(remote);
-        if(firstDepartments){
-          firstDepartments = false;
-          const remoteIds = new Set(remote.map(item => item.id));
-          const missing = startupDepartments.filter(item => !remoteIds.has(item.id) && !state.deletedDepartmentIds.has(item.id));
-          if(missing.length) await cloud.saveDepartments(missing);
-        }
       },error => {
         console.error('No se pudieron leer los departamentos',error);
         setCloudState('Sincronización no disponible · datos locales',false);
       });
 
-      FS.onSnapshot(ordersCol,async snapshot => {
+      FS.onSnapshot(ordersCol,snapshot => {
         const remote = snapshot.docs.map(document => ({id:document.id,...document.data()}));
         mergeOrders(remote);
-        if(firstOrders){
-          firstOrders = false;
-          const remoteIds = new Set(remote.map(item => item.id));
-          const missing = startupOrders.filter(item => !remoteIds.has(item.id) && !state.deletedOrderIds.has(item.id));
-          if(missing.length) await cloud.saveOrders(missing);
-        }
       },error => {
         console.error('No se pudieron leer las órdenes de departamentos',error);
         setCloudState('Sincronización no disponible · datos locales',false);
@@ -3902,15 +3865,11 @@ ensureAutomaticAccess();
 
   try{
     const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-    const {getAuth,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
     const {getFirestore,doc,onSnapshot} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
     let app = getApps().find(item=>item.options && item.options.projectId === firebaseConfig.projectId);
     if(!app) app = initializeApp(firebaseConfig, 'ldh-direct-fabrication-phase-reader');
-    const auth = getAuth(app);
-    if(!auth.currentUser){
-      try{ await signInAnonymously(auth); }
-      catch(error){ console.warn('[Direct phases] anonymous login unavailable; trying current rules', error); }
-    }
+    // No intentar acceso anónimo: el proveedor está deshabilitado y solo genera
+    // peticiones fallidas. Se lee directamente con las reglas actuales.
     const db = getFirestore(app);
     onSnapshot(doc(db,'taller_data','fabricacion'), snapshot=>{
       if(snapshot.exists()) receivePayload(snapshot.data() || {});
