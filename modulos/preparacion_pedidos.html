@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V50-BOTONES-ESTABLES-20260729" />
+<meta name="ldh-build" content="PREPARACION-V51-VINCULO-MANUAL-PRIORITARIO-20260731" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -932,7 +932,9 @@ function LDH_mergeLineInto(target, source){
   [
     "linked_matId","linkedMatId","stockMatId","stock_matId",
     "stockLinkId","stockId","matId","linked_matName","stockLinkLabel",
-    "stockLinkEmpresa","cat","category","grp","group"
+    "stockLinkEmpresa","cat","category","grp","group",
+    "linkSource","manual_link_matId","manualLinkMatId",
+    "linked_manually","linkedManualAt"
   ].forEach(field=>{
     if((target[field] === undefined || target[field] === null || target[field] === "") &&
        source[field] !== undefined && source[field] !== null && source[field] !== ""){
@@ -3345,6 +3347,18 @@ function LDH_aplicarVinculosConfiguracionActuales(lines, meta){
     let changed = false;
     lines.forEach(line=>{
       if(!line || typeof line !== "object") return;
+
+      // V51: un vínculo elegido manualmente —o recordado en linkMap— manda
+      // sobre cualquier reparación automática desde Configuración.
+      try{
+        const remembered = linkMap && linkMap[linkKeyFor(line)];
+        const rememberedId = remembered && remembered.matId
+          ? LDH_validLinkedIdForLine(line, remembered.matId)
+          : "";
+        const manualId = LDH_manualLinkedIdForLine(line);
+        if(manualId || rememberedId) return;
+      }catch(_){ }
+
       const name = String(line.mat || line.material || line.name || line.title || "").trim();
       if(!name) return;
       const unit = String(line.unit || line.unidad || "").toLowerCase();
@@ -3396,6 +3410,18 @@ function LDH_aplicarVinculosFerreteriaActualV45(lines){
     let changed = false;
     lines.forEach(line=>{
       if(!line || typeof line !== "object") return;
+
+      // V51: no sustituir la ficha escogida manualmente ni el vínculo
+      // recordado para esta misma línea.
+      try{
+        const remembered = linkMap && linkMap[linkKeyFor(line)];
+        const rememberedId = remembered && remembered.matId
+          ? LDH_validLinkedIdForLine(line, remembered.matId)
+          : "";
+        const manualId = LDH_manualLinkedIdForLine(line);
+        if(manualId || rememberedId) return;
+      }catch(_){ }
+
       if(_unitIsBarra(line.unit || line.unidad)) return;
       try{ if(typeof isPaintLine === "function" && isPaintLine(line)) return; }catch(_){}
 
@@ -3774,6 +3800,51 @@ function LDH_resolveV2LinkIdByExactName(line){
   }
 }
 
+function LDH_validLinkedIdForLine(line, id){
+  try{
+    id = String(id || "").trim();
+    if(!id) return "";
+    const mat = (typeof LDH_getV2MaterialById === "function" ? LDH_getV2MaterialById(id) : null)
+      || (typeof getMatById === "function" ? getMatById(id) : null);
+    if(!mat) return "";
+    if(!LDH_unitCompatibleForLink(line, mat)) return "";
+    return id;
+  }catch(_){
+    return "";
+  }
+}
+
+function LDH_manualLinkedIdForLine(line){
+  try{
+    if(!line || typeof line !== "object") return "";
+    const manual =
+      line.linkSource === "preparacion_manual" ||
+      line.linked_manually === true ||
+      !!line.manual_link_matId ||
+      !!line.manualLinkMatId;
+    if(!manual) return "";
+
+    const ids = [
+      line.manual_link_matId,
+      line.manualLinkMatId,
+      line.linked_matId,
+      line.linkedMatId,
+      line.stockMatId,
+      line.stock_matId,
+      line.stockLinkId,
+      line.stockId,
+      line.stockMaterialId,
+      line.v2MaterialId,
+      line.matId
+    ];
+    for(const candidate of ids){
+      const valid = LDH_validLinkedIdForLine(line, candidate);
+      if(valid) return valid;
+    }
+  }catch(_){ }
+  return "";
+}
+
 function getLinkedMatIdForLine(line){
   // Para PINTURA: sólo aceptamos el vínculo que viene del Cálculo (por empresa),
   // nunca heredamos un link global por nombre (evita que SKLUM/CREATE se crucen).
@@ -3786,9 +3857,25 @@ function getLinkedMatIdForLine(line){
   }catch(e){}
 
   /*
-   * V41: Configuración es la autoridad del vínculo de los accesorios.
-   * Preparación no debe descartarlo mientras Firebase termina de cargar ni
-   * sustituirlo por una coincidencia de otro catálogo.
+   * V51 · PRIORIDAD DE VÍNCULO
+   * 1) Ficha elegida manualmente en esta línea.
+   * 2) Ficha recordada en linkMap para el mismo nombre + unidad.
+   * 3) Vínculo de Configuración/Cálculo validado.
+   * 4) Búsqueda automática por nombre exacto.
+   */
+  const manualId = LDH_manualLinkedIdForLine(line);
+  if(manualId) return manualId;
+
+  const k = linkKeyFor(line);
+  const rec = linkMap[k];
+  const rememberedId = rec && rec.matId
+    ? LDH_validLinkedIdForLine(line, rec.matId)
+    : "";
+  if(rememberedId) return rememberedId;
+
+  /*
+   * V41: Configuración es la autoridad del vínculo de los accesorios,
+   * salvo que Preparación tenga ya una selección manual/recordada válida.
    */
   try{
     if(line && line.linkSource === "configuracion_concepto_actual"){
@@ -3834,19 +3921,15 @@ function getLinkedMatIdForLine(line){
     }
   }catch(e){}
 
-  // Prioridad: Stock real v2 por nombre exacto en la empresa del pedido.
-  // Evita que Preparación use linkMap/stockMaterials del stock antiguo y pinte "Stock: 69 barras".
+  // Solo cuando no existe selección manual/recordada se permite el auto-vínculo.
   const exactV2 = LDH_findExactV2MaterialForLine(line);
   if(exactV2) return exactV2.id;
 
   const safeV2Id = LDH_resolveV2LinkIdByExactName(line);
   if(safeV2Id) return safeV2Id;
 
-  if(line.linked_matId && LDH_getV2MaterialById(line.linked_matId)) return line.linked_matId;
-
-  const k = linkKeyFor(line);
-  const rec = linkMap[k];
-  if(rec && rec.matId && LDH_getV2MaterialById(rec.matId)) return rec.matId;
+  const explicitV2 = LDH_validLinkedIdForLine(line, line && line.linked_matId);
+  if(explicitV2) return explicitV2;
 
   // Legacy solo como último recurso, para no romper pedidos antiguos sin ficha v2.
   if(line.linked_matId && getMatById(line.linked_matId)) return line.linked_matId;
@@ -3862,7 +3945,7 @@ function getLinkedMatIdForLine(line){
 function setLinkForLine(index, matId){
   const line = estadoMateriales[index];
   if(!line) return false;
-  // Prioridad absoluta al Stock real v2. El modal ya no trabaja contra stockMaterials legacy.
+  // El modal trabaja contra Stock real v2/Ferretería actual.
   const mat = (typeof LDH_getV2MaterialById === "function" ? LDH_getV2MaterialById(matId) : null) || getMatById(matId);
   if(!mat){
     alert("No se ha podido validar este material contra el Stock actual de Firebase. Actualiza y vuelve a intentarlo.");
@@ -3873,19 +3956,37 @@ function setLinkForLine(index, matId){
     return false;
   }
 
-  line.linked_matId = matId;
-  line.stockMatId = matId;
-  line.matId = matId;
-  line.linked_matName = mat.name || mat.nombre || mat.material || "";
-  line.stockLinkLabel = line.linked_matName;
+  const id = String(matId || "").trim();
+  const name = mat.name || mat.nombre || mat.material || "";
+
+  // V51: guardar la selección manual en todos los campos de compatibilidad.
+  // Así ninguna búsqueda automática posterior puede sustituirla.
+  line.linked_matId = id;
+  line.linkedMatId = id;
+  line.stockMatId = id;
+  line.stock_matId = id;
+  line.stockLinkId = id;
+  line.stockId = id;
+  line.stockMaterialId = id;
+  line.v2MaterialId = id;
+  line.matId = id;
+  line.linked_matName = name;
+  line.stockLinkLabel = name;
+  line.linkSource = "preparacion_manual";
+  line.manual_link_matId = id;
+  line.manualLinkMatId = id;
+  line.linked_manually = true;
+  line.linkedManualAt = Date.now();
 
   const k = linkKeyFor(line);
   linkMap[k] = {
-    matId: matId,
-    name: mat.name || mat.nombre || mat.material || "",
+    matId: id,
+    name,
     cat: mat.cat || mat.categoria || mat.tipo || mat.type || "Stock v2",
     grp: mat.grp || mat.grupo || mat.familia || mat.family || "",
     unit: mat.unit || mat.unidad || "",
+    source: "preparacion_manual",
+    updatedAt: Date.now(),
     v2: !!mat.__v2
   };
   saveLinkMap();
@@ -3897,7 +3998,24 @@ function setLinkForLine(index, matId){
 }
 function clearLinkForLine(index){
   const line = estadoMateriales[index];
-  line.linked_matId = null;
+  if(!line) return;
+
+  const k = linkKeyFor(line);
+  if(linkMap && Object.prototype.hasOwnProperty.call(linkMap,k)){
+    delete linkMap[k];
+    saveLinkMap();
+  }
+
+  [
+    "linked_matId","linkedMatId","stockMatId","stock_matId",
+    "stockLinkId","stockId","stockMaterialId","v2MaterialId","matId",
+    "manual_link_matId","manualLinkMatId"
+  ].forEach(field=>{ try{ delete line[field]; }catch(_){ line[field] = null; } });
+  ["linked_matName","stockLinkLabel","linkSource","linkedManualAt"].forEach(field=>{
+    try{ delete line[field]; }catch(_){ line[field] = ""; }
+  });
+  try{ delete line.linked_manually; }catch(_){ line.linked_manually = false; }
+
   guardarEstadoLocal();
   renderTabla();
 }
