@@ -197,7 +197,7 @@ main{max-width:1500px;margin:auto;padding:16px}.login{max-width:460px;margin:55p
 <style id="LDH_WORKFLOW_V2_VIEW_20260730">
 .wo-view-dialog{width:min(900px,96vw)}.wo-view-content{padding:20px}.wo-view-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wo-view-card{border:1px solid rgba(148,163,184,.22);border-radius:13px;background:rgba(2,8,23,.55);padding:13px}.wo-view-card.wide{grid-column:1/-1}.wo-view-label{color:#93a4ba;font-size:10px;font-weight:950;letter-spacing:.07em;text-transform:uppercase;margin-bottom:6px}.wo-view-value{color:#fff;font-size:14px;font-weight:850;white-space:pre-wrap;overflow-wrap:anywhere}.wo-view-flow{display:flex;gap:6px;flex-wrap:wrap}.wo-view-history{display:grid;gap:7px}.wo-view-history-row{padding:9px 10px;border:1px solid rgba(148,163,184,.16);border-radius:10px;background:rgba(15,23,42,.55);color:#dbeafe;font-size:12px}.wo-view-history-row small{display:block;margin-top:3px;color:#94a3b8}.wo-view-check{margin-top:8px;color:#86efac;font-size:11px;font-weight:850}.wo-view-check.bad{color:#fca5a5}@media(max-width:700px){.wo-view-grid{grid-template-columns:1fr}}
 </style>
-<meta name="ldh-build" content="INFORMATIVA-ESTADO-FUENTE-UNICA-V14-20260730">
+<meta name="ldh-build" content="INFORMATIVA-COLA-SOLICITUD-ANULACION-V18-20260731">
 </head>
 <body>
 <header>
@@ -1409,9 +1409,24 @@ ensureAutomaticAccess();
     const v=views[state]||{};
     return {state,label:v.label||'',rowClass:v.rowClass||'',pillClass:v.pillClass||'',actionLabel:'',actionClass:''};
   }
+  function normalizeCancellationRequest(raw){
+    const r = raw && typeof raw === 'object' ? raw : null;
+    if(!r || normText(r.status).toLowerCase() !== 'pending') return null;
+    return {
+      status:'pending',
+      requestId:normText(r.requestId),
+      requestedAtMs:Number(r.requestedAtMs)||0,
+      requestedBy:normText(r.requestedBy) || 'informativa',
+      sourceClientId:normText(r.sourceClientId),
+      originalPriority:Math.max(1,Math.round(Number(r.originalPriority)||1)),
+      originalWorkflowStateV2:normText(r.originalWorkflowStateV2),
+      originalPhaseFlowV2:phaseFlow({phaseFlowV2:r.originalPhaseFlowV2 || {}})
+    };
+  }
   function normalizeOrder(raw){
     const o = raw && typeof raw === 'object' ? raw : {};
     const workflowState = normalizeWorkflowState(o);
+    const cancellationRequestV1 = normalizeCancellationRequest(o.cancellationRequestV1);
     return {
       id: normText(o.id) || uid(),
       reference: normText(o.reference),
@@ -1440,6 +1455,8 @@ ensureAutomaticAccess();
       workflowHistoryV2: Array.isArray(o.workflowHistoryV2) ? o.workflowHistoryV2.slice(-80) : [],
       archivedV2: !!o.archivedV2,
       archivedAtMs: Number(o.archivedAtMs)||0,
+      cancellationRequestV1,
+      cancellationPendingV1: !!cancellationRequestV1,
       createdAtMs: Number(o.createdAtMs)||Date.now(),
       updatedAtMs: Number(o.updatedAtMs)||Date.now()
     };
@@ -1853,7 +1870,8 @@ ensureAutomaticAccess();
     },
 
     render(){
-      const rows = this.sortedPending();
+      const allRows = this.sortedPending();
+      const rows = allRows.filter(order=>!normalizeCancellationRequest(order.cancellationRequestV1));
       const body = document.getElementById('woOrdersBody');
       const empty = document.getElementById('woOrdersEmpty');
       const count = document.getElementById('woPendingCount');
@@ -1870,7 +1888,7 @@ ensureAutomaticAccess();
             newOrderNotice ? 'wo-new-order-row' : ''
           ].filter(Boolean).join(' ');
           return `<tr${rowClasses ? ` class="${rowClasses}"` : ''}>
-            <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:rows.length},(_,position)=>`<option value="${position+1}"${position===index?' selected':''}>${position+1}</option>`).join('')}</select></td>
+            <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:allRows.length},(_,position)=>`<option value="${position+1}"${Number(o.priority)===position+1?' selected':''}>${position+1}</option>`).join('')}</select></td>
             <td class="wo-reference">${esc(o.reference)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${phasePills(o)}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}</td>
             <td>${esc(fmtDate(o.entryDate))}</td>
             <td>${esc(fmtDate(o.deliveryDate))}</td>
@@ -2289,12 +2307,47 @@ ensureAutomaticAccess();
     },
 
     async cancelOrder(id){
-      const order=this.orders.find(o=>o.id===id&&o.status==='pending');if(!order)return;
-      if(!confirm(`¿Anular el trabajo ${order.reference}? No se borrará y seguirá visible hasta archivarlo.`))return;
-      const now=Date.now();order.workflowStateV2='cancelled';order.workflowState='';order.inProgress=false;order.startedAtMs=0;order.workflowUpdatedAtMs=now;order.workflowSourceV2='compras_anulado';order.updatedAtMs=now;
-      order.workflowHistoryV2=Array.isArray(order.workflowHistoryV2)?order.workflowHistoryV2.slice(-79):[];order.workflowHistoryV2.push({atMs:now,state:'cancelled',phaseFlowV2:phaseFlow(order),source:'compras_anulado',note:'Anulado desde app informativa'});
-      writeOrders(this.orders);this.render();
-      try{if(this.cloud?.saveOrder)await this.cloud.saveOrder(order);else if(this.cloud?.saveOrders)await this.cloud.saveOrders([order]);this.updateSyncStatus('Orden anulada',true);}catch(error){console.error(error);this.updateSyncStatus('Anulada local · sincronización pendiente',false);}
+      const order=this.orders.find(o=>o.id===id&&o.status==='pending');
+      if(!order) return;
+      if(normalizeCancellationRequest(order.cancellationRequestV1)) return;
+      if(!this.cloud?.saveOrder && !this.cloud?.saveOrders){
+        alert('Espera a que aparezca “Sincronización: conectada” antes de solicitar la anulación.');
+        return;
+      }
+      if(!confirm(`¿Solicitar la anulación de ${order.reference}?
+
+El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará hasta que el responsable lo apruebe desde Agenda. Si la solicitud se rechaza, volverá a aparecer con su posición y estados.`)) return;
+
+      const now=Date.now();
+      const previousRequest=order.cancellationRequestV1;
+      const previousPending=order.cancellationPendingV1;
+      order.cancellationRequestV1={
+        status:'pending',
+        requestId:`cancel_${order.id}_${now}`,
+        requestedAtMs:now,
+        requestedBy:'informativa',
+        sourceClientId:CLIENT_ID,
+        originalPriority:Number(order.priority)||1,
+        originalWorkflowStateV2:normalizeWorkflowState(order),
+        originalPhaseFlowV2:phaseFlow(order)
+      };
+      order.cancellationPendingV1=true;
+      order.updatedAtMs=now;
+      writeOrders(this.orders);
+      this.render();
+      try{
+        if(this.cloud.saveOrder) await this.cloud.saveOrder(order);
+        else await this.cloud.saveOrders([order]);
+        this.updateSyncStatus('Solicitud de anulación enviada · pendiente de aprobación',true);
+      }catch(error){
+        console.error('No se pudo enviar la solicitud de anulación',error);
+        order.cancellationRequestV1=previousRequest || null;
+        order.cancellationPendingV1=!!previousPending;
+        writeOrders(this.orders);
+        this.render();
+        this.updateSyncStatus('No se pudo solicitar la anulación',false);
+        alert('No se ha enviado la solicitud. El trabajo vuelve a mostrarse en la Informativa.');
+      }
     },
 
     printExisting(id){
