@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V2</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -193,7 +193,9 @@
       this.load();
       this.mergeInbox();
       this.mergePrepMeta();
-      this.save(false);
+      // Una recarga automática solo recompone la vista local. No debe publicar
+      // una copia antigua sobre un movimiento recién confirmado por Almacén.
+      this.save(false, false);
       this.loadCompanies();
       this.render();
       if(show) this.toast("Fabricación actualizada");
@@ -1075,7 +1077,16 @@ function localRevisionMs(){
     timestampMs(ldh.updatedAtISO)
   );
 }
+function remoteSource(remote){
+  return String(remote && remote.source || "").trim().toLowerCase();
+}
+function isAlmacenAuthoritative(remote){
+  // Almacén es la fuente autoritativa para ALM/ENT. Su transacción ya mezcla
+  // el paquete completo, por lo que aceptar ese paquete no elimina otras refs.
+  return remoteSource(remote).startsWith("almacen");
+}
 function remoteShouldReplaceLocal(remote){
+  if(isAlmacenAuthoritative(remote)) return true;
   const rScore = localScore(remote);
   const lScore = localScore();
   if(rScore > lScore) return true;
@@ -1090,6 +1101,8 @@ function withoutDeletedRefs(pkg){
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
   pkg = withoutDeletedRefs(pkg);
+  const appliedStamp = String(pkg.updatedAtISO || "");
+  if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
   setStore(DB_KEY, pkg.ldh_db);
   setStore(INBOX_KEY, pkg.inbox || "[]");
@@ -1133,12 +1146,15 @@ async function publish(force=false){
       const score = localScore(pkg);
       if(!force && score <= 0) return;
 
-      // Protección: si la nube tiene más referencias, no publicar encima; restaurar.
+      // Protección: Almacén manda sobre ALM/ENT. Nunca se puede sobrescribir
+      // una entrega o reapertura recién publicada con la copia anterior de Fabricación.
       const snap = await getDoc(DOC_REF);
       if(snap.exists()){
         const remote = withoutDeletedRefs(snap.data() || {});
+        const remoteStamp = String(remote.updatedAtISO || "");
         const remoteScore = localScore(remote);
-        if(remoteScore > score || (remoteScore === score && packageRevisionMs(remote) > localRevisionMs())){
+        const authoritativePending = isAlmacenAuthoritative(remote) && (!remoteStamp || remoteStamp !== lastRemoteUpdated);
+        if(authoritativePending || remoteScore > score || (remoteScore === score && packageRevisionMs(remote) > localRevisionMs())){
           applyRemotePackage(remote);
           status("Nube restaurada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
           return;
@@ -1259,14 +1275,16 @@ function hookApp(){
   const oldSave = appObj.save;
   appObj.save = function(){
     const res = oldSave.apply(this, arguments);
-    publish(false);
+    // El segundo argumento false se usa únicamente en refrescos automáticos.
+    if(arguments[1] !== false) publish(false);
     return res;
   };
 
   const oldReload = appObj.reload;
   appObj.reload = function(){
     const res = oldReload.apply(this, arguments);
-    publish(false);
+    // reload(false) es el refresco periódico/de nube: no debe generar otra escritura.
+    if(arguments.length === 0 || arguments[0] !== false) publish(false);
     return res;
   };
 
@@ -1301,8 +1319,11 @@ onAuthStateChanged(auth, async user=>{
   publish(true);
 
   onSnapshot(DOC_REF, snap=>{
-    if(!snap.exists() || ignorePublish) return;
+    if(!snap.exists()) return;
     const remote = withoutDeletedRefs(snap.data() || {});
+    // Aunque estemos aplicando otra actualización, una transacción de Almacén
+    // no puede descartarse: contiene el estado autoritativo de ALM/ENT.
+    if(ignorePublish && !isAlmacenAuthoritative(remote)) return;
     const remoteStamp = String(remote.updatedAtISO || "");
     if(remoteStamp && remoteStamp === lastRemoteUpdated) return;
     lastRemoteUpdated = remoteStamp;
@@ -1462,5 +1483,7 @@ setTimeout(hookApp, 1500);
 <!-- LDH_WORKFLOW_V2_SYNC_FASES_EXISTENTES_NO_LOOP_20260730 -->
 <!-- LDH_FABRICACION_RECONCILIA_SOLO_CANTIDADES_RESPETA_ESTADO_MANUAL_V7_20260730 -->
 <!-- LDH_FAB_ENTREGA_SINCRONIZADA_V2_20260803 -->
+<!-- LDH_FABRICACION_ALMACEN_AUTORITATIVO_V3_20260803 -->
+
 </body>
 </html>
