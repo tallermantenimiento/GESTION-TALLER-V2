@@ -1430,16 +1430,17 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 
                 <div class="ldh-plan-upload">
                     <div>
-                        <label>Nombre visible (opcional)</label>
+                        <label>Nombre visible del plano</label>
                         <input id="conceptPlanDisplayName" placeholder="Ej: Plano general">
                     </div>
                     <div>
-                        <label>PDF o imagen · se permiten varios archivos</label>
-                        <input id="conceptPlanFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+                        <label>Enlace compartido de Drive, OneDrive o web</label>
+                        <input id="conceptPlanExternalUrl" type="url" inputmode="url" placeholder="https://drive.google.com/...">
                     </div>
-                    <button class="btn btn-primary" type="button" id="conceptPlanUploadBtn">☁️ Subir y vincular</button>
+                    <button class="btn btn-primary" type="button" id="conceptPlanUploadBtn">🔗 Vincular plano</button>
                 </div>
                 <div id="conceptPlanProgress" class="ldh-plan-progress"></div>
+                <div class="ldh-plan-status" style="margin-top:8px">En Google Drive: <b>Compartir → Acceso general → Cualquier persona con el enlace → Lector</b>. El archivo permanece en Drive; aquí solo se guarda el vínculo.</div>
                 <div id="conceptPlanList" class="ldh-plan-list"><div class="ldh-plan-empty">Sin concepto seleccionado.</div></div>
                 <details class="ldh-plan-trash" id="conceptPlanTrashBox">
                     <summary>Papelera de vínculos <span id="conceptPlanTrashCount">(0)</span></summary>
@@ -8066,7 +8067,7 @@ function LDH_cfgStockDiagnostico(){
 
 
 
-<script type="module" id="LDH_CONCEPT_PLANS_FIREBASE_V1">
+<script type="module" id="LDH_CONCEPT_PLANS_FIREBASE_V2_EXTERNAL_LINKS">
 (async function(){
   if(window.__LDH_CONCEPT_PLANS_INSTALLED) return;
   window.__LDH_CONCEPT_PLANS_INSTALLED = true;
@@ -8080,29 +8081,20 @@ function LDH_cfgStockDiagnostico(){
     appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
   };
   const COLLECTION = "concept_planos";
-  const STORAGE_ROOT = "concept_plans";
-  const MAX_BYTES = 25 * 1024 * 1024;
-  const ALLOWED = new Set(["application/pdf","image/jpeg","image/png"]);
 
   const { initializeApp, getApps, getApp } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
-  const { getAuth, onAuthStateChanged } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
   const { getFirestore, collection, query, where, getDocs, doc, setDoc, updateDoc, serverTimestamp } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
-  const { getStorage, ref: storageRef, uploadBytesResumable, getDownloadURL } = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js");
 
   const app = window.__FIREBASE__?.app || (getApps().length ? getApp() : initializeApp(firebaseConfig));
-  const auth = window.__FIREBASE__?.auth || getAuth(app);
   const db = window.__FIREBASE__?.db || getFirestore(app);
-  const storage = getStorage(app);
 
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const norm = s => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g," ").trim();
-  const safeFile = s => String(s || "archivo").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-zA-Z0-9._-]+/g,"_").replace(/^_+|_+$/g,"") || "archivo";
-  const fmtSize = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n/1024).toFixed(1)} KB` : `${(n/1048576).toFixed(1)} MB`;
   const hashName = s => { let h=2166136261; const t=norm(s); for(let i=0;i<t.length;i++){ h^=t.charCodeAt(i); h=Math.imul(h,16777619); } return (h>>>0).toString(36); };
   const makeId = name => `cn_${hashName(name)}`;
   const docId = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g,"") : Date.now().toString(36)+Math.random().toString(36).slice(2));
-  const state = {user:null, active:[], trash:[], loadToken:0};
+  const state = {active:[], trash:[], loadToken:0};
 
   function setStatus(text, kind=""){
     const el=$("conceptPlanStatus"); if(!el) return;
@@ -8124,35 +8116,57 @@ function LDH_cfgStockDiagnostico(){
     concept.planosId=id;
     try{ App.saveData(); window.__ldhMarkLocalDirty?.("concept-plan-id"); }catch(e){ console.warn("No se pudo persistir planosId",e); }
   }
+  function validUrl(raw){
+    const value=String(raw || "").trim();
+    let u;
+    try{ u=new URL(value); }catch(e){ throw new Error("El enlace no es válido. Debe comenzar por https://"); }
+    if(u.protocol!=="https:" && u.protocol!=="http:") throw new Error("Solo se permiten enlaces http:// o https://");
+    return u.href;
+  }
+  function safeUrl(raw){
+    try{ return validUrl(raw); }catch(e){ return ""; }
+  }
+  function providerOf(raw){
+    try{
+      const host=new URL(raw).hostname.toLowerCase();
+      if(host.includes("drive.google.com") || host.includes("docs.google.com")) return "GOOGLE DRIVE";
+      if(host.includes("1drv.ms") || host.includes("onedrive.live.com") || host.includes("sharepoint.com")) return "ONEDRIVE";
+      if(host.includes("dropbox.com")) return "DROPBOX";
+      return host.replace(/^www\./,"").toUpperCase();
+    }catch(e){ return "ENLACE WEB"; }
+  }
   async function collectPlans(concept){
     const ident=identity(concept);
     if(!ident.name) return [];
     const byId=new Map();
-    const runs=[];
-    runs.push(getDocs(query(collection(db,COLLECTION), where("conceptId","==",ident.id))));
-    runs.push(getDocs(query(collection(db,COLLECTION), where("conceptNameKey","==",ident.key))));
-    const snaps=await Promise.all(runs);
+    const snaps=await Promise.all([
+      getDocs(query(collection(db,COLLECTION), where("conceptId","==",ident.id))),
+      getDocs(query(collection(db,COLLECTION), where("conceptNameKey","==",ident.key)))
+    ]);
     snaps.forEach(s=>s.forEach(d=>byId.set(d.id,{id:d.id,...d.data()})));
     return [...byId.values()].sort((a,b)=>(Number(a.sortOrder)||0)-(Number(b.sortOrder)||0) || (Number(a.createdAtMs)||0)-(Number(b.createdAtMs)||0));
   }
   function errorText(e){
     const code=String(e?.code || "");
-    if(code.includes("permission-denied") || code.includes("unauthorized")) return "Permiso denegado. Revisa las reglas de Firestore y Storage para concept_planos/concept_plans.";
-    if(code.includes("bucket-not-found") || code.includes("storage/unknown")) return "Firebase Storage no está habilitado o no está disponible en este proyecto.";
+    if(code.includes("permission-denied")) return "Permiso denegado por las reglas actuales de Firestore.";
+    if(code.includes("unavailable")) return "Firestore no está disponible en este momento. Revisa la conexión.";
     return String(e?.message || e || "Error desconocido");
   }
+  function planUrl(p){ return safeUrl(p.externalUrl || p.webUrl || p.downloadURL || ""); }
   function renderRows(rows, trash=false){
     const host=$(trash ? "conceptPlanTrashList" : "conceptPlanList");
     if(!host) return;
     if(!rows.length){ host.innerHTML=`<div class="ldh-plan-empty">${trash ? "Papelera vacía." : "Este concepto todavía no tiene planos vinculados."}</div>`; return; }
     host.innerHTML=rows.map((p,i)=>{
-      const type=String(p.contentType||"").includes("pdf") ? "PDF" : "IMAGEN";
-      const meta=[type, fmtSize(Number(p.size)||0), p.originalName||""].filter(Boolean).join(" · ");
+      const url=planUrl(p);
+      const provider=providerOf(url || p.externalUrl || p.downloadURL || "");
+      const meta=[provider, p.originalName || p.fileName || "Enlace externo"].filter(Boolean).join(" · ");
+      const open=url ? `<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Abrir / imprimir</a>` : `<button class="btn btn-ghost" type="button" disabled>Enlace no válido</button>`;
       const actions=trash
         ? `<button class="btn btn-ghost" type="button" data-plan-action="restore" data-plan-id="${p.id}">↩ Restaurar</button>`
-        : `<a class="btn btn-ghost" href="${esc(p.downloadURL||'')}" target="_blank" rel="noopener">Abrir / imprimir</a>
+        : `${open}
            <button class="btn btn-ghost" type="button" data-plan-action="rename" data-plan-id="${p.id}">Renombrar</button>
-           <button class="btn btn-ghost" type="button" data-plan-action="replace" data-plan-id="${p.id}">Sustituir</button>
+           <button class="btn btn-ghost" type="button" data-plan-action="replace" data-plan-id="${p.id}">Cambiar enlace</button>
            <button class="btn btn-ghost" type="button" data-plan-action="up" data-plan-id="${p.id}" ${i===0?'disabled':''}>↑</button>
            <button class="btn btn-ghost" type="button" data-plan-action="down" data-plan-id="${p.id}" ${i===rows.length-1?'disabled':''}>↓</button>
            <button class="btn btn-danger" type="button" data-plan-action="trash" data-plan-id="${p.id}">Quitar</button>`;
@@ -8163,87 +8177,111 @@ function LDH_cfgStockDiagnostico(){
     const token=++state.loadToken;
     const concept=currentConcept();
     if(!concept){ state.active=[];state.trash=[]; $("conceptPlanCount").textContent="0 planos"; $("conceptPlanTrashCount").textContent="(0)"; renderRows([]); renderRows([],true); setStatus("Selecciona un concepto guardado para vincular sus planos."); return; }
-    if(!state.user){ renderRows([]);renderRows([],true);setStatus("Inicia sesión para consultar y subir planos.","warn");return; }
-    setStatus(`Consultando planos de ${concept.name}...`);
+    setStatus(`Consultando vínculos de ${concept.name}...`);
     try{
       const all=await collectPlans(concept); if(token!==state.loadToken) return;
       state.active=all.filter(p=>p.active!==false); state.trash=all.filter(p=>p.active===false);
       $("conceptPlanCount").textContent=`${state.active.length} plano${state.active.length===1?'':'s'}`;
       $("conceptPlanTrashCount").textContent=`(${state.trash.length})`;
       renderRows(state.active); renderRows(state.trash,true);
-      setStatus(`Nube conectada · ${state.active.length} plano${state.active.length===1?'':'s'} vinculado${state.active.length===1?'':'s'}.`,"ok");
+      setStatus(`Firestore conectado · ${state.active.length} vínculo${state.active.length===1?'':'s'} guardado${state.active.length===1?'':'s'}.`,"ok");
     }catch(e){ console.error("Planos: lectura ERROR",e); setStatus(errorText(e),"err"); }
   }
-  function validFile(file){
-    const ext=String(file.name||"").toLowerCase().split(".").pop();
-    const mime=String(file.type||"").toLowerCase();
-    if(!ALLOWED.has(mime) && !["pdf","jpg","jpeg","png"].includes(ext)) throw new Error(`Formato no permitido: ${file.name}`);
-    if(file.size<=0) throw new Error(`Archivo vacío: ${file.name}`);
-    if(file.size>MAX_BYTES) throw new Error(`El archivo supera 25 MB: ${file.name}`);
-  }
-  function uploadTaskPromise(task, progressCb){
-    return new Promise((resolve,reject)=>task.on("state_changed", snap=>progressCb?.(snap.bytesTransferred/snap.totalBytes), reject, ()=>resolve(task.snapshot)));
-  }
-  async function uploadNew(){
+  async function addLink(){
     const concept=currentConcept();
-    const files=[...($("conceptPlanFiles")?.files || [])];
     if(!concept) return alert("Selecciona primero un concepto guardado.");
-    if(!state.user) return alert("Debes iniciar sesión antes de subir planos.");
-    if(!files.length) return alert("Selecciona al menos un PDF o una imagen.");
-    try{ files.forEach(validFile); }catch(e){ return alert(e.message); }
+    const rawUrl=String($("conceptPlanExternalUrl")?.value || "").trim();
+    let url;
+    try{ url=validUrl(rawUrl); }catch(e){ return alert(e.message); }
     const ident=identity(concept); persistPlanId(concept,ident.id);
     const custom=String($("conceptPlanDisplayName")?.value || "").trim();
+    const displayName=custom || `Plano ${state.active.length+1}`;
     const baseOrder=state.active.reduce((m,p)=>Math.max(m,Number(p.sortOrder)||0),0);
     const progress=$("conceptPlanProgress"); const btn=$("conceptPlanUploadBtn");
-    btn.disabled=true; progress.style.display="block";
+    btn.disabled=true; progress.style.display="block"; progress.textContent="Guardando vínculo en Firestore...";
     try{
-      for(let i=0;i<files.length;i++){
-        const file=files[i]; const id=docId(); const refDoc=doc(db,COLLECTION,id);
-        const path=`${STORAGE_ROOT}/${ident.id}/${id}/${Date.now()}_${safeFile(file.name)}`;
-        progress.textContent=`Subiendo ${i+1}/${files.length}: ${file.name} · 0%`;
-        const task=uploadBytesResumable(storageRef(storage,path),file,{contentType:file.type||undefined,customMetadata:{conceptId:ident.id,conceptName:ident.name}});
-        const snap=await uploadTaskPromise(task,p=>{ progress.textContent=`Subiendo ${i+1}/${files.length}: ${file.name} · ${Math.round(p*100)}%`; });
-        const url=await getDownloadURL(snap.ref);
-        const displayName=(files.length===1 && custom) ? custom : file.name.replace(/\.[^.]+$/,"");
-        await setDoc(refDoc,{conceptId:ident.id,conceptName:ident.name,conceptNameKey:ident.key,displayName,originalName:file.name,storagePath:path,downloadURL:url,contentType:file.type||"application/octet-stream",size:file.size,sortOrder:baseOrder+i+1,active:true,createdAt:serverTimestamp(),createdAtMs:Date.now(),createdByUid:state.user.uid||"",createdByEmail:state.user.email||""});
-      }
-      $("conceptPlanFiles").value=""; $("conceptPlanDisplayName").value="";
-      progress.textContent="Subida completada. Los originales de tu carpeta no se han modificado.";
+      const id=docId();
+      const currentUser=window.__FIREBASE__?.auth?.currentUser || null;
+      await setDoc(doc(db,COLLECTION,id),{
+        conceptId:ident.id,
+        conceptName:ident.name,
+        conceptNameKey:ident.key,
+        displayName,
+        externalUrl:url,
+        provider:providerOf(url),
+        linkType:"external",
+        sortOrder:baseOrder+1,
+        active:true,
+        createdAt:serverTimestamp(),
+        createdAtMs:Date.now(),
+        createdByUid:currentUser?.uid || "",
+        createdByEmail:currentUser?.email || ""
+      });
+      $("conceptPlanExternalUrl").value="";
+      $("conceptPlanDisplayName").value="";
+      progress.textContent="Vínculo guardado. El archivo original sigue en Drive/OneDrive.";
       await loadPlans();
-    }catch(e){ console.error("Planos: subida ERROR",e); progress.textContent="ERROR: "+errorText(e); setStatus(errorText(e),"err"); }
-    finally{ btn.disabled=false; setTimeout(()=>{ if(progress.textContent.startsWith("Subida completada")) progress.style.display="none"; },2500); }
+    }catch(e){ console.error("Planos: guardado ERROR",e); progress.textContent="ERROR: "+errorText(e); setStatus(errorText(e),"err"); }
+    finally{ btn.disabled=false; setTimeout(()=>{ if(progress.textContent.startsWith("Vínculo guardado")) progress.style.display="none"; },2600); }
   }
-  async function renamePlan(p){ const name=prompt("Nombre visible del plano:",p.displayName||p.originalName||""); if(name===null) return; const clean=name.trim(); if(!clean) return alert("El nombre no puede estar vacío."); await updateDoc(doc(db,COLLECTION,p.id),{displayName:clean,updatedAt:serverTimestamp(),updatedAtMs:Date.now()}); }
-  async function replacePlan(p){
-    const input=document.createElement("input"); input.type="file"; input.accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png";
-    input.onchange=async()=>{ const file=input.files?.[0]; if(!file) return; try{ validFile(file); const progress=$("conceptPlanProgress"); progress.style.display="block"; progress.textContent=`Sustituyendo ${p.displayName||p.originalName} · 0%`; const path=`${STORAGE_ROOT}/${p.conceptId}/${p.id}/v_${Date.now()}_${safeFile(file.name)}`; const task=uploadBytesResumable(storageRef(storage,path),file,{contentType:file.type||undefined}); const snap=await uploadTaskPromise(task,x=>progress.textContent=`Sustituyendo ${p.displayName||p.originalName} · ${Math.round(x*100)}%`); const url=await getDownloadURL(snap.ref); await updateDoc(doc(db,COLLECTION,p.id),{previousStoragePath:p.storagePath||"",storagePath:path,downloadURL:url,originalName:file.name,contentType:file.type||"application/octet-stream",size:file.size,updatedAt:serverTimestamp(),updatedAtMs:Date.now()}); progress.textContent="Plano sustituido. La versión anterior no se ha borrado de Storage."; await loadPlans(); }catch(e){ alert(errorText(e)); } };
-    input.click();
+  async function renamePlan(p){
+    const name=prompt("Nombre visible del plano:",p.displayName||p.originalName||"");
+    if(name===null) return;
+    const clean=name.trim(); if(!clean) return alert("El nombre no puede estar vacío.");
+    await updateDoc(doc(db,COLLECTION,p.id),{displayName:clean,updatedAt:serverTimestamp(),updatedAtMs:Date.now()});
   }
-  async function movePlan(p,dir){ const list=state.active; const i=list.findIndex(x=>x.id===p.id); const j=i+dir; if(i<0||j<0||j>=list.length) return; const a=list[i],b=list[j]; const ao=Number(a.sortOrder)||i+1, bo=Number(b.sortOrder)||j+1; await Promise.all([updateDoc(doc(db,COLLECTION,a.id),{sortOrder:bo,updatedAtMs:Date.now()}),updateDoc(doc(db,COLLECTION,b.id),{sortOrder:ao,updatedAtMs:Date.now()})]); }
+  async function replaceLink(p){
+    const current=planUrl(p);
+    const raw=prompt("Pega el nuevo enlace compartido:",current);
+    if(raw===null) return;
+    const url=validUrl(raw);
+    await updateDoc(doc(db,COLLECTION,p.id),{
+      previousExternalUrl:current || "",
+      externalUrl:url,
+      provider:providerOf(url),
+      linkType:"external",
+      downloadURL:"",
+      updatedAt:serverTimestamp(),
+      updatedAtMs:Date.now()
+    });
+  }
+  async function movePlan(p,dir){
+    const list=state.active; const i=list.findIndex(x=>x.id===p.id); const j=i+dir;
+    if(i<0||j<0||j>=list.length) return;
+    const a=list[i],b=list[j]; const ao=Number(a.sortOrder)||i+1, bo=Number(b.sortOrder)||j+1;
+    await Promise.all([
+      updateDoc(doc(db,COLLECTION,a.id),{sortOrder:bo,updatedAtMs:Date.now()}),
+      updateDoc(doc(db,COLLECTION,b.id),{sortOrder:ao,updatedAtMs:Date.now()})
+    ]);
+  }
   async function act(e){
     const btn=e.target.closest("[data-plan-action]"); if(!btn) return;
-    const id=btn.dataset.planId, action=btn.dataset.planAction; const p=[...state.active,...state.trash].find(x=>x.id===id); if(!p) return;
+    const id=btn.dataset.planId, action=btn.dataset.planAction;
+    const p=[...state.active,...state.trash].find(x=>x.id===id); if(!p) return;
     btn.disabled=true;
     try{
       if(action==="rename") await renamePlan(p);
-      else if(action==="replace") await replacePlan(p);
+      else if(action==="replace") await replaceLink(p);
       else if(action==="up") await movePlan(p,-1);
       else if(action==="down") await movePlan(p,1);
-      else if(action==="trash"){ if(!confirm("¿Quitar este vínculo? El archivo no se borrará y podrá restaurarse desde la papelera.")) return; await updateDoc(doc(db,COLLECTION,p.id),{active:false,deletedAt:serverTimestamp(),deletedAtMs:Date.now()}); }
+      else if(action==="trash"){
+        if(!confirm("¿Quitar este vínculo? El archivo de Drive/OneDrive no se borrará y el vínculo podrá restaurarse.")) return;
+        await updateDoc(doc(db,COLLECTION,p.id),{active:false,deletedAt:serverTimestamp(),deletedAtMs:Date.now()});
+      }
       else if(action==="restore") await updateDoc(doc(db,COLLECTION,p.id),{active:true,restoredAt:serverTimestamp(),restoredAtMs:Date.now()});
-      if(action!=="replace") await loadPlans();
+      await loadPlans();
     }catch(err){ console.error("Planos: acción ERROR",err); alert(errorText(err)); }
     finally{ btn.disabled=false; }
   }
   function bind(){
-    $("conceptPlanUploadBtn")?.addEventListener("click",uploadNew);
+    $("conceptPlanUploadBtn")?.addEventListener("click",addLink);
+    $("conceptPlanExternalUrl")?.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); addLink(); } });
     $("conceptPlanList")?.addEventListener("click",act);
     $("conceptPlanTrashList")?.addEventListener("click",act);
     $("cfgListSel")?.addEventListener("change",()=>setTimeout(loadPlans,0));
     window.addEventListener("ldh:concept-saved",()=>setTimeout(loadPlans,80));
   }
   bind();
-  onAuthStateChanged(auth,user=>{ state.user=user||null; loadPlans(); });
   setTimeout(loadPlans,250);
   window.LDH_PLANOS={reload:loadPlans};
 })();

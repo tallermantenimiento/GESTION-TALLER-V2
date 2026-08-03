@@ -732,28 +732,35 @@
 </script>
 
 
-<script type="module" id="LDH_CALC_CONCEPT_PLANS_FIREBASE_V1">
+<script type="module" id="LDH_CALC_CONCEPT_PLANS_FIREBASE_V2_EXTERNAL_LINKS">
 (async function(){
   if(window.__LDH_CALC_PLANS_INSTALLED) return;
   window.__LDH_CALC_PLANS_INSTALLED=true;
   const firebaseConfig={apiKey:"AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",authDomain:"gestion-taller-v2.firebaseapp.com",projectId:"gestion-taller-v2",storageBucket:"gestion-taller-v2.firebasestorage.app",messagingSenderId:"888590823508",appId:"1:888590823508:web:6dfd420a3e7ac17d647dc1"};
   const COLLECTION="concept_planos";
   const {initializeApp,getApps,getApp}=await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
-  const {getAuth,onAuthStateChanged}=await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
   const {getFirestore,collection,query,where,getDocs}=await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
   const app=getApps().length?getApp():initializeApp(firebaseConfig);
-  const auth=getAuth(app),db=getFirestore(app);
+  const db=getFirestore(app);
   const $=id=>document.getElementById(id);
   const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const norm=s=>String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/\s+/g," ").trim();
   const hashName=s=>{let h=2166136261,t=norm(s);for(let i=0;i<t.length;i++){h^=t.charCodeAt(i);h=Math.imul(h,16777619);}return(h>>>0).toString(36);};
   const identity=c=>({name:String(c?.name||"").trim(),key:norm(c?.name||""),id:String(c?.planosId||c?.conceptId||"").trim()||`cn_${hashName(c?.name||"")}`});
-  const fmtSize=n=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:`${(n/1048576).toFixed(1)} MB`;
-  let user=null,loadToken=0;
+  let loadToken=0;
   function status(t){$("calcConceptPlanStatus").textContent=t||"";}
+  function safeUrl(raw){
+    try{const u=new URL(String(raw||"").trim());return(u.protocol==="https:"||u.protocol==="http:")?u.href:"";}catch(e){return "";}
+  }
+  function providerOf(raw){
+    try{const host=new URL(raw).hostname.toLowerCase();if(host.includes("drive.google.com")||host.includes("docs.google.com"))return"GOOGLE DRIVE";if(host.includes("1drv.ms")||host.includes("onedrive.live.com")||host.includes("sharepoint.com"))return"ONEDRIVE";if(host.includes("dropbox.com"))return"DROPBOX";return host.replace(/^www\./,"").toUpperCase();}catch(e){return"ENLACE WEB";}
+  }
   async function collect(c){
     const x=identity(c),m=new Map();
-    const snaps=await Promise.all([getDocs(query(collection(db,COLLECTION),where("conceptId","==",x.id))),getDocs(query(collection(db,COLLECTION),where("conceptNameKey","==",x.key)))]);
+    const snaps=await Promise.all([
+      getDocs(query(collection(db,COLLECTION),where("conceptId","==",x.id))),
+      getDocs(query(collection(db,COLLECTION),where("conceptNameKey","==",x.key)))
+    ]);
     snaps.forEach(s=>s.forEach(d=>m.set(d.id,{id:d.id,...d.data()})));
     return[...m.values()].filter(p=>p.active!==false).sort((a,b)=>(Number(a.sortOrder)||0)-(Number(b.sortOrder)||0)||(Number(a.createdAtMs)||0)-(Number(b.createdAtMs)||0));
   }
@@ -763,15 +770,19 @@
     if(!card||!host||!count)return;
     if(!c){card.classList.remove("show");host.innerHTML='<div class="calc-plan-empty">Sin concepto seleccionado.</div>';count.textContent='0 planos';return;}
     card.classList.add("show");
-    if(!user){status("Sin sesión de Firebase. Abre Configuración e inicia sesión en este ordenador.");host.innerHTML='<div class="calc-plan-empty">Los planos están protegidos. Inicia sesión desde Configuración y vuelve a Cálculo.</div>';count.textContent='0 planos';return;}
     status(`Consultando planos de ${c.name}...`);
     try{
       const rows=await collect(c);if(token!==loadToken)return;
       count.textContent=`${rows.length} plano${rows.length===1?'':'s'}`;
-      if(!rows.length){host.innerHTML='<div class="calc-plan-empty">Este concepto no tiene planos vinculados.</div>';status("Nube conectada · sin planos vinculados.");return;}
-      host.innerHTML=rows.map(p=>{const type=String(p.contentType||"").includes("pdf")?"PDF":"IMAGEN";return `<div class="calc-plan-item"><div><div class="calc-plan-name">${esc(p.displayName||p.originalName||"Plano")}</div><div class="calc-plan-meta">${type} · ${fmtSize(Number(p.size)||0)}</div></div><a class="btn small" href="${esc(p.downloadURL||'')}" target="_blank" rel="noopener">Abrir / imprimir</a></div>`;}).join("");
-      status("Nube conectada · los archivos se abrirán en una pestaña nueva para verlos o imprimirlos.");
-    }catch(e){console.error("Planos Cálculo ERROR",e);status("No se pudieron leer los planos: "+String(e?.message||e));host.innerHTML='<div class="calc-plan-empty">Error de conexión o permisos.</div>';}
+      if(!rows.length){host.innerHTML='<div class="calc-plan-empty">Este concepto no tiene planos vinculados.</div>';status("Firestore conectado · sin planos vinculados.");return;}
+      host.innerHTML=rows.map(p=>{
+        const url=safeUrl(p.externalUrl||p.webUrl||p.downloadURL||"");
+        const provider=providerOf(url);
+        const action=url?`<a class="btn small" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Abrir / imprimir</a>`:`<button class="btn small" disabled>Enlace no válido</button>`;
+        return `<div class="calc-plan-item"><div><div class="calc-plan-name">${esc(p.displayName||p.originalName||"Plano")}</div><div class="calc-plan-meta">${esc(provider)}</div></div>${action}</div>`;
+      }).join("");
+      status("Planos sincronizados · se abrirán desde Drive, OneDrive o la web en una pestaña nueva.");
+    }catch(e){console.error("Planos Cálculo ERROR",e);status("No se pudieron leer los vínculos: "+String(e?.message||e));host.innerHTML='<div class="calc-plan-empty">Error de conexión o permisos de Firestore.</div>';}
   }
   function hook(){
     if(!window.App){setTimeout(hook,50);return;}
@@ -779,7 +790,7 @@
     $("conceptSelect")?.addEventListener("change",()=>setTimeout(load,0));
     setTimeout(load,100);
   }
-  hook();onAuthStateChanged(auth,u=>{user=u||null;load();});
+  hook();
   window.LDH_CALC_PLANOS={reload:load};
 })();
 </script>
