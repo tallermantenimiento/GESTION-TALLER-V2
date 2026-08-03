@@ -728,6 +728,8 @@
   const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
   let authReady = false;
   let syncChain = Promise.resolve();
+  const pendingByRef = new Map();
+  let loginRetryTimer = null;
 
   function status(text, kind){
     const el = document.getElementById('cloudStatus');
@@ -861,15 +863,38 @@
     const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
     const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
     const {getFirestore,doc,runTransaction,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-    let app = getApps().find(candidate=>candidate.options && candidate.options.projectId === firebaseConfig.projectId);
-    if(!app) app = initializeApp(firebaseConfig, 'ldh-almacen-phase-sync');
+
+    // Usar la app [DEFAULT] es imprescindible: Firebase Auth guarda la sesion
+    // por nombre de app. Fabricacion usa [DEFAULT], por lo que Almacen debe usar
+    // la misma para reutilizar el login ya existente entre paginas del mismo origen.
+    const apps = getApps();
+    let app = apps.find(candidate =>
+      candidate.name === '[DEFAULT]' &&
+      candidate.options &&
+      candidate.options.projectId === firebaseConfig.projectId
+    );
+    if(!app){
+      const defaultApp = apps.find(candidate => candidate.name === '[DEFAULT]');
+      if(!defaultApp){
+        app = initializeApp(firebaseConfig);
+      }else{
+        app = apps.find(candidate =>
+          candidate.options && candidate.options.projectId === firebaseConfig.projectId
+        ) || initializeApp(firebaseConfig, 'ldh-almacen-phase-sync');
+      }
+    }
     const auth = getAuth(app);
     const db = getFirestore(app);
     const docRef = doc(db, 'taller_data', 'fabricacion');
 
     async function syncItems(items, source, startup=false){
       items = (Array.isArray(items) ? items : [items]).map(cloneItem).filter(item=>refOf(item));
-      if(!items.length || !authReady) return false;
+      if(!items.length) return false;
+      if(!authReady){
+        items.forEach(item => pendingByRef.set(refOf(item), cloneItem(item)));
+        status('Nube: esperando sesion...', 'warn');
+        return false;
+      }
       status('Nube: sincronizando...', 'warn');
       try{
         await runTransaction(db, async transaction=>{
@@ -904,9 +929,24 @@
     }
 
     window.LDH_almacenPublishItem = function(item, source){
-      syncChain = syncChain.then(()=>syncItems(item, source || 'almacen_cambio', false));
+      const copy = cloneItem(item);
+      const ref = refOf(copy);
+      if(ref) pendingByRef.set(ref, copy);
+      syncChain = syncChain.then(async()=>{
+        const ok = await syncItems(copy, source || 'almacen_cambio', false);
+        if(ok && ref) pendingByRef.delete(ref);
+        return ok;
+      });
       return syncChain;
     };
+
+    async function flushPendingItems(){
+      const items = Array.from(pendingByRef.values());
+      if(!items.length) return true;
+      const ok = await syncItems(items, 'almacen_cambios_pendientes', false);
+      if(ok) pendingByRef.clear();
+      return ok;
+    }
 
     async function startupSync(){
       const state = window.App && window.App.state;
@@ -919,15 +959,33 @@
       else status('Nube: conectada', 'ok');
     }
 
+    async function ensureLogin(){
+      if(auth.currentUser) return true;
+      try{
+        await signInAnonymously(auth);
+        return true;
+      }catch(error){
+        console.error('Login nube Almacen', error);
+        status('Nube: sin login', 'bad');
+        clearTimeout(loginRetryTimer);
+        loginRetryTimer = setTimeout(ensureLogin, 5000);
+        return false;
+      }
+    }
+
     onAuthStateChanged(auth, async user=>{
       if(!user){
-        try{ await signInAnonymously(auth); }
-        catch(error){ console.error('Login nube Almacén', error); status('Nube: sin login', 'bad'); }
+        authReady = false;
+        await ensureLogin();
         return;
       }
+      clearTimeout(loginRetryTimer);
       authReady = true;
       status('Nube: comprobando...', 'warn');
-      setTimeout(startupSync, 900);
+      setTimeout(async()=>{
+        await flushPendingItems();
+        await startupSync();
+      }, 900);
     });
   }catch(error){
     console.error('Inicialización nube Almacén', error);
@@ -936,7 +994,7 @@
 })();
 </script>
 
-<!-- LDH_ALMACEN_ENTREGA_SINCRONIZADA_V2_20260803 -->
+<!-- LDH_ALMACEN_AUTH_DEFAULT_Y_COLA_PENDIENTE_V3_20260803 -->
 
 </body>
 </html>
