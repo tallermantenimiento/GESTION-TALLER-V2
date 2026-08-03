@@ -67,7 +67,7 @@
     <div class="toolbar">
       <input id="q" class="search" placeholder="Buscar referencia, concepto o empresa..." oninput="App.render()">
       <select id="companyFilter" onchange="App.render()"><option value="">Todas las empresas</option></select>
-      <span id="status" class="status">Cargando...</span>
+      <span id="status" class="status">Cargando...</span><span id="cloudStatus" class="status">Nube: esperando...</span>
     </div>
 
     <section class="card">
@@ -86,6 +86,8 @@
 <script>
 (function(){
   const KEY = "ldh_db";
+  const INBOX_KEY = "ldh_fabricacion_inbox_v1";
+  const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
 
   function getStore(k){
     try{ const v = localStorage.getItem(k); if(v !== null && v !== undefined) return v; }catch(e){}
@@ -241,8 +243,6 @@
 
         const rec = {
           id: meta.pedido_uid || ("ALM-" + ref),
-          agendaOrderId: String(meta.agenda_order_id || meta.orderId || "").trim(),
-          orderId: String(meta.agenda_order_id || meta.orderId || "").trim(),
           ref, referencia: ref,
           concept, concepto: concept,
           company, empresa: company, empresaReceptora: company,
@@ -279,6 +279,74 @@
         arr.push(rec);
       }
       return true;
+    },
+
+    syncEveryPool(item){
+      if(!item || typeof item !== "object") return false;
+      const ref = String(item.ref || item.referencia || "").trim();
+      if(!ref) return false;
+
+      item.ref = ref;
+      item.referencia = ref;
+      item.flow = item.flow && typeof item.flow === "object" ? item.flow : {};
+      item.flow.fab = n(item.flow.fab ?? item.flow.fabricacion ?? 0);
+      item.flow.fabricacion = item.flow.fab;
+      item.flow.pintura = n(item.flow.pintura ?? 0);
+      item.flow.almacen = n(item.flow.almacen ?? item.flow.alm ?? 0);
+      item.flow.entregado = n(item.flow.entregado ?? item.delivered ?? 0);
+      item.delivered = item.flow.entregado;
+      item.localFlowUpdatedAt = new Date().toISOString();
+
+      ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+        if(!Array.isArray(this.state[pool])) this.state[pool] = [];
+        const arr = this.state[pool];
+        const idx = arr.findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+        if(idx >= 0){
+          const old = arr[idx] && typeof arr[idx] === "object" ? arr[idx] : {};
+          arr[idx] = {...old, ...item, flow:{...(old.flow || {}), ...(item.flow || {})}};
+        }else{
+          arr.push({...item, flow:{...(item.flow || {})}});
+        }
+      });
+
+      try{
+        let inbox = parse(getStore(INBOX_KEY), []) || [];
+        if(!Array.isArray(inbox)) inbox = [];
+        const idx = inbox.findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+        const copy = {...item, flow:{...(item.flow || {})}};
+        if(idx >= 0) inbox[idx] = copy; else inbox.push(copy);
+        setStore(INBOX_KEY, JSON.stringify(inbox.slice(-200)));
+      }catch(e){}
+
+      try{
+        const overrides = parse(getStore(OVERRIDE_KEY), {}) || {};
+        overrides[ref] = {
+          flow:{
+            fab:n(item.flow.fab),
+            fabricacion:n(item.flow.fab),
+            pintura:n(item.flow.pintura),
+            almacen:n(item.flow.almacen),
+            entregado:n(item.flow.entregado)
+          },
+          fase:item.fase,
+          estado:item.estado,
+          status:item.status,
+          keepInFab:item.keepInFab,
+          hideFromFab:item.hideFromFab,
+          archived:item.archived,
+          updatedAt:item.localFlowUpdatedAt
+        };
+        setStore(OVERRIDE_KEY, JSON.stringify(overrides));
+      }catch(e){}
+      return true;
+    },
+
+    publishPhase(item, source){
+      try{
+        if(typeof window.LDH_almacenPublishItem === "function"){
+          window.LDH_almacenPublishItem(item, source || "almacen");
+        }
+      }catch(error){ console.warn("No se pudo solicitar la sincronización de Almacén", error); }
     },
 
     itemAlmacen(item){ const f = item.flow || {}; return n(f.almacen ?? f.alm ?? item.almacen ?? item.enAlmacen ?? 0); },
@@ -360,16 +428,6 @@
           <td><span class="badge b-green">En almacén</span><div class="muted">Total: ${esc(item.total || alm || 0)}</div></td>
           <td><div class="actions"><button class="btn small green" onclick="App.entregar(${idx})">📦 Entregar</button><button class="btn small orange" onclick="App.devolverFabricacion(${idx})">↩ Fabricación</button><button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'almacen')">🗑 Eliminar</button></div></td>
         </tr>`;
-    },
-
-    syncWorkflow(item,source,note){
-      try{
-        if(!item || !window.LDH_WorkflowV2) return;
-        const f=item.flow||{};
-        const flow={fabricacion:n(f.fab??f.fabricacion),pintura:n(f.pintura),almacen:this.itemAlmacen(item),entregado:this.itemEntregado(item)};
-        const state=flow.fabricacion>0?'fabrication':flow.pintura>0?'painting':(flow.almacen>0||flow.entregado>0)?'finished':'';
-        window.LDH_WorkflowV2.update({orderId:item.agendaOrderId||item.orderId||'',reference:item.ref||item.referencia||'',state,flow,source:source||'almacen',note:note||''}).catch(error=>console.warn('Workflow Almacén',error));
-      }catch(error){ console.warn('Workflow Almacén',error); }
     },
 
     deliveredItems(){
@@ -461,12 +519,16 @@
       item.fase = "almacen";
       item.estado = "almacen";
       item.status = "pendiente";
+      item.archived = false;
+      item.keepInFab = false;
+      item.hideFromFab = true;
       item.history = Array.isArray(item.history) ? item.history : [];
       item.history.push({ id:uid("hist"), type:"reabrir_almacen", qty, date:new Date().toISOString(), note:"Devuelto desde entregados a Almacén" });
 
+      this.syncEveryPool(item);
       this.updatePrepMeta(item);
       this.save();
-      this.syncWorkflow(item,'almacen_reabrir','Reabierto desde Entregados a Almacén');
+      this.publishPhase(item, "almacen_reabrir");
       this.render();
       this.renderDelivered();
       this.toast("Pedido reabierto en Almacén");
@@ -494,13 +556,17 @@
       item.delivered = item.flow.entregado;
       item.fase = item.flow.almacen > 0 ? "almacen" : "entregado";
       item.estado = item.fase;
-      if(item.flow.almacen <= 0) item.status = "entregado";
+      item.status = item.flow.almacen > 0 ? "pendiente" : "entregado";
+      item.keepInFab = false;
+      item.hideFromFab = true;
+      item.archived = item.flow.almacen <= 0 && item.flow.entregado >= n(item.total || item.unidades || item.flow.entregado);
       item.history = Array.isArray(item.history) ? item.history : [];
       item.history.push({ id:uid("hist"), type:"entrega", qty, date:new Date().toISOString(), note:"Entregado desde Almacén" });
 
+      this.syncEveryPool(item);
       this.updatePrepMeta(item);
       this.save();
-      this.syncWorkflow(item,'almacen_entrega',`Entregadas ${qty} unidades`);
+      this.publishPhase(item, "almacen_entrega");
       this.render();
       this.renderDelivered();
       this.toast("Entrega registrada");
@@ -520,12 +586,16 @@
       item.fase = "fabricacion";
       item.estado = "fabricacion";
       item.status = "pendiente";
+      item.archived = false;
+      item.keepInFab = true;
+      item.hideFromFab = false;
       item.history = Array.isArray(item.history) ? item.history : [];
       item.history.push({ id:uid("hist"), type:"devolver_fabricacion", qty, date:new Date().toISOString(), note:"Devuelto desde Almacén" });
 
+      this.syncEveryPool(item);
       this.updatePrepMeta(item);
       this.save();
-      this.syncWorkflow(item,'almacen_a_fabricacion',`Devueltas ${qty} unidades a Fabricación`);
+      this.publishPhase(item, "almacen_a_fabricacion");
       this.render();
       this.renderDelivered();
       this.toast("Devuelto a Fabricación");
@@ -639,121 +709,234 @@
 })();
 </script>
 
-<script type="module" id="LDH_WORKFLOW_V2_CLIENT_20260730">
+
+<script type="module" id="LDH_ALMACEN_FIRESTORE_SYNC_20260803">
 (async function(){
   'use strict';
-  if(window.LDH_WorkflowV2) return;
+  if(window.LDH_almacenPublishItem) return;
+
   const firebaseConfig = {
-    apiKey: "AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo",
-    authDomain: "gestion-taller-2a439.firebaseapp.com",
-    projectId: "gestion-taller-2a439",
-    storageBucket: "gestion-taller-2a439.firebasestorage.app",
-    messagingSenderId: "498579673950",
-    appId: "1:498579673950:web:eb626781a5b509957db5cf"
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
   };
-  const api = {};
-  let readyResolve;
-  const ready = new Promise(resolve=>{ readyResolve=resolve; });
-  window.LDH_WorkflowV2 = {
-    ready,
-    async update(payload){
-      await ready;
-      return api.update(payload||{});
-    },
-    async findOrderId(reference){
-      await ready;
-      return api.findOrderId(reference);
+  const DB_KEY = "ldh_db";
+  const INBOX_KEY = "ldh_fabricacion_inbox_v1";
+  const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
+  let authReady = false;
+  let syncChain = Promise.resolve();
+
+  function status(text, kind){
+    const el = document.getElementById('cloudStatus');
+    if(!el) return;
+    el.textContent = text;
+    el.style.borderColor = kind === 'bad' ? 'rgba(239,68,68,.55)' : kind === 'ok' ? 'rgba(16,185,129,.50)' : 'rgba(34,211,238,.22)';
+    el.style.color = kind === 'bad' ? '#fecaca' : kind === 'ok' ? '#a7f3d0' : '#9bdcff';
+  }
+  function parse(raw, fallback){ try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; } }
+  function n(v){ const x = Number(String(v ?? 0).replace(',', '.')); return Number.isFinite(x) ? Math.max(0,x) : 0; }
+  function getStore(key){
+    try{ const value = localStorage.getItem(key); if(value !== null && value !== undefined) return value; }catch(e){}
+    try{ const value = sessionStorage.getItem(key); if(value !== null && value !== undefined) return value; }catch(e){}
+    return null;
+  }
+  function refOf(item){ return String(item && (item.ref || item.referencia || item.jobRef) || '').trim(); }
+  function cloneItem(item){
+    const copy = item && typeof item === 'object' ? JSON.parse(JSON.stringify(item)) : {};
+    const ref = refOf(copy);
+    copy.ref = ref;
+    copy.referencia = ref;
+    copy.flow = copy.flow && typeof copy.flow === 'object' ? copy.flow : {};
+    copy.flow.fab = n(copy.flow.fab ?? copy.flow.fabricacion);
+    copy.flow.fabricacion = copy.flow.fab;
+    copy.flow.pintura = n(copy.flow.pintura);
+    copy.flow.almacen = n(copy.flow.almacen ?? copy.flow.alm);
+    copy.flow.entregado = n(copy.flow.entregado ?? copy.delivered ?? copy.entregado);
+    copy.delivered = copy.flow.entregado;
+    return copy;
+  }
+  function lastEventMs(item){
+    let max = 0;
+    const add = value => {
+      const ms = Date.parse(String(value || ''));
+      if(Number.isFinite(ms)) max = Math.max(max, ms);
+    };
+    add(item && item.localFlowUpdatedAt);
+    add(item && item.updatedAt);
+    add(item && item.lastUpdate);
+    (Array.isArray(item && item.history) ? item.history : []).forEach(event=>add(event && (event.date || event.at || event.createdAt)));
+    return max;
+  }
+  function findInDb(db, ref){
+    for(const pool of ['deliveries','fabricacion','fab','trabajos']){
+      const found = (Array.isArray(db && db[pool]) ? db[pool] : []).find(item=>refOf(item) === ref);
+      if(found) return found;
     }
-  };
-  function num(v){ const x=Number(v); return Number.isFinite(x) ? Math.max(0,x) : 0; }
-  function cleanFlow(flow){
-    flow=flow&&typeof flow==='object'?flow:{};
+    return null;
+  }
+  function upsert(arr, item){
+    const ref = refOf(item);
+    const idx = arr.findIndex(row=>refOf(row) === ref);
+    if(idx >= 0){
+      const old = arr[idx] && typeof arr[idx] === 'object' ? arr[idx] : {};
+      arr[idx] = {...old, ...item, flow:{...(old.flow || {}), ...(item.flow || {})}};
+    }else{
+      arr.push({...item, flow:{...(item.flow || {})}});
+    }
+  }
+  function countsFor(db, prepMeta, prepRecepcion){
+    const refs = new Set();
+    ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
+      (Array.isArray(db[pool]) ? db[pool] : []).forEach(item=>{ const ref=refOf(item); if(ref) refs.add(ref); });
+    });
+    Object.keys(prepMeta || {}).forEach(ref=>refs.add(ref));
     return {
-      fabricacion:num(flow.fabricacion ?? flow.fab),
-      pintura:num(flow.pintura),
-      almacen:num(flow.almacen),
-      entregado:num(flow.entregado ?? flow.delivered)
+      refs:refs.size,
+      deliveries:Array.isArray(db.deliveries) ? db.deliveries.length : 0,
+      fabricacion:Array.isArray(db.fabricacion) ? db.fabricacion.length : 0,
+      fab:Array.isArray(db.fab) ? db.fab.length : 0,
+      trabajos:Array.isArray(db.trabajos) ? db.trabajos.length : 0,
+      prepMeta:Object.keys(prepMeta || {}).length,
+      prepRecepcion:Object.keys(prepRecepcion || {}).length
     };
   }
-  function stateFromFlow(flow,fallback){
-    const f=cleanFlow(flow);
-    if(f.fabricacion>0) return 'fabrication';
-    if(f.pintura>0) return 'painting';
-    if(f.almacen>0 || f.entregado>0) return 'finished';
-    return String(fallback||'').trim();
+  function mergePackage(remote, items, source){
+    remote = remote && typeof remote === 'object' ? {...remote} : {};
+    const db = parse(remote.ldh_db, {}) || {};
+    ['deliveries','fabricacion','fab','trabajos','deliveryCompanies'].forEach(pool=>{
+      if(!Array.isArray(db[pool])) db[pool] = [];
+    });
+    let inbox = parse(remote.inbox, []) || [];
+    if(!Array.isArray(inbox)) inbox = [];
+    const overrides = parse(remote.overrides, {}) || {};
+    const prepMeta = {...(remote.prepMeta || {})};
+    const prepRecepcion = {...(remote.prepRecepcion || {})};
+    const nowISO = new Date().toISOString();
+
+    items.map(cloneItem).filter(item=>refOf(item)).forEach(item=>{
+      item.localFlowUpdatedAt = item.localFlowUpdatedAt || nowISO;
+      ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>upsert(db[pool], item));
+      upsert(inbox, item);
+      const ref = refOf(item);
+      overrides[ref] = {
+        flow:{
+          fab:n(item.flow.fab),
+          fabricacion:n(item.flow.fab),
+          pintura:n(item.flow.pintura),
+          almacen:n(item.flow.almacen),
+          entregado:n(item.flow.entregado)
+        },
+        fase:item.fase,
+        estado:item.estado,
+        status:item.status,
+        keepInFab:item.keepInFab,
+        hideFromFab:item.hideFromFab,
+        archived:item.archived,
+        updatedAt:item.localFlowUpdatedAt || nowISO
+      };
+      const metaRaw = getStore('prep_meta_' + ref);
+      if(metaRaw) prepMeta[ref] = metaRaw;
+      const receptionRaw = getStore('prep_recepcion_' + ref);
+      if(receptionRaw) prepRecepcion[ref] = receptionRaw;
+    });
+
+    db.updatedAt = nowISO;
+    return {
+      ...remote,
+      ldh_db:JSON.stringify(db),
+      inbox:JSON.stringify(inbox.slice(-200)),
+      overrides:JSON.stringify(overrides),
+      prepMeta,
+      prepRecepcion,
+      counts:countsFor(db, prepMeta, prepRecepcion),
+      updatedAtISO:nowISO,
+      source:source || 'almacen.html'
+    };
   }
+
   try{
     const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
     const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-    const {getFirestore,collection,doc,getDoc,getDocs,query,where,setDoc} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-    let app=getApps().find(a=>a.options&&a.options.projectId===firebaseConfig.projectId);
-    if(!app) app=initializeApp(firebaseConfig,'ldh-workflow-v2-client');
-    const auth=getAuth(app), db=getFirestore(app);
-    const ordersCol=collection(db,'taller_data','work_orders','orders');
-    let authReady=false;
-    onAuthStateChanged(auth,user=>{
-      if(user){ authReady=true; readyResolve(true); }
-      else signInAnonymously(auth).catch(error=>{ console.error('[Workflow V2] login',error); readyResolve(false); });
-    });
-    setTimeout(()=>{ if(!authReady) readyResolve(false); },8000);
-    api.findOrderId=async function(reference){
-      reference=String(reference||'').trim();
-      if(!reference) return '';
+    const {getFirestore,doc,runTransaction,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+    let app = getApps().find(candidate=>candidate.options && candidate.options.projectId === firebaseConfig.projectId);
+    if(!app) app = initializeApp(firebaseConfig, 'ldh-almacen-phase-sync');
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const docRef = doc(db, 'taller_data', 'fabricacion');
+
+    async function syncItems(items, source, startup=false){
+      items = (Array.isArray(items) ? items : [items]).map(cloneItem).filter(item=>refOf(item));
+      if(!items.length || !authReady) return false;
+      status('Nube: sincronizando...', 'warn');
       try{
-        const candidates=[reference];
-        const prefix=(reference.match(/^(OT-\d{6}-\d{3})/i)||[])[1];
-        if(prefix && prefix!==reference) candidates.push(prefix.toUpperCase());
-        for(const candidate of candidates){
-          const snap=await getDocs(query(ordersCol,where('reference','==',candidate)));
-          const rows=snap.docs.map(d=>({id:d.id,...d.data()}))
-            .filter(x=>String(x.status||'pending')==='pending')
-            .sort((a,b)=>Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0));
-          if(rows[0]?.id) return rows[0].id;
-        }
-        return '';
-      }catch(error){ console.warn('[Workflow V2] buscar referencia',error); return ''; }
-    };
-    api.update=async function(payload){
-      if(!authReady) throw new Error('Workflow V2 sin autenticación');
-      let orderId=String(payload.orderId||payload.agendaOrderId||payload.workOrderId||'').trim();
-      const reference=String(payload.reference||payload.ref||'').trim();
-      if(!orderId) orderId=await api.findOrderId(reference);
-      if(!orderId){ console.warn('[Workflow V2] orden no vinculada',reference); return false; }
-      const ref=doc(ordersCol,orderId);
-      const snap=await getDoc(ref);
-      const current=snap.exists()?(snap.data()||{}):{};
-      const now=Date.now();
-      const flow=cleanFlow(payload.phaseFlowV2||payload.flow||current.phaseFlowV2||{});
-      const state=stateFromFlow(flow,payload.state||payload.workflowStateV2||current.workflowStateV2||'');
-      const history=Array.isArray(current.workflowHistoryV2)?current.workflowHistoryV2.slice(-79):[];
-      const previousState=String(current.workflowStateV2||'');
-      const previousFlow=cleanFlow(current.phaseFlowV2||{});
-      const changed=previousState!==state || JSON.stringify(previousFlow)!==JSON.stringify(flow);
-      if(changed){
-        history.push({
-          atMs:now,
-          state,
-          phaseFlowV2:flow,
-          source:String(payload.source||'modulo'),
-          note:String(payload.note||'')
+        await runTransaction(db, async transaction=>{
+          const snap = await transaction.get(docRef);
+          let selected = items;
+          const remote = snap.exists() ? (snap.data() || {}) : {};
+          if(startup){
+            const remoteDb = parse(remote.ldh_db, {}) || {};
+            selected = items.filter(localItem=>{
+              const ref = refOf(localItem);
+              const remoteItem = findInDb(remoteDb, ref);
+              if(!remoteItem) return true;
+              const localFlow = JSON.stringify(cloneItem(localItem).flow);
+              const remoteFlow = JSON.stringify(cloneItem(remoteItem).flow);
+              if(localFlow === remoteFlow) return false;
+              const localEvent = lastEventMs(localItem);
+              const remoteEvent = lastEventMs(remoteItem);
+              return localEvent > 0 && localEvent >= remoteEvent;
+            });
+            if(!selected.length) return;
+          }
+          const merged = mergePackage(remote, selected, source);
+          transaction.set(docRef, {...merged, updatedAt:serverTimestamp()}, {merge:false});
         });
+        status('Nube: sincronizada', 'ok');
+        return true;
+      }catch(error){
+        console.error('Sincronización Almacén → Fabricación', error);
+        status('Nube: error', 'bad');
+        return false;
       }
-      await setDoc(ref,{
-        workflowStateV2:state,
-        phaseFlowV2:flow,
-        workflowUpdatedAtMs:now,
-        workflowSourceV2:String(payload.source||'modulo'),
-        workflowHistoryV2:history,
-        updatedAtMs:now
-      },{merge:true});
-      return true;
+    }
+
+    window.LDH_almacenPublishItem = function(item, source){
+      syncChain = syncChain.then(()=>syncItems(item, source || 'almacen_cambio', false));
+      return syncChain;
     };
+
+    async function startupSync(){
+      const state = window.App && window.App.state;
+      const items = Array.isArray(state && state.deliveries) ? state.deliveries : [];
+      const authoritative = items.filter(item=>{
+        const copy = cloneItem(item);
+        return n(copy.flow.almacen) > 0 || n(copy.flow.entregado) > 0;
+      });
+      if(authoritative.length) await syncItems(authoritative, 'almacen_reconciliacion_inicio', true);
+      else status('Nube: conectada', 'ok');
+    }
+
+    onAuthStateChanged(auth, async user=>{
+      if(!user){
+        try{ await signInAnonymously(auth); }
+        catch(error){ console.error('Login nube Almacén', error); status('Nube: sin login', 'bad'); }
+        return;
+      }
+      authReady = true;
+      status('Nube: comprobando...', 'warn');
+      setTimeout(startupSync, 900);
+    });
   }catch(error){
-    console.error('[Workflow V2] inicialización',error);
-    readyResolve(false);
+    console.error('Inicialización nube Almacén', error);
+    status('Nube: no disponible', 'bad');
   }
 })();
 </script>
+
+<!-- LDH_ALMACEN_ENTREGA_SINCRONIZADA_V2_20260803 -->
 
 </body>
 </html>

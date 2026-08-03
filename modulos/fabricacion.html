@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V2</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -488,7 +488,14 @@
           if(stage === "fab") return n(f.fab) > 0;
           if(stage === "pintura") return n(f.pintura) > 0;
           if(stage === "almacen") return n(f.fab)+n(f.pintura)+n(f.almacen) > 0;
-          return n(f.fab)+n(f.pintura) > 0 || !!it.keepInFab;
+
+          // La vista principal es solo Fabricación y Pintura. Un pedido que ya
+          // está íntegramente en Almacén o Entregado no puede reaparecer por un
+          // keepInFab antiguo. hideFromFab es autoritativo cuando ya no quedan
+          // unidades en Fabricación/Pintura.
+          const activeWorkshop = n(f.fab) + n(f.pintura);
+          if(!!it.hideFromFab && activeWorkshop <= 0) return false;
+          return activeWorkshop > 0;
         })
         .filter(it => !companyFilter || String(it.company || it.empresa || "") === companyFilter)
         .filter(it => {
@@ -1040,6 +1047,41 @@ function localScore(pkg){
   const c = pkg.counts || {};
   return Number(c.refs||0) + Number(c.deliveries||0) + Number(c.fabricacion||0) + Number(c.fab||0) + Number(c.trabajos||0) + Number(c.prepMeta||0) + Number(c.prepRecepcion||0);
 }
+function timestampMs(value){
+  if(!value) return 0;
+  try{
+    if(typeof value.toMillis === "function") return Number(value.toMillis()) || 0;
+    if(typeof value.seconds === "number") return Number(value.seconds) * 1000 + Math.floor(Number(value.nanoseconds || 0) / 1000000);
+  }catch(e){}
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : 0;
+}
+function packageRevisionMs(pkg){
+  pkg = pkg || {};
+  const ldh = parse(pkg.ldh_db, {}) || {};
+  return Math.max(
+    timestampMs(pkg.updatedAt),
+    timestampMs(pkg.updatedAtISO),
+    timestampMs(ldh.updatedAt),
+    timestampMs(ldh.lastUpdate),
+    timestampMs(ldh.updatedAtISO)
+  );
+}
+function localRevisionMs(){
+  const ldh = parse(getStore(DB_KEY), {}) || {};
+  return Math.max(
+    timestampMs(ldh.updatedAt),
+    timestampMs(ldh.lastUpdate),
+    timestampMs(ldh.updatedAtISO)
+  );
+}
+function remoteShouldReplaceLocal(remote){
+  const rScore = localScore(remote);
+  const lScore = localScore();
+  if(rScore > lScore) return true;
+  if(rScore < lScore) return false;
+  return packageRevisionMs(remote) > localRevisionMs();
+}
 function withoutDeletedRefs(pkg){
   // Conserva el paquete completo. Las referencias borradas se ocultan por la subcolección
   // deleted, pero no se destruyen dentro de ldh_db; así pueden recuperarse con seguridad.
@@ -1070,9 +1112,7 @@ async function restoreIfRemoteBetter(){
     const snap = await getDoc(DOC_REF);
     if(!snap.exists()) return false;
     const remote = withoutDeletedRefs(snap.data() || {});
-    const lScore = localScore();
-    const rScore = localScore(remote);
-    if(rScore > lScore){
+    if(remoteShouldReplaceLocal(remote)){
       applyRemotePackage(remote);
       status("Nube restaurada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
       return true;
@@ -1098,7 +1138,7 @@ async function publish(force=false){
       if(snap.exists()){
         const remote = withoutDeletedRefs(snap.data() || {});
         const remoteScore = localScore(remote);
-        if(remoteScore > score){
+        if(remoteScore > score || (remoteScore === score && packageRevisionMs(remote) > localRevisionMs())){
           applyRemotePackage(remote);
           status("Nube restaurada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
           return;
@@ -1267,7 +1307,10 @@ onAuthStateChanged(auth, async user=>{
     if(remoteStamp && remoteStamp === lastRemoteUpdated) return;
     lastRemoteUpdated = remoteStamp;
 
-    if(localScore(remote) > localScore()){
+    // Antes solo se aceptaba la nube cuando traía más referencias. Por eso una
+    // entrega (mismas referencias, cantidades distintas) podía quedar ignorada.
+    // Ahora también se acepta la misma colección cuando su revisión es posterior.
+    if(remoteShouldReplaceLocal(remote)){
       applyRemotePackage(remote);
       status("Nube actualizada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
     }
@@ -1418,5 +1461,6 @@ setTimeout(hookApp, 1500);
 
 <!-- LDH_WORKFLOW_V2_SYNC_FASES_EXISTENTES_NO_LOOP_20260730 -->
 <!-- LDH_FABRICACION_RECONCILIA_SOLO_CANTIDADES_RESPETA_ESTADO_MANUAL_V7_20260730 -->
+<!-- LDH_FAB_ENTREGA_SINCRONIZADA_V2_20260803 -->
 </body>
 </html>
