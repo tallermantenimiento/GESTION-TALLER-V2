@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V51-VINCULO-MANUAL-PRIORITARIO-20260731" />
+<meta name="ldh-build" content="PREPARACION-V52-RECIBIDO-FISICO-SEGURO-20260804" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,6 +491,7 @@
   }
 </style>
 
+<meta name="ldh-fix" content="PREPARACION-V52-RECIBIDO-FISICO-SEGURO-20260804">
 </head>
 <body>
 
@@ -8667,6 +8668,48 @@ function LDH_marcarRecibidoCompleto(index){
   if(!linea) return;
   const pedida = toNum(linea.qty_pedida);
   if(pedida <= 0) return;
+
+  /*
+   * "Recibido" confirma una recepcion fisica. Primero registra en Stock la
+   * parte que todavia no procede de reserva/libre/STOCK COMUN/otra empresa y
+   * solo despues completa la linea. Si Stock no puede guardarse, no se marca
+   * la recepcion para evitar el estado imposible Recibida > Fisico.
+   */
+  const aplicadoAntes = Math.max(0,toNum(linea.aplicado_qty));
+  const faltaFisica = Math.max(0,pedida - aplicadoAntes);
+  let added = null;
+
+  if(faltaFisica > 0){
+    if((String(linea.unit||"").toLowerCase() === "barra")){
+      const tipoHierro = metaActual.tipo_hierro || metaActual.tipo_perfil || metaActual.tipoPerfileria || metaActual.tipoHierro || "Negro";
+      try{
+        metaActual.tipo_hierro = tipoHierro;
+        setAny(KM(refActual), JSON.stringify(metaActual));
+      }catch(e){}
+    }
+
+    added = LDH_addReceivedToStockV2(linea,faltaFisica,index);
+    if(!added || !added.success){
+      alert("No se pudo registrar la recepcion en el Stock real v2.\n\nLa linea NO se ha marcado como recibida.\n" + ((added && added.reason) || "Motivo desconocido"));
+      return;
+    }
+
+    linea.aplicado_qty = aplicadoAntes + faltaFisica;
+    linea.stock_consumed_qty = toNum(linea.stock_consumed_qty);
+    linea.linked_matId = added.materialId;
+    linea.stockMatId = added.materialId;
+    linea.matId = added.materialId;
+    linea.linked_matName = _v2MaterialLabel(added.material);
+    linea.stockLinkLabel = linea.linked_matName;
+    if(!Array.isArray(linea.trace)) linea.trace = [];
+    linea.trace = linea.trace.filter(t=>String(t && t.source || "") !== "stock_asignado_propio_sync");
+    linea.trace.push({
+      at:new Date().toISOString(),
+      qty:faltaFisica,
+      source:"entrada_stock_v2_desde_preparacion",
+      automaticFromReceivedButton:true
+    });
+  }
 
   linea.qty_recibida = pedida;
   linea.recibida = pedida;

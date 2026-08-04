@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- LDH_STOCK_V49_RESERVADO_UNIFICADO · 29/07/2026 -->
+<!-- LDH_STOCK_V50_RECONCILIACION_ORIGEN_SEGURO · 04/08/2026 -->
 <html lang="es">
 <head>
 <meta charset="utf-8" />
@@ -1329,6 +1329,7 @@ html, body{
   }
 </style>
 
+<meta name="ldh-fix" content="STOCK-V50-RECONCILIACION-ORIGEN-SEGURO-20260804">
 </head>
 <body>
 <div class="app">
@@ -1854,7 +1855,8 @@ function _refCompanyFromPrep(ref){
   }catch(e){}
 
   try{
-    const raw = localStorage.getItem('prep_meta_' + ref);
+    const raw = localStorage.getItem('prep_meta_' + ref)
+      || sessionStorage.getItem('prep_meta_' + ref);
     if(raw){
       const meta = JSON.parse(raw) || {};
       return meta.companyId || meta.empresaId || meta.empresa || meta.company || meta.companyName || meta.empresaActual || '';
@@ -1879,9 +1881,57 @@ function _refCompanyFromPrep(ref){
   return '';
 }
 function _lineReceivedOwnQty(line){
-  const rec = Number(line && (line.qty_recibida ?? line.recibida ?? line.received ?? 0) || 0);
-  const apl = Number(line && (line.aplicado_qty ?? line.stock_consumed_qty ?? 0) || 0);
-  return Math.max(0, rec, apl);
+  /*
+   * Cantidad realmente aportada por la empresa del pedido.
+   * qty_recibida incluye tambien STOCK COMUN y prestamos de otras empresas;
+   * esas cantidades no pueden crear una segunda asignacion en la empresa
+   * consumidora. La traza stock_asignado_propio_sync es solo un reflejo visual
+   * y nunca se usa como origen real de material.
+   */
+  const rec = Math.max(0, Number(line && (line.qty_recibida ?? line.recibida ?? line.received ?? 0) || 0));
+  const apl = Math.max(0, Number(line && (line.aplicado_qty ?? line.stock_consumed_qty ?? 0) || 0));
+  if(!line || rec <= 0) return 0;
+
+  const traces = Array.isArray(line.trace) ? line.trace : [];
+  let externalQty = 0;
+  let hasSyntheticSync = false;
+  let hasRealTrace = false;
+
+  traces.forEach(function(trace){
+    const source = String(trace && trace.source || '').trim().toLowerCase();
+    const qty = Math.max(0, Number(trace && (trace.qty ?? trace.cantidad ?? 0) || 0));
+    if(!source || qty <= 0) return;
+
+    if(source.indexOf('stock_asignado_propio_sync') === 0){
+      hasSyntheticSync = true;
+      return;
+    }
+
+    hasRealTrace = true;
+    if(
+      source.indexOf('stock_comun') === 0 ||
+      source.indexOf('otra_empresa') === 0 ||
+      source.indexOf('asignado_otra_empresa') === 0 ||
+      source.indexOf('reserva_ajena') === 0 ||
+      source.indexOf('reserva_otra_empresa') === 0 ||
+      source.indexOf('prestamo_otra_empresa') === 0 ||
+      source.indexOf('prestamo:') === 0
+    ){
+      externalQty += qty;
+    }
+  });
+
+  if(hasRealTrace){
+    return Math.min(rec, Math.max(0, rec - externalQty));
+  }
+
+  // Una marca sintetica creada por la antigua reconciliacion no demuestra
+  // que el material entrase fisicamente ni que proceda del stock propio.
+  if(hasSyntheticSync) return 0;
+
+  // Compatibilidad con lineas antiguas: solo cuenta lo ya aplicado, nunca una
+  // cantidad meramente escrita en "Recibida" que aun no se ha pasado a Stock.
+  return Math.min(rec, apl);
 }
 function _activeBorrowDebtForRefMaterial(companyId, materialId, ref){
   return (db.assignments||[]).some(a=>{
@@ -6703,14 +6753,16 @@ setTimeout(()=>{
 
   function currentReferences(){
     const refs = [];
-    try{
-      for(let index=0; index<localStorage.length; index+=1){
-        const key = localStorage.key(index) || "";
-        if(key.indexOf("prep_recepcion_") === 0){
-          refs.push(key.slice("prep_recepcion_".length).trim());
+    [localStorage,sessionStorage].forEach(function(store){
+      try{
+        for(let index=0; index<store.length; index+=1){
+          const key = store.key(index) || "";
+          if(key.indexOf("prep_recepcion_") === 0){
+            refs.push(key.slice("prep_recepcion_".length).trim());
+          }
         }
-      }
-    }catch(_){}
+      }catch(_){}
+    });
     return Array.from(new Set(refs.filter(Boolean)));
   }
 
@@ -6721,6 +6773,60 @@ setTimeout(()=>{
       }
       let changed = false;
       const now = new Date().toISOString();
+
+      function sameMaterial(row, materialId){
+        try{
+          return typeof _sameDebtMaterial === "function"
+            ? _sameDebtMaterial(row.materialId || row.matId, materialId)
+            : txt(row.materialId || row.matId) === materialId;
+        }catch(_){
+          return txt(row.materialId || row.matId) === materialId;
+        }
+      }
+
+      function isGeneratedV48(row){
+        const source = txt(row && (row.source || row.createdFrom)).toLowerCase();
+        const id = txt(row && row.id).toLowerCase();
+        return source === "stock_v48_reconciliacion_preparacion"
+          || id.indexOf("asg_prep_v48_") === 0
+          || row && row.reconciledFromPreparation === true;
+      }
+
+      function setGeneratedQty(row, qty){
+        qty = Math.max(0, Number(qty || 0) || 0);
+        const current = Math.max(0, Number(row.qty || row.cantidad || 0) || 0);
+        const status = txt(row.status || row.estado || "activa").toLowerCase();
+
+        if(qty <= 0){
+          if(current !== 0 || status === "activa"){
+            row.qty = 0;
+            row.cantidad = 0;
+            row.status = "liberada";
+            row.estado = "liberada";
+            row.releasedAt = now;
+            row.releaseReason = "reconciliacion_v50_sin_origen_propio";
+            row.updatedAt = now;
+            row.reconciledFromPreparation = true;
+            return true;
+          }
+          return false;
+        }
+
+        if(current !== qty || status !== "activa"){
+          row.qty = qty;
+          row.cantidad = qty;
+          row.status = "activa";
+          row.estado = "activa";
+          row.phase = "preparacion";
+          row.fase = "preparacion";
+          row.updatedAt = now;
+          row.reconciledFromPreparation = true;
+          try{ delete row.releasedAt; }catch(_){}
+          try{ delete row.releaseReason; }catch(_){}
+          return true;
+        }
+        return false;
+      }
 
       currentReferences().forEach(function(ref){
         try{
@@ -6736,7 +6842,9 @@ setTimeout(()=>{
           let lines = [];
           try{
             const parsed = JSON.parse(
-              localStorage.getItem("prep_recepcion_" + ref) || "[]"
+              localStorage.getItem("prep_recepcion_" + ref)
+              || sessionStorage.getItem("prep_recepcion_" + ref)
+              || "[]"
             );
             lines = Array.isArray(parsed) ? parsed : [];
           }catch(_){
@@ -6744,59 +6852,54 @@ setTimeout(()=>{
           }
 
           lines.forEach(function(line){
-            const qty = Math.max(0,Number(
-              typeof _lineReceivedOwnQty === "function"
-                ? _lineReceivedOwnQty(line)
-                : (line && (line.aplicado_qty || line.stock_consumed_qty
-                  || line.qty_recibida || line.recibida || 0))
-            ) || 0);
-            if(qty <= 0) return;
-
             const materialId = resolveMaterialId(companyId,line);
             if(!materialId) return;
 
+            const ownQty = Math.max(0,Number(
+              typeof _lineReceivedOwnQty === "function"
+                ? _lineReceivedOwnQty(line)
+                : 0
+            ) || 0);
+
             try{
-              if(typeof _activeBorrowDebtForRefMaterial === "function"
+              if(ownQty > 0 && typeof _activeBorrowDebtForRefMaterial === "function"
                 && _activeBorrowDebtForRefMaterial(
                   companyId,materialId,ref
                 )) return;
             }catch(_){}
 
-            const existing = db.assignments.find(function(row){
-              if(!activeOwnAssignment(row)) return false;
+            const sameRows = db.assignments.filter(function(row){
+              if(!row) return false;
               if(txt(row.companyId || row.empresaId) !== companyId) return false;
               if(txt(row.ref || row.jobRef || row.reference) !== ref) return false;
-              try{
-                return typeof _sameDebtMaterial === "function"
-                  ? _sameDebtMaterial(
-                    row.materialId || row.matId,
-                    materialId
-                  )
-                  : txt(row.materialId || row.matId) === materialId;
-              }catch(_){
-                return txt(row.materialId || row.matId) === materialId;
-              }
+              return sameMaterial(row,materialId);
             });
 
-            if(existing){
-              const currentQty = Math.max(0,Number(
-                existing.qty || existing.cantidad || 0
-              ) || 0);
-              if(currentQty < qty){
-                existing.qty = qty;
-                existing.cantidad = qty;
-                existing.updatedAt = now;
-                existing.reconciledFromPreparation = true;
-                changed = true;
-              }
+            const generatedRows = sameRows.filter(isGeneratedV48);
+            const otherActiveQty = sameRows
+              .filter(function(row){ return !isGeneratedV48(row) && activeOwnAssignment(row); })
+              .reduce(function(sum,row){
+                return sum + Math.max(0,Number(row.qty || row.cantidad || 0) || 0);
+              },0);
+
+            const generatedNeeded = Math.max(0, ownQty - otherActiveQty);
+            const primary = generatedRows[0] || null;
+
+            if(primary){
+              if(setGeneratedQty(primary,generatedNeeded)) changed = true;
+              generatedRows.slice(1).forEach(function(extra){
+                if(setGeneratedQty(extra,0)) changed = true;
+              });
               return;
             }
+
+            if(generatedNeeded <= 0) return;
 
             const material = typeof materialById === "function"
               ? (materialById(materialId) || {})
               : {};
             db.assignments.push({
-              id:"asg_prep_v48_" + safeId(ref) + "_"
+              id:"asg_prep_v50_" + safeId(ref) + "_"
                 + safeId(companyId) + "_" + safeId(materialId),
               companyId,
               empresaId:companyId,
@@ -6806,8 +6909,8 @@ setTimeout(()=>{
                 material.name || material.nombre
                 || line.mat || line.material || materialId
               ),
-              qty,
-              cantidad:qty,
+              qty:generatedNeeded,
+              cantidad:generatedNeeded,
               phase:"preparacion",
               fase:"preparacion",
               status:"activa",
@@ -6815,7 +6918,7 @@ setTimeout(()=>{
               ref,
               jobRef:ref,
               assignmentType:"libre",
-              reason:"asignado_desde_preparacion_reconciliado_v48",
+              reason:"asignado_desde_preparacion_reconciliado_v50",
               source:"stock_v48_reconciliacion_preparacion",
               reconciledFromPreparation:true,
               createdAt:now,
@@ -6824,7 +6927,7 @@ setTimeout(()=>{
             changed = true;
           });
         }catch(error){
-          console.warn("[Stock V48] Referencia no reconciliada:",ref,error);
+          console.warn("[Stock V50] Referencia no reconciliada:",ref,error);
         }
       });
 
@@ -6837,12 +6940,12 @@ setTimeout(()=>{
           }
         }catch(_){}
         console.info(
-          "[Stock V48] Asignaciones de Preparación consolidadas y pendientes de confirmación en nube."
+          "[Stock V50] Asignaciones de Preparacion reconciliadas sin duplicar STOCK COMUN."
         );
       }
       return changed;
     }catch(error){
-      console.warn("[Stock V48] No se pudo consolidar Preparación:",error);
+      console.warn("[Stock V50] No se pudo consolidar Preparacion:",error);
       return false;
     }
   }
