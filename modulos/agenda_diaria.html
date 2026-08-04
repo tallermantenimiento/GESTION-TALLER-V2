@@ -1462,7 +1462,7 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 <style id="LDH_WORKFLOW_V2_VIEW_20260730">
 .wo-view-dialog{width:min(900px,96vw)}.wo-view-content{padding:20px}.wo-view-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wo-view-card{border:1px solid rgba(148,163,184,.22);border-radius:13px;background:rgba(2,8,23,.55);padding:13px}.wo-view-card.wide{grid-column:1/-1}.wo-view-label{color:#93a4ba;font-size:10px;font-weight:950;letter-spacing:.07em;text-transform:uppercase;margin-bottom:6px}.wo-view-value{color:#fff;font-size:14px;font-weight:850;white-space:pre-wrap;overflow-wrap:anywhere}.wo-view-flow{display:flex;gap:6px;flex-wrap:wrap}.wo-view-history{display:grid;gap:7px}.wo-view-history-row{padding:9px 10px;border:1px solid rgba(148,163,184,.16);border-radius:10px;background:rgba(15,23,42,.55);color:#dbeafe;font-size:12px}.wo-view-history-row small{display:block;margin-top:3px;color:#94a3b8}.wo-view-check{margin-top:8px;color:#86efac;font-size:11px;font-weight:850}.wo-view-check.bad{color:#fca5a5}@media(max-width:700px){.wo-view-grid{grid-template-columns:1fr}}
 </style>
-<meta name="ldh-build" content="AGENDA-COLA-ANULACION-APROBACION-V18-20260731">
+<meta name="ldh-build" content="AGENDA-AVISOS-HUERFANOS-V19-20260804">
 </head>
 <body>
 
@@ -7733,6 +7733,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
     cloud:null,
     activePanel:'daily',
     deletedIds:new Set(),
+    cloudOrdersSnapshotReady:false,
+    notificationCleanupRunning:false,
     baseDocumentTitle:'',
     statePickerOrderId:'',
 
@@ -7875,10 +7877,45 @@ window.ejecutarDevolucion = function(matId, maxQty){
         .sort((a,b)=>Number(b.createdAtMs)-Number(a.createdAtMs));
       this.render();
       this.renderNotifications();
+      if(this.cloudOrdersSnapshotReady) this.cleanupOrphanNotifications();
+    },
+
+    async cleanupOrphanNotifications(){
+      if(this.notificationCleanupRunning || !this.cloudOrdersSnapshotReady || !this.cloud?.deleteNotifications) return;
+      const pendingOrderIds = new Set(
+        this.orders
+          .filter(order=>order.status === 'pending' && !this.deletedIds.has(order.id))
+          .map(order=>order.id)
+      );
+      const orphanIds = this.notifications
+        .filter(notification=>notification.id && (!notification.orderId || !pendingOrderIds.has(notification.orderId)))
+        .map(notification=>notification.id);
+      if(!orphanIds.length) return;
+
+      this.notificationCleanupRunning = true;
+      const orphanSet = new Set(orphanIds);
+      this.notifications = this.notifications.filter(notification=>!orphanSet.has(notification.id));
+      this.render();
+      try{
+        await this.cloud.deleteNotifications(orphanIds);
+        console.log('[Agenda] Avisos huérfanos eliminados:', orphanIds.length);
+      }catch(error){
+        console.warn('[Agenda] No se pudieron borrar de la nube todos los avisos huérfanos',error);
+      }finally{
+        this.notificationCleanupRunning = false;
+      }
     },
 
     renderNotifications(){
-      const priorityRows = this.notifications.filter(notification=>notification.type === 'priority_changed');
+      const pendingOrderIds = new Set(
+        this.orders
+          .filter(order=>order.status === 'pending' && !this.deletedIds.has(order.id))
+          .map(order=>order.id)
+      );
+      const activeNotifications = this.notifications.filter(notification=>
+        notification.orderId && pendingOrderIds.has(notification.orderId)
+      );
+      const priorityRows = activeNotifications.filter(notification=>notification.type === 'priority_changed');
       const cancellationRows = this.orders
         .filter(order=>order.status === 'pending' && normalizeCancellationRequest(order.cancellationRequestV1))
         .sort((a,b)=>{
@@ -7887,7 +7924,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
           return Number(br?.requestedAtMs||0)-Number(ar?.requestedAtMs||0);
         });
       const totalVisible = priorityRows.length + cancellationRows.length;
-      const totalUnread = this.notifications.length + cancellationRows.length;
+      const totalUnread = activeNotifications.length + cancellationRows.length;
       const panel = document.getElementById('woNotifications');
       const list = document.getElementById('woNotificationList');
       const count = document.getElementById('woNotificationCount');
@@ -7971,16 +8008,22 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
     applyDeletedIds(ids){
       let changed = false;
+      const removedIds = new Set();
       (ids||[]).forEach(id=>{
         const key = normText(id);
-        if(key && !this.deletedIds.has(key)){
+        if(!key) return;
+        removedIds.add(key);
+        if(!this.deletedIds.has(key)){
           this.deletedIds.add(key);
           changed = true;
         }
       });
       const before = this.orders.length;
+      const notificationsBefore = this.notifications.length;
       this.orders = this.orders.filter(order=>!this.deletedIds.has(order.id));
-      if(changed || before !== this.orders.length){
+      this.notifications = this.notifications.filter(notification=>!removedIds.has(notification.orderId));
+      const notificationsChanged = notificationsBefore !== this.notifications.length;
+      if(changed || before !== this.orders.length || notificationsChanged){
         // Solo normalizacion local. Nunca escribir desde un listener de Firestore:
         // evitamos el bucle snapshot -> renumerar -> escribir -> snapshot.
         if(before !== this.orders.length) this.normalizePendingPositions(false);
@@ -7990,6 +8033,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     },
 
     mergeFromCloud(remoteRows){
+      this.cloudOrdersSnapshotReady = true;
       const localOnly = new Map(
         this.orders.filter(o=>!this.deletedIds.has(o.id)).map(o=>[o.id,o])
       );
@@ -8005,6 +8049,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       writeOrders(this.orders);
       this.render();
       this.updateSyncStatus('Sincronización: actualizada', true);
+      this.cleanupOrphanNotifications();
     },
 
     getLocalOrders(){
@@ -9171,6 +9216,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 </script>
 
 <!-- LDH_WORKFLOW_SINGLE_SOURCE_V16 -->
+<!-- LDH_FIX_AVISOS_HUERFANOS_V19_20260804 -->
 <script type="module" id="LDH_WORK_ORDERS_FIRESTORE_V1">
 (async function(){
   const PROJECT_ID = 'gestion-taller-2a439';
@@ -9282,6 +9328,14 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
           if(!id) return;
           await deleteDoc(doc(notificationsCol,String(id)));
         },
+        async deleteNotifications(ids){
+          const rows = Array.from(new Set((Array.isArray(ids) ? ids : []).map(id=>String(id||'').trim()).filter(Boolean)));
+          for(let start=0;start<rows.length;start+=400){
+            const batch = writeBatch(db);
+            rows.slice(start,start+400).forEach(id=>batch.delete(doc(notificationsCol,id)));
+            await batch.commit();
+          }
+        },
         async deleteOrders(orders,reason){
           const rows = (Array.isArray(orders) ? orders : []).filter(order=>order && order.id);
           if(!rows.length) return;
@@ -9301,6 +9355,20 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
               },{merge:true});
             });
             await batch.commit();
+          }
+
+          // Eliminar también los avisos asociados para que no quede un contador rojo
+          // huérfano después de borrar la orden. Es una limpieza auxiliar: si falla,
+          // la orden ya eliminada no se restaura ni se considera fallida.
+          try{
+            const orderIds = new Set(rows.map(order=>String(order.id)));
+            const notificationSnap = await getDocs(notificationsCol);
+            const notificationIds = notificationSnap.docs
+              .filter(item=>orderIds.has(String(item.data()?.orderId||'')))
+              .map(item=>item.id);
+            if(notificationIds.length) await this.deleteNotifications(notificationIds);
+          }catch(error){
+            console.warn('[Agenda] Orden eliminada, pero no se pudieron limpiar todos sus avisos',error);
           }
         }
       };
