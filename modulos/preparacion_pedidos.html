@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V52-RECIBIDO-FISICO-SEGURO-20260804" />
+<meta name="ldh-build" content="PREPARACION-V53-LIMPIAR-PRUEBA-NUBE-SEGURO-20260804" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V52-RECIBIDO-FISICO-SEGURO-20260804">
+<meta name="ldh-fix" content="PREPARACION-V53-LIMPIAR-PRUEBA-NUBE-SEGURO-20260804">
 </head>
 <body>
 
@@ -18544,6 +18544,186 @@ window.addEventListener("DOMContentLoaded", () => {
   setTimeout(LDH_prepReconcileCurrentFabricationV51, 1400);
   setTimeout(LDH_prepReconcileCurrentFabricationV51, 3200);
 });
+
+/*
+ * V53 · "Limpiar prueba" persistente en Stock nube.
+ *
+ * Antes, la línea se dejaba a cero solo en Preparación y en la copia local de
+ * Stock. Si Firebase conservaba una asignación activa para la misma referencia
+ * y material, renderTabla() la detectaba de nuevo y volvía a marcar la línea
+ * como recibida. Esta corrección libera primero, dentro de una transacción, solo
+ * las reservas/asignaciones de ESA referencia y ESE material. No modifica
+ * movimientos ni cantidades físicas. Los préstamos/deudas entre empresas se
+ * bloquean y deben regularizarse con sus botones específicos.
+ */
+const LDH_PREP_CLEAR_TEST_LOCK_V53 = new Set();
+
+function LDH_prepActiveRowV53(row) {
+  const status = LDH_prepNormCloudV30(row?.status ?? row?.estado ?? "activa");
+  const phase = LDH_prepNormCloudV30(row?.phase ?? row?.fase ?? "preparacion");
+  return status === "activa" && (phase === "preparacion" || phase === "fabricacion");
+}
+
+function LDH_prepReservationMatchesLineV53(row, line, remoteDB, reference) {
+  const rowRefs = [
+    row?.ref, row?.jobRef, row?.consumerRef, row?.reference,
+    row?.usedByRef, row?.refConsumidor
+  ].filter(Boolean);
+  if (!rowRefs.some((value) => LDH_prepSameRefV32(value, reference))) return false;
+  const ids = LDH_prepLineMaterialIdsV49(line, remoteDB);
+  if (!ids.size) return false;
+  return [
+    row?.toMaterialId, row?.materialId, row?.fromMaterialId,
+    row?.matId, row?.material_id
+  ].filter(Boolean).map(String).some((id) => ids.has(id));
+}
+
+function LDH_prepCancelTestRowV53(row, now) {
+  const originalQty = LDH_prepNumCloudV30(
+    row?.qty ?? row?.cantidad ?? row?.reservado ?? row?.asignado ?? 0
+  );
+  row.status = "cancelada_prueba";
+  row.estado = "cancelada_prueba";
+  row.pendingQty = 0;
+  row.qtyPending = 0;
+  row.updatedAt = now;
+  row.cancelledAt = now;
+  row.releasedAt = now;
+  row.cancelledReason = "limpiar_prueba_preparacion_v53";
+  row.releasedReason = "limpiar_prueba_preparacion_v53";
+  row.testCleanupOriginalQty = originalQty;
+}
+
+async function LDH_prepClearTestCloudV53(line) {
+  const reference = String(window.refActual ?? refActual ?? "").trim();
+  if (!reference) throw new Error("El pedido no tiene referencia.");
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    throw new Error("Stock nube todavía no está autenticado. Espera a que aparezca conectado.");
+  }
+
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction, metaRef);
+    remoteDB.reservations = Array.isArray(remoteDB.reservations)
+      ? remoteDB.reservations : [];
+    remoteDB.assignments = Array.isArray(remoteDB.assignments)
+      ? remoteDB.assignments : [];
+
+    const matchingLoans = remoteDB.assignments.filter((row) =>
+      LDH_prepActiveRowV53(row)
+      && LDH_prepAssignmentMatchesLineV49(row, line, remoteDB, reference)
+      && LDH_prepIsLoanV45(row)
+    );
+    if (matchingLoans.length) {
+      throw new Error(
+        "Esta línea tiene un préstamo o deuda entre empresas activo. " +
+        "Utiliza Devolver/Compensar; Limpiar prueba no puede cancelar una deuda."
+      );
+    }
+
+    const now = new Date().toISOString();
+    let assignmentsChanged = 0;
+    let reservationsChanged = 0;
+
+    remoteDB.assignments.forEach((row) => {
+      if (!LDH_prepActiveRowV53(row)) return;
+      if (LDH_prepIsLoanV45(row)) return;
+      if (!LDH_prepAssignmentMatchesLineV49(row, line, remoteDB, reference)) return;
+      LDH_prepCancelTestRowV53(row, now);
+      assignmentsChanged += 1;
+    });
+
+    remoteDB.reservations.forEach((row) => {
+      if (!LDH_prepActiveRowV53(row)) return;
+      if (!LDH_prepReservationMatchesLineV53(row, line, remoteDB, reference)) return;
+      LDH_prepCancelTestRowV53(row, now);
+      reservationsChanged += 1;
+    });
+
+    if (assignmentsChanged || reservationsChanged) {
+      LDH_prepWriteRemoteStockTransactionV45(
+        transaction,
+        metaRef,
+        remoteDB,
+        "preparacion_limpiar_prueba_v53"
+      );
+    }
+
+    return { remoteDB, assignmentsChanged, reservationsChanged };
+  });
+
+  LDH_prepAdoptRemoteDBV49(result.remoteDB);
+  return result;
+}
+
+function LDH_prepClearLocalLineV53(line) {
+  LDH_prepResetLineV49(line);
+  line._old_return_traces_hidden_at = new Date().toISOString();
+  try { delete line.qty_recibida_base_before_lent; } catch (_) {
+    line.qty_recibida_base_before_lent = "";
+  }
+}
+
+window.limpiarConsumoLinea = async function limpiarConsumoLineaV53(index) {
+  const lines = window.estadoMateriales ?? estadoMateriales;
+  const line = lines?.[index];
+  if (!line) return;
+
+  const material = String(
+    line.mat ?? line.material ?? line.name ?? "esta línea"
+  );
+  const reference = String(window.refActual ?? refActual ?? "").trim();
+  const lockKey = `${reference}|${index}|${material}`;
+  if (LDH_PREP_CLEAR_TEST_LOCK_V53.has(lockKey)) return;
+
+  const accepted = confirm(
+    `Limpiar la prueba de "${material}" en este pedido?\n\n` +
+    "Se pondrá Recibida = 0 y se liberarán únicamente las reservas o " +
+    "asignaciones de esta referencia y este material.\n\n" +
+    "No cambia el stock físico ni toca otros trabajos, préstamos o deudas."
+  );
+  if (!accepted) return;
+
+  LDH_PREP_CLEAR_TEST_LOCK_V53.add(lockKey);
+  const button = document.activeElement instanceof HTMLButtonElement
+    ? document.activeElement : null;
+  const oldText = button?.textContent || "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "LIMPIANDO…";
+  }
+
+  try {
+    const result = await LDH_prepClearTestCloudV53(line);
+    LDH_prepClearLocalLineV53(line);
+
+    if (typeof window.saveMetaActual === "function") window.saveMetaActual();
+    if (typeof window.guardarEstadoLocal === "function") window.guardarEstadoLocal();
+    if (typeof window.renderTabla === "function") window.renderTabla();
+    if (typeof window.cargarLista === "function") window.cargarLista();
+
+    alert(
+      "✅ Prueba limpiada.\n\n" +
+      `Asignaciones liberadas: ${result.assignmentsChanged}\n` +
+      `Reservas liberadas: ${result.reservationsChanged}\n\n` +
+      "El stock físico no se ha modificado."
+    );
+  } catch (error) {
+    console.error("[Preparación V53] Limpiar prueba:", error);
+    alert(
+      "No se ha modificado nada.\n\n" +
+      String(error?.message || error || "Error al sincronizar con Stock nube.")
+    );
+  } finally {
+    LDH_PREP_CLEAR_TEST_LOCK_V53.delete(lockKey);
+    if (button && button.isConnected) {
+      button.disabled = false;
+      button.textContent = oldText || "LIMPIAR PRUEBA";
+    }
+  }
+};
+
+window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
 </script>
 
 <script type="module" id="LDH_WORKFLOW_V2_CLIENT_20260730">
