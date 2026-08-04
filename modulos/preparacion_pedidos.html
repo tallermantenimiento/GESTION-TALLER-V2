@@ -6473,6 +6473,66 @@ function LDH_addReceivedToStockV2(linea, diff, index){
     row.fisico = total;
     row.updatedAt = new Date().toISOString();
 
+    /*
+     * V52: la recepción física crea/actualiza directamente la asignación del
+     * trabajo en la misma base que Stock. Así el Informativo y Stock muestran
+     * el mismo Reservado sin depender de reconstrucciones desde localStorage.
+     */
+    db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
+    const targetAssigned = Math.max(0, toNum(linea && linea.aplicado_qty) + Number(diff||0));
+    const refKey = String(refActual||"").trim();
+    const ownAssignment = db.assignments.find(a => {
+      if(!a) return false;
+      if(String(a.companyId||a.empresaId||"") !== String(companyId)) return false;
+      if(String(a.materialId||a.matId||"") !== String(materialId)) return false;
+      if(String(a.ref||a.jobRef||"").trim() !== refKey) return false;
+      if(a.sharedStock === true || String(a.assignmentType||"").toLowerCase() === "stock_comun") return false;
+      const typ = String(a.assignmentType||a.reason||a.source||"").toLowerCase();
+      if(typ.includes("otra_empresa") || typ.includes("prestamo") || typ.includes("préstamo")) return false;
+      return true;
+    });
+
+    if(refKey && targetAssigned > 0){
+      const stamp = new Date().toISOString();
+      if(ownAssignment){
+        const currentQty = Math.max(0, Number(ownAssignment.qty||ownAssignment.cantidad||0));
+        ownAssignment.qty = Math.max(currentQty, targetAssigned);
+        ownAssignment.cantidad = ownAssignment.qty;
+        ownAssignment.status = "activa";
+        ownAssignment.estado = "activa";
+        ownAssignment.phase = ownAssignment.phase || ownAssignment.fase || "preparacion";
+        ownAssignment.fase = ownAssignment.fase || ownAssignment.phase || "preparacion";
+        ownAssignment.updatedAt = stamp;
+      }else{
+        const safe = value => String(value||"")
+          .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+          .replace(/[^a-zA-Z0-9_-]+/g,"_")
+          .replace(/^_+|_+$/g,"")
+          .slice(0,120) || "sin_id";
+        db.assignments.push({
+          id:"asg_prep_received_"+safe(refKey)+"_"+safe(companyId)+"_"+safe(materialId),
+          companyId,
+          empresaId:companyId,
+          materialId,
+          matId:materialId,
+          materialName,
+          qty:targetAssigned,
+          cantidad:targetAssigned,
+          phase:"preparacion",
+          fase:"preparacion",
+          status:"activa",
+          estado:"activa",
+          ref:refKey,
+          jobRef:refKey,
+          assignmentType:"libre",
+          reason:"asignado_desde_preparacion_recepcion_fisica",
+          source:"preparacion_pedidos_recepcion_fisica",
+          createdAt:stamp,
+          updatedAt:stamp
+        });
+      }
+    }
+
     if(!LDH_exactSaveDB(db)) return {success:false, reason:"No se pudo guardar en Stock v2."};
 
     return {success:true, db, company, companyId, material, materialId, total};
