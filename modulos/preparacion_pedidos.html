@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V64-COMPRA-CONJUNTA-FASES-HISTORICO-20260805" />
+<meta name="ldh-build" content="PREPARACION-V65-STOCK-SKLUM-FIREBASE-VIVO-20260805" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V64-COMPRA-CONJUNTA-FASES-HISTORICO-20260805">
+<meta name="ldh-fix" content="PREPARACION-V65-STOCK-SKLUM-FIREBASE-VIVO-20260805">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -5023,12 +5023,10 @@ function LDH_exactNorm(v){
 }
 function LDH_exactStockRawDB(){
   const KEY = "ldh_v2_company_stock_v1";
-  let raw = "";
-  try{ if(window.__LDH_STOCK_MEMORY_DB) return window.__LDH_STOCK_MEMORY_DB; }catch(e){}
-  try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){}
-  if(!raw){ try{ raw = localStorage.getItem(KEY) || ""; }catch(e){} }
-  try{
-    const db = JSON.parse(raw || "{}") || {};
+
+  function normalizarDB(candidate){
+    if(!candidate || typeof candidate !== "object") return null;
+    const db = candidate;
     db.companies = Array.isArray(db.companies) ? db.companies : [];
     db.materials = Array.isArray(db.materials) ? db.materials : [];
     db.stock = Array.isArray(db.stock) ? db.stock : [];
@@ -5036,6 +5034,35 @@ function LDH_exactStockRawDB(){
     db.reservations = Array.isArray(db.reservations) ? db.reservations : [];
     db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
     return db;
+  }
+
+  /* V65: Preparación debe calcular las píldoras con la misma base viva que Stock.
+     Las copias de memoria/local pueden quedar antiguas y no deben imponerse sobre
+     el onSnapshot de gestion-taller-stock. */
+  try{
+    if(window.__LDH_PREP_STOCK_CLOUD_DB && typeof window.__LDH_PREP_STOCK_CLOUD_DB === "object"){
+      return normalizarDB(window.__LDH_PREP_STOCK_CLOUD_DB);
+    }
+  }catch(e){}
+  try{
+    if(typeof window.LDH_prepLiveStockPackV60 === "function"){
+      const livePack = window.LDH_prepLiveStockPackV60();
+      if(livePack && livePack.db && typeof livePack.db === "object"){
+        return normalizarDB(livePack.db);
+      }
+    }
+  }catch(e){}
+  try{
+    if(window.__LDH_STOCK_MEMORY_DB && typeof window.__LDH_STOCK_MEMORY_DB === "object"){
+      return normalizarDB(window.__LDH_STOCK_MEMORY_DB);
+    }
+  }catch(e){}
+
+  let raw = "";
+  try{ raw = sessionStorage.getItem(KEY) || ""; }catch(e){}
+  if(!raw){ try{ raw = localStorage.getItem(KEY) || ""; }catch(e){} }
+  try{
+    return normalizarDB(JSON.parse(raw || "{}") || {});
   }catch(e){ return null; }
 }
 function LDH_exactFirst(){
@@ -20174,7 +20201,19 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
             const wrapped = function(line){
               const result = previous.apply(this, arguments);
               if(!isLocked(line) || !result || typeof result !== 'object') return result;
-              return Object.assign({}, result, {asignado:0, assigned:0, assignedQty:0});
+              const real = Number(String(result.real ?? result.fisico ?? 0).replace(',', '.')) || 0;
+              const reservado = Number(String(result.reservado ?? result.reserved ?? 0).replace(',', '.')) || 0;
+              return Object.assign({}, result, {
+                asignado:0,
+                asignadoPrep:0,
+                asignadoFab:0,
+                assigned:0,
+                assignedQty:0,
+                libre:real - reservado,
+                free:real - reservado,
+                available:real - reservado,
+                sourceKey:String(result.sourceKey || '') + ' + limpieza V65 recalculada'
+              });
             };
             wrapped.__ldhV62 = true;
             window._v2CompanyStockInfo = wrapped;
