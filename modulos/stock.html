@@ -1329,8 +1329,8 @@ html, body{
   }
 </style>
 
-<meta name="ldh-fix" content="STOCK-V52-ASIGNACION-40X20-ID-CANONICO-20260805">
-<meta name="ldh-build" content="STOCK-V52-ASIGNACION-40X20-ID-CANONICO-20260805">
+<meta name="ldh-fix" content="STOCK-V53-ASIGNACION-40X20-PUBLICACION-FORZADA-20260805">
+<meta name="ldh-build" content="STOCK-V53-ASIGNACION-40X20-PUBLICACION-FORZADA-20260805">
 </head>
 <body>
 <div class="app">
@@ -6991,5 +6991,140 @@ setTimeout(()=>{
 })();
 </script>
 
+
+
+<!--
+  V53 · Reconciliación robusta de la asignación 40x20x1.5.
+  La V52 podía dejar el flag aplicado sin que la asignación alcanzase Firebase.
+  Esta versión valida la fila real, la reconstruye si falta y fuerza la publicación
+  desde la memoria actual. No modifica movimientos ni stock físico.
+-->
+<script id="LDH_STOCK_V53_ASIGNACION_40X20_PUBLICACION_FORZADA">
+(function(){
+  const COMPANY_ID = "emp_jku45mmllb";
+  const MATERIAL_ID = "mat_w1pptmgey0";
+  const LEGACY_MATERIAL_ID = "mat_fkuauoczxw";
+  const REF = "OT-260731-001 VILLALONGA SALAS LEMON Y MARKETING: varias mesas oficina y suplementos";
+  const ASSIGNMENT_ID = "asg_v53_ot260731_40x20_canonical";
+  const FLAG = "stock_v53_40x20_assignment_published_20260805";
+  let running = false;
+
+  function arr(v){ return Array.isArray(v) ? v : []; }
+  function num(v){ const n = Number(String(v ?? 0).replace(',', '.')); return Number.isFinite(n) ? Math.max(0,n) : 0; }
+  function now(){ return new Date().toISOString(); }
+  function statusOf(row){ return String((row && (row.status || row.estado)) || '').toLowerCase(); }
+  function phaseOf(row){ return String((row && (row.phase || row.fase)) || '').toLowerCase(); }
+  function active(row){ return statusOf(row) === 'activa' && ['preparacion','fabricacion'].includes(phaseOf(row)); }
+  function refOf(row){ return String((row && (row.ref || row.jobRef || row.reference)) || '').trim(); }
+  function materialOf(row){ return String((row && (row.materialId || row.matId || row.material_id)) || '').trim(); }
+  function companyOf(row){ return String((row && (row.companyId || row.empresaId || row.company)) || '').trim(); }
+  function qtyOf(row){ return num(row && (row.qty ?? row.cantidad ?? row.asignado)); }
+
+  function localQty(){
+    try{
+      const raw = localStorage.getItem('prep_recepcion_' + REF) || sessionStorage.getItem('prep_recepcion_' + REF) || '[]';
+      const lines = JSON.parse(raw);
+      if(!Array.isArray(lines)) return 0;
+      const line = lines.find(item => {
+        const id = String((item && (item.linked_matId || item.stockMatId || item.matId)) || '');
+        const name = String((item && (item.mat || item.material || item.name)) || '').toLowerCase().replace(/\s+/g,'');
+        return id === MATERIAL_ID || id === LEGACY_MATERIAL_ID || name === '40x20x1.5';
+      });
+      if(!line) return 0;
+      const received = num(line.qty_recibida ?? line.recibida ?? 0);
+      const applied = num(line.aplicado_qty ?? line.stock_consumed_qty ?? 0);
+      return Math.min(received, applied || received);
+    }catch(_){ return 0; }
+  }
+
+  function ensureAssignment(){
+    if(typeof db === 'undefined' || !db || typeof db !== 'object') return {ok:false, reason:'db_no_disponible'};
+    db.assignments = arr(db.assignments);
+    db.materials = arr(db.materials);
+    db.stock = arr(db.stock);
+    db._repairFlags = db._repairFlags && typeof db._repairFlags === 'object' ? db._repairFlags : {};
+
+    const materialExists = db.materials.some(row => String(row && (row.id || row.materialId) || '') === MATERIAL_ID)
+      || db.stock.some(row => companyOf(row) === COMPANY_ID && materialOf(row) === MATERIAL_ID);
+    if(!materialExists) return {ok:false, reason:'material_canonico_no_encontrado'};
+
+    const related = db.assignments.filter(row =>
+      companyOf(row) === COMPANY_ID &&
+      refOf(row) === REF &&
+      [MATERIAL_ID, LEGACY_MATERIAL_ID].includes(materialOf(row))
+    );
+    const qty = Math.max(localQty(), ...related.filter(active).map(qtyOf), 0);
+    if(qty <= 0) return {ok:false, reason:'cantidad_no_encontrada'};
+
+    let canonical = db.assignments.find(row => String(row && row.id || '') === ASSIGNMENT_ID);
+    if(!canonical){
+      canonical = {id:ASSIGNMENT_ID};
+      db.assignments.push(canonical);
+    }
+
+    const stamp = now();
+    Object.assign(canonical,{
+      companyId:COMPANY_ID, empresaId:COMPANY_ID,
+      materialId:MATERIAL_ID, matId:MATERIAL_ID,
+      materialName:'40x20x1.5',
+      qty, cantidad:qty,
+      phase:'preparacion', fase:'preparacion',
+      status:'activa', estado:'activa',
+      ref:REF, jobRef:REF,
+      assignmentType:'libre',
+      reason:'reconciliacion_id_material_canonico_v53',
+      source:'stock_v53_forced_cloud_publish',
+      migratedFromMaterialId:LEGACY_MATERIAL_ID,
+      createdAt:canonical.createdAt || stamp,
+      updatedAt:stamp
+    });
+
+    related.forEach(row => {
+      if(row === canonical || String(row.id || '') === ASSIGNMENT_ID) return;
+      row.qty = 0; row.cantidad = 0;
+      row.status = 'fusionada'; row.estado = 'fusionada';
+      row.mergedIntoAssignmentId = ASSIGNMENT_ID;
+      row.updatedAt = stamp;
+    });
+
+    db._repairFlags[FLAG] = {
+      appliedAt:stamp, companyId:COMPANY_ID, materialId:MATERIAL_ID,
+      ref:REF, qty, assignmentId:ASSIGNMENT_ID
+    };
+    db.updatedAt = stamp;
+    window.__LDH_STOCK_MEMORY_DB = db;
+    return {ok:true, qty, canonical};
+  }
+
+  async function reconcile(){
+    if(running) return false;
+    running = true;
+    try{
+      const result = ensureAssignment();
+      if(!result.ok){
+        console.warn('[Stock V53] Reconciliación pendiente:', result.reason);
+        return false;
+      }
+
+      try{ if(typeof save === 'function') save(); }catch(error){ console.warn('[Stock V53] Guardado local falló; se mantiene memoria:', error); }
+      try{ if(typeof render === 'function') render(); }catch(_){ }
+
+      if(typeof window.LDH_publishStockDirectFromMemory === 'function')
+        await window.LDH_publishStockDirectFromMemory(db);
+      else if(typeof window.LDH_scheduleStockCloudPublish === 'function')
+        window.LDH_scheduleStockCloudPublish(true);
+
+      console.info('[Stock V53] Asignación 40x20 publicada/reconciliada:', {qty:result.qty, assignmentId:ASSIGNMENT_ID});
+      return true;
+    }catch(error){
+      console.error('[Stock V53] Error en reconciliación:', error);
+      return false;
+    }finally{ running = false; }
+  }
+
+  window.LDH_reconciliarAsignacion40x20V53 = reconcile;
+  [2800, 7000, 14000, 24000].forEach(delay => setTimeout(reconcile, delay));
+})();
+</script>
 </body>
 </html>
