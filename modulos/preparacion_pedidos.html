@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V67-PILL-RESERVADO-GLOBAL-FIREBASE-20260805" />
+<meta name="ldh-build" content="PREPARACION-V68-FISICO-DUPLICADOS-FIREBASE-20260805" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V67-PILL-RESERVADO-GLOBAL-FIREBASE-20260805">
+<meta name="ldh-fix" content="PREPARACION-V68-FISICO-DUPLICADOS-FIREBASE-20260805">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -21084,6 +21084,163 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   }else{
     setTimeout(start, 0);
   }
+})();
+</script>
+
+
+
+<!--
+  V68 · Si una línea está vinculada a una ficha duplicada sin movimientos,
+  toma el físico de la ficha homónima exacta que sí usa Stock para esa empresa.
+  Las reservas/asignaciones globales de V67 se mantienen intactas.
+-->
+<script id="LDH_PREP_V68_FISICO_DUPLICADOS_FIREBASE">
+(function(){
+  'use strict';
+
+  function num(value){
+    const parsed = Number(String(value ?? 0).replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function first(){
+    for(let index = 0; index < arguments.length; index += 1){
+      const value = arguments[index];
+      if(value !== undefined && value !== null && String(value).trim() !== '') return value;
+    }
+    return '';
+  }
+  function norm(value){
+    try{
+      return String(value || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/ø/g, 'o')
+        .replace(/[^a-z0-9]+/g, '');
+    }catch(_){ return String(value || '').toLowerCase().trim(); }
+  }
+  function materialId(row){
+    return String(first(row && row.id, row && row.materialId, row && row.matId, row && row.material_id)).trim();
+  }
+  function materialName(row){
+    return String(first(row && row.name, row && row.nombre, row && row.material, row && row.label)).trim();
+  }
+  function rowCompanyId(row){
+    return String(first(row && row.companyId, row && row.empresaId, row && row.company, row && row.empresa)).trim();
+  }
+  function rowMaterialId(row){
+    return String(first(row && row.materialId, row && row.matId, row && row.material_id, row && row.material)).trim();
+  }
+
+  function candidatePhysical(exact, line, linkedMat){
+    const db = exact && exact.db;
+    if(!db) return null;
+
+    const companyId = String(exact.companyId || '').trim();
+    const targetNames = [
+      exact.materialName,
+      materialName(exact.material),
+      line && line.linked_matName,
+      line && line.stockLinkLabel,
+      line && line.mat,
+      line && line.material,
+      line && line.name,
+      linkedMat && materialName(linkedMat)
+    ].map(norm).filter(Boolean);
+
+    const exactNameSet = new Set(targetNames);
+    const ids = new Set([
+      exact.materialId,
+      line && line.linked_matId,
+      line && line.stockMatId,
+      line && line.matId,
+      line && line.stock_matId
+    ].map(v => String(v || '').trim()).filter(Boolean));
+
+    const materials = Array.isArray(db.materials) ? db.materials : [];
+    materials.forEach(row => {
+      const id = materialId(row);
+      const name = norm(materialName(row));
+      if(id && name && exactNameSet.has(name)) ids.add(id);
+    });
+
+    // Solo candidatos realmente presentes en el stock o en movimientos de la empresa.
+    const activeIds = new Set();
+    (Array.isArray(db.stock) ? db.stock : []).forEach(row => {
+      if(rowCompanyId(row) === companyId && ids.has(rowMaterialId(row))) activeIds.add(rowMaterialId(row));
+    });
+    (Array.isArray(db.movements) ? db.movements : []).forEach(row => {
+      if(rowCompanyId(row) === companyId && ids.has(rowMaterialId(row))) activeIds.add(rowMaterialId(row));
+    });
+    if(!activeIds.size) ids.forEach(id => activeIds.add(id));
+
+    const rows = Array.from(activeIds).map(id => {
+      let real = 0;
+      try{
+        if(typeof LDH_exactRealStock === 'function') real = num(LDH_exactRealStock(db, companyId, id));
+      }catch(_){ real = 0; }
+      return {id, real};
+    });
+    if(!rows.length) return null;
+
+    const linkedId = String(exact.materialId || '').trim();
+    const linked = rows.find(row => row.id === linkedId) || {id:linkedId, real:num(exact.real)};
+    const best = rows.reduce((chosen, row) => row.real > chosen.real ? row : chosen, linked);
+
+    return {
+      real: Math.max(num(exact.real), num(best.real)),
+      selectedMaterialId: best.id || linkedId,
+      linkedMaterialId: linkedId,
+      candidates: rows
+    };
+  }
+
+  function install(){
+    if(!window.LDH_PREP_V67_GLOBAL_PILL) return false;
+    const previous = window._v2CompanyStockInfo;
+    if(typeof previous !== 'function') return false;
+    if(previous.__ldhV68) return true;
+
+    const wrapped = function _v2CompanyStockInfoV68(line, linkedMat){
+      const info = previous.apply(this, arguments);
+      if(!info || info.state !== 'ok') return info;
+
+      let exact = null;
+      try{ exact = window.LDH_exactResolveStockLine(line); }catch(_){ exact = null; }
+      const physical = candidatePhysical(exact, line, linkedMat);
+      if(!physical) return info;
+
+      const real = physical.real;
+      const reserved = num(info.reservado);
+      const assigned = num(info.asignado);
+
+      return Object.assign({}, info, {
+        real,
+        libre: real - reserved - assigned,
+        sourceKey: String(info.sourceKey || 'firebase_live') + ' + fisico homonimo V68',
+        physicalMaterialIdV68: physical.selectedMaterialId,
+        linkedMaterialIdV68: physical.linkedMaterialId,
+        physicalCandidatesV68: physical.candidates
+      });
+    };
+
+    wrapped.__ldhV68 = true;
+    wrapped.__ldhPreviousV67 = previous;
+    window._v2CompanyStockInfo = wrapped;
+    window.LDH_PREP_V68_PHYSICAL_ALIAS = true;
+
+    try{ if(typeof window.renderTabla === 'function') window.renderTabla(); }catch(error){
+      console.warn('[Preparacion V68] No se pudo refrescar la tabla:', error);
+    }
+    return true;
+  }
+
+  let attempts = 0;
+  (function start(){
+    attempts += 1;
+    if(install()) return;
+    if(attempts < 180) setTimeout(start, 50);
+    else console.error('[Preparacion V68] No se pudo instalar el lector fisico homonimo.');
+  })();
 })();
 </script>
 

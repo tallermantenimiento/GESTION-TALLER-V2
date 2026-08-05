@@ -1329,8 +1329,8 @@ html, body{
   }
 </style>
 
-<meta name="ldh-fix" content="STOCK-V53-ASIGNACION-40X20-PUBLICACION-FORZADA-20260805">
-<meta name="ldh-build" content="STOCK-V53-ASIGNACION-40X20-PUBLICACION-FORZADA-20260805">
+<meta name="ldh-fix" content="STOCK-V54-FAMILIAS-ABIERTAS-ESTABLES-20260805">
+<meta name="ldh-build" content="STOCK-V54-FAMILIAS-ABIERTAS-ESTABLES-20260805">
 </head>
 <body>
 <div class="app">
@@ -7126,5 +7126,138 @@ setTimeout(()=>{
   [2800, 7000, 14000, 24000].forEach(delay => setTimeout(reconcile, delay));
 })();
 </script>
+
+
+<!--
+  V54 · Mantiene abiertas las familias de Stock durante cualquier renderizado
+  automático, incluida la sincronización con Firebase. No modifica datos.
+-->
+<script id="LDH_STOCK_V54_FAMILIAS_ABIERTAS_ESTABLES">
+(function(){
+  'use strict';
+
+  const SESSION_KEY = 'ldh_stock_open_families_v54';
+
+  function familyName(details){
+    return String(details && details.dataset && details.dataset.family || '').trim();
+  }
+
+  function currentSet(){
+    try{
+      if(typeof LDH_stockOpenFamilies !== 'undefined' && LDH_stockOpenFamilies instanceof Set){
+        return LDH_stockOpenFamilies;
+      }
+    }catch(_){ }
+    if(!(window.__LDH_STOCK_OPEN_FAMILIES_V54 instanceof Set)){
+      window.__LDH_STOCK_OPEN_FAMILIES_V54 = new Set();
+    }
+    return window.__LDH_STOCK_OPEN_FAMILIES_V54;
+  }
+
+  function replaceSet(values){
+    const next = new Set(Array.from(values || []).map(v => String(v || '').trim()).filter(Boolean));
+    try{
+      if(typeof LDH_stockOpenFamilies !== 'undefined') LDH_stockOpenFamilies = next;
+    }catch(_){ }
+    window.__LDH_STOCK_OPEN_FAMILIES_V54 = next;
+    return next;
+  }
+
+  function saveSet(){
+    try{ sessionStorage.setItem(SESSION_KEY, JSON.stringify(Array.from(currentSet()))); }catch(_){ }
+  }
+
+  function loadSet(){
+    try{
+      const parsed = JSON.parse(sessionStorage.getItem(SESSION_KEY) || '[]');
+      if(Array.isArray(parsed) && parsed.length) replaceSet(parsed);
+    }catch(_){ }
+  }
+
+  function rememberFromDOM(){
+    try{
+      const names = Array.from(document.querySelectorAll('.family-details[open]'))
+        .map(familyName)
+        .filter(Boolean);
+      replaceSet(names);
+      saveSet();
+    }catch(_){ }
+  }
+
+  function bindDetails(){
+    document.querySelectorAll('.family-details').forEach(details => {
+      if(details.__ldhV54ToggleBound) return;
+      details.__ldhV54ToggleBound = true;
+      details.addEventListener('toggle', function(){
+        const name = familyName(details);
+        if(!name) return;
+        const set = currentSet();
+        if(details.open) set.add(name);
+        else set.delete(name);
+        saveSet();
+      });
+    });
+  }
+
+  function restoreToDOM(){
+    try{
+      const set = currentSet();
+      document.querySelectorAll('.family-details').forEach(details => {
+        const name = familyName(details);
+        if(name && set.has(name)) details.open = true;
+      });
+      bindDetails();
+    }catch(_){ }
+  }
+
+  function install(){
+    loadSet();
+    const previous = window.render;
+    if(typeof previous !== 'function') return false;
+    if(previous.__ldhV54FamiliesStable) return true;
+
+    const wrapped = function renderV54FamiliesStable(){
+      rememberFromDOM();
+      const result = previous.apply(this, arguments);
+      restoreToDOM();
+      setTimeout(restoreToDOM, 0);
+      setTimeout(restoreToDOM, 80);
+      return result;
+    };
+    wrapped.__ldhV54FamiliesStable = true;
+    wrapped.__ldhPreviousRender = previous;
+    window.render = wrapped;
+
+    // Sustituye el helper antiguo para que también use el render final protegido.
+    window.LDH_stockRenderKeepFamilies = function LDH_stockRenderKeepFamiliesV54(){
+      rememberFromDOM();
+      return window.render();
+    };
+
+    restoreToDOM();
+
+    // Cubre reemplazos parciales del tbody que no llamen a render().
+    const target = document.getElementById('stockBody') || document.body;
+    if(target && typeof MutationObserver === 'function'){
+      const observer = new MutationObserver(function(){
+        setTimeout(restoreToDOM, 0);
+      });
+      observer.observe(target, {childList:true, subtree:true});
+      window.__LDH_STOCK_FAMILY_OBSERVER_V54 = observer;
+    }
+
+    window.LDH_STOCK_V54_FAMILIES_STABLE = true;
+    return true;
+  }
+
+  let attempts = 0;
+  (function start(){
+    attempts += 1;
+    if(install()) return;
+    if(attempts < 120) setTimeout(start, 50);
+  })();
+})();
+</script>
+
 </body>
 </html>
