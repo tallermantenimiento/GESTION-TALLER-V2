@@ -1329,8 +1329,8 @@ html, body{
   }
 </style>
 
-<meta name="ldh-fix" content="STOCK-V54-FAMILIAS-ABIERTAS-ESTABLES-20260805">
-<meta name="ldh-build" content="STOCK-V54-FAMILIAS-ABIERTAS-ESTABLES-20260805">
+<meta name="ldh-fix" content="STOCK-V55-PUBLICACION-COLA-ESTADO-ESTABLE-20260805">
+<meta name="ldh-build" content="STOCK-V55-PUBLICACION-COLA-ESTADO-ESTABLE-20260805">
 </head>
 <body>
 <div class="app">
@@ -6027,6 +6027,11 @@ const META_PATH = ['taller_data','stock'];
 let publishTimer = null;
 let lastRawPublished = '';
 let authReady = false;
+let publishInFlight = false;
+let publishPending = false;
+let publishPendingForce = false;
+let mirrorQueue = Promise.resolve();
+window.LDH_STOCK_V55_PUBLISH_QUEUE = true;
 
 function stEl(){ return document.getElementById('LDH_stockCloudStatus'); }
 function setCloudStatus(txt, cls, detail){
@@ -6266,23 +6271,55 @@ async function publishStockMaterialsMirror(data){
   }
 }
 
+function publishStockMaterialsMirrorInBackground(data){
+  // V55: el espejo auxiliar nunca mantiene el indicador principal en "subiendo".
+  // Se serializa para evitar batches simultáneos y se ejecuta con una instantánea.
+  let snapshot = data;
+  try{ snapshot = JSON.parse(JSON.stringify(data || {})); }catch(_){ }
+  mirrorQueue = mirrorQueue
+    .catch(()=>0)
+    .then(()=>publishStockMaterialsMirror(snapshot))
+    .then(count=>{
+      const el = stEl();
+      if(el && el.classList.contains('ok')){
+        el.title = (el.title || 'Stock principal sincronizado.') + ' · espejo auxiliar: ' + count;
+      }
+      return count;
+    });
+  return mirrorQueue;
+}
+
 async function publishFullStock(force=false){
+  if(publishInFlight){
+    publishPending = true;
+    publishPendingForce = publishPendingForce || !!force;
+    return false;
+  }
+
+  publishInFlight = true;
   try{
     if(!authReady){
       setCloudStatus('Stock nube esperando auth','warn','Esperando autenticación de Firebase.');
-      return;
+      return false;
     }
 
-    if(!(await cloudPublishSafetyCheck(force))) return;
+    if(!(await cloudPublishSafetyCheck(force))) return false;
 
     const {data, raw} = completePayloadFromLocalStorage();
-    if(!force && raw && raw === lastRawPublished) return;
+    if(raw && raw === lastRawPublished){
+      setCloudStatus(
+        'Stock nube conectado · ' + data.materials.length + ' materiales',
+        'ok',
+        'La base principal ya estaba sincronizada; no se repite la publicación.'
+      );
+      return true;
+    }
     if(!raw || !data.stock || !data.stock.length){
       setCloudStatus('Stock nube sin datos','warn','No hay datos de stock para publicar.');
-      return;
+      return false;
     }
 
-    setCloudStatus('Stock nube subiendo...','warn','Publicando catálogo completo en Firestore.');
+    setCloudStatus('Stock nube subiendo...','warn','Publicando la base principal de Stock en Firestore.');
 
     const packageObj = {};
     packageObj[STOCK_KEY] = raw;
@@ -6291,7 +6328,7 @@ async function publishFullStock(force=false){
     const packageJson = JSON.stringify(packageObj);
     const chunks = chunkString(packageJson, 350000);
 
-    // Primero chunks, luego meta. Así la app informativa no lee un totalChunks nuevo antes de existir los chunks.
+    // Primero chunks, luego meta. Al terminar el meta, la base principal ya es válida.
     for(let i=0;i<chunks.length;i++){
       await setDoc(doc(fbDb, ...META_PATH, 'chunks', String(i)), {
         part: chunks[i],
@@ -6315,17 +6352,33 @@ async function publishFullStock(force=false){
       source: 'stock.html'
     }, {merge:true});
 
-    const mirrorCount = await publishStockMaterialsMirror(data);
     lastRawPublished = raw;
     setCloudStatus(
       'Stock nube conectado · ' + data.materials.length + ' materiales',
       'ok',
-      'Publicado en Firestore. Empresas: ' + data.companies.length + ' · materiales: ' + data.materials.length + ' · stock: ' + data.stock.length + ' · chunks: ' + chunks.length + ' · espejo: ' + mirrorCount
+      'Base principal publicada. Empresas: ' + data.companies.length +
+      ' · materiales: ' + data.materials.length +
+      ' · stock: ' + data.stock.length +
+      ' · chunks: ' + chunks.length +
+      ' · espejo auxiliar en segundo plano.'
     );
+
+    // El espejo informativo se publica después, sin bloquear ni cambiar a amarillo.
+    publishStockMaterialsMirrorInBackground(data);
+    return true;
   }catch(e){
     const msg = String((e && (e.code || e.message)) || e || 'error');
     console.error('Error publicando Stock en Firestore', e);
     setCloudStatus('Stock nube error','bad',msg);
+    return false;
+  }finally{
+    publishInFlight = false;
+    if(publishPending){
+      const nextForce = publishPendingForce;
+      publishPending = false;
+      publishPendingForce = false;
+      setTimeout(()=>publishFullStock(nextForce), 120);
+    }
   }
 }
 
@@ -6333,7 +6386,7 @@ window.LDH_scheduleStockCloudPublish = function(force=false){
   clearTimeout(publishTimer);
   publishTimer = setTimeout(()=>publishFullStock(!!force), force ? 100 : 900);
 };
-window.LDH_publishFullStockNow = function(){ publishFullStock(true); };
+window.LDH_publishFullStockNow = function(){ return publishFullStock(true); };
 window.LDH_publishStockDirectFromMemory = async function(memoryDb){
   try{
     if(memoryDb){
@@ -6341,10 +6394,11 @@ window.LDH_publishStockDirectFromMemory = async function(memoryDb){
       window.__LDH_STOCK_FORCE_MEMORY_PUBLISH = true;
       try{ sessionStorage.setItem(STOCK_KEY, JSON.stringify(memoryDb)); }catch(e){}
     }
-    await publishFullStock(true);
+    return await publishFullStock(true);
   }catch(e){
     console.error('Publicación directa desde memoria falló', e);
     setCloudStatus('Stock nube error','bad',String((e && (e.code || e.message)) || e));
+    return false;
   }
 };
 
@@ -7057,6 +7111,21 @@ setTimeout(()=>{
     if(qty <= 0) return {ok:false, reason:'cantidad_no_encontrada'};
 
     let canonical = db.assignments.find(row => String(row && row.id || '') === ASSIGNMENT_ID);
+    const duplicatesActive = related.some(row =>
+      String(row && row.id || '') !== ASSIGNMENT_ID && active(row) && qtyOf(row) > 0
+    );
+    const canonicalValid = !!canonical &&
+      active(canonical) &&
+      companyOf(canonical) === COMPANY_ID &&
+      materialOf(canonical) === MATERIAL_ID &&
+      refOf(canonical) === REF &&
+      qtyOf(canonical) === qty &&
+      !duplicatesActive;
+
+    if(canonicalValid){
+      return {ok:true, qty, canonical, changed:false};
+    }
+
     if(!canonical){
       canonical = {id:ASSIGNMENT_ID};
       db.assignments.push(canonical);
@@ -7093,7 +7162,7 @@ setTimeout(()=>{
     };
     db.updatedAt = stamp;
     window.__LDH_STOCK_MEMORY_DB = db;
-    return {ok:true, qty, canonical};
+    return {ok:true, qty, canonical, changed:true};
   }
 
   async function reconcile(){
@@ -7104,6 +7173,11 @@ setTimeout(()=>{
       if(!result.ok){
         console.warn('[Stock V53] Reconciliación pendiente:', result.reason);
         return false;
+      }
+
+      if(!result.changed){
+        console.info('[Stock V53] Asignación 40x20 ya correcta; no se vuelve a publicar:', {qty:result.qty, assignmentId:ASSIGNMENT_ID});
+        return true;
       }
 
       try{ if(typeof save === 'function') save(); }catch(error){ console.warn('[Stock V53] Guardado local falló; se mantiene memoria:', error); }
@@ -7257,6 +7331,15 @@ setTimeout(()=>{
     if(attempts < 120) setTimeout(start, 50);
   })();
 })();
+</script>
+
+<!--
+  V55 · Cola única de publicación Firebase y estado visual estable.
+  La base principal confirma "conectado" antes del espejo auxiliar; las llamadas
+  simultáneas se agrupan y V53 no republica si la asignación ya está correcta.
+-->
+<script id="LDH_STOCK_V55_PUBLICACION_COLA_ESTADO_ESTABLE">
+window.LDH_STOCK_V55_PUBLISH_STATUS_STABLE = true;
 </script>
 
 </body>
