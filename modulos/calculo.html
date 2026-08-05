@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
-  <meta name="ldh-build" content="CALC-PEDIDO-COMPUESTO-V1-20260804">
+  <meta name="ldh-build" content="CALC-PEDIDO-COMPUESTO-V2-PARTID-ID-SEGURO-20260805">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -441,24 +441,31 @@
 
       const notice = document.getElementById("agendaHandoffNotice");
       const expectedOrderId = String(params.get("orderId") || "").trim();
-      let payload = null;
+      const expectedPartId = String(params.get("partId") || "").trim();
+      const candidates = [];
       for(const storage of [sessionStorage,localStorage]){
         try{
           const candidate = parse(storage.getItem(AGENDA_HANDOFF_KEY),null);
-          if(candidate && typeof candidate === "object"){
-            payload = candidate;
-            break;
-          }
+          if(candidate && typeof candidate === "object") candidates.push(candidate);
         }catch(error){
           console.warn("No se pudo leer el envío de Agenda",error);
         }
       }
-
-      const valid = payload &&
-        Number(payload.version) === 1 &&
-        payload.source === "agenda_diaria" &&
-        (!expectedOrderId || String(payload.orderId || "") === expectedOrderId) &&
-        (!Number(payload.expiresAtMs) || Number(payload.expiresAtMs) >= Date.now());
+      const validCandidates = candidates.filter(candidate =>
+        Number(candidate.version) === 1 &&
+        candidate.source === "agenda_diaria" &&
+        (!expectedOrderId || String(candidate.orderId || "") === expectedOrderId) &&
+        (!expectedPartId || String(candidate.partId || "") === expectedPartId) &&
+        (!Number(candidate.expiresAtMs) || Number(candidate.expiresAtMs) >= Date.now())
+      ).sort((a,b)=>Number(b.createdAtMs||0)-Number(a.createdAtMs||0));
+      const payload = validCandidates[0] || null;
+      const valid = !!payload;
+      if(payload){
+        const json = JSON.stringify(payload);
+        for(const storage of [sessionStorage,localStorage]){
+          try{ storage.setItem(AGENDA_HANDOFF_KEY,json); }catch(error){}
+        }
+      }
 
       if(!valid){
         if(notice){
@@ -470,7 +477,7 @@
 
       const reference = String(payload.partReference || payload.reference || "").trim();
       const description = String(payload.description || "").trim();
-      const combinedReference = [reference,description].filter(Boolean).join(" ");
+      const combinedReference = payload.composite ? reference : [reference,description].filter(Boolean).join(" ");
       const refInput = document.getElementById("refInput");
       if(refInput) refInput.value = combinedReference;
 
@@ -712,8 +719,10 @@
       if(!data.ref) return alert("Introduce una referencia.");
       if(!data.empresa) return alert("Selecciona la empresa receptora para este pedido.");
 
-      const refFinal = uniquePrepRef(data.ref);
-      if(refFinal !== data.ref){
+      const isCompositePart = !!(this.agendaHandoff && this.agendaHandoff.composite && this.agendaHandoff.partId);
+      const exactCompositeRef = String(this.agendaHandoff && this.agendaHandoff.partReference || data.ref || "").trim();
+      const refFinal = isCompositePart ? exactCompositeRef : uniquePrepRef(data.ref);
+      if(!isCompositePart && refFinal !== data.ref){
         alert("La referencia ya existía en Preparación. Se enviará como: " + refFinal);
       }
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V55-COMPRA-CONJUNTA-IMPORT-SYNC-SEGURO-20260805" />
+<meta name="ldh-build" content="PREPARACION-V56-COMPUESTO-PARTID-ESTADO-SEGURO-20260805" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V55-COMPRA-CONJUNTA-IMPORT-SYNC-SEGURO-20260805">
+<meta name="ldh-fix" content="PREPARACION-V56-COMPUESTO-PARTID-ESTADO-SEGURO-20260805">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 </head>
 <body>
@@ -2882,7 +2882,34 @@ function saveLinkMap(){
         try { removeAny("prep_estado_actual"); } catch(_) {}
         return;
       }
-      const refBase = refCandidate;
+      let refBase = refCandidate;
+      // Pedido compuesto: la identidad real de una partida es groupId + partId.
+      // Si se recalcula, se sustituye esa misma partida y nunca se crea un B (1).
+      try{
+        const earlyGroupId = String(snap.composite_group_id || snap.compositeGroupId || '').trim();
+        const earlyPartId = String(snap.composite_part_id || snap.partId || '').trim();
+        const earlyPartRef = String(snap.composite_part_reference || snap.partReference || '').trim();
+        if(earlyGroupId && earlyPartRef) refBase = earlyPartRef;
+        if(earlyGroupId && earlyPartId){
+          const seenKeys = new Set();
+          for(const storage of [localStorage,sessionStorage]){
+            try{
+              for(let i=0;i<storage.length;i++){
+                const key=storage.key(i);
+                if(!key || !key.startsWith('prep_meta_') || seenKeys.has(key)) continue;
+                seenKeys.add(key);
+                const existingMeta=JSON.parse(storage.getItem(key)||'{}')||{};
+                const existingGroup=String(existingMeta.composite_group_id||existingMeta.compositeGroupId||'').trim();
+                const existingPart=String(existingMeta.composite_part_id||existingMeta.compositePartId||'').trim();
+                if(existingGroup===earlyGroupId && existingPart===earlyPartId){
+                  refBase=key.slice('prep_meta_'.length);
+                  break;
+                }
+              }
+            }catch(error){}
+          }
+        }
+      }catch(error){}
 
 // UID de pedido:
 // - Si el pedido ya existe con esa referencia, REUTILIZAMOS su UID para NO crear "#2".
@@ -18801,6 +18828,10 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
     async findOrderId(reference){
       await ready;
       return api.findOrderId(reference);
+    },
+    async markCompositePart(payload){
+      await ready;
+      return api.markCompositePart(payload||{});
     }
   };
   function num(v){ const x=Number(v); return Number.isFinite(x) ? Math.max(0,x) : 0; }
@@ -18823,7 +18854,7 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
   try{
     const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
     const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-    const {getFirestore,collection,doc,getDoc,getDocs,query,where,setDoc} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+    const {getFirestore,collection,doc,getDoc,getDocs,query,where,setDoc,runTransaction} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
     let app=getApps().find(a=>a.options&&a.options.projectId===firebaseConfig.projectId);
     if(!app) app=initializeApp(firebaseConfig,'ldh-workflow-v2-client');
     const auth=getAuth(app), db=getFirestore(app);
@@ -18886,6 +18917,36 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
       },{merge:true});
       return true;
     };
+    api.markCompositePart=async function(payload){
+      if(!authReady) throw new Error('Workflow V2 sin autenticación');
+      let orderId=String(payload.orderId||payload.masterOrderId||'').trim();
+      const masterReference=String(payload.masterReference||payload.reference||'').trim();
+      if(!orderId) orderId=await api.findOrderId(masterReference);
+      if(!orderId) return false;
+      const partId=String(payload.partId||'').trim();
+      const partReference=String(payload.partReference||payload.prepReference||'').trim();
+      const partIndex=Math.max(0,Math.round(Number(payload.partIndex)||0));
+      const prepReference=String(payload.prepReference||partReference||'').trim();
+      const prepConcept=String(payload.prepConcept||payload.concept||'').trim();
+      const orderRef=doc(ordersCol,orderId);
+      return runTransaction(db,async transaction=>{
+        const snap=await transaction.get(orderRef);
+        if(!snap.exists()) return false;
+        const current=snap.data()||{};
+        const composite=current.compositeV1&&typeof current.compositeV1==='object'?current.compositeV1:null;
+        if(!composite||!Array.isArray(composite.parts)) return false;
+        const parts=composite.parts.map(part=>({...part}));
+        let index=parts.findIndex(part=>partId&&String(part.id||'')===partId);
+        if(index<0&&partReference) index=parts.findIndex(part=>String(part.reference||'')===partReference);
+        if(index<0&&partIndex>0&&parts[partIndex-1]) index=partIndex-1;
+        if(index<0) return false;
+        const now=Date.now();
+        const previous=parts[index]||{};
+        parts[index]={...previous,prepStatus:'in_preparation',inPreparationAtMs:Number(previous.inPreparationAtMs)||now,prepReference,prepConcept,prepUpdatedAtMs:now,updatedAtMs:Math.max(Number(previous.updatedAtMs)||0,now)};
+        transaction.set(orderRef,{compositeV1:{...composite,parts,updatedAtMs:now},updatedAtMs:now},{merge:true});
+        return true;
+      });
+    };
   }catch(error){
     console.error('[Workflow V2] inicialización',error);
     readyResolve(false);
@@ -18893,13 +18954,43 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
 })();
 </script>
 
+<script id="LDH_PREP_COMPOSITE_PART_STATUS_SYNC_V56_20260805">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_COMPOSITE_PART_STATUS_SYNC_V56__) return;
+  window.__LDH_PREP_COMPOSITE_PART_STATUS_SYNC_V56__=true;
+  const sent=new Map();
+  function raw(key){try{return getAny(key);}catch(e){try{return localStorage.getItem(key)||sessionStorage.getItem(key);}catch(_){return null;}}}
+  function refs(){const out=new Set();for(const storage of [localStorage,sessionStorage]){try{for(let i=0;i<storage.length;i++){const key=storage.key(i);if(key&&key.startsWith('prep_meta_'))out.add(key.slice(10));}}catch(e){}}return [...out];}
+  async function scan(){
+    if(!window.LDH_WorkflowV2||typeof window.LDH_WorkflowV2.markCompositePart!=='function') return;
+    for(const prepRef of refs()){
+      let meta={};try{meta=JSON.parse(raw('prep_meta_'+prepRef)||'{}')||{};}catch(e){continue;}
+      const groupId=String(meta.composite_group_id||meta.compositeGroupId||'').trim();
+      const partId=String(meta.composite_part_id||meta.compositePartId||'').trim();
+      if(!groupId||!partId) continue;
+      const payload={orderId:String(meta.composite_master_order_id||meta.agenda_order_id||meta.orderId||'').trim(),masterReference:String(meta.composite_master_reference||'').trim(),partId,partReference:String(meta.composite_part_reference||prepRef).trim(),partIndex:Number(meta.composite_part_index)||0,prepReference:prepRef,prepConcept:String(meta.concepto||meta.composite_part_concept||'').trim()};
+      const key=groupId+'|'+partId;
+      const signature=JSON.stringify(payload);
+      if(sent.get(key)===signature) continue;
+      sent.set(key,signature);
+      try{const ok=await window.LDH_WorkflowV2.markCompositePart(payload);if(!ok)sent.delete(key);}catch(error){sent.delete(key);console.warn('[Pedido compuesto] estado de partida no sincronizado',error);}
+    }
+  }
+  window.LDH_syncCompositePartStatusesV56=scan;
+  window.addEventListener('storage',()=>setTimeout(scan,300));
+  document.addEventListener('DOMContentLoaded',()=>setTimeout(scan,1200),{once:true});
+  window.addEventListener('load',()=>setTimeout(scan,1600),{once:true});
+  setInterval(scan,5000);
+})();
+</script>
 
 <style id="LDH_COMPRA_CONJUNTA_PREP_STYLE_V1_20260804">
 .ldh-prep-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}.ldh-prep-tab{border:1px solid rgba(56,189,248,.30);background:#071426;color:#9fb0c8;border-radius:11px;padding:9px 14px;font-weight:900;cursor:pointer}.ldh-prep-tab.active{background:linear-gradient(180deg,#075985,#0c4a6e);border-color:#38bdf8;color:#fff}.ldh-prep-tab-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;margin-left:5px;border-radius:999px;background:rgba(255,255,255,.13);font-size:10px}
 .ldh-group-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}.ldh-group-card{padding:14px;border:1px solid rgba(56,189,248,.25);border-radius:14px;background:linear-gradient(180deg,rgba(8,47,73,.38),rgba(2,6,23,.72));cursor:pointer}.ldh-group-card:hover{border-color:#38bdf8}.ldh-group-title{font-weight:950;color:#fff}.ldh-group-meta{margin-top:6px;color:#9fb0c8;font-size:12px}.ldh-group-state{display:inline-flex;margin-top:8px;padding:4px 8px;border-radius:999px;border:1px solid rgba(34,197,94,.38);background:rgba(20,83,45,.22);color:#bbf7d0;font-size:10px;font-weight:950}.ldh-group-state.warn{border-color:rgba(245,158,11,.48);background:rgba(120,53,15,.24);color:#fde68a}.ldh-group-state.bad{border-color:rgba(239,68,68,.48);background:rgba(127,29,29,.22);color:#fecaca}
 .ldh-group-modal-table{width:100%;border-collapse:collapse}.ldh-group-modal-table th,.ldh-group-modal-table td{padding:9px;border-bottom:1px solid rgba(255,255,255,.09);vertical-align:top}.ldh-group-breakdown{display:grid;gap:3px;color:#cbd5e1;font-size:11px}.ldh-group-total{font-size:16px;font-weight:950;color:#86efac}.ldh-group-warning{margin:10px 0;padding:10px;border:1px solid rgba(245,158,11,.45);border-radius:11px;background:rgba(120,53,15,.22);color:#fde68a}.ldh-group-ok{margin:10px 0;padding:10px;border:1px solid rgba(34,197,94,.35);border-radius:11px;background:rgba(20,83,45,.20);color:#bbf7d0}.ldh-group-part-list{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.ldh-group-part-pill{padding:4px 8px;border-radius:999px;border:1px solid rgba(148,163,184,.25);background:rgba(15,23,42,.7);font-size:10px;color:#dbeafe}
 </style>
-<script id="LDH_COMPRA_CONJUNTA_PREP_V1_20260804">
+<script id="LDH_COMPRA_CONJUNTA_PREP_V2_20260805">
 (function(){
   'use strict';
   let activeTab='individual',originalCargarLista=null,originalCopiarLista=null,currentGroupId='';
@@ -18918,10 +19009,21 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
   function member(ref){
     try{const meta=JSON.parse(getRaw('prep_meta_'+ref)||'{}');const lines=JSON.parse(getRaw('prep_recepcion_'+ref)||'[]');return {ref,meta,lines:Array.isArray(lines)?lines:[]};}catch(e){return {ref,meta:{},lines:[]};}
   }
+  function partIdentity(m){
+    const id=String(m&&m.meta&&(m.meta.composite_part_id||m.meta.compositePartId)||'').trim();if(id)return 'id:'+id;
+    const index=Math.round(n(m&&m.meta&&(m.meta.composite_part_index||m.meta.partIndex)||0));if(index>0)return 'index:'+index;
+    const reference=String(m&&m.meta&&(m.meta.composite_part_reference||m.ref)||'').trim();return 'ref:'+reference;
+  }
+  function memberTime(m){return Math.max(n(m&&m.meta&&m.meta.fecha),n(m&&m.meta&&m.meta.updatedAtMs),Date.parse(m&&m.meta&&m.meta.createdAt||0)||0);}
   function allGroups(){
     const map=new Map();
     refs().forEach(ref=>{const m=member(ref),gid=groupIdOf(m.meta);if(!gid)return;if(!map.has(gid))map.set(gid,[]);map.get(gid).push(m);});
-    return [...map.entries()].map(([id,members])=>({id,members:members.sort((a,b)=>n(a.meta.composite_part_index)-n(b.meta.composite_part_index)||a.ref.localeCompare(b.ref,'es'))}));
+    return [...map.entries()].map(([id,rawMembers])=>{
+      const canonical=new Map(),duplicates=[];
+      rawMembers.forEach(m=>{const key=partIdentity(m),old=canonical.get(key);if(!old){canonical.set(key,m);return;}if(memberTime(m)>=memberTime(old)){duplicates.push(old);canonical.set(key,m);}else duplicates.push(m);});
+      const members=[...canonical.values()].sort((a,b)=>n(a.meta.composite_part_index)-n(b.meta.composite_part_index)||a.ref.localeCompare(b.ref,'es'));
+      return {id,members,duplicates};
+    });
   }
   function expected(group){return Math.max(2,...group.members.map(m=>Math.round(n(m.meta.composite_part_count)||0)));}
   function masterRef(group){return String(group.members[0]?.meta?.composite_master_reference||group.members[0]?.ref||'Pedido conjunto');}
@@ -18976,7 +19078,7 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
   function renderGroups(){
     ensureUi();const groups=allGroups(),host=document.getElementById('ldhCompraGrupos'),count=document.getElementById('ldhGroupCount');if(count)count.textContent=String(groups.length);if(!host)return;
     if(!groups.length){host.innerHTML='<div style="opacity:.55;padding:20px">No hay pedidos compuestos en Preparación.</div>';return;}
-    host.innerHTML=groups.map(group=>{const exp=expected(group),status=latestStatus(group),sig=signature(group),modified=!!status&&status.signature!==sig;let state='<span class="ldh-group-state warn">BORRADOR</span>';if(group.members.length<exp)state=`<span class="ldh-group-state bad">FALTAN ${exp-group.members.length} PARTIDAS</span>`;else if(status&&modified)state='<span class="ldh-group-state warn">MODIFICADO DESPUÉS DE ENVIAR</span>';else if(status)state='<span class="ldh-group-state">✓ PEDIDO CONJUNTO ENVIADO</span>';return `<div class="ldh-group-card" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}')"><div class="ldh-group-title">🧩 ${esc(masterRef(group))}</div><div class="ldh-group-meta">${esc(company(group))} · ${group.members.length} de ${exp} partidas en Preparación</div>${state}</div>`;}).join('');
+    host.innerHTML=groups.map(group=>{const exp=expected(group),status=latestStatus(group),sig=signature(group),modified=!!status&&status.signature!==sig,dup=group.duplicates.length;let state='<span class="ldh-group-state warn">BORRADOR</span>';if(group.members.length<exp)state=`<span class="ldh-group-state bad">FALTAN ${exp-group.members.length} PARTIDAS</span>`;else if(dup)state=`<span class="ldh-group-state warn">${dup} PARTIDA DUPLICADA IGNORADA</span>`;else if(status&&modified)state='<span class="ldh-group-state warn">MODIFICADO DESPUÉS DE ENVIAR</span>';else if(status)state='<span class="ldh-group-state">✓ PEDIDO CONJUNTO ENVIADO</span>';const dupText=dup?` · ${dup} duplicada${dup===1?'':'s'} ignorada${dup===1?'':'s'}`:'';return `<div class="ldh-group-card" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}')"><div class="ldh-group-title">🧩 ${esc(masterRef(group))}</div><div class="ldh-group-meta">${esc(company(group))} · ${group.members.length} de ${exp} partidas en Preparación${dupText}</div>${state}</div>`;}).join('');
   }
   function textFor(data){
     const lines=[`PEDIDO CONJUNTO · ${masterRef(data.group)}`];if(company(data.group))lines.push(`EMPRESA · ${company(data.group)}`);lines.push('');
@@ -18986,7 +19088,8 @@ window.LDH_limpiarPruebaNubeV53 = LDH_prepClearTestCloudV53;
   function show(groupId){
     ensureUi();const group=allGroups().find(g=>g.id===groupId);if(!group)return;currentGroupId=groupId;const data=build(group),status=latestStatus(group),modified=!!status&&status.signature!==data.currentSignature;document.getElementById('ldhGroupModalTitle').textContent=`Compra conjunta · ${masterRef(group)}`;
     const parts=group.members.map(m=>`<span class="ldh-group-part-pill">${esc(m.meta.composite_part_reference||m.ref)} · ${esc(m.meta.concepto||m.meta.composite_part_concept||'Sin concepto')}</span>`).join('');
-    const notice=!data.complete?`<div class="ldh-group-warning">Faltan ${expected(group)-group.members.length} partidas por llegar desde Cálculo. La compra conjunta no se puede copiar todavía.</div>`:status&&modified?'<div class="ldh-group-warning">El grupo cambió después del último envío a Compras. Al confirmar se copiará la lista actualizada.</div>':status?'<div class="ldh-group-ok">Este pedido conjunto ya fue copiado. Puedes abrirlo para revisarlo o volver a copiar la misma lista.</div>':'<div class="ldh-group-ok">Grupo completo. Se copiará una sola lista y la orden principal pasará a ESPERANDO MATERIAL.</div>';
+    const duplicateNotice=group.duplicates.length?`<div class="ldh-group-warning">Se han detectado ${group.duplicates.length} envío${group.duplicates.length===1?'':'s'} duplicado${group.duplicates.length===1?'':'s'} de una misma partida. Se ignoran para el total y no sustituyen a la partida que falta.</div>`:'';
+    const notice=duplicateNotice+(!data.complete?`<div class="ldh-group-warning">Faltan ${expected(group)-group.members.length} partidas distintas por llegar desde Cálculo. La compra conjunta no se puede copiar todavía.</div>`:status&&modified?'<div class="ldh-group-warning">El grupo cambió después del último envío a Compras. Al confirmar se copiará la lista actualizada.</div>':status?'<div class="ldh-group-ok">Este pedido conjunto ya fue copiado. Puedes abrirlo para revisarlo o volver a copiar la misma lista.</div>':'<div class="ldh-group-ok">Grupo completo. Se copiará una sola lista y la orden principal pasará a ESPERANDO MATERIAL.</div>');
     const rows=data.items.length?data.items.map(it=>`<tr><td><strong>${esc(it.name)}</strong><div style="font-size:10px;color:#9fb0c8">${esc(it.unit)}</div></td><td><div class="ldh-group-breakdown">${it.contributions.map(c=>`<span>${esc(c.ref)} · ${esc(c.concept||'Concepto')} · ${fmt(c.need)}</span>`).join('')}</div></td><td>${fmt(it.needed)}</td><td>${it.stockKnown?fmt(it.stock):'N/D'}</td><td class="ldh-group-total">${fmt(it.purchase)}</td></tr>`).join(''):'<tr><td colspan="5" style="text-align:center;color:#9fb0c8">No hay materiales marcados para pedir en las partidas.</td></tr>';
     document.getElementById('ldhGroupModalBody').innerHTML=`${notice}<div class="ldh-group-part-list">${parts}</div><table class="ldh-group-modal-table"><thead><tr><th>Material</th><th>Desglose</th><th>Necesarias</th><th>Stock libre</th><th>Pedir</th></tr></thead><tbody>${rows}</tbody></table>`;
     const btn=document.getElementById('ldhGroupCopyBtn');btn.disabled=!data.complete||!data.items.length||data.totalPurchase<=0;btn.title=btn.disabled?'El grupo debe estar completo y tener cantidad real para pedir.':'';document.getElementById('ldhGroupModal').classList.add('active');document.getElementById('ldhGroupModal').setAttribute('aria-hidden','false');

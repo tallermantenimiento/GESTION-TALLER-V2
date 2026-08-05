@@ -7642,6 +7642,11 @@ window.ejecutarDevolucion = function(matId, maxQty){
         concept:normText(p.concept || p.concepto),
         quantity:Math.max(1,Math.round(Number(p.quantity || p.cantidad)||1)),
         openedAtMs:Number(p.openedAtMs)||0,
+        prepStatus:normText(p.prepStatus || p.preparationStatus),
+        inPreparationAtMs:Number(p.inPreparationAtMs || p.prepAtMs)||0,
+        prepReference:normText(p.prepReference),
+        prepConcept:normText(p.prepConcept),
+        prepUpdatedAtMs:Number(p.prepUpdatedAtMs)||0,
         updatedAtMs:Number(p.updatedAtMs)||0
       };
     }).filter(part=>part.id && part.concept);
@@ -9816,9 +9821,10 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 .ldh-composite-editor{display:grid;gap:10px;margin-top:14px}.ldh-composite-row{display:grid;grid-template-columns:110px minmax(220px,1fr) 110px auto;gap:9px;align-items:end;padding:11px;border:1px solid rgba(148,163,184,.20);border-radius:13px;background:rgba(2,8,23,.55)}
 .ldh-composite-row label{display:block;color:#9fb0c8;font-size:10px;font-weight:900;margin-bottom:5px}.ldh-composite-ref{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#7dd3fc;font-weight:950;padding:10px 9px;border:1px solid rgba(56,189,248,.22);border-radius:10px;background:#020817;min-height:40px}
 .ldh-composite-row select,.ldh-composite-row input{width:100%;box-sizing:border-box}.ldh-composite-actions{display:flex;gap:8px;flex-wrap:wrap}.ldh-composite-help{padding:11px;border:1px solid rgba(56,189,248,.25);border-radius:12px;background:rgba(7,89,133,.16);color:#dff7ff;font-size:12px;line-height:1.45}
+.ldh-composite-status{display:inline-flex;align-items:center;margin-top:7px;padding:4px 8px;border-radius:999px;border:1px solid rgba(148,163,184,.30);background:rgba(15,23,42,.75);color:#cbd5e1;font-size:10px;font-weight:950;letter-spacing:.04em;white-space:nowrap}.ldh-composite-status.prep{border-color:rgba(34,197,94,.48);background:rgba(20,83,45,.28);color:#bbf7d0}.ldh-composite-status.calc{border-color:rgba(56,189,248,.46);background:rgba(7,89,133,.24);color:#bae6fd}.ldh-composite-recalc{border-color:#22c55e!important;background:linear-gradient(180deg,#15803d,#14532d)!important;color:#fff!important}
 @media(max-width:850px){.ldh-composite-row{grid-template-columns:1fr}.ldh-composite-actions button{width:100%}}
 </style>
-<script id="LDH_PEDIDO_COMPUESTO_AGENDA_V1_20260804">
+<script id="LDH_PEDIDO_COMPUESTO_AGENDA_V2_20260805">
 (function(){
   'use strict';
   const KEY='ldh_work_orders_v1';
@@ -9874,24 +9880,39 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
     host.innerHTML=draftParts.map((p,index)=>{
       const suffix=suffixOf(index),reference=`${order.reference}-${suffix}`;
       const options=['<option value="">— Selecciona concepto —</option>',...opts.map(name=>`<option value="${esc(name)}"${name===p.concept?' selected':''}>${esc(name)}</option>`)].join('');
+      const inPrep=norm(p.prepStatus)==='in_preparation'||Number(p.inPreparationAtMs)>0;
+      const opened=!inPrep&&Number(p.openedAtMs)>0;
+      const status=inPrep?'<span class="ldh-composite-status prep">✓ EN PREPARACIÓN</span>':opened?'<span class="ldh-composite-status calc">ABIERTA EN CÁLCULO</span>':'<span class="ldh-composite-status">PENDIENTE</span>';
+      const sendLabel=inPrep?'↻ Recalcular':'➡ Cálculo';
+      const sendClass=inPrep?'wo-small-btn wo-send-calc-btn ldh-composite-recalc':'wo-small-btn wo-send-calc-btn';
       return `<div class="ldh-composite-row">
-        <div><label>Referencia</label><div class="ldh-composite-ref">${esc(reference)}</div></div>
+        <div><label>Referencia</label><div class="ldh-composite-ref">${esc(reference)}</div>${status}</div>
         <div><label>Concepto</label><select onchange="LDH_CompositeAgendaV1.update(${index},'concept',this.value)">${options}</select></div>
         <div><label>Unidades</label><input type="number" min="1" step="1" value="${Math.max(1,Number(p.quantity)||1)}" onchange="LDH_CompositeAgendaV1.update(${index},'quantity',this.value)"></div>
-        <div class="ldh-composite-actions"><button type="button" class="wo-small-btn wo-send-calc-btn" onclick="LDH_CompositeAgendaV1.sendPart('${esc(p.id)}')">➡ Cálculo</button><button type="button" class="wo-small-btn wo-danger-btn" onclick="LDH_CompositeAgendaV1.removePart(${index})"${draftParts.length<=2?' disabled':''}>Quitar</button></div>
+        <div class="ldh-composite-actions"><button type="button" class="${sendClass}" onclick="LDH_CompositeAgendaV1.sendPart('${esc(p.id)}')">${sendLabel}</button><button type="button" class="wo-small-btn wo-danger-btn" onclick="LDH_CompositeAgendaV1.removePart(${index})"${draftParts.length<=2?' disabled':''}>Quitar</button></div>
       </div>`;
     }).join('');
   }
   function normalizeDraft(order){
-    return draftParts.map((p,index)=>({
-      id:norm(p.id)||`part_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2,6)}`,
-      suffix:suffixOf(index),
-      reference:`${order.reference}-${suffixOf(index)}`,
-      concept:norm(p.concept),
-      quantity:Math.max(1,Math.round(Number(p.quantity)||1)),
-      openedAtMs:Number(p.openedAtMs)||0,
-      updatedAtMs:Date.now()
-    }));
+    const currentParts=order&&order.compositeV1&&Array.isArray(order.compositeV1.parts)?order.compositeV1.parts:[];
+    return draftParts.map((p,index)=>{
+      const id=norm(p.id)||`part_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2,6)}`;
+      const existing=currentParts.find(part=>String(part.id||'')===id)||{};
+      return {
+        id,
+        suffix:suffixOf(index),
+        reference:`${order.reference}-${suffixOf(index)}`,
+        concept:norm(p.concept),
+        quantity:Math.max(1,Math.round(Number(p.quantity)||1)),
+        openedAtMs:Number(p.openedAtMs||existing.openedAtMs)||0,
+        prepStatus:norm(p.prepStatus || p.preparationStatus || existing.prepStatus || existing.preparationStatus),
+        inPreparationAtMs:Number(p.inPreparationAtMs || p.prepAtMs || existing.inPreparationAtMs || existing.prepAtMs)||0,
+        prepReference:norm(p.prepReference || existing.prepReference),
+        prepConcept:norm(p.prepConcept || existing.prepConcept),
+        prepUpdatedAtMs:Number(p.prepUpdatedAtMs || existing.prepUpdatedAtMs)||0,
+        updatedAtMs:Date.now()
+      };
+    });
   }
   async function saveInternal(closeAfter){
     const order=currentOrder(); if(!order)return null;
@@ -9943,6 +9964,8 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
     async sendPart(partId){
       const order=await saveInternal(false);if(!order)return;
       const part=order.compositeV1.parts.find(p=>p.id===partId);if(!part)return;
+      const alreadyInPrep=norm(part.prepStatus)==='in_preparation'||Number(part.inPreparationAtMs)>0;
+      if(alreadyInPrep&&!confirm(`La partida ${part.reference} ya está en Preparación. ¿Quieres recalcularla y sustituir su cálculo actual?`))return;
       const state=workflowState(order);
       if(!['','preparing'].includes(state)){alert('Esta orden ya está en una fase posterior. No se abrirá Cálculo desde el desglose para evitar inconsistencias.');return;}
       if(!W.cloud?.saveOrders&&!W.cloud?.saveOrder){alert('Espera a que aparezca “Sincronización: conectada”.');return;}
