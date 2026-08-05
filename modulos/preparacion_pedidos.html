@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V60-FIREBASE-STOCK-AUTORIDAD-LIMPIEZA-20260805" />
+<meta name="ldh-build" content="PREPARACION-V61-SYNC-LEGACY-USA-FIREBASE-VIVO-20260805" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V60-FIREBASE-STOCK-AUTORIDAD-LIMPIEZA-20260805">
+<meta name="ldh-fix" content="PREPARACION-V61-SYNC-LEGACY-USA-FIREBASE-VIVO-20260805">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -19252,6 +19252,265 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 
   window.LDH_PREP_V60_FIREBASE_STOCK_AUTHORITY = true;
   window.LDH_prepLiveStockPackV60 = livePackV60;
+})();
+</script>
+
+
+<script id="LDH_PREP_V61_LEGACY_SYNC_LIVE_ONLY_20260805">
+(function(){
+  'use strict';
+
+  /*
+   * V61: los dos reconciliadores antiguos de devoluciones leian directamente
+   * localStorage. Cuando la cuota estaba llena, esa copia quedaba obsoleta y
+   * podia reponer cantidades ya limpiadas aunque Firebase Stock no tuviera
+   * ninguna asignacion activa. Desde ahora ambos usan exclusivamente la base
+   * viva recibida de gestion-taller-stock. Si la base viva aun no ha llegado,
+   * no hacen ningun cambio y esperan al siguiente render/snapshot.
+   */
+
+  function n(v){
+    const x = parseFloat(String(v ?? 0).replace(',', '.'));
+    return Number.isFinite(x) ? x : 0;
+  }
+  function s(v){ return String(v ?? '').trim(); }
+  function norm(v){
+    return s(v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+  function liveDB(){
+    try{
+      const pack = (typeof window.LDH_prepLiveStockPackV60 === 'function')
+        ? window.LDH_prepLiveStockPackV60()
+        : null;
+      const db = (pack && pack.db) || window.__LDH_PREP_STOCK_CLOUD_DB || null;
+      return db && typeof db === 'object' ? db : null;
+    }catch(_){ return null; }
+  }
+  function assignmentsOf(db){
+    if(!db) return [];
+    if(Array.isArray(db.assignments)) return db.assignments;
+    if(Array.isArray(db.asignaciones)) return db.asignaciones;
+    return [];
+  }
+  function linesNow(){
+    try{
+      if(Array.isArray(window.estadoMateriales)) return window.estadoMateriales;
+      if(typeof estadoMateriales !== 'undefined' && Array.isArray(estadoMateriales)) return estadoMateriales;
+    }catch(_){ }
+    return [];
+  }
+  function refNow(){
+    try{ return s(window.refActual ?? refActual ?? ''); }catch(_){ return s(window.refActual || ''); }
+  }
+  function sameRef(a,b){
+    const na = norm(a), nb = norm(b);
+    return !!na && !!nb && na === nb;
+  }
+  function sameMatId(a,b){
+    if(!a || !b) return false;
+    return s(a) === s(b) || norm(a) === norm(b);
+  }
+  function linkedId(line){
+    try{
+      if(typeof getLinkedMatIdForLine === 'function') return s(getLinkedMatIdForLine(line));
+    }catch(_){ }
+    return s(line && (line.linked_matId || line.stockMatId || line.matId || line.materialId));
+  }
+  function materialsOf(db){
+    if(!db) return [];
+    if(Array.isArray(db.materials)) return db.materials;
+    return [];
+  }
+  function materialName(db,id){
+    const row = materialsOf(db).find(item =>
+      s(item && (item.id || item.materialId || item.matId)) === s(id)
+    );
+    return s(row && (row.name || row.nombre || row.material));
+  }
+  function sameMaterial(line, assignment, db){
+    const linked = linkedId(line);
+    const ids = [
+      assignment && assignment.materialId,
+      assignment && assignment.toMaterialId,
+      assignment && assignment.fromMaterialId,
+      assignment && assignment.matId,
+      assignment && assignment.material_id
+    ].map(s).filter(Boolean);
+    if(linked && ids.includes(linked)) return true;
+
+    const lineName = norm(line && (line.mat || line.material || line.name));
+    if(!lineName) return false;
+    const names = ids.map(id => materialName(db,id)).filter(Boolean).map(norm);
+    if(names.some(name => name && (name === lineName || name.includes(lineName) || lineName.includes(name)))) return true;
+
+    const lineProfile = lineName.match(/\d+\s*x\s*\d+(?:\s*x\s*\d+)?/);
+    return names.some(name => {
+      const profile = name.match(/\d+\s*x\s*\d+(?:\s*x\s*\d+)?/);
+      return !!(lineProfile && profile && (
+        lineProfile[0] === profile[0] ||
+        lineProfile[0].startsWith(profile[0]) ||
+        profile[0].startsWith(lineProfile[0])
+      ));
+    });
+  }
+  function isReturnedLoan(a){
+    const status = s(a && (a.status || a.estado)).toLowerCase();
+    if(status !== 'devuelta') return false;
+    const type = s(a && (a.assignmentType || a.reason || a.source)).toLowerCase();
+    return type.includes('otra_empresa') || type.includes('otra empresa') || type.includes('prestamo') || type.includes('préstamo');
+  }
+  function positiveAssignedQty(line){
+    try{
+      return (Array.isArray(line && line.trace) ? line.trace : [])
+        .filter(trace => {
+          const source = s(trace && trace.source).toLowerCase();
+          return n(trace && trace.qty) > 0 && (
+            source.startsWith('reserva') ||
+            source.startsWith('libre') ||
+            source.startsWith('otra_empresa')
+          );
+        })
+        .reduce((sum,trace) => sum + n(trace.qty), 0);
+    }catch(_){ return 0; }
+  }
+  function saveMetaAndState(){
+    try{ if(typeof saveMetaActual === 'function') saveMetaActual(); }catch(_){ }
+    try{ if(typeof guardarEstadoLocal === 'function') guardarEstadoLocal(); }catch(_){ }
+    try{ if(typeof updateNoAsigPill === 'function') updateNoAsigPill(); }catch(_){ }
+  }
+
+  window.LDH_syncDevolucionesStock = function LDH_syncDevolucionesStockV61(){
+    try{
+      const db = liveDB();
+      if(!db) return false;
+      if(typeof metaActual === 'undefined' || !metaActual) return false;
+      const ub = metaActual.unassignedBorrow;
+      if(!ub || !Array.isArray(ub.items) || !ub.items.length) return false;
+
+      const assignments = assignmentsOf(db);
+      const reference = refNow();
+      let changed = false;
+
+      ub.items.forEach(item => {
+        const pending = n(item.qtyPending ?? item.pending ?? item.qty_pending);
+        if(pending <= 0) return;
+
+        const match = assignments.find(a => {
+          if(!isReturnedLoan(a)) return false;
+          const refOk = sameRef(a.ref || a.jobRef, item.ref || reference) || sameRef(a.ref || a.jobRef, reference);
+          const originOk = !item.fromCompanyId || s(a.companyId || a.fromCompanyId) === s(item.fromCompanyId);
+          const destOk = !item.toCompanyId || s(a.toCompanyId) === s(item.toCompanyId);
+          const matOk =
+            sameMatId(a.materialId, item.v2MaterialId) ||
+            sameMatId(a.toMaterialId, item.v2MaterialId) ||
+            sameMatId(a.fromMaterialId, item.v2MaterialId) ||
+            sameMatId(a.materialId, item.matId) ||
+            sameMatId(a.toMaterialId, item.matId) ||
+            sameMatId(a.fromMaterialId, item.matId);
+          return refOk && originOk && destOk && matOk;
+        });
+        if(!match) return;
+
+        const returnedQty = n(match.returnedQty || item.qtyPending || item.pending || item.qty_pending || match.qty || match.cantidad);
+        item.qtyPending = 0;
+        item.pending = 0;
+        item.qty_pending = 0;
+        item.status = 'devuelta_desde_stock';
+        item.estado = 'devuelta_desde_stock';
+        item.returnedAt = match.returnedAt || new Date().toISOString();
+        item.returnedFromStock = true;
+        item.returnedNote = match.returnedNote || 'Devuelto desde Stock';
+
+        const target = linesNow().find(line => {
+          try{
+            if(typeof _uaMatchKey === 'function' && item.key && _uaMatchKey(line) === item.key) return true;
+          }catch(_){ }
+          const lineName = norm(line && (line.mat || line.material || line.name));
+          const itemName = norm(item.name || item.matName || item.mat || '');
+          return !!lineName && !!itemName && lineName === itemName;
+        });
+
+        if(target && returnedQty > 0 && !item.lineAdjustedFromStock){
+          const requested = n(target.qty_pedida);
+          target.qty_recibida = Math.max(0, n(target.qty_recibida) - returnedQty);
+          target.recibida = target.qty_recibida;
+          target.aplicado_qty = Math.max(0, n(target.aplicado_qty) - returnedQty);
+          target.stock_consumed_qty = Math.max(0, n(target.stock_consumed_qty) - returnedQty);
+          target.ok = requested > 0 && n(target.qty_recibida) >= requested;
+          item.lineAdjustedFromStock = true;
+        }
+        changed = true;
+      });
+
+      if(changed){
+        metaActual.unassignedBorrow = ub;
+        saveMetaAndState();
+      }
+      return changed;
+    }catch(error){
+      console.warn('[Preparacion V61] Sync devoluciones vivo fallo:', error);
+      return false;
+    }
+  };
+
+  window.LDH_syncDevolucionesStockRobusto = function LDH_syncDevolucionesStockRobustoV61(){
+    try{
+      const db = liveDB();
+      if(!db) return false;
+      if(typeof metaActual === 'undefined' || !metaActual) return false;
+      const reference = refNow();
+      if(!reference) return false;
+      const lines = linesNow();
+      if(!lines.length) return false;
+
+      if(!Array.isArray(metaActual._stockReturnedSyncIds)) metaActual._stockReturnedSyncIds = [];
+      const processed = metaActual._stockReturnedSyncIds;
+      let changed = false;
+
+      assignmentsOf(db)
+        .filter(a => isReturnedLoan(a) && sameRef(a.ref || a.jobRef, reference))
+        .forEach(a => {
+          const id = s(a.id || a.assignmentId || ((a.ref || a.jobRef || '') + '_' + (a.materialId || a.toMaterialId || '') + '_' + (a.returnedAt || '')));
+          if(!id || processed.includes(id)) return;
+          const qty = n(a.returnedQty || a.qty || a.cantidad);
+          if(qty <= 0) return;
+          const target = lines.find(line => sameMaterial(line,a,db));
+          if(!target) return;
+
+          if(!Array.isArray(target.trace)) target.trace = [];
+          const originName = s(a.fromEmpresa || a.companyName || a.companyId || '').replace(/^emp[_-]/i,'').replace(/[_-]+/g,' ').toUpperCase();
+          const source = 'devolucion_otra_empresa:' + originName;
+          if(!target.trace.some(t => s(t && t.source) === source && Math.abs(n(t && t.qty) - qty) < 0.0001)){
+            target.trace.push({ at:new Date().toISOString(), qty, source });
+          }
+
+          /* Solo se repone lo que siga respaldado por trazas positivas vivas.
+             Una linea limpiada tiene trace vacio, por lo que nunca resucita. */
+          const requested = n(target.qty_pedida);
+          const assigned = positiveAssignedQty(target);
+          const targetQty = requested > 0 ? Math.min(requested,assigned) : assigned;
+          if(targetQty > 0){
+            target.qty_recibida = Math.max(n(target.qty_recibida),targetQty);
+            target.recibida = target.qty_recibida;
+            target.aplicado_qty = Math.max(n(target.aplicado_qty),targetQty);
+            target.stock_consumed_qty = Math.max(n(target.stock_consumed_qty),targetQty);
+          }
+          target.ok = requested > 0 && n(target.qty_recibida) >= requested;
+          processed.push(id);
+          changed = true;
+        });
+
+      if(changed) saveMetaAndState();
+      return changed;
+    }catch(error){
+      console.warn('[Preparacion V61] Sync robusto vivo fallo:', error);
+      return false;
+    }
+  };
+
+  window.LDH_PREP_V61_LEGACY_SYNC_LIVE_ONLY = true;
 })();
 </script>
 
