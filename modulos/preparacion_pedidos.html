@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V54-COMPRA-CONJUNTA-V1-20260804" />
+<meta name="ldh-build" content="PREPARACION-V55-COMPRA-CONJUNTA-IMPORT-SYNC-SEGURO-20260805" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,8 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V54-COMPRA-CONJUNTA-V1-20260804">
+<meta name="ldh-fix" content="PREPARACION-V55-COMPRA-CONJUNTA-IMPORT-SYNC-SEGURO-20260805">
+<!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 </head>
 <body>
 
@@ -15373,6 +15374,29 @@ function LDH_prepVolverMenu(){
     pushTimer = setTimeout(function(){ pushNow(reason || "change"); }, delay == null ? 350 : delay);
   }
 
+  function freshImportInfo(){
+    try{
+      const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
+      const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
+      return {
+        guardTs,
+        guardRef,
+        fresh: !!(guardTs && guardRef && (Date.now() - guardTs) < 90000)
+      };
+    }catch(e){
+      return {guardTs:0, guardRef:"", fresh:false};
+    }
+  }
+
+  function isFreshImportKey(k, info){
+    if(!info || !info.fresh || !info.guardRef) return false;
+    return k === "prep_recepcion_" + info.guardRef ||
+           k === "prep_meta_" + info.guardRef ||
+           k === "prep_last_import_ref" ||
+           k === "prep_focus_ref" ||
+           k === "prep_import_guard_ts";
+  }
+
   function applyRemote(remote){
     if(!remote || !remote.data) return false;
     const rdata = remote.data || {};
@@ -15384,11 +15408,23 @@ function LDH_prepVolverMenu(){
     storageKeys(sessionStorage).forEach(k => all.add(k));
     Object.keys(rdata).forEach(k => { if(isPrepKey(k)) all.add(k); });
 
+    const freshInfo = freshImportInfo();
     let changed = false;
+    let preservedFreshImport = false;
     applyingRemote = true;
     try{
       Array.from(all).forEach(k => {
         if(!isPrepKey(k)) return;
+
+        // V54: una partida recién importada desde Cálculo es la autoridad para
+        // sus dos claves, aunque Firebase conserve una versión anterior de la
+        // misma referencia. Así nunca reaparecen cantidades recibidas antiguas
+        // y la nueva partida no desaparece antes de subirse a la nube.
+        if(isFreshImportKey(k, freshInfo) && getValue(k) !== null){
+          preservedFreshImport = true;
+          return;
+        }
+
         if(Object.prototype.hasOwnProperty.call(rdata, k)){
           const v = String(rdata[k]);
           // Protección: si localmente un pedido acaba de pasar a Fabricación, no permitir
@@ -15410,14 +15446,6 @@ function LDH_prepVolverMenu(){
           if(getValue(k) !== v){ changed = true; }
           setBoth(k, v);
         }else{
-          try{
-            const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
-            const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
-            const freshImport = guardTs && (Date.now() - guardTs) < 90000 && guardRef;
-            if(freshImport && (k === "prep_recepcion_" + guardRef || k === "prep_meta_" + guardRef || k === "prep_last_import_ref" || k === "prep_focus_ref" || k === "prep_import_guard_ts")){
-              return;
-            }
-          }catch(e){}
           if(getValue(k) !== null){ changed = true; }
           removeBoth(k);
         }
@@ -15427,6 +15455,9 @@ function LDH_prepVolverMenu(){
     }
     lastLocalHash = stableHash(collectData());
     if(changed) refreshViews(true);
+    if(preservedFreshImport && booted){
+      setTimeout(function(){ pushNow("fresh_import_preserved_v55:" + freshInfo.guardRef); }, 80);
+    }
     return changed;
   }
 
@@ -15531,6 +15562,12 @@ function LDH_prepVolverMenu(){
         const data = snap.data() || {};
         lastRemoteAt = Number(data.updatedAt || 0);
         applyRemote(data);
+        const imported = freshImportInfo();
+        if(imported.fresh){
+          // V54: tras fusionar la nube con la partida recién importada,
+          // publicar inmediatamente el conjunto completo antes de continuar.
+          await pushNow("fresh_import_boot_v55:" + imported.guardRef);
+        }
       }else{
         await pushNow("crear_doc_v6");
       }
