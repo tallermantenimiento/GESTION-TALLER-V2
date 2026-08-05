@@ -7627,6 +7627,39 @@ window.ejecutarDevolucion = function(matId, maxQty){
       originalPhaseFlowV2:phaseFlow({phaseFlowV2:r.originalPhaseFlowV2 || {}})
     };
   }
+
+  function normalizeCompositeV1(raw,orderFallback){
+    const c = raw && typeof raw === 'object' ? raw : null;
+    if(!c) return null;
+    const sourceParts = Array.isArray(c.parts) ? c.parts : [];
+    const parts = sourceParts.map((part,index)=>{
+      const p = part && typeof part === 'object' ? part : {};
+      const suffix = normText(p.suffix || String.fromCharCode(65 + index)).toUpperCase();
+      return {
+        id:normText(p.id) || `part_${index+1}`,
+        suffix:suffix || String.fromCharCode(65 + index),
+        reference:normText(p.reference),
+        concept:normText(p.concept || p.concepto),
+        quantity:Math.max(1,Math.round(Number(p.quantity || p.cantidad)||1)),
+        openedAtMs:Number(p.openedAtMs)||0,
+        updatedAtMs:Number(p.updatedAtMs)||0
+      };
+    }).filter(part=>part.id && part.concept);
+    if(parts.length < 2) return null;
+    const fallback = orderFallback && typeof orderFallback === 'object' ? orderFallback : {};
+    return {
+      version:1,
+      enabled:true,
+      groupId:normText(c.groupId) || `cg_${normText(fallback.id) || uid()}`,
+      masterOrderId:normText(c.masterOrderId) || normText(fallback.id),
+      masterReference:normText(c.masterReference) || normText(fallback.reference),
+      expectedPartCount:Math.max(parts.length,Math.round(Number(c.expectedPartCount)||parts.length)),
+      parts,
+      createdAtMs:Number(c.createdAtMs)||Date.now(),
+      updatedAtMs:Number(c.updatedAtMs)||Date.now()
+    };
+  }
+
   function normalizeOrder(raw){
     const o = raw && typeof raw === 'object' ? raw : {};
     const workflowState = normalizeWorkflowState(o);
@@ -7661,6 +7694,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       archivedAtMs: Number(o.archivedAtMs)||0,
       cancellationRequestV1,
       cancellationPendingV1: !!cancellationRequestV1,
+      compositeV1: normalizeCompositeV1(o.compositeV1,o),
       createdAtMs: Number(o.createdAtMs)||Date.now(),
       updatedAtMs: Number(o.updatedAtMs)||Date.now()
     };
@@ -8583,6 +8617,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
         row.workflowHistoryV2 = Array.isArray(existing.workflowHistoryV2) ? existing.workflowHistoryV2.slice(-80) : [];
         row.archivedV2 = !!existing.archivedV2;
         row.archivedAtMs = Number(existing.archivedAtMs)||0;
+        row.compositeV1 = existing.compositeV1 ? normalizeCompositeV1(existing.compositeV1,existing) : null;
       }
       row.updatedAtMs = Date.now();
       return row;
@@ -9774,5 +9809,163 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 
 
 <!-- LDH_AGENDA_REFERENCE_STATE_AUTHORITY_V11_20260730 -->
+
+
+<style id="LDH_PEDIDO_COMPUESTO_AGENDA_STYLE_V1_20260804">
+.ldh-composite-pill{display:flex;width:max-content;align-items:center;gap:5px;margin-top:6px;padding:4px 8px;border:1px solid rgba(34,211,238,.55);border-radius:999px;background:rgba(8,145,178,.18);color:#cffafe;font-size:10px;font-weight:950;letter-spacing:.04em;white-space:nowrap}
+.ldh-composite-editor{display:grid;gap:10px;margin-top:14px}.ldh-composite-row{display:grid;grid-template-columns:110px minmax(220px,1fr) 110px auto;gap:9px;align-items:end;padding:11px;border:1px solid rgba(148,163,184,.20);border-radius:13px;background:rgba(2,8,23,.55)}
+.ldh-composite-row label{display:block;color:#9fb0c8;font-size:10px;font-weight:900;margin-bottom:5px}.ldh-composite-ref{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#7dd3fc;font-weight:950;padding:10px 9px;border:1px solid rgba(56,189,248,.22);border-radius:10px;background:#020817;min-height:40px}
+.ldh-composite-row select,.ldh-composite-row input{width:100%;box-sizing:border-box}.ldh-composite-actions{display:flex;gap:8px;flex-wrap:wrap}.ldh-composite-help{padding:11px;border:1px solid rgba(56,189,248,.25);border-radius:12px;background:rgba(7,89,133,.16);color:#dff7ff;font-size:12px;line-height:1.45}
+@media(max-width:850px){.ldh-composite-row{grid-template-columns:1fr}.ldh-composite-actions button{width:100%}}
+</style>
+<script id="LDH_PEDIDO_COMPUESTO_AGENDA_V1_20260804">
+(function(){
+  'use strict';
+  const KEY='ldh_work_orders_v1';
+  const HANDOFF='ldh_agenda_to_calculo_v1';
+  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const norm=s=>String(s??'').trim();
+  const suffixOf=i=>{
+    let n=i+1,out='';
+    while(n>0){n--;out=String.fromCharCode(65+(n%26))+out;n=Math.floor(n/26);}
+    return out;
+  };
+  let W=null,originalRender=null,currentOrderId='',draftParts=[];
+
+  function concepts(){
+    for(const key of ['ldh_db','TallerFlowDB']){
+      for(const storage of [localStorage,sessionStorage]){
+        try{
+          const db=JSON.parse(storage.getItem(key)||'null');
+          if(db&&Array.isArray(db.concepts)) return db.concepts.map(c=>norm(c&&c.name)).filter(Boolean).sort((a,b)=>a.localeCompare(b,'es'));
+        }catch(e){}
+      }
+    }
+    return [];
+  }
+  function workflowState(order){
+    return norm(order&&(order.workflowStateV2||order.workflowState)).toLowerCase().replace(/[\s-]+/g,'_');
+  }
+  function persistLocal(){
+    try{localStorage.setItem(KEY,JSON.stringify(W.orders));return true;}catch(e){console.error('[Pedido compuesto] localStorage',e);return false;}
+  }
+  async function syncOrder(order){
+    if(!W.cloud) return false;
+    if(W.cloud.saveOrders) await W.cloud.saveOrders([order]);
+    else if(W.cloud.saveOrder) await W.cloud.saveOrder(order);
+    else return false;
+    return true;
+  }
+  function ensureModal(){
+    if(document.getElementById('ldhCompositeModal')) return;
+    const host=document.createElement('div');
+    host.innerHTML=`<div id="ldhCompositeModal" class="wo-modal" role="dialog" aria-modal="true" aria-labelledby="ldhCompositeTitle">
+      <div class="wo-dialog">
+        <div class="wo-dialog-head"><div><h3 id="ldhCompositeTitle">Pedido compuesto</h3><div style="color:#9fb0c8;font-size:12px;margin-top:4px">Cada partida conserva una referencia y viaja por separado a Cálculo y Preparación.</div></div><button type="button" class="wo-close" onclick="LDH_CompositeAgendaV1.close()">×</button></div>
+        <div class="wo-form"><div class="ldh-composite-help">Asigna un concepto y sus unidades a cada partida. Las referencias se generan automáticamente como <strong>-A, -B, -C</strong>. La orden principal seguirá siendo una sola en Agenda e Informativa.</div><div id="ldhCompositeRows" class="ldh-composite-editor"></div><button type="button" class="wo-small-btn" style="margin-top:12px" onclick="LDH_CompositeAgendaV1.addPart()">＋ Añadir partida</button></div>
+        <div class="wo-dialog-actions"><button type="button" class="wo-cancel" onclick="LDH_CompositeAgendaV1.close()">Cancelar</button><button type="button" class="wo-save" onclick="LDH_CompositeAgendaV1.save(true)">Guardar desglose</button></div>
+      </div></div>`;
+    document.body.appendChild(host.firstElementChild);
+  }
+  function currentOrder(){return W&&W.orders.find(o=>o.id===currentOrderId);}
+  function renderEditor(){
+    const order=currentOrder(); const host=document.getElementById('ldhCompositeRows'); if(!order||!host)return;
+    const opts=concepts();
+    host.innerHTML=draftParts.map((p,index)=>{
+      const suffix=suffixOf(index),reference=`${order.reference}-${suffix}`;
+      const options=['<option value="">— Selecciona concepto —</option>',...opts.map(name=>`<option value="${esc(name)}"${name===p.concept?' selected':''}>${esc(name)}</option>`)].join('');
+      return `<div class="ldh-composite-row">
+        <div><label>Referencia</label><div class="ldh-composite-ref">${esc(reference)}</div></div>
+        <div><label>Concepto</label><select onchange="LDH_CompositeAgendaV1.update(${index},'concept',this.value)">${options}</select></div>
+        <div><label>Unidades</label><input type="number" min="1" step="1" value="${Math.max(1,Number(p.quantity)||1)}" onchange="LDH_CompositeAgendaV1.update(${index},'quantity',this.value)"></div>
+        <div class="ldh-composite-actions"><button type="button" class="wo-small-btn wo-send-calc-btn" onclick="LDH_CompositeAgendaV1.sendPart('${esc(p.id)}')">➡ Cálculo</button><button type="button" class="wo-small-btn wo-danger-btn" onclick="LDH_CompositeAgendaV1.removePart(${index})"${draftParts.length<=2?' disabled':''}>Quitar</button></div>
+      </div>`;
+    }).join('');
+  }
+  function normalizeDraft(order){
+    return draftParts.map((p,index)=>({
+      id:norm(p.id)||`part_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2,6)}`,
+      suffix:suffixOf(index),
+      reference:`${order.reference}-${suffixOf(index)}`,
+      concept:norm(p.concept),
+      quantity:Math.max(1,Math.round(Number(p.quantity)||1)),
+      openedAtMs:Number(p.openedAtMs)||0,
+      updatedAtMs:Date.now()
+    }));
+  }
+  async function saveInternal(closeAfter){
+    const order=currentOrder(); if(!order)return null;
+    if(draftParts.length<2){alert('Un pedido compuesto necesita al menos dos partidas.');return null;}
+    const parts=normalizeDraft(order);
+    const empty=parts.find(p=>!p.concept);
+    if(empty){alert('Selecciona un concepto en todas las partidas.');return null;}
+    const previous=order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:{};
+    order.compositeV1={version:1,enabled:true,groupId:norm(previous.groupId)||`cg_${order.id}`,masterOrderId:order.id,masterReference:order.reference,expectedPartCount:parts.length,parts,createdAtMs:Number(previous.createdAtMs)||Date.now(),updatedAtMs:Date.now()};
+    order.updatedAtMs=Date.now();
+    persistLocal(); W.render();
+    try{await syncOrder(order);W.updateSyncStatus?.(`Pedido compuesto guardado · ${parts.length} partidas`,true);}catch(e){console.error(e);W.updateSyncStatus?.('Desglose guardado localmente · sincronización pendiente',false);alert('El desglose se ha guardado localmente, pero no se ha confirmado en Firebase.');}
+    draftParts=parts.map(p=>({...p})); renderEditor();
+    if(closeAfter) api.close();
+    return order;
+  }
+  async function storeHandoff(order,part){
+    const now=Date.now();
+    const payload={version:1,source:'agenda_diaria',orderId:order.id,reference:part.reference,description:order.description,companyId:order.companyId,companyName:order.companyName,createdAtMs:now,expiresAtMs:now+24*60*60*1000,composite:true,compositeGroupId:order.compositeV1.groupId,masterOrderId:order.id,masterReference:order.reference,partId:part.id,partReference:part.reference,partIndex:order.compositeV1.parts.findIndex(x=>x.id===part.id)+1,partCount:order.compositeV1.parts.length,partConcept:part.concept,partQuantity:part.quantity};
+    const json=JSON.stringify(payload); let stored=false;
+    for(const storage of [localStorage,sessionStorage]){try{storage.setItem(HANDOFF,json);stored=storage.getItem(HANDOFF)===json||stored;}catch(e){console.error(e);}}
+    return stored;
+  }
+  function decorate(){
+    if(!W)return;
+    const rows=W.sortedPending?W.sortedPending():[];
+    const trs=[...document.querySelectorAll('#woOrdersBody tr')];
+    trs.forEach((tr,index)=>{
+      const order=rows[index]; if(!order)return;
+      const actions=tr.querySelector('.wo-actions'); const refCell=tr.querySelector('.wo-reference');
+      const comp=order.compositeV1&&Array.isArray(order.compositeV1.parts)&&order.compositeV1.parts.length>=2?order.compositeV1:null;
+      if(comp&&refCell&&!refCell.querySelector('.ldh-composite-pill')) refCell.insertAdjacentHTML('beforeend',`<span class="ldh-composite-pill">🧩 PEDIDO COMPUESTO · ${comp.parts.length} PARTIDAS</span>`);
+      if(!actions)return;
+      const existing=actions.querySelector('.ldh-composite-action');
+      if(existing)existing.remove();
+      const send=actions.querySelector('.wo-send-calc-btn');
+      const btn=document.createElement('button');btn.type='button';btn.className='wo-small-btn ldh-composite-action';btn.textContent=comp?`🧩 PARTIDAS (${comp.parts.length})`:'🧩 DESGLOSAR';btn.onclick=()=>api.open(order.id);
+      if(comp&&send)send.remove();
+      actions.insertBefore(btn,actions.querySelector('button[onclick*="viewOrder"]')||actions.firstChild);
+    });
+  }
+  const api={
+    open(orderId){ensureModal();const order=W.orders.find(o=>o.id===orderId);if(!order)return;currentOrderId=orderId;const existing=order.compositeV1&&Array.isArray(order.compositeV1.parts)?order.compositeV1.parts:[];draftParts=(existing.length>=2?existing:[{id:`part_${Date.now().toString(36)}_a`,concept:'',quantity:1},{id:`part_${Date.now().toString(36)}_b`,concept:'',quantity:1}]).map(p=>({...p}));document.getElementById('ldhCompositeTitle').textContent=`Pedido compuesto · ${order.reference}`;renderEditor();document.getElementById('ldhCompositeModal').classList.add('open');document.body.style.overflow='hidden';},
+    close(){document.getElementById('ldhCompositeModal')?.classList.remove('open');document.body.style.overflow='';currentOrderId='';draftParts=[];},
+    addPart(){draftParts.push({id:`part_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`,concept:'',quantity:1});renderEditor();},
+    removePart(index){if(draftParts.length<=2)return;draftParts.splice(index,1);renderEditor();},
+    update(index,key,value){if(!draftParts[index])return;draftParts[index][key]=key==='quantity'?Math.max(1,Math.round(Number(value)||1)):value;},
+    save(closeAfter){return saveInternal(!!closeAfter);},
+    async sendPart(partId){
+      const order=await saveInternal(false);if(!order)return;
+      const part=order.compositeV1.parts.find(p=>p.id===partId);if(!part)return;
+      const state=workflowState(order);
+      if(!['','preparing'].includes(state)){alert('Esta orden ya está en una fase posterior. No se abrirá Cálculo desde el desglose para evitar inconsistencias.');return;}
+      if(!W.cloud?.saveOrders&&!W.cloud?.saveOrder){alert('Espera a que aparezca “Sincronización: conectada”.');return;}
+      if(!await storeHandoff(order,part)){alert('El navegador no ha podido preparar el envío a Cálculo.');return;}
+      if(state===''){
+        const ok=await W.saveWorkflowState(order,'preparing');
+        if(!ok){alert('No se ha confirmado EN PREPARACIÓN en Firebase. No se abrirá Cálculo.');return;}
+      }
+      part.openedAtMs=Date.now();part.updatedAtMs=Date.now();order.compositeV1.updatedAtMs=Date.now();order.updatedAtMs=Date.now();persistLocal();
+      try{await syncOrder(order);}catch(e){console.warn('[Pedido compuesto] no se pudo guardar apertura',e);}
+      location.href=`calculo.html?fromAgenda=1&orderId=${encodeURIComponent(order.id)}&partId=${encodeURIComponent(part.id)}`;
+    },
+    decorate
+  };
+  window.LDH_CompositeAgendaV1=api;
+  function install(){
+    if(!window.WorkOrders){setTimeout(install,100);return;}
+    W=window.WorkOrders; ensureModal();
+    if(!W.__compositeRenderPatched){originalRender=W.render;W.render=function(){const r=originalRender.apply(this,arguments);setTimeout(decorate,0);return r;};W.__compositeRenderPatched=true;}
+    decorate();
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
+})();
+</script>
 
 </body></html>
