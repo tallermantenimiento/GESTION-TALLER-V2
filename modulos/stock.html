@@ -1329,8 +1329,8 @@ html, body{
   }
 </style>
 
-<meta name="ldh-fix" content="STOCK-V55-PUBLICACION-COLA-ESTADO-ESTABLE-20260805">
-<meta name="ldh-build" content="STOCK-V55-PUBLICACION-COLA-ESTADO-ESTABLE-20260805">
+<meta name="ldh-fix" content="STOCK-V56-PUBLICACION-FIRMA-WATCHDOG-20260805">
+<meta name="ldh-build" content="STOCK-V56-PUBLICACION-FIRMA-WATCHDOG-20260805">
 </head>
 <body>
 <div class="app">
@@ -6031,7 +6031,11 @@ let publishInFlight = false;
 let publishPending = false;
 let publishPendingForce = false;
 let mirrorQueue = Promise.resolve();
+let lastContentSignature = '';
+let publishStartedAt = 0;
+let publishGeneration = 0;
 window.LDH_STOCK_V55_PUBLISH_QUEUE = true;
+window.LDH_STOCK_V56_SIGNATURE_WATCHDOG = true;
 
 function stEl(){ return document.getElementById('LDH_stockCloudStatus'); }
 function setCloudStatus(txt, cls, detail){
@@ -6043,6 +6047,62 @@ function setCloudStatus(txt, cls, detail){
   el.title = detail || txt;
 }
 function nowISO(){ return new Date().toISOString(); }
+
+function publishContentSignature(data){
+  try{
+    const volatile = new Set([
+      'updatedAt','updatedAtISO','lastReadAt','lastWriteAt','publishedAt',
+      'syncedAt','syncAt','cloudUpdatedAt','_lastSyncAt','_lastPublishAt'
+    ]);
+    const scrub = value => {
+      if(Array.isArray(value)) return value.map(scrub);
+      if(value && typeof value === 'object'){
+        const out = {};
+        Object.keys(value).sort().forEach(key => {
+          if(volatile.has(key)) return;
+          out[key] = scrub(value[key]);
+        });
+        return out;
+      }
+      return value;
+    };
+    return JSON.stringify(scrub(data || {}));
+  }catch(e){
+    return '';
+  }
+}
+
+function armPublishConfirmationWatchdog(generation, data, raw, signature, startedAt){
+  setTimeout(async ()=>{
+    try{
+      if(generation !== publishGeneration || !publishInFlight) return;
+      const el = stEl();
+      if(!el || !/subiendo/i.test(String(el.textContent || ''))) return;
+      const metaSnap = await getDoc(doc(fbDb, ...META_PATH));
+      if(!metaSnap.exists()) return;
+      const meta = metaSnap.data() || {};
+      const remoteAt = Date.parse(String(meta.updatedAtISO || '')) || 0;
+      const countsMatch =
+        Number(meta.rawCompanies || 0) === Number((data.companies || []).length) &&
+        Number(meta.rawMaterials || 0) === Number((data.materials || []).length) &&
+        Number(meta.rawStock || 0) === Number((data.stock || []).length) &&
+        Number(meta.rawMovements || 0) === Number((data.movements || []).length) &&
+        Number(meta.rawReservations || 0) === Number((data.reservations || []).length) &&
+        Number(meta.rawAssignments || 0) === Number((data.assignments || []).length);
+      if(countsMatch && remoteAt >= startedAt - 3000){
+        lastRawPublished = raw;
+        lastContentSignature = signature;
+        setCloudStatus(
+          'Stock nube conectado · ' + (data.materials || []).length + ' materiales',
+          'ok',
+          'Firebase confirmó la base principal. El proceso auxiliar puede continuar en segundo plano.'
+        );
+      }
+    }catch(e){
+      console.warn('[Stock V56] No se pudo confirmar el estado remoto durante el watchdog', e);
+    }
+  }, 12000);
+}
 
 function safeParse(raw){
   try{ return JSON.parse(raw || '{}') || {}; }catch(e){ return {}; }
@@ -6146,6 +6206,7 @@ async function restoreRemoteIfLocalMissing(){
   if(remote && remote.raw && remote.data && remote.data.materials && remote.data.materials.length){
     writeStockEverywhere(remote.raw);
     lastRawPublished = remote.raw;
+    lastContentSignature = publishContentSignature(remote.data);
     setCloudStatus(
       'Stock nube restaurado · ' + remote.data.materials.length + ' materiales',
       'ok',
@@ -6187,6 +6248,7 @@ async function cloudPublishSafetyCheck(force){
     )){
       writeStockEverywhere(remote.raw);
       lastRawPublished = remote.raw;
+      lastContentSignature = publishContentSignature(remote.data);
       setCloudStatus(
         'Stock nube restaurado · ' + remoteMaterials + ' materiales',
         'ok',
@@ -6306,7 +6368,18 @@ async function publishFullStock(force=false){
     if(!(await cloudPublishSafetyCheck(force))) return false;
 
     const {data, raw} = completePayloadFromLocalStorage();
+    const contentSignature = publishContentSignature(data);
+    if(contentSignature && contentSignature === lastContentSignature){
+      lastRawPublished = raw;
+      setCloudStatus(
+        'Stock nube conectado · ' + data.materials.length + ' materiales',
+        'ok',
+        'El contenido real ya estaba sincronizado; se ignoran cambios de fecha o escrituras repetidas.'
+      );
+      return true;
+    }
     if(raw && raw === lastRawPublished){
+      lastContentSignature = contentSignature;
       setCloudStatus(
         'Stock nube conectado · ' + data.materials.length + ' materiales',
         'ok',
@@ -6319,7 +6392,11 @@ async function publishFullStock(force=false){
       return false;
     }
 
+    publishStartedAt = Date.now();
+    publishGeneration += 1;
+    const currentGeneration = publishGeneration;
     setCloudStatus('Stock nube subiendo...','warn','Publicando la base principal de Stock en Firestore.');
+    armPublishConfirmationWatchdog(currentGeneration, data, raw, contentSignature, publishStartedAt);
 
     const packageObj = {};
     packageObj[STOCK_KEY] = raw;
@@ -6353,6 +6430,7 @@ async function publishFullStock(force=false){
     }, {merge:true});
 
     lastRawPublished = raw;
+    lastContentSignature = contentSignature;
     setCloudStatus(
       'Stock nube conectado · ' + data.materials.length + ' materiales',
       'ok',
@@ -6377,7 +6455,18 @@ async function publishFullStock(force=false){
       const nextForce = publishPendingForce;
       publishPending = false;
       publishPendingForce = false;
-      setTimeout(()=>publishFullStock(nextForce), 120);
+      const current = completePayloadFromLocalStorage();
+      const currentSignature = publishContentSignature(current.data);
+      if(currentSignature && currentSignature === lastContentSignature){
+        lastRawPublished = current.raw;
+        setCloudStatus(
+          'Stock nube conectado · ' + (current.data.materials || []).length + ' materiales',
+          'ok',
+          'La publicación pendiente solo contenía cambios técnicos de fecha y se ha descartado.'
+        );
+      }else{
+        setTimeout(()=>publishFullStock(nextForce), 180);
+      }
     }
   }
 }
@@ -7334,12 +7423,13 @@ setTimeout(()=>{
 </script>
 
 <!--
-  V55 · Cola única de publicación Firebase y estado visual estable.
-  La base principal confirma "conectado" antes del espejo auxiliar; las llamadas
-  simultáneas se agrupan y V53 no republica si la asignación ya está correcta.
+  V56 · Firma de contenido + watchdog de confirmación remota.
+  Evita republicaciones por cambios de fecha y corrige el indicador amarillo cuando
+  Firebase ya confirmó la base principal.
 -->
-<script id="LDH_STOCK_V55_PUBLICACION_COLA_ESTADO_ESTABLE">
+<script id="LDH_STOCK_V56_PUBLICACION_FIRMA_WATCHDOG">
 window.LDH_STOCK_V55_PUBLISH_STATUS_STABLE = true;
+window.LDH_STOCK_V56_PUBLISH_SIGNATURE_WATCHDOG = true;
 </script>
 
 </body>
