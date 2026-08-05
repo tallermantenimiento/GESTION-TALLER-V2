@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- LDH_STOCK_V51_REPARACION_SELECTIVA_ORIGEN_SEGURO · 04/08/2026 -->
+<!-- LDH_STOCK_V52_ASIGNACION_40X20_ID_CANONICO · 05/08/2026 -->
 <html lang="es">
 <head>
 <meta charset="utf-8" />
@@ -1329,7 +1329,8 @@ html, body{
   }
 </style>
 
-<meta name="ldh-fix" content="STOCK-V50-RECONCILIACION-ORIGEN-SEGURO-20260804">
+<meta name="ldh-fix" content="STOCK-V52-ASIGNACION-40X20-ID-CANONICO-20260805">
+<meta name="ldh-build" content="STOCK-V52-ASIGNACION-40X20-ID-CANONICO-20260805">
 </head>
 <body>
 <div class="app">
@@ -6824,5 +6825,171 @@ setTimeout(()=>{
   window.LDH_repararStockOrigenSeguroV51 = repairOnce;
 })();
 </script>
+
+
+<!--
+  V52 · Migra la asignación válida de 5 barras 40x20x1.5 al ID canónico
+  actualmente vinculado por Preparación. No modifica el físico.
+-->
+<script id="LDH_STOCK_V52_ASIGNACION_40X20_ID_CANONICO">
+(function(){
+  const FLAG = "stock_v52_40x20_assignment_canonical_20260805";
+  const COMPANY_ID = "emp_jku45mmllb";
+  const CURRENT_MATERIAL_ID = "mat_w1pptmgey0";
+  const LEGACY_MATERIAL_ID = "mat_fkuauoczxw";
+  const REF = "OT-260731-001 VILLALONGA SALAS LEMON Y MARKETING: varias mesas oficina y suplementos";
+  const CANONICAL_ASSIGNMENT_ID = "asg_v52_ot260731_40x20_canonical";
+
+  function arr(value){ return Array.isArray(value) ? value : []; }
+  function nowIso(){ return new Date().toISOString(); }
+  function active(row){
+    const status = String((row && (row.status || row.estado)) || "activa").toLowerCase();
+    const phase = String((row && (row.phase || row.fase)) || "preparacion").toLowerCase();
+    return status === "activa" && (phase === "preparacion" || phase === "fabricacion");
+  }
+  function refOf(row){ return String((row && (row.ref || row.jobRef || row.reference)) || "").trim(); }
+  function qtyOf(row){ return Math.max(0, Number((row && (row.qty ?? row.cantidad)) || 0) || 0); }
+
+  function localReceivedQty(){
+    try{
+      const raw = localStorage.getItem("prep_recepcion_" + REF) || "[]";
+      const lines = JSON.parse(raw);
+      if(!Array.isArray(lines)) return 0;
+      const line = lines.find(function(item){
+        const id = String((item && (item.linked_matId || item.stockMatId || item.matId)) || "");
+        const name = String((item && (item.mat || item.material || item.name)) || "")
+          .toLowerCase().replace(/\s+/g, "");
+        return id === CURRENT_MATERIAL_ID || id === LEGACY_MATERIAL_ID || name === "40x20x1.5";
+      });
+      if(!line) return 0;
+      return Math.max(0, Number(line.qty_recibida ?? line.recibida ?? line.aplicado_qty ?? line.stock_consumed_qty ?? 0) || 0);
+    }catch(_){
+      return 0;
+    }
+  }
+
+  function migrate(){
+    try{
+      if(typeof db === "undefined" || !db) return false;
+      db.assignments = arr(db.assignments);
+      db.materials = arr(db.materials);
+      db.stock = arr(db.stock);
+      db._repairFlags = db._repairFlags && typeof db._repairFlags === "object" ? db._repairFlags : {};
+      if(db._repairFlags[FLAG]) return false;
+
+      const currentExists = db.materials.some(function(row){
+        return String(row && (row.id || row.materialId) || "") === CURRENT_MATERIAL_ID;
+      }) || db.stock.some(function(row){
+        return String(row && row.companyId || "") === COMPANY_ID
+          && String(row && row.materialId || "") === CURRENT_MATERIAL_ID;
+      });
+      if(!currentExists) return false;
+
+      const legacyRows = db.assignments.filter(function(row){
+        return active(row)
+          && String(row && (row.companyId || row.empresaId) || "") === COMPANY_ID
+          && refOf(row) === REF
+          && String(row && (row.materialId || row.matId) || "") === LEGACY_MATERIAL_ID;
+      });
+
+      const currentRows = db.assignments.filter(function(row){
+        return active(row)
+          && String(row && (row.companyId || row.empresaId) || "") === COMPANY_ID
+          && refOf(row) === REF
+          && String(row && (row.materialId || row.matId) || "") === CURRENT_MATERIAL_ID;
+      });
+
+      const qty = Math.max(
+        0,
+        ...legacyRows.map(qtyOf),
+        ...currentRows.map(qtyOf),
+        localReceivedQty()
+      );
+      if(qty <= 0) return false;
+
+      const stamp = nowIso();
+      let canonical = db.assignments.find(function(row){
+        return String(row && row.id || "") === CANONICAL_ASSIGNMENT_ID;
+      });
+      if(!canonical){
+        canonical = {id:CANONICAL_ASSIGNMENT_ID};
+        db.assignments.push(canonical);
+      }
+
+      Object.assign(canonical, {
+        companyId: COMPANY_ID,
+        empresaId: COMPANY_ID,
+        materialId: CURRENT_MATERIAL_ID,
+        matId: CURRENT_MATERIAL_ID,
+        materialName: "40x20x1.5",
+        qty: qty,
+        cantidad: qty,
+        phase: "preparacion",
+        fase: "preparacion",
+        status: "activa",
+        estado: "activa",
+        ref: REF,
+        jobRef: REF,
+        assignmentType: "libre",
+        reason: "migracion_id_material_canonico_v52",
+        source: "stock_v52_assignment_material_id_migration",
+        migratedFromMaterialId: LEGACY_MATERIAL_ID,
+        createdAt: canonical.createdAt || stamp,
+        updatedAt: stamp
+      });
+
+      legacyRows.forEach(function(row){
+        if(String(row.id || "") === CANONICAL_ASSIGNMENT_ID) return;
+        row.qty = 0;
+        row.cantidad = 0;
+        row.status = "migrada";
+        row.estado = "migrada";
+        row.migratedToAssignmentId = CANONICAL_ASSIGNMENT_ID;
+        row.migratedToMaterialId = CURRENT_MATERIAL_ID;
+        row.releasedAt = stamp;
+        row.updatedAt = stamp;
+      });
+
+      currentRows.forEach(function(row){
+        if(String(row.id || "") === CANONICAL_ASSIGNMENT_ID) return;
+        row.qty = 0;
+        row.cantidad = 0;
+        row.status = "fusionada";
+        row.estado = "fusionada";
+        row.mergedIntoAssignmentId = CANONICAL_ASSIGNMENT_ID;
+        row.updatedAt = stamp;
+      });
+
+      db._repairFlags[FLAG] = {
+        appliedAt: stamp,
+        companyId: COMPANY_ID,
+        ref: REF,
+        fromMaterialId: LEGACY_MATERIAL_ID,
+        toMaterialId: CURRENT_MATERIAL_ID,
+        qty: qty,
+        assignmentId: CANONICAL_ASSIGNMENT_ID
+      };
+      db.updatedAt = stamp;
+
+      if(typeof save === "function") save();
+      if(typeof render === "function") render();
+      try{
+        if(window.LDH_scheduleStockCloudPublish){
+          window.LDH_scheduleStockCloudPublish(true);
+        }
+      }catch(_){}
+      console.info("[Stock V52] Asignación 40x20x1.5 migrada al ID canónico:", qty);
+      return true;
+    }catch(error){
+      console.error("[Stock V52] Error migrando asignación 40x20x1.5:", error);
+      return false;
+    }
+  }
+
+  window.LDH_migrarAsignacion40x20CanonicaV52 = migrate;
+  [2200, 6200, 11500].forEach(function(delay){ setTimeout(migrate, delay); });
+})();
+</script>
+
 </body>
 </html>
