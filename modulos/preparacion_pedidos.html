@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V66-RECIBIDO-ATOMICO-IDEMPOTENTE-20260805" />
+<meta name="ldh-build" content="PREPARACION-V67-PILL-RESERVADO-GLOBAL-FIREBASE-20260805" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V66-RECIBIDO-ATOMICO-IDEMPOTENTE-20260805">
+<meta name="ldh-fix" content="PREPARACION-V67-PILL-RESERVADO-GLOBAL-FIREBASE-20260805">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -20892,6 +20892,197 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     document.addEventListener('DOMContentLoaded', startV63, {once:true});
   }else{
     startV63();
+  }
+})();
+</script>
+
+
+<script id="LDH_PREP_V67_PILL_GLOBAL_FIREBASE_20260805">
+(function(){
+  'use strict';
+
+  function num(value){
+    const parsed = Number(String(value ?? 0).replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function first(){
+    for(let index = 0; index < arguments.length; index += 1){
+      const value = arguments[index];
+      if(value !== undefined && value !== null && String(value).trim() !== '') return value;
+    }
+    return '';
+  }
+  function norm(value){
+    try{
+      return String(value || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/ø/g, 'o')
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+    }catch(_){
+      return String(value || '').toLowerCase().trim();
+    }
+  }
+  function quantity(row){
+    return Math.max(0, num(first(
+      row && row.qty,
+      row && row.cantidad,
+      row && row.asignado,
+      row && row.reservado,
+      row && row.cantidadReservada
+    )));
+  }
+  function active(row){
+    const state = norm(first(row && row.status, row && row.estado, 'activa'));
+    return state === '' || state === 'activa' || state === 'activo' || state === 'active';
+  }
+  function phaseAllowed(row){
+    const phase = norm(first(row && row.phase, row && row.fase, 'preparacion'));
+    return phase === '' || phase === 'preparacion' || phase === 'fabricacion';
+  }
+  function loanAssignment(row){
+    const text = String(first(
+      row && row.assignmentType,
+      row && row.reason,
+      row && row.tipo,
+      row && row.source,
+      ''
+    )).toLowerCase();
+    return text.includes('otra_empresa') ||
+      text.includes('otra empresa') ||
+      text.includes('prestamo') ||
+      text.includes('préstamo') ||
+      !!(row && (row.toCompanyId || row.toEmpresa || row.fromAssignmentId || row.originalAssignmentId));
+  }
+  function companyKeys(row){
+    return [
+      row && row.companyId,
+      row && row.empresaId,
+      row && row.company,
+      row && row.empresa,
+      row && row.companyName,
+      row && row.empresaNombre
+    ].map(norm).filter(Boolean);
+  }
+  function materialKeys(row){
+    return [
+      row && row.materialId,
+      row && row.matId,
+      row && row.material_id,
+      row && row.material,
+      row && row.mat,
+      row && row.materialName,
+      row && row.name,
+      row && row.nombre,
+      row && row.migratedFromMaterialId,
+      row && row.originalMaterialId
+    ].map(norm).filter(Boolean);
+  }
+  function lineKeys(line){
+    return [
+      line && line.linked_matId,
+      line && line.stockMatId,
+      line && line.matId,
+      line && line.stock_matId,
+      line && line.linked_matName,
+      line && line.stockLinkLabel,
+      line && line.mat,
+      line && line.material,
+      line && line.name
+    ].map(norm).filter(Boolean);
+  }
+  function keysMatch(left, right){
+    if(!left.length || !right.length) return false;
+    return left.some(a => right.some(b =>
+      a === b || (a.length > 2 && b.length > 2 && (a.includes(b) || b.includes(a)))
+    ));
+  }
+
+  function install(){
+    if(!window.LDH_PREP_V63_POST_MODULE_INSTALLED) return false;
+    if(typeof window.LDH_exactResolveStockLine !== 'function') return false;
+    if(window._v2CompanyStockInfo && window._v2CompanyStockInfo.__ldhV67) return true;
+
+    const fallback = typeof window._v2CompanyStockInfo === 'function'
+      ? window._v2CompanyStockInfo
+      : null;
+
+    const globalInfo = function _v2CompanyStockInfoV67(line, linkedMat){
+      let exact = null;
+      try{ exact = window.LDH_exactResolveStockLine(line); }catch(_){ exact = null; }
+      if(!exact || !exact.db){
+        return fallback ? fallback.apply(this, arguments) : {state:'no_db'};
+      }
+
+      const db = exact.db;
+      const targetCompanies = [exact.companyId, exact.companyName].map(norm).filter(Boolean);
+      const targetMaterials = [exact.materialId, exact.materialName]
+        .map(norm).filter(Boolean)
+        .concat(lineKeys(line));
+
+      const reservations = Array.isArray(db.reservations) ? db.reservations : [];
+      const assignments = Array.isArray(db.assignments) ? db.assignments : [];
+
+      const reserved = reservations
+        .filter(active)
+        .filter(phaseAllowed)
+        .filter(row => keysMatch(companyKeys(row), targetCompanies))
+        .filter(row => keysMatch(materialKeys(row), targetMaterials))
+        .reduce((sum, row) => sum + quantity(row), 0);
+
+      const assigned = assignments
+        .filter(active)
+        .filter(phaseAllowed)
+        .filter(row => !loanAssignment(row))
+        .filter(row => keysMatch(companyKeys(row), targetCompanies))
+        .filter(row => keysMatch(materialKeys(row), targetMaterials))
+        .reduce((sum, row) => sum + quantity(row), 0);
+
+      const real = num(exact.real);
+      return {
+        state:'ok',
+        empresa:exact.companyName,
+        material:exact.materialName,
+        real,
+        reservado:reserved,
+        asignadoPrep:assigned,
+        asignadoFab:0,
+        asignado:assigned,
+        libre:real - reserved - assigned,
+        unit:String(first(
+          line && (line.unit || line.unidad),
+          exact.material && exact.material.unit,
+          exact.material && exact.material.unidad
+        )),
+        sourceKey:(exact.sourceKey || 'firebase_live') + ' + global V67',
+        exact:true
+      };
+    };
+
+    globalInfo.__ldhV67 = true;
+    globalInfo.__ldhGlobalStockTotals = true;
+    window._v2CompanyStockInfo = globalInfo;
+    window.LDH_PREP_V67_GLOBAL_PILL = true;
+
+    try{ if(typeof window.renderTabla === 'function') window.renderTabla(); }catch(error){
+      console.warn('[Preparacion V67] No se pudo refrescar la tabla:', error);
+    }
+    return true;
+  }
+
+  let attempts = 0;
+  function start(){
+    attempts += 1;
+    if(install()) return;
+    if(attempts < 160) setTimeout(start, 50);
+    else console.error('[Preparacion V67] No se pudo instalar el calculo global de stock.');
+  }
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', function(){ setTimeout(start, 0); }, {once:true});
+  }else{
+    setTimeout(start, 0);
   }
 })();
 </script>
