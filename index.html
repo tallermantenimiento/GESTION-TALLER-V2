@@ -1693,6 +1693,20 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   }
 </style>
 
+
+<meta name="ldh-build" content="INDEX-ESTADISTICA-ELIMINAR-FILAS-V1-20260805">
+<style id="LDH_INDEX_STATS_DELETE_ROW_CSS_0508">
+  .ldh-iron-company-table th.action,
+  .ldh-iron-company-table td.action,
+  #ldhIronDetail th.action,
+  #ldhIronDetail td.action{width:92px;text-align:right;white-space:nowrap}
+  .ldh-iron-delete-row-btn{
+    border:1px solid rgba(239,68,68,.46);background:rgba(239,68,68,.12);color:#fecaca;
+    border-radius:9px;padding:5px 8px;font-size:10px;line-height:1;font-weight:950;cursor:pointer
+  }
+  .ldh-iron-delete-row-btn:hover{background:rgba(239,68,68,.23);border-color:rgba(248,113,113,.72)}
+  .ldh-iron-delete-row-btn:disabled{opacity:.55;cursor:wait}
+</style>
 </head>
 <body>
 <div class="app">
@@ -3757,6 +3771,7 @@ function collectAssignments(db){
   const KEY = "ldh_v2_company_stock_v1";
   const BAR_LENGTH_M = 6;
   const STATS_CUTOFF_KEY = "ldh_iron_stats_cutoff_date_v1";
+  const STATS_EXCLUDE_KEY = "ldh_iron_stats_exclusions_v1";
   const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
   let mode = "total";
 
@@ -3766,6 +3781,63 @@ function collectAssignments(db){
   function norm(s){ return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/,/g,".").replace(/\s+/g," ").trim(); }
   function num(v){ const n = parseFloat(String(v ?? 0).replace(",", ".")); return isNaN(n) ? 0 : n; }
   function fmt(n){ return Number(n||0).toLocaleString("es-ES",{maximumFractionDigits:1}); }
+
+  function readStatsExclusions(){
+    const merged = {};
+    const add = value => {
+      if(!value) return;
+      let obj = value;
+      if(typeof obj === "string"){
+        try{ obj = JSON.parse(obj); }catch(e){ obj = {}; }
+      }
+      if(Array.isArray(obj)){
+        obj.forEach(item=>{ if(item && item.key) merged[String(item.key)] = item; });
+        return;
+      }
+      if(obj && typeof obj === "object"){
+        Object.keys(obj).forEach(key=>{
+          const item = obj[key];
+          merged[String(key)] = item && typeof item === "object" ? item : {key:String(key)};
+        });
+      }
+    };
+    try{ add(localStorage.getItem(STATS_EXCLUDE_KEY)); }catch(e){}
+    try{ add(sessionStorage.getItem(STATS_EXCLUDE_KEY)); }catch(e){}
+    try{ add(window.__LDH_IRON_STATS_EXCLUSIONS); }catch(e){}
+    return merged;
+  }
+  function writeStatsExclusions(map){
+    const raw = JSON.stringify(map || {});
+    window.__LDH_IRON_STATS_EXCLUSIONS = map || {};
+    try{ localStorage.setItem(STATS_EXCLUDE_KEY, raw); }
+    catch(e){ try{ sessionStorage.setItem(STATS_EXCLUDE_KEY, raw); }catch(e2){} }
+    try{
+      if(typeof window.LDH_IronStats_saveExclusionsCloud === "function"){
+        Promise.resolve(window.LDH_IronStats_saveExclusionsCloud(map || {})).catch(err=>console.warn("No se pudo sincronizar la exclusión de estadística", err));
+      }else{
+        window.__LDH_IRON_STATS_EXCLUSIONS_PENDING = map || {};
+      }
+    }catch(e){}
+  }
+  function rowIdentity(row){
+    if(row && row.rowKey) return String(row.rowKey);
+    const date = row && row.dateObj instanceof Date && !isNaN(row.dateObj.getTime())
+      ? row.dateObj.toISOString().slice(0,10)
+      : "";
+    return [
+      norm(row && row.source),
+      norm(row && row.companyId),
+      norm(row && (row.materialId || row.material)),
+      norm(row && row.ref),
+      String(num(row && row.qty)),
+      date
+    ].join("|");
+  }
+  function rowIsExcluded(row){ return !!readStatsExclusions()[rowIdentity(row)]; }
+  function statsDeleteButton(row){
+    const key = encodeURIComponent(rowIdentity(row));
+    return `<button class="ldh-iron-delete-row-btn" type="button" onclick="LDH_IronStats_deleteRow('${key}')">Eliminar</button>`;
+  }
 
   function readDB(){
     try{
@@ -4193,11 +4265,15 @@ function collectAssignments(db){
 
     const dt = new Date((dateSource && (dateSource.date || dateSource.fecha || dateSource.createdAt || dateSource.updatedAt || dateSource.fabricacion_ts || dateSource.pintura_ts || dateSource.almacen_ts)) || line.date || line.fecha || now());
 
+    const materialId = String(m.id || m.materialId || material);
     rows.push({
       source:source || "Fabricación nube",
+      sourceType:"fabrication_cloud",
+      recordId:String(ref) + "|" + materialId,
+      rowKey:"fabrication:" + encodeURIComponent(String(ref)) + ":" + encodeURIComponent(materialId),
       companyId:comp.companyId,
       company:comp.company,
-      materialId:String(m.id || m.materialId || material),
+      materialId,
       material,
       unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
       qty,
@@ -4276,8 +4352,12 @@ function collectAssignments(db){
       const qty = assignmentQty(a);
       if(qty <= 0) return;
       const dateObj = getLineDate(db, a, a.jobId);
+      const recordId = String(a.id || a.assignmentId || a.asignacionId || "");
       rows.push({
         source:"Asignación",
+        sourceType:"assignment",
+        recordId,
+        rowKey:recordId ? "assignment:" + recordId : "",
         companyId,
         company:compName,
         materialId,
@@ -4305,8 +4385,12 @@ function collectAssignments(db){
       const compName = companyName(db, companyId);
       if(!companyIsActive(db, companyId, compName)) return;
       const dateObj = getLineDate(db, r, r.jobId);
+      const recordId = String(r.id || r.reservationId || r.reservaId || "");
       rows.push({
         source:"Reserva",
+        sourceType:"reservation",
+        recordId,
+        rowKey:recordId ? "reservation:" + recordId : "",
         companyId,
         company:compName,
         materialId,
@@ -4331,7 +4415,7 @@ function collectAssignments(db){
         const c = (db.companies||[]).find(x => norm(x.name||x.nombre||x.id) === norm(companyText) || norm(companyText).includes(norm(x.name||x.nombre||x.id)));
         const companyId = c ? c.id : companyText;
         if(!companyIsActive(db, companyId, c ? companyName(db, companyId) : companyText)) continue;
-        lines.forEach(line=>{
+        lines.forEach((line, lineIndex)=>{
           const materialId = line.stockLinkId || line.materialId || line.matId;
           const m = materialById(db, materialId);
           if(!m || !isIronMaterial(m)) return;
@@ -4340,6 +4424,9 @@ function collectAssignments(db){
           const dt = new Date(meta.date || meta.fecha || line.date || line.fecha || now());
           rows.push({
             source:"Preparación",
+            sourceType:"preparation",
+            recordId:key + "#" + lineIndex,
+            rowKey:"preparation:" + encodeURIComponent(ref) + ":" + encodeURIComponent(String(materialId || m.id || "")) + ":" + lineIndex,
             companyId,
             company:c ? companyName(db, companyId) : companyText,
             materialId,
@@ -4367,7 +4454,7 @@ function collectAssignments(db){
     activeCompanies(db).forEach(c=>{
       map.set(String(c.companyId), c);
     });
-    rows.filter(rowInPeriod).filter(rowPassesCutoff).forEach(r=>{
+    rows.filter(rowInPeriod).filter(rowPassesCutoff).filter(r=>!rowIsExcluded(r)).forEach(r=>{
       const rawName = r.company || companyName(db, r.companyId);
       const active = resolveActiveCompany(db, r.companyId, rawName);
       if(!active) return;
@@ -4505,11 +4592,12 @@ function collectAssignments(db){
           <td>${weightInfoForLine(l)}</td>
           <td>${fmt(l.kg)} kg</td>
           <td>${esc(l.source)}</td>
+          <td class="action">${statsDeleteButton(l)}</td>
         </tr>`);
       });
     });
     box.innerHTML = rows.length ? `<table>
-      <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Cantidad</th><th>Peso unitario</th><th>Kg estimados</th><th>Origen</th></tr></thead>
+      <thead><tr><th>Empresa</th><th>Trabajo</th><th>Material vinculado</th><th>Cantidad</th><th>Peso unitario</th><th>Kg estimados</th><th>Origen</th><th class="action">Acción</th></tr></thead>
       <tbody>${rows.join("")}</tbody>
     </table>` : "";
   }
@@ -4576,6 +4664,7 @@ function collectAssignments(db){
           <td class="num">${fmt(l.qty)}</td>
           <td class="num">${weightInfoForLine(l)}</td>
           <td class="num">${fmt(l.kg)} kg</td>
+          <td class="action">${statsDeleteButton(l)}</td>
         </tr>`).join("");
       return `<div class="ldh-iron-material-group">
         <div class="ldh-iron-material-summary">
@@ -4585,7 +4674,7 @@ function collectAssignments(db){
           <div class="ldh-iron-material-kpi">${fmt(g.kg)} kg est.</div>
         </div>
         <table class="ldh-iron-company-table">
-          <thead><tr><th>Trabajo</th><th>Origen</th><th class="num">Cantidad</th><th class="num">Peso unitario</th><th class="num">Kg estimados</th></tr></thead>
+          <thead><tr><th>Trabajo</th><th>Origen</th><th class="num">Cantidad</th><th class="num">Peso unitario</th><th class="num">Kg estimados</th><th class="action">Acción</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
@@ -4593,6 +4682,50 @@ function collectAssignments(db){
 
     body.innerHTML = totals + (htmlGroups || `<div class="ldh-iron-empty">No hay materiales de hierro para esta empresa.</div>`);
     bg.classList.add("show");
+  }
+  function deleteStatsRow(encodedKey){
+    let key = "";
+    try{ key = decodeURIComponent(String(encodedKey || "")); }catch(e){ key = String(encodedKey || ""); }
+    if(!key) return;
+
+    const db = readDB();
+    const row = collectAllRows(db).find(item => rowIdentity(item) === key);
+    if(!row){
+      alert("La fila ya no existe o ya fue eliminada de la estadística.");
+      render();
+      return;
+    }
+
+    const message =
+      "¿Eliminar esta fila de la estadística?\\n\\n" +
+      "Trabajo: " + (row.ref || "—") + "\\n" +
+      "Material: " + (row.material || "—") + "\\n" +
+      "Origen: " + (row.source || "—") + "\\n" +
+      "Cantidad: " + fmt(row.qty) + "\\n\\n" +
+      "Dejará de contar en barras y kilogramos. No se borrará el stock físico ni el pedido productivo.";
+    if(!confirm(message)) return;
+
+    const exclusions = readStatsExclusions();
+    exclusions[key] = {
+      key,
+      deletedAt:now(),
+      companyId:String(row.companyId || ""),
+      company:String(row.company || ""),
+      materialId:String(row.materialId || ""),
+      material:String(row.material || ""),
+      ref:String(row.ref || ""),
+      source:String(row.source || ""),
+      sourceType:String(row.sourceType || ""),
+      recordId:String(row.recordId || ""),
+      qty:num(row.qty)
+    };
+    writeStatsExclusions(exclusions);
+
+    const bg = document.getElementById("ldhIronCompanyModalBg");
+    const reopen = !!(bg && bg.classList.contains("show"));
+    const companyId = row.companyId;
+    render();
+    if(reopen) setTimeout(()=>openCompanyDetail(companyId), 0);
   }
   function closeCompanyDetail(){
     const bg = document.getElementById("ldhIronCompanyModalBg");
@@ -4931,6 +5064,7 @@ function collectAssignments(db){
   window.LDH_IronStats_toggleDetalle = toggleDetalle;
   window.LDH_IronStats_openCompany = openCompanyDetail;
   window.LDH_IronStats_closeCompany = closeCompanyDetail;
+  window.LDH_IronStats_deleteRow = deleteStatsRow;
   window.LDH_IronStats_seedDemo = seedDemo;
   window.LDH_IronStats_clearDemo = clearDemo;
   window.LDH_IronStats_print = printReport;
@@ -5240,6 +5374,95 @@ async function readFabricacionCloudForStats(){
 
 if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", readFabricacionCloudForStats);
 else readFabricacionCloudForStats();
+</script>
+
+
+<script type="module" id="LDH_INDEX_IRON_STATS_EXCLUSIONS_FIRESTORE_0508">
+/* Exclusiones individuales de la estadística. No modifica Stock ni pedidos. */
+const LDH_STATS_EXCLUSION_KEY = "ldh_iron_stats_exclusions_v1";
+const LDH_STATS_EXCLUSION_CONFIG = {
+  apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
+  authDomain: "gestion-taller-stock.firebaseapp.com",
+  projectId: "gestion-taller-stock",
+  storageBucket: "gestion-taller-stock.firebasestorage.app",
+  messagingSenderId: "164944519480",
+  appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
+};
+function ldhStatsExclusionMap(value){
+  const out = {};
+  let data = value;
+  if(typeof data === "string"){
+    try{ data = JSON.parse(data); }catch(e){ data = {}; }
+  }
+  if(Array.isArray(data)) data.forEach(item=>{ if(item && item.key) out[String(item.key)] = item; });
+  else if(data && typeof data === "object") Object.keys(data).forEach(key=>{ out[String(key)] = data[key]; });
+  return out;
+}
+function ldhStatsLocalExclusions(){
+  const out = {};
+  const add = value=>Object.assign(out, ldhStatsExclusionMap(value));
+  try{ add(localStorage.getItem(LDH_STATS_EXCLUSION_KEY)); }catch(e){}
+  try{ add(sessionStorage.getItem(LDH_STATS_EXCLUSION_KEY)); }catch(e){}
+  try{ add(window.__LDH_IRON_STATS_EXCLUSIONS); }catch(e){}
+  return out;
+}
+function ldhStatsStoreLocal(map){
+  window.__LDH_IRON_STATS_EXCLUSIONS = map || {};
+  const raw = JSON.stringify(map || {});
+  try{ localStorage.setItem(LDH_STATS_EXCLUSION_KEY, raw); }
+  catch(e){ try{ sessionStorage.setItem(LDH_STATS_EXCLUSION_KEY, raw); }catch(e2){} }
+}
+(async()=>{
+  try{
+    const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
+    const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+    const {getFirestore,doc,getDoc,onSnapshot,setDoc,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+    const appName = "ldh-index-iron-stats-exclusions-v1";
+    const app = getApps().some(a=>a.name===appName) ? getApp(appName) : initializeApp(LDH_STATS_EXCLUSION_CONFIG, appName);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const ref = doc(db, "taller_data", "iron_stats_exclusions");
+    await new Promise(resolve=>{
+      let done=false;
+      const finish=()=>{ if(!done){ done=true; resolve(); } };
+      const unsub=onAuthStateChanged(auth, async user=>{
+        try{
+          if(user){ try{ unsub(); }catch(e){} finish(); return; }
+          try{ await signInAnonymously(auth); }catch(e){}
+        }finally{ finish(); }
+      });
+      setTimeout(finish,3500);
+    });
+    let cloudMap={};
+    try{
+      const snap=await getDoc(ref);
+      if(snap.exists()) cloudMap=ldhStatsExclusionMap((snap.data()||{}).rows||[]);
+    }catch(e){ console.warn("No se pudieron leer exclusiones de estadística",e); }
+    const merged=Object.assign({},cloudMap,ldhStatsLocalExclusions());
+    ldhStatsStoreLocal(merged);
+    window.LDH_IronStats_saveExclusionsCloud=async function(map){
+      const finalMap=Object.assign({},cloudMap,ldhStatsExclusionMap(map),ldhStatsLocalExclusions());
+      await setDoc(ref,{version:1,updatedAt:serverTimestamp(),rows:Object.values(finalMap)},{merge:false});
+      cloudMap=finalMap;
+      ldhStatsStoreLocal(finalMap);
+      return true;
+    };
+    if(window.__LDH_IRON_STATS_EXCLUSIONS_PENDING){
+      try{ await window.LDH_IronStats_saveExclusionsCloud(window.__LDH_IRON_STATS_EXCLUSIONS_PENDING); }catch(e){}
+      delete window.__LDH_IRON_STATS_EXCLUSIONS_PENDING;
+    }else if(Object.keys(merged).length>Object.keys(cloudMap).length){
+      try{ await window.LDH_IronStats_saveExclusionsCloud(merged); }catch(e){}
+    }
+    onSnapshot(ref,snap=>{
+      if(!snap.exists()) return;
+      cloudMap=ldhStatsExclusionMap((snap.data()||{}).rows||[]);
+      const union=Object.assign({},cloudMap,ldhStatsLocalExclusions());
+      ldhStatsStoreLocal(union);
+      try{ window.LDH_IronStats_render && window.LDH_IronStats_render(); }catch(e){}
+    },err=>console.warn("Exclusiones de estadística sin escucha en vivo",err));
+    try{ window.LDH_IronStats_render && window.LDH_IronStats_render(); }catch(e){}
+  }catch(e){ console.warn("Exclusiones de estadística: Firebase no disponible; se conservarán localmente",e); }
+})();
 </script>
 
 </body>
