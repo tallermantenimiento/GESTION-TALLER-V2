@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806" />
+<meta name="ldh-build" content="PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -494,7 +494,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806">
+<meta name="ldh-fix" content="PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -20214,8 +20214,22 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     return [...out];
   }
   function member(ref){
-    try{const meta=JSON.parse(getRaw('prep_meta_'+ref)||'{}');const lines=JSON.parse(getRaw('prep_recepcion_'+ref)||'[]');return {ref,meta,lines:Array.isArray(lines)?lines:[]};}
-    catch(e){return {ref,meta:{},lines:[]};}
+    try{
+      const metaRaw=getRaw('prep_meta_'+ref);
+      const linesRaw=getRaw('prep_recepcion_'+ref);
+      const meta=JSON.parse(metaRaw||'{}');
+      const lines=JSON.parse(linesRaw||'[]');
+      return {
+        ref,
+        meta,
+        lines:Array.isArray(lines)?lines:[],
+        // V80: una meta conservada al cerrar no significa que la partida siga
+        // en Preparación. Solo existe una partida activa si conserva su clave
+        // prep_recepcion_ correspondiente.
+        inPreparation:linesRaw!==null&&linesRaw!==undefined
+      };
+    }
+    catch(e){return {ref,meta:{},lines:[],inPreparation:false};}
   }
   function partIdentity(m){
     const id=String(m&&m.meta&&(m.meta.composite_part_id||m.meta.compositePartId)||'').trim();if(id)return 'id:'+id;
@@ -20294,6 +20308,10 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   }
   function isArchived(group){
     const status=latestStatus(group);if(!status)return false;
+    // V80: si ya no queda ninguna prep_recepcion_ viva, el grupo enviado está
+    // cerrado aunque falten tombstones antiguos de alguna partida. El snapshot
+    // de compra conserva el histórico y evita mostrar falsos «pendientes».
+    if(!group.members.some(m=>m.inPreparation))return true;
     const phases=phaseData(group);if(phases.missing>0||phases.counts.preparacion>0)return false;
     /* La recepción real cambia qty_recibida después de copiar. Eso no reabre
        una compra ya enviada: cuando todas las partidas salen de Preparación,
@@ -20358,7 +20376,20 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     host.innerHTML=toolbar+groups.map(group=>{const ph=phaseData(group),st=latestStatus(group);return `<div class="ldh-group-card history" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}','history')"><div class="ldh-group-title">📦 ${esc(masterRef(group))}</div><div class="ldh-group-meta">${esc(company(group))} · ${esc(ph.text)}${st?.purchaseId?` · ${esc(st.purchaseId)}`:''}</div><span class="ldh-group-state archived">ARCHIVADO · COMPRA CERRADA</span></div>`;}).join('');
   }
   function renderGroups(){
-    ensureUi();const all=allGroups().filter(g=>!g.deleted);all.forEach(ensureLegacySnapshot);const active=all.filter(g=>!isArchived(g)),history=all.filter(g=>isArchived(g));
+    ensureUi();
+    const discovered=allGroups().filter(g=>!g.deleted);
+    /*
+     * V80 · No convertir las metas de cierre de V80 en grupos fantasma.
+     * - Con alguna prep_recepcion_ viva: grupo activo real.
+     * - Sin partidas vivas pero con compra enviada: histórico.
+     * - Sin partidas vivas y sin compra enviada: grupo operativo terminado;
+     *   no debe figurar como «faltan partidas por llegar».
+     */
+    const all=discovered.filter(g=>
+      g.members.some(m=>m.inPreparation) || !!latestStatus(g)
+    );
+    all.forEach(ensureLegacySnapshot);
+    const active=all.filter(g=>!isArchived(g)),history=all.filter(g=>isArchived(g));
     const count=document.getElementById('ldhGroupCount'),hcount=document.getElementById('ldhHistoryCount');if(count)count.textContent=String(active.length);if(hcount)hcount.textContent=String(history.length);
     renderActive(active);renderHistory(history);
   }
@@ -21207,7 +21238,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   if(window.__LDH_PREP_V69_RECEIVED_ROUTER__) return;
   window.__LDH_PREP_V69_RECEIVED_ROUTER__ = true;
 
-  const BUILD = 'PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+  const BUILD = 'PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
   const FER_KEY = 'ldh_v2_ferreteria_stock_v1';
   const SESSION_OVERRIDE_PREFIX = '__ldh_session_override_v58__:';
   const IDB_NAME = 'ldh_workshop_resilient_v1';
@@ -21782,7 +21813,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   if(window.__LDH_PREP_V71_CLEANUP_QUOTA_SAFE__) return;
   window.__LDH_PREP_V71_CLEANUP_QUOTA_SAFE__ = true;
 
-  const BUILD = 'PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+  const BUILD = 'PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
   const SESSION_OVERRIDE_PREFIX = '__ldh_session_override_v58__:';
   const cleaning = new Set();
 
@@ -22428,7 +22459,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 (function(){
   'use strict';
   const BUILD = 'V77';
-  window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+  window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
 
   function markBuild(){
     try{
@@ -22446,7 +22477,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
       if(status){
         const current = String(status.textContent || '').trim();
         const base = current.replace(/(?:\s*·\s*V\d+)+\s*$/i, '').trim();
-        const target = (base || 'Preparación') + ' · V79';
+        const target = (base || 'Preparación') + ' · V80';
         if(current !== target) status.textContent = target;
         status.dataset.ldhBuild = BUILD;
       }
@@ -22804,14 +22835,14 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 
   window.LDH_PREP_ALLOW_CREATE_MATERIAL = false;
   function markBuild(){
-    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
     document.documentElement.dataset.ldhPrepBuild = BUILD;
     const selectors = ['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
     for(const selector of selectors){
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V79';
+        status.textContent = (base || 'Preparación') + ' · V80';
         break;
       }
     }
@@ -23223,14 +23254,14 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     }
   }
   function markBuild(){
-    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
     document.documentElement.dataset.ldhPrepBuild = BUILD;
     const selectors = ['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
     for(const selector of selectors){
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V79';
+        status.textContent = (base || 'Preparación') + ' · V80';
         break;
       }
     }
@@ -23520,14 +23551,14 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     window.LDH_prepReceivePhysicalCloudV66 = wrapped;
   }
   function markBuild(){
-    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
     document.documentElement.dataset.ldhPrepBuild = BUILD;
     const selectors = ['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
     for(const selector of selectors){
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V79';
+        status.textContent = (base || 'Preparación') + ' · V80';
         break;
       }
     }
@@ -23548,13 +23579,13 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 
 
 
-<script id="LDH_PREP_V79_RETIRADA_FABRICACION_AUTORITATIVA_20260806">
+<script id="LDH_PREP_V80_RETIRADA_FABRICACION_AUTORITATIVA_20260806">
 (function(){
   'use strict';
-  if(window.__LDH_PREP_V79_CLOSE_AFTER_FAB__) return;
-  window.__LDH_PREP_V79_CLOSE_AFTER_FAB__ = true;
+  if(window.__LDH_PREP_V80_CLOSE_AFTER_FAB__) return;
+  window.__LDH_PREP_V80_CLOSE_AFTER_FAB__ = true;
 
-  const BUILD = 'V79';
+  const BUILD = 'V80';
   const CLOSED_BY = 'preparacion_v79_fabricacion_autoritativa';
 
   function numberOf(value){
@@ -23729,7 +23760,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
       },delay));
       return true;
     }catch(error){
-      console.warn('[Preparacion V79] No se pudo retirar el pedido',ref,error);
+      console.warn('[Preparacion V80] No se pudo retirar el pedido',ref,error);
       return false;
     }
   }
@@ -23781,14 +23812,14 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     if(removed && typeof previousList === 'function') previousList();
   }
   function markBuild(){
-    window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V79-RETIRADA-FAB-AUTORITATIVA-20260806';
+    window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806';
     document.documentElement.dataset.ldhPrepBuild=BUILD;
     const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
     for(const selector of selectors){
       const status=document.querySelector(selector);
       if(!status) continue;
       const base=String(status.textContent || 'Preparacion').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-      status.textContent=(base || 'Preparacion')+' · V79';
+      status.textContent=(base || 'Preparacion')+' · V80';
       break;
     }
   }
@@ -23802,7 +23833,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   setInterval(markBuild,700);
   setInterval(refreshAfterCleanup,2500);
   window.addEventListener('storage',function(){ setTimeout(refreshAfterCleanup,180); });
-  console.info('[Preparacion V79] Retirada autoritativa post Fabricacion activa');
+  console.info('[Preparacion V80] Retirada autoritativa post Fabricacion activa');
 })();
 </script>
 
