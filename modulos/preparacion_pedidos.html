@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V75-FUSION-DUPLICADOS-BLOQUEO-20260806" />
+<meta name="ldh-build" content="PREPARACION-V76-FUSION-DUPLICADOS-EXACTOS-20260806" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -494,7 +494,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V75-FUSION-DUPLICADOS-BLOQUEO-20260806">
+<meta name="ldh-fix" content="PREPARACION-V76-FUSION-DUPLICADOS-EXACTOS-20260806">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -22427,8 +22427,8 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 <script id="LDH_PREP_V75_BUILD_VISIBLE_20260806">
 (function(){
   'use strict';
-  const BUILD = 'V75';
-  window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V75-FUSION-DUPLICADOS-BLOQUEO-20260806';
+  const BUILD = 'V76';
+  window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V76-FUSION-DUPLICADOS-EXACTOS-20260806';
 
   function markBuild(){
     try{
@@ -22446,7 +22446,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
       if(status){
         const current = String(status.textContent || '').trim();
         const base = current.replace(/(?:\s*·\s*V\d+)+\s*$/i, '').trim();
-        const target = (base || 'Preparación') + ' · V75';
+        const target = (base || 'Preparación') + ' · V76';
         if(current !== target) status.textContent = target;
         status.dataset.ldhBuild = BUILD;
       }
@@ -22475,7 +22475,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   if(window.__LDH_PREP_V75_DUPLICATES__) return;
   window.__LDH_PREP_V75_DUPLICATES__ = true;
 
-  const BUILD = 'V75';
+  const BUILD = 'V76';
   const PROJECT = 'gestion-taller-stock';
   const DB = '(default)';
   const STOCK_KEY = 'ldh_v2_company_stock_v1';
@@ -22804,14 +22804,433 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 
   window.LDH_PREP_ALLOW_CREATE_MATERIAL = false;
   function markBuild(){
-    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V75-FUSION-DUPLICADOS-BLOQUEO-20260806';
+    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V76-FUSION-DUPLICADOS-EXACTOS-20260806';
     document.documentElement.dataset.ldhPrepBuild = BUILD;
     const selectors = ['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
     for(const selector of selectors){
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V75';
+        status.textContent = (base || 'Preparación') + ' · V76';
+        break;
+      }
+    }
+  }
+  function start(){
+    markBuild();
+    // V76 ejecuta la reparación exacta y sustituye esta rutina limitada a mat_prep_*.
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',start,{once:true});
+  else start();
+  [100,500,1500,4000].forEach(delay => setTimeout(markBuild,delay));
+  setInterval(markBuild,1500);
+  console.info('[Preparación V75] Fusión segura de duplicados y creación automática bloqueada');
+})();
+</script>
+
+
+
+<script id="LDH_PREP_V76_FUSION_DUPLICADOS_EXACTOS_20260806">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V76_EXACT_DUPLICATES__) return;
+  window.__LDH_PREP_V76_EXACT_DUPLICATES__ = true;
+
+  const BUILD = 'V76';
+  const PROJECT = 'gestion-taller-stock';
+  const DB = '(default)';
+  const STOCK_KEY = 'ldh_v2_company_stock_v1';
+  let running = false;
+  let completed = false;
+
+  function n(value){
+    const parsed = Number.parseFloat(String(value ?? '').replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function norm(value){
+    return String(value ?? '').trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[x×*]/g, 'x').replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+  function idOf(row){ return String(row?.id ?? row?.materialId ?? row?.matId ?? row?.material_id ?? '').trim(); }
+  function nameOf(row){ return String(row?.name ?? row?.nombre ?? row?.materialName ?? row?.material ?? row?.mat ?? '').trim(); }
+  function unitKey(row){
+    const unit = norm(row?.unit ?? row?.unidad ?? '');
+    if(unit.includes('barra')) return 'barra';
+    if(['ud','uds','und','unds','unidad','unidades'].includes(unit)) return 'ud';
+    return unit || 'sin unidad';
+  }
+  function materialKey(row){ return norm(nameOf(row)) + '|' + unitKey(row); }
+  function companyId(row){ return String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? '').trim(); }
+  function rowMaterialId(row){ return String(row?.materialId ?? row?.matId ?? row?.material_id ?? row?.material ?? row?.mat ?? '').trim(); }
+  function qty(row){ return Math.max(0,n(row?.physicalQty ?? row?.qty ?? row?.cantidad ?? row?.stock ?? row?.real ?? row?.fisico ?? row?.quantity ?? row?.amount ?? 0)); }
+  function rowRef(row){ return norm(row?.ref ?? row?.jobRef ?? row?.reference ?? row?.referencia ?? row?.workRef ?? row?.pedidoRef ?? ''); }
+  function rowLine(row){
+    const value = row?.lineIndex ?? row?.line_index ?? row?.lineId ?? row?.line_id ?? '';
+    return value === null || value === undefined ? '' : String(value);
+  }
+  function rowPhase(row){ return norm(row?.phase ?? row?.fase ?? 'preparacion') || 'preparacion'; }
+  function sourceText(row){
+    return norm([row?.id,row?.assignmentId,row?.movementId,row?.idempotencyKey,row?.source,row?.reason,row?.createdFrom,row?.origin,row?.origen,row?.motivo].filter(Boolean).join(' '));
+  }
+  function statusActive(row){
+    const status = norm(row?.status ?? row?.estado ?? 'activa');
+    return !['cancelada','cancelado','cerrada','cerrado','consumida','consumido','liberada','liberado','devuelta','devuelto','anulada','anulado','consolidada','consolidado'].includes(status);
+  }
+  function movementSign(type){
+    const value = norm(type || '');
+    if(['entrada','in','ajuste pos','devolucion','devolucion fisica','entrada preparacion','entrada prep','entrada desde preparacion','stock entrada','recepcion stock','add stock'].includes(value)) return 1;
+    if(['salida','out','ajuste neg','consumo','consumo terminal','prestamo','baja','retirada'].includes(value)) return -1;
+    return 0;
+  }
+  function isAutomaticReceiptMovement(row){
+    const text = sourceText(row);
+    return movementSign(row?.type ?? row?.tipo) > 0 && (
+      text.includes('recibido fisico') ||
+      text.includes('recepcion fisica') ||
+      text.includes('preparacion pedidos recepcion fisica') ||
+      text.includes('preparacion recibido')
+    );
+  }
+  function isAutomaticReceiptAllocation(row){
+    const text = sourceText(row);
+    return text.includes('recibido fisico') ||
+      text.includes('recepcion fisica') ||
+      text.includes('asignado desde preparacion recepcion fisica') ||
+      text.includes('prep received');
+  }
+  function companySetForMaterial(remote,mid){
+    const set = new Set();
+    ['stock','movements','reservations','assignments','reservationDebts'].forEach(key => {
+      (remote[key] || []).forEach(row => {
+        const ids = [rowMaterialId(row),String(row?.toMaterialId ?? ''),String(row?.fromMaterialId ?? '')];
+        if(ids.includes(mid) && companyId(row)) set.add(companyId(row));
+      });
+    });
+    return set;
+  }
+  function referenceScore(remote,mid){
+    let score = 0;
+    ['assignments','reservations'].forEach(key => {
+      (remote[key] || []).forEach(row => {
+        if(rowMaterialId(row) === mid && statusActive(row)) score += 1000 + qty(row);
+      });
+    });
+    ['movements','stock','reservationDebts'].forEach(key => {
+      (remote[key] || []).forEach(row => {
+        if(rowMaterialId(row) === mid || String(row?.toMaterialId ?? '') === mid || String(row?.fromMaterialId ?? '') === mid) score += 1;
+      });
+    });
+    return score;
+  }
+  function chooseCanonical(remote,rows){
+    return rows.slice().sort((a,b) => {
+      const score = referenceScore(remote,idOf(b)) - referenceScore(remote,idOf(a));
+      if(score) return score;
+      const aTemp = /^mat_prep_/i.test(idOf(a)) || norm(a?.createdFrom) === 'preparacion pedidos';
+      const bTemp = /^mat_prep_/i.test(idOf(b)) || norm(b?.createdFrom) === 'preparacion pedidos';
+      if(aTemp !== bTemp) return Number(aTemp) - Number(bTemp);
+      const aTime = Date.parse(a?.createdAt || a?.updatedAt || '') || Number.MAX_SAFE_INTEGER;
+      const bTime = Date.parse(b?.createdAt || b?.updatedAt || '') || Number.MAX_SAFE_INTEGER;
+      return aTime - bTime;
+    })[0];
+  }
+  function buildPlan(remote){
+    const groups = new Map();
+    remote.materials.forEach(row => {
+      const key = materialKey(row);
+      if(!norm(nameOf(row)) || !idOf(row)) return;
+      if(!groups.has(key)) groups.set(key,[]);
+      groups.get(key).push(row);
+    });
+    const mapping = new Map();
+    const merged = [];
+    for(const [key,rows] of groups){
+      if(rows.length < 2) continue;
+      const ids = rows.map(idOf).filter(Boolean);
+      const overlap = new Map();
+      ids.forEach(mid => companySetForMaterial(remote,mid).forEach(cid => {
+        if(!overlap.has(cid)) overlap.set(cid,new Set());
+        overlap.get(cid).add(mid);
+      }));
+      const sameCompanyDuplicate = Array.from(overlap.values()).some(set => set.size > 1);
+      const prepGenerated = rows.some(row => /^mat_prep_/i.test(idOf(row)) || norm(row?.createdFrom) === 'preparacion pedidos');
+      if(!sameCompanyDuplicate && !prepGenerated) continue;
+      const canonical = chooseCanonical(remote,rows);
+      const canonicalId = idOf(canonical);
+      const duplicates = rows.filter(row => idOf(row) !== canonicalId);
+      if(!canonicalId || !duplicates.length) continue;
+      canonical.materialAliases = Array.from(new Set([...(Array.isArray(canonical.materialAliases) ? canonical.materialAliases : []),...duplicates.map(idOf)]));
+      duplicates.forEach(row => mapping.set(idOf(row),canonicalId));
+      merged.push({key,canonicalId,allIds:ids,duplicates:duplicates.map(idOf)});
+    }
+    return {mapping,merged};
+  }
+  function dedupeRows(array,groups,predicate){
+    const idToGroup = new Map();
+    groups.forEach(group => group.allIds.forEach(mid => idToGroup.set(mid,group.key)));
+    const seen = new Map();
+    const remove = new Set();
+    array.forEach((row,index) => {
+      const mid = rowMaterialId(row);
+      const groupKey = idToGroup.get(mid);
+      if(!groupKey || !predicate(row)) return;
+      const logical = [groupKey,companyId(row),rowRef(row),rowLine(row),rowPhase(row)].join('|');
+      if(!seen.has(logical)){
+        seen.set(logical,{row,index});
+        return;
+      }
+      const keeper = seen.get(logical).row;
+      const best = Math.max(qty(keeper),qty(row));
+      ['qty','cantidad','amount','quantity','pendingQty','qtyPending'].forEach(field => {
+        if(field in keeper || field in row) keeper[field] = best;
+      });
+      remove.add(index);
+    });
+    return {rows:array.filter((_,index) => !remove.has(index)),removed:remove.size};
+  }
+  function physicalFor(remote,cid,mid){
+    const movements = remote.movements.filter(row => companyId(row) === cid && rowMaterialId(row) === mid && movementSign(row?.type ?? row?.tipo) !== 0);
+    if(movements.length) return movements.reduce((sum,row) => sum + movementSign(row?.type ?? row?.tipo) * qty(row),0);
+    return remote.stock.filter(row => companyId(row) === cid && rowMaterialId(row) === mid).reduce((sum,row) => sum + qty(row),0);
+  }
+  function computeTotals(remote,merged){
+    const totals = new Map();
+    merged.forEach(item => {
+      const companies = new Set();
+      [...remote.stock,...remote.movements].forEach(row => {
+        if(item.allIds.includes(rowMaterialId(row)) && companyId(row)) companies.add(companyId(row));
+      });
+      companies.forEach(cid => {
+        const total = item.allIds.reduce((sum,mid) => sum + physicalFor(remote,cid,mid),0);
+        totals.set(cid+'|'+item.canonicalId,total);
+      });
+    });
+    return totals;
+  }
+  function replaceReferences(remote,mapping){
+    const fields = new Set(['materialId','matId','material_id','toMaterialId','fromMaterialId','stockMatId','v2MaterialId','sourceMaterialId','targetMaterialId','linked_matId','linkedMatId']);
+    function walk(value,parentKey=''){
+      if(!value || typeof value !== 'object') return;
+      if(Array.isArray(value)){
+        value.forEach((item,index) => {
+          if(typeof item === 'string' && /material/i.test(parentKey) && mapping.has(item)) value[index] = mapping.get(item);
+          else walk(item,parentKey);
+        });
+        return;
+      }
+      Object.entries(value).forEach(([key,item]) => {
+        if(typeof item === 'string' && (fields.has(key) || key === 'material' || key === 'mat') && mapping.has(item)) value[key] = mapping.get(item);
+        else if(item && typeof item === 'object') walk(item,key);
+      });
+    }
+    Object.entries(remote).forEach(([key,value]) => { if(key !== 'materials') walk(value,key); });
+  }
+  function consolidateStock(remote,canonicalIds,totals){
+    const groups = new Map();
+    remote.stock.forEach((row,index) => {
+      const key = companyId(row)+'|'+rowMaterialId(row);
+      if(!groups.has(key)) groups.set(key,[]);
+      groups.get(key).push({row,index});
+    });
+    const remove = new Set();
+    let removed = 0;
+    for(const [key,items] of groups){
+      const mid = key.slice(key.indexOf('|')+1);
+      if(!canonicalIds.has(mid)) continue;
+      const keeper = items[0].row;
+      const total = totals.has(key) ? totals.get(key) : items.reduce((sum,item) => sum + qty(item.row),0);
+      ['qty','cantidad','stock','real','fisico','physicalQty'].forEach(field => { keeper[field] = total; });
+      keeper.updatedAt = new Date().toISOString();
+      items.slice(1).forEach(item => { remove.add(item.index); removed += 1; });
+    }
+    remote.stock = remote.stock.filter((_,index) => !remove.has(index));
+    return removed;
+  }
+  function applyRepair(remote){
+    ['companies','materials','stock','movements','reservations','assignments','reservationDebts'].forEach(key => {
+      remote[key] = Array.isArray(remote[key]) ? remote[key] : [];
+    });
+    const plan = buildPlan(remote);
+    if(!plan.mapping.size) return {changed:false,mergedMaterials:0,removedStockRows:0,removedMovements:0,removedAllocations:0,mapping:plan.mapping};
+
+    const movementResult = dedupeRows(remote.movements,plan.merged,isAutomaticReceiptMovement);
+    remote.movements = movementResult.rows;
+    const assignmentResult = dedupeRows(remote.assignments,plan.merged,isAutomaticReceiptAllocation);
+    remote.assignments = assignmentResult.rows;
+    const reservationResult = dedupeRows(remote.reservations,plan.merged,isAutomaticReceiptAllocation);
+    remote.reservations = reservationResult.rows;
+
+    const totals = computeTotals(remote,plan.merged);
+    replaceReferences(remote,plan.mapping);
+    const canonicalIds = new Set(plan.merged.map(item => item.canonicalId));
+    const removedStockRows = consolidateStock(remote,canonicalIds,totals);
+    remote.materials = remote.materials.filter(row => !plan.mapping.has(idOf(row)));
+    remote.updatedAt = new Date().toISOString();
+    remote.maintenance = remote.maintenance && typeof remote.maintenance === 'object' ? remote.maintenance : {};
+    remote.maintenance.lastExactMaterialMergeV76 = {
+      at:remote.updatedAt,
+      mergedMaterials:plan.mapping.size,
+      removedStockRows,
+      removedMovements:movementResult.removed,
+      removedAllocations:assignmentResult.removed + reservationResult.removed,
+      mappings:Array.from(plan.mapping.entries()).map(([from,to]) => ({from,to}))
+    };
+    return {
+      changed:true,
+      mergedMaterials:plan.mapping.size,
+      removedStockRows,
+      removedMovements:movementResult.removed,
+      removedAllocations:assignmentResult.removed + reservationResult.removed,
+      mapping:plan.mapping
+    };
+  }
+
+  function firestoreValue(value){
+    if(value == null) return null;
+    if(Object.prototype.hasOwnProperty.call(value,'stringValue')) return value.stringValue;
+    if(Object.prototype.hasOwnProperty.call(value,'integerValue')) return Number(value.integerValue || 0);
+    if(Object.prototype.hasOwnProperty.call(value,'doubleValue')) return Number(value.doubleValue || 0);
+    if(Object.prototype.hasOwnProperty.call(value,'booleanValue')) return !!value.booleanValue;
+    if(Object.prototype.hasOwnProperty.call(value,'timestampValue')) return value.timestampValue;
+    if(Object.prototype.hasOwnProperty.call(value,'nullValue')) return null;
+    return null;
+  }
+  function documentUrl(path){ return `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/${encodeURIComponent(DB)}/documents/${path}`; }
+  async function token(){
+    const getter = window.__LDH_PREP_STOCK_GET_TOKEN_V74;
+    if(typeof getter !== 'function') throw new Error('La conexión con Stock todavía no está preparada.');
+    return getter();
+  }
+  async function getDocument(path,authToken){
+    const response = await fetch(documentUrl(path),{method:'GET',headers:{Authorization:`Bearer ${authToken}`},cache:'no-store'});
+    if(!response.ok) throw new Error(`Stock REST ${response.status}: ${(await response.text()).slice(0,220)}`);
+    return response.json();
+  }
+  function parseStock(packed){
+    const outer = JSON.parse(packed);
+    let raw = outer?.[STOCK_KEY] ?? outer?.payload ?? outer?.data ?? outer?.stock ?? outer;
+    if(typeof raw === 'string') raw = JSON.parse(raw);
+    if(!raw || typeof raw !== 'object') throw new Error('El paquete de Stock no tiene un formato válido.');
+    return raw;
+  }
+  function chunksOf(text,size=350000){
+    const result=[];
+    for(let index=0;index<text.length;index+=size) result.push(text.slice(index,index+size));
+    return result.length ? result : [''];
+  }
+  async function commitStock(remote,docs,authToken){
+    const now = new Date().toISOString();
+    remote.updatedAt = now;
+    const packageObj = {[STOCK_KEY]:JSON.stringify(remote),updatedAt:now,schema:'ldh_stock_chunked_v2_full'};
+    const chunks = chunksOf(JSON.stringify(packageObj));
+    const root = `projects/${PROJECT}/databases/${DB}/documents`;
+    const writes = chunks.map((part,index) => {
+      const previous = docs.chunks[index];
+      const write = {update:{name:`${root}/taller_data/stock/chunks/${index}`,fields:{part:{stringValue:part},index:{integerValue:String(index)},updatedAt:{timestampValue:now}}}};
+      write.currentDocument = previous?.updateTime ? {updateTime:previous.updateTime} : {exists:false};
+      return write;
+    });
+    for(let index=chunks.length;index<docs.chunks.length;index+=1){
+      writes.push({delete:`${root}/taller_data/stock/chunks/${index}`,currentDocument:{updateTime:docs.chunks[index].updateTime}});
+    }
+    const metaFields = {
+      totalChunks:{integerValue:String(chunks.length)},chunkSize:{integerValue:'350000'},updatedAt:{timestampValue:now},updatedAtISO:{stringValue:now},key:{stringValue:STOCK_KEY},
+      rawCompanies:{integerValue:String((remote.companies||[]).length)},rawMaterials:{integerValue:String((remote.materials||[]).length)},rawStock:{integerValue:String((remote.stock||[]).length)},
+      rawMovements:{integerValue:String((remote.movements||[]).length)},rawReservations:{integerValue:String((remote.reservations||[]).length)},rawAssignments:{integerValue:String((remote.assignments||[]).length)},
+      source:{stringValue:'preparacion_fusion_duplicados_exactos_v76'}
+    };
+    writes.push({update:{name:`${root}/taller_data/stock`,fields:metaFields},updateMask:{fieldPaths:Object.keys(metaFields)},currentDocument:{updateTime:docs.meta.updateTime}});
+    const response = await fetch(`https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/${encodeURIComponent(DB)}/documents:commit`,{
+      method:'POST',headers:{Authorization:`Bearer ${authToken}`,'Content-Type':'application/json'},body:JSON.stringify({writes})
+    });
+    if(!response.ok){
+      const error = new Error(`No se pudo guardar la reparación (${response.status}): ${(await response.text()).slice(0,260)}`);
+      error.status = response.status;
+      throw error;
+    }
+  }
+  function updateLocalLines(mapping){
+    if(!mapping?.size) return;
+    const lines = Array.isArray(window.estadoMateriales) ? window.estadoMateriales : [];
+    lines.forEach(line => {
+      ['linked_matId','linkedMatId','stockMatId','matId','materialId','stockLinkId','stockId','v2MaterialId'].forEach(field => {
+        const value = String(line?.[field] ?? '').trim();
+        if(mapping.has(value)) line[field] = mapping.get(value);
+      });
+    });
+  }
+  function showStatus(text,kind='ok'){
+    let node = document.getElementById('ldhV76MergeStatus');
+    if(!node){
+      node = document.createElement('div');
+      node.id = 'ldhV76MergeStatus';
+      node.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:999999;padding:7px 10px;border-radius:999px;font:700 11px Segoe UI,Arial;background:#0f1b2d;border:1px solid #1e4f6b;color:#7dd3fc;box-shadow:0 8px 24px rgba(0,0,0,.35)';
+      document.body.appendChild(node);
+    }
+    node.textContent = text;
+    node.style.borderColor = kind === 'error' ? '#b91c1c' : kind === 'working' ? '#ca8a04' : '#15803d';
+    node.style.color = kind === 'error' ? '#fecaca' : kind === 'working' ? '#fde68a' : '#bbf7d0';
+    if(kind === 'ok') setTimeout(() => { if(node?.isConnected) node.remove(); },9000);
+  }
+  async function repair(){
+    if(running || completed) return;
+    running = true;
+    showStatus('Reparando materiales duplicados exactos…','working');
+    try{
+      for(let attempt=0;attempt<3;attempt+=1){
+        const authToken = await token();
+        const meta = await getDocument('taller_data/stock',authToken);
+        const total = Math.max(0,Number(firestoreValue(meta?.fields?.totalChunks) || 0));
+        if(!total) throw new Error('Stock remoto no contiene bloques de datos.');
+        const chunkDocs = await Promise.all(Array.from({length:total},(_,index)=>getDocument(`taller_data/stock/chunks/${index}`,authToken)));
+        const packed = chunkDocs.map(doc => String(firestoreValue(doc?.fields?.part) ?? '')).join('');
+        const remote = parseStock(packed);
+        const result = applyRepair(remote);
+        if(!result.changed){
+          completed = true;
+          showStatus('Stock sin materiales exactos duplicados','ok');
+          return;
+        }
+        try{
+          await commitStock(remote,{meta,chunks:chunkDocs},authToken);
+          window.__LDH_PREP_STOCK_CLOUD_DB = remote;
+          window.__LDH_STOCK_MEMORY_DB = remote;
+          updateLocalLines(result.mapping);
+          try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'fusion_duplicados_exactos_v76'}}));}catch(_){ }
+          try{if(typeof window.renderTabla === 'function') window.renderTabla();}catch(_){ }
+          completed = true;
+          showStatus(`Stock reparado: ${result.mergedMaterials} ficha(s) fusionada(s)`,'ok');
+          alert(
+            `Stock reparado correctamente.\n\n`+
+            `Fichas fusionadas: ${result.mergedMaterials}\n`+
+            `Filas de Stock eliminadas: ${result.removedStockRows}\n`+
+            `Recepciones repetidas eliminadas: ${result.removedMovements}\n`+
+            `Asignaciones repetidas eliminadas: ${result.removedAllocations}\n\n`+
+            `Abre Stock y pulsa Ctrl + F5.`
+          );
+          return;
+        }catch(error){
+          const conflict = error?.status === 409 || /aborted|precondition|conflict/i.test(String(error?.message || error));
+          if(!conflict || attempt === 2) throw error;
+        }
+      }
+    }catch(error){
+      console.error('[Preparación V76] Reparación exacta',error);
+      showStatus('No se pudo reparar Stock: '+String(error?.message || error),'error');
+    }finally{
+      running = false;
+    }
+  }
+  function markBuild(){
+    window.__LDH_PREP_CANONICAL_BUILD = 'PREPARACION-V76-FUSION-DUPLICADOS-EXACTOS-20260806';
+    document.documentElement.dataset.ldhPrepBuild = BUILD;
+    const selectors = ['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
+    for(const selector of selectors){
+      const status = document.querySelector(selector);
+      if(status){
+        const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
+        status.textContent = (base || 'Preparación') + ' · V76';
         break;
       }
     }
@@ -22824,7 +23243,7 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   else start();
   [100,500,1500,4000].forEach(delay => setTimeout(markBuild,delay));
   setInterval(markBuild,1500);
-  console.info('[Preparación V75] Fusión segura de duplicados y creación automática bloqueada');
+  console.info('[Preparación V76] Reparación exacta de materiales duplicados activa');
 })();
 </script>
 
