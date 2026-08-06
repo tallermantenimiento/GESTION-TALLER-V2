@@ -1694,7 +1694,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 </style>
 
 
-<meta name="ldh-build" content="INDEX-ESTADISTICA-ELIMINAR-FILAS-V1-20260805">
+<meta name="ldh-build" content="INDEX-ESTADISTICA-PESO-MANUAL-MATERIAL-V2-20260806">
 <style id="LDH_INDEX_STATS_DELETE_ROW_CSS_0508">
   .ldh-iron-company-table th.action,
   .ldh-iron-company-table td.action,
@@ -1706,6 +1706,20 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   }
   .ldh-iron-delete-row-btn:hover{background:rgba(239,68,68,.23);border-color:rgba(248,113,113,.72)}
   .ldh-iron-delete-row-btn:disabled{opacity:.55;cursor:wait}
+</style>
+<style id="LDH_INDEX_STATS_WEIGHT_OVERRIDE_CSS_0608">
+  .ldh-iron-material-summary{grid-template-columns:minmax(220px,1fr) 90px minmax(240px,290px) 130px!important}
+  .ldh-iron-weight-editor{display:grid;grid-template-columns:minmax(82px,1fr) auto auto;gap:5px;align-items:center;text-align:left}
+  .ldh-iron-weight-editor input{width:100%;min-width:78px;background:#071225;border:1px solid rgba(148,163,184,.28);color:#edf6ff;border-radius:9px;padding:6px 7px;font-size:11px;font-weight:900;outline:none;font-variant-numeric:tabular-nums}
+  .ldh-iron-weight-editor input:focus{border-color:rgba(56,189,248,.65);box-shadow:0 0 0 2px rgba(56,189,248,.10)}
+  .ldh-iron-weight-unit{font-size:10px;color:#cbd5e1;white-space:nowrap;font-weight:900}
+  .ldh-iron-weight-save,.ldh-iron-weight-reset{border-radius:8px;padding:6px 7px;font-size:9px;line-height:1;font-weight:950;cursor:pointer;white-space:nowrap}
+  .ldh-iron-weight-save{border:1px solid rgba(34,197,94,.45);background:rgba(34,197,94,.12);color:#bbf7d0}
+  .ldh-iron-weight-reset{border:1px solid rgba(148,163,184,.30);background:rgba(148,163,184,.08);color:#dbeafe}
+  .ldh-iron-weight-meta{grid-column:1/-1;font-size:9px;line-height:1.25;color:#9fb3d1;font-weight:750}
+  .ldh-iron-weight-meta.manual{color:#86efac}
+  .ldh-iron-manual-tag{display:inline-block;margin-left:4px;border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:#bbf7d0;border-radius:999px;padding:2px 5px;font-size:8px;font-weight:950;vertical-align:1px}
+  @media(max-width:850px){.ldh-iron-material-summary{grid-template-columns:1fr!important}.ldh-iron-weight-editor{max-width:340px}}
 </style>
 </head>
 <body>
@@ -3583,6 +3597,7 @@ function collectAssignments(db){
   }
 
   function openCompanyDetail(companyId){
+    window.__LDH_IRON_STATS_OPEN_COMPANY_ID = String(companyId || "");
     const db = readDB();
     const data = aggregate(collectAssignments(db));
     const comp = data.find(x => String(x.companyId) === String(companyId));
@@ -3772,6 +3787,7 @@ function collectAssignments(db){
   const BAR_LENGTH_M = 6;
   const STATS_CUTOFF_KEY = "ldh_iron_stats_cutoff_date_v1";
   const STATS_EXCLUDE_KEY = "ldh_iron_stats_exclusions_v1";
+  const STATS_WEIGHT_KEY = "ldh_iron_stats_weight_overrides_v1";
   const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
   let mode = "total";
 
@@ -3837,6 +3853,150 @@ function collectAssignments(db){
   function statsDeleteButton(row){
     const key = encodeURIComponent(rowIdentity(row));
     return `<button class="ldh-iron-delete-row-btn" type="button" onclick="LDH_IronStats_deleteRow('${key}')">Eliminar</button>`;
+  }
+
+  function weightOverrideMap(value){
+    const out = {};
+    let obj = value;
+    if(typeof obj === "string"){
+      try{ obj = JSON.parse(obj); }catch(e){ obj = {}; }
+    }
+    if(Array.isArray(obj)){
+      obj.forEach(item=>{ if(item && item.key) out[String(item.key)] = item; });
+    }else if(obj && typeof obj === "object"){
+      Object.keys(obj).forEach(key=>{
+        const item = obj[key];
+        if(item && typeof item === "object") out[String(key)] = Object.assign({key:String(key)}, item);
+      });
+    }
+    return out;
+  }
+  function mergeWeightMaps(){
+    const merged = {};
+    const add = value=>{
+      const map = weightOverrideMap(value);
+      Object.keys(map).forEach(key=>{
+        const next = map[key] || {};
+        const prev = merged[key] || null;
+        const nt = Date.parse(next.updatedAt || next.savedAt || 0) || 0;
+        const pt = prev ? (Date.parse(prev.updatedAt || prev.savedAt || 0) || 0) : -1;
+        if(!prev || nt >= pt) merged[key] = next;
+      });
+    };
+    try{ add(localStorage.getItem(STATS_WEIGHT_KEY)); }catch(e){}
+    try{ add(sessionStorage.getItem(STATS_WEIGHT_KEY)); }catch(e){}
+    try{ add(window.__LDH_IRON_STATS_WEIGHT_OVERRIDES); }catch(e){}
+    return merged;
+  }
+  function writeWeightOverrides(map){
+    const finalMap = weightOverrideMap(map || {});
+    const raw = JSON.stringify(finalMap);
+    window.__LDH_IRON_STATS_WEIGHT_OVERRIDES = finalMap;
+    try{ localStorage.setItem(STATS_WEIGHT_KEY, raw); }
+    catch(e){ try{ sessionStorage.setItem(STATS_WEIGHT_KEY, raw); }catch(e2){} }
+    try{
+      if(typeof window.LDH_IronStats_saveWeightOverridesCloud === "function"){
+        Promise.resolve(window.LDH_IronStats_saveWeightOverridesCloud(finalMap)).catch(err=>console.warn("No se pudo sincronizar el peso manual de materiales", err));
+      }else{
+        window.__LDH_IRON_STATS_WEIGHT_OVERRIDES_PENDING = finalMap;
+      }
+    }catch(e){}
+  }
+  function weightOverrideKey(line){
+    const name = norm(line && line.material);
+    if(name) return "material:" + name;
+    const id = String(line && line.materialId || "").trim();
+    return id ? "id:" + id : "";
+  }
+  function weightBasisForLine(line){
+    return isSheetMaterialName(String(line && line.material || "")) ? "kg/ud" : "kg/m";
+  }
+  function automaticUnitWeight(line){
+    const material = String(line && line.material || "");
+    const kgu = kgPerUnitFromName(material);
+    if(kgu > 0) return {value:kgu,basis:"kg/ud"};
+    return {value:num(line && line.kgm),basis:"kg/m"};
+  }
+  function manualWeightForLine(line){
+    const key = weightOverrideKey(line);
+    if(!key) return null;
+    const item = mergeWeightMaps()[key];
+    if(!item || item.deleted) return null;
+    const value = num(item.value ?? item.weight ?? item.kg);
+    if(!(value > 0)) return null;
+    return {
+      key,
+      value,
+      basis:String(item.basis || weightBasisForLine(line)),
+      materialName:String(item.materialName || line.material || ""),
+      updatedAt:String(item.updatedAt || "")
+    };
+  }
+  function weightEditorForGroup(group){
+    const line = group && group.rows && group.rows[0] ? group.rows[0] : {material:group && group.material, materialId:group && group.materialId, kgm:group && group.kgm};
+    const manual = manualWeightForLine(line);
+    const automatic = automaticUnitWeight(line);
+    const basis = manual ? manual.basis : automatic.basis;
+    const current = manual ? String(manual.value).replace(".", ",") : "";
+    const placeholder = automatic.value > 0 ? String(Number(automatic.value.toFixed(3))).replace(".", ",") : "";
+    const materialName = esc(String(line.material || group.material || ""));
+    const materialId = esc(String(line.materialId || group.materialId || ""));
+    const meta = manual
+      ? `<div class="ldh-iron-weight-meta manual">Peso manual guardado · se aplicará a pedidos actuales y futuros.</div>`
+      : `<div class="ldh-iron-weight-meta">Automático actual: ${fmt(automatic.value)} ${esc(automatic.basis)}. Escribir un valor es opcional.</div>`;
+    return `<div class="ldh-iron-weight-editor" data-material-name="${materialName}" data-material-id="${materialId}" data-basis="${esc(basis)}">
+      <input type="text" inputmode="decimal" value="${esc(current)}" placeholder="${esc(placeholder)}" aria-label="Peso manual de ${materialName}">
+      <span class="ldh-iron-weight-unit">${esc(basis)}</span>
+      <button class="ldh-iron-weight-save" type="button" onclick="LDH_IronStats_saveWeightFromButton(this)">Guardar</button>
+      <button class="ldh-iron-weight-reset" type="button" onclick="LDH_IronStats_clearWeightFromButton(this)" ${manual ? "" : "disabled"}>Automático</button>
+      ${meta}
+    </div>`;
+  }
+  function saveWeightFromButton(button){
+    const editor = button && button.closest ? button.closest(".ldh-iron-weight-editor") : null;
+    if(!editor) return;
+    const input = editor.querySelector("input");
+    const value = num(input && input.value);
+    if(!(value > 0)){
+      alert("Introduce un peso mayor que cero. Usa punto o coma para los decimales.");
+      if(input) input.focus();
+      return;
+    }
+    const line = {material:String(editor.dataset.materialName || ""), materialId:String(editor.dataset.materialId || "")};
+    const key = weightOverrideKey(line);
+    if(!key) return;
+    const map = mergeWeightMaps();
+    map[key] = {
+      key,
+      materialName:line.material,
+      materialId:line.materialId,
+      value,
+      basis:String(editor.dataset.basis || weightBasisForLine(line)),
+      updatedAt:now()
+    };
+    writeWeightOverrides(map);
+    const companyId = window.__LDH_IRON_STATS_OPEN_COMPANY_ID || "";
+    render();
+    if(companyId) setTimeout(()=>openCompanyDetail(companyId),0);
+  }
+  function clearWeightFromButton(button){
+    const editor = button && button.closest ? button.closest(".ldh-iron-weight-editor") : null;
+    if(!editor) return;
+    const line = {material:String(editor.dataset.materialName || ""), materialId:String(editor.dataset.materialId || "")};
+    const key = weightOverrideKey(line);
+    if(!key) return;
+    const map = mergeWeightMaps();
+    map[key] = {
+      key,
+      materialName:line.material,
+      materialId:line.materialId,
+      deleted:true,
+      updatedAt:now()
+    };
+    writeWeightOverrides(map);
+    const companyId = window.__LDH_IRON_STATS_OPEN_COMPANY_ID || "";
+    render();
+    if(companyId) setTimeout(()=>openCompanyDetail(companyId),0);
   }
 
   function readDB(){
@@ -4049,6 +4209,12 @@ function collectAssignments(db){
     const qty = num(line && line.qty);
     const unit = norm((line && (line.unit || line.unidad)) || "");
     const material = String((line && line.material) || "");
+    const manual = manualWeightForLine(line);
+    if(manual){
+      if(manual.basis === "kg/ud") return qty * manual.value;
+      if(unit.includes("barra") || unit.includes("bar") || !unit) return qty * manual.value * BAR_LENGTH_M;
+      return qty * manual.value;
+    }
     const kgm = num(line && line.kgm);
     const kgu = kgPerUnitFromName(material);
 
@@ -4066,7 +4232,8 @@ function collectAssignments(db){
     return qty * kgm;
   }
   function weightInfoForLine(line){
-    const unit = norm((line && (line.unit || line.unidad)) || "");
+    const manual = manualWeightForLine(line);
+    if(manual) return fmt(manual.value) + " " + manual.basis + `<span class="ldh-iron-manual-tag">manual</span>`;
     const material = String((line && line.material) || "");
     const kgu = kgPerUnitFromName(material);
     if(kgu > 0) return fmt(kgu) + " kg/ud";
@@ -4633,6 +4800,7 @@ function collectAssignments(db){
     return bg;
   }
   function openCompanyDetail(companyId){
+    window.__LDH_IRON_STATS_OPEN_COMPANY_ID = String(companyId || "");
     const db = readDB();
     const comp = aggregate(collectAllRows(db)).find(x => String(x.companyId) === String(companyId));
     const bg = ensureCompanyModal();
@@ -4670,7 +4838,7 @@ function collectAssignments(db){
         <div class="ldh-iron-material-summary">
           <div><div class="ldh-iron-material-name">${esc(g.material)}</div><div class="ldh-iron-material-sub">${fmt(g.refs.size)} trabajos donde aparece este material</div></div>
           <div class="ldh-iron-material-kpi">${quantityInfoForMaterial(g.material, g.qty)}</div>
-          <div class="ldh-iron-material-kpi">${weightInfoForLine(g.rows[0])}</div>
+          <div class="ldh-iron-material-kpi">${weightEditorForGroup(g)}</div>
           <div class="ldh-iron-material-kpi">${fmt(g.kg)} kg est.</div>
         </div>
         <table class="ldh-iron-company-table">
@@ -4728,6 +4896,7 @@ function collectAssignments(db){
     if(reopen) setTimeout(()=>openCompanyDetail(companyId), 0);
   }
   function closeCompanyDetail(){
+    window.__LDH_IRON_STATS_OPEN_COMPANY_ID = "";
     const bg = document.getElementById("ldhIronCompanyModalBg");
     if(bg) bg.classList.remove("show");
   }
@@ -5065,6 +5234,8 @@ function collectAssignments(db){
   window.LDH_IronStats_openCompany = openCompanyDetail;
   window.LDH_IronStats_closeCompany = closeCompanyDetail;
   window.LDH_IronStats_deleteRow = deleteStatsRow;
+  window.LDH_IronStats_saveWeightFromButton = saveWeightFromButton;
+  window.LDH_IronStats_clearWeightFromButton = clearWeightFromButton;
   window.LDH_IronStats_seedDemo = seedDemo;
   window.LDH_IronStats_clearDemo = clearDemo;
   window.LDH_IronStats_print = printReport;
@@ -5075,7 +5246,7 @@ function collectAssignments(db){
 
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", render);
   else render();
-  window.addEventListener("storage", ev=>{ if(ev && (ev.key===KEY || ev.key==="ldh_company_master_v1" || (ev.key||"").startsWith("prep_"))) render(); });
+  window.addEventListener("storage", ev=>{ if(ev && (ev.key===KEY || ev.key==="ldh_company_master_v1" || ev.key===STATS_WEIGHT_KEY || (ev.key||"").startsWith("prep_"))) render(); });
 })();
 </script>
 
@@ -5462,6 +5633,111 @@ function ldhStatsStoreLocal(map){
     },err=>console.warn("Exclusiones de estadística sin escucha en vivo",err));
     try{ window.LDH_IronStats_render && window.LDH_IronStats_render(); }catch(e){}
   }catch(e){ console.warn("Exclusiones de estadística: Firebase no disponible; se conservarán localmente",e); }
+})();
+</script>
+
+<script type="module" id="LDH_INDEX_IRON_STATS_WEIGHT_OVERRIDES_FIRESTORE_0608">
+/* Peso manual por material para la estadística. No modifica fichas ni movimientos de Stock. */
+const LDH_STATS_WEIGHT_KEY_V2 = "ldh_iron_stats_weight_overrides_v1";
+const LDH_STATS_WEIGHT_CONFIG = {
+  apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
+  authDomain: "gestion-taller-stock.firebaseapp.com",
+  projectId: "gestion-taller-stock",
+  storageBucket: "gestion-taller-stock.firebasestorage.app",
+  messagingSenderId: "164944519480",
+  appId: "1:164944519480:web:bfa9173d22f88a3b56e1cd"
+};
+function ldhWeightMap(value){
+  const out={};
+  let obj=value;
+  if(typeof obj==="string"){ try{ obj=JSON.parse(obj); }catch(e){ obj={}; } }
+  if(Array.isArray(obj)) obj.forEach(item=>{ if(item&&item.key) out[String(item.key)]=item; });
+  else if(obj&&typeof obj==="object") Object.keys(obj).forEach(key=>{ if(obj[key]&&typeof obj[key]==="object") out[String(key)]=Object.assign({key:String(key)},obj[key]); });
+  return out;
+}
+function ldhMergeWeightMaps(...maps){
+  const out={};
+  maps.forEach(value=>{
+    const map=ldhWeightMap(value);
+    Object.keys(map).forEach(key=>{
+      const next=map[key]||{};
+      const prev=out[key]||null;
+      const nt=Date.parse(next.updatedAt||next.savedAt||0)||0;
+      const pt=prev?(Date.parse(prev.updatedAt||prev.savedAt||0)||0):-1;
+      if(!prev||nt>=pt) out[key]=next;
+    });
+  });
+  return out;
+}
+function ldhLocalWeights(){
+  let a={},b={},c={};
+  try{ a=localStorage.getItem(LDH_STATS_WEIGHT_KEY_V2)||{}; }catch(e){}
+  try{ b=sessionStorage.getItem(LDH_STATS_WEIGHT_KEY_V2)||{}; }catch(e){}
+  try{ c=window.__LDH_IRON_STATS_WEIGHT_OVERRIDES||{}; }catch(e){}
+  return ldhMergeWeightMaps(a,b,c);
+}
+function ldhStoreWeights(map){
+  const finalMap=ldhWeightMap(map||{});
+  window.__LDH_IRON_STATS_WEIGHT_OVERRIDES=finalMap;
+  const raw=JSON.stringify(finalMap);
+  try{ localStorage.setItem(LDH_STATS_WEIGHT_KEY_V2,raw); }
+  catch(e){ try{ sessionStorage.setItem(LDH_STATS_WEIGHT_KEY_V2,raw); }catch(e2){} }
+}
+function ldhRefreshWeightUI(){
+  try{ window.LDH_IronStats_render&&window.LDH_IronStats_render(); }catch(e){}
+  const companyId=window.__LDH_IRON_STATS_OPEN_COMPANY_ID||"";
+  if(companyId) setTimeout(()=>{ try{ window.LDH_IronStats_openCompany&&window.LDH_IronStats_openCompany(companyId); }catch(e){} },0);
+}
+(async()=>{
+  try{
+    const {initializeApp,getApps,getApp}=await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
+    const {getAuth,onAuthStateChanged,signInAnonymously}=await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+    const {getFirestore,doc,getDoc,onSnapshot,setDoc,serverTimestamp}=await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+    const appName="ldh-index-iron-stats-weight-overrides-v1";
+    const app=getApps().some(a=>a.name===appName)?getApp(appName):initializeApp(LDH_STATS_WEIGHT_CONFIG,appName);
+    const auth=getAuth(app);
+    const db=getFirestore(app);
+    const ref=doc(db,"taller_data","iron_stats_weight_overrides");
+    await new Promise(resolve=>{
+      let done=false;
+      const finish=()=>{ if(!done){ done=true; resolve(); } };
+      const unsub=onAuthStateChanged(auth,async user=>{
+        try{
+          if(user){ try{unsub();}catch(e){} finish(); return; }
+          try{ await signInAnonymously(auth); }catch(e){}
+        }finally{ finish(); }
+      });
+      setTimeout(finish,3500);
+    });
+    let cloudMap={};
+    try{
+      const snap=await getDoc(ref);
+      if(snap.exists()) cloudMap=ldhWeightMap((snap.data()||{}).rows||[]);
+    }catch(e){ console.warn("No se pudieron leer los pesos manuales de estadística",e); }
+    let merged=ldhMergeWeightMaps(cloudMap,ldhLocalWeights());
+    ldhStoreWeights(merged);
+    window.LDH_IronStats_saveWeightOverridesCloud=async function(map){
+      const finalMap=ldhMergeWeightMaps(cloudMap,ldhLocalWeights(),map||{});
+      await setDoc(ref,{version:1,updatedAt:serverTimestamp(),rows:Object.values(finalMap)},{merge:false});
+      cloudMap=finalMap;
+      ldhStoreWeights(finalMap);
+      return true;
+    };
+    if(window.__LDH_IRON_STATS_WEIGHT_OVERRIDES_PENDING){
+      try{ await window.LDH_IronStats_saveWeightOverridesCloud(window.__LDH_IRON_STATS_WEIGHT_OVERRIDES_PENDING); }catch(e){}
+      delete window.__LDH_IRON_STATS_WEIGHT_OVERRIDES_PENDING;
+    }else if(Object.keys(merged).length>Object.keys(cloudMap).length){
+      try{ await window.LDH_IronStats_saveWeightOverridesCloud(merged); }catch(e){}
+    }
+    onSnapshot(ref,snap=>{
+      if(!snap.exists()) return;
+      cloudMap=ldhWeightMap((snap.data()||{}).rows||[]);
+      merged=ldhMergeWeightMaps(cloudMap,ldhLocalWeights());
+      ldhStoreWeights(merged);
+      ldhRefreshWeightUI();
+    },err=>console.warn("Pesos manuales de estadística sin escucha en vivo",err));
+    ldhRefreshWeightUI();
+  }catch(e){ console.warn("Pesos manuales de estadística: Firebase no disponible; se conservarán localmente",e); }
 })();
 </script>
 
