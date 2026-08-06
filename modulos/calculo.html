@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
-  <meta name="ldh-build" content="CALC-PEDIDO-COMPUESTO-V2-PARTID-ID-SEGURO-20260805">
+  <meta name="ldh-build" content="CALC-PESO-MATERIAL-USADO-V3-20260806">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -42,7 +42,7 @@
     .right{text-align:right}
     .pill{display:inline-flex;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:900;border:1px solid rgba(34,211,238,.25);background:rgba(34,211,238,.08);color:#a5f3fc}
     .empty{text-align:center;color:var(--muted);padding:30px 14px;border:1px dashed rgba(148,163,184,.25);border-radius:14px;background:rgba(15,23,42,.35)}
-    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px}
+    .summary{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
     .kpi{border:1px solid var(--line);border-radius:14px;padding:13px;background:rgba(15,23,42,.55)}
     .kpi b{display:block;font-size:21px;margin-top:4px}
     .print-only{display:none}
@@ -71,6 +71,18 @@
   .calc-plan-empty{padding:18px;text-align:center;color:#93a4bb;border:1px dashed rgba(148,163,184,.25);border-radius:12px}
 </style>
 
+
+<style id="LDH_CALC_PESO_MATERIAL_USADO_V3_CSS">
+  .kpi small{display:block;margin-top:5px;color:#93a4bb;font-size:10px;line-height:1.3;font-weight:700}
+  .ldh-weight-value{font-weight:950;color:#bbf7d0;font-variant-numeric:tabular-nums}
+  .ldh-weight-rate{color:#fde68a;font-weight:850;font-variant-numeric:tabular-nums}
+  .ldh-weight-source{display:block;margin-top:3px;color:#93a4bb;font-size:9px;line-height:1.2}
+  .ldh-weight-source.manual{color:#86efac}
+  .ldh-weight-note{margin-top:10px;color:#93a4bb;font-size:11px;line-height:1.4}
+  .ldh-weight-note strong{color:#dbeafe}
+  @media(max-width:1100px){.summary{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:900px){.summary{grid-template-columns:1fr}}
+</style>
 </head>
 <body>
   <div class="topbar">
@@ -134,24 +146,26 @@
       <div class="kpi"><span class="muted">Referencia</span><b id="kpiRef">—</b></div>
       <div class="kpi"><span class="muted">Concepto</span><b id="kpiConcept">—</b></div>
       <div class="kpi"><span class="muted">Empresa</span><b id="kpiCompany">—</b></div>
+      <div class="kpi"><span class="muted">Peso utilizado</span><b id="kpiWeight">0 kg</b><small id="kpiWeightNote">Metros reales utilizados, sin contar la merma de las barras.</small></div>
     </section>
 
     <div class="grid-2">
       <section class="card">
         <h2 style="margin-top:0">Materiales Lineales (mm)</h2>
         <table>
-          <thead><tr><th>Perfil</th><th class="right">Total mm</th></tr></thead>
+          <thead><tr><th>Perfil</th><th class="right">Total mm</th><th class="right">kg/m</th><th class="right">Peso utilizado</th></tr></thead>
           <tbody id="lineRows"></tbody>
-          <tfoot><tr><th>Total GL</th><th class="right" id="sumLineales">0</th></tr></tfoot>
+          <tfoot><tr><th>Total GL</th><th class="right" id="sumLineales">0</th><th></th><th class="right ldh-weight-value" id="sumLineWeight">0 kg</th></tr></tfoot>
         </table>
       </section>
 
       <section class="card">
         <h2 style="margin-top:0">Accesorios / Unidades</h2>
         <table>
-          <thead><tr><th>Artículo</th><th class="right">Cant.</th></tr></thead>
+          <thead><tr><th>Artículo</th><th class="right">Cant.</th><th class="right">Peso unitario</th><th class="right">Peso utilizado</th></tr></thead>
           <tbody id="unitRows"></tbody>
         </table>
+        <div class="ldh-weight-note" id="weightCoverageNote"><strong>Criterio:</strong> perfiles por metros reales utilizados; chapas y unidades solo cuando tienen peso conocido o guardado. No se contabiliza la merma de las barras.</div>
       </section>
     </div>
 
@@ -849,6 +863,286 @@
   }
   hook();
   window.LDH_CALC_PLANOS={reload:load};
+})();
+</script>
+
+
+<script id="LDH_CALC_PESO_MATERIAL_USADO_V3_JS">
+(function(){
+  if(window.__LDH_CALC_WEIGHT_V3_INSTALLED) return;
+  window.__LDH_CALC_WEIGHT_V3_INSTALLED = true;
+
+  const WEIGHT_KEY = "ldh_iron_stats_weight_overrides_v1";
+
+  function n(v){
+    const x = parseFloat(String(v ?? 0).replace(",", "."));
+    return Number.isFinite(x) ? x : 0;
+  }
+  function fmt(v, dec=2){
+    const x = n(v);
+    return x.toLocaleString("es-ES", {minimumFractionDigits:0, maximumFractionDigits:dec});
+  }
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+  function norm(s){
+    return String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/,/g, ".")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  function getStore(key){
+    try{ const v=localStorage.getItem(key); if(v!==null && v!=="") return v; }catch(e){}
+    try{ const v=sessionStorage.getItem(key); if(v!==null && v!=="") return v; }catch(e){}
+    return "";
+  }
+  function parse(raw, fallback){ try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; } }
+
+  function weightMap(value){
+    const out={};
+    let obj=value;
+    if(typeof obj==="string") obj=parse(obj,{});
+    if(Array.isArray(obj)){
+      obj.forEach(item=>{ if(item && item.key) out[String(item.key)]=item; });
+    }else if(obj && typeof obj==="object"){
+      Object.keys(obj).forEach(key=>{
+        const item=obj[key];
+        if(item && typeof item==="object") out[String(key)]=Object.assign({key:String(key)},item);
+      });
+    }
+    return out;
+  }
+  function readWeightOverrides(){
+    const merged={};
+    const add=value=>{
+      const map=weightMap(value);
+      Object.keys(map).forEach(key=>{
+        const next=map[key]||{};
+        const prev=merged[key]||null;
+        const nt=Date.parse(next.updatedAt||next.savedAt||0)||0;
+        const pt=prev ? (Date.parse(prev.updatedAt||prev.savedAt||0)||0) : -1;
+        if(!prev || nt>=pt) merged[key]=next;
+      });
+    };
+    try{ add(localStorage.getItem(WEIGHT_KEY)); }catch(e){}
+    try{ add(sessionStorage.getItem(WEIGHT_KEY)); }catch(e){}
+    try{ add(window.__LDH_IRON_STATS_WEIGHT_OVERRIDES); }catch(e){}
+    return merged;
+  }
+  function manualWeight(name,id){
+    const map=readWeightOverrides();
+    const nameKey=norm(name) ? "material:"+norm(name) : "";
+    const idKey=id ? "id:"+String(id) : "";
+    const item=(nameKey && map[nameKey]) || (idKey && map[idKey]) || null;
+    if(!item || item.deleted) return null;
+    const value=n(item.value ?? item.weight ?? item.kg);
+    if(!(value>0)) return null;
+    return {value,basis:String(item.basis||"kg/m"),source:"Peso manual guardado"};
+  }
+
+  function readStock(){ return parse(getStore("ldh_v2_company_stock_v1"),{}) || {}; }
+  function allStockMaterials(){
+    const db=readStock(), out=[];
+    if(Array.isArray(db.materials)) out.push(...db.materials);
+    if(db.db && Array.isArray(db.db.materials)) out.push(...db.db.materials);
+    if(db.stock && typeof db.stock==="object"){
+      Object.values(db.stock).forEach(pack=>{
+        if(Array.isArray(pack)) out.push(...pack);
+        if(pack && Array.isArray(pack.materials)) out.push(...pack.materials);
+      });
+    }
+    return out;
+  }
+  function stockMaterial(id,name){
+    const mats=allStockMaterials();
+    if(id){
+      const found=mats.find(m=>String(m?.id||m?.materialId||m?.matId||"")===String(id));
+      if(found) return found;
+    }
+    const key=norm(name);
+    return key ? mats.find(m=>norm(m?.name||m?.nombre||m?.material||m?.label)===key) || null : null;
+  }
+  function firstPositive(obj,keys){
+    for(const key of keys){ const value=n(obj && obj[key]); if(value>0) return value; }
+    return 0;
+  }
+  function stockKgPerMeter(mat){
+    return firstPositive(mat,["kgm","kg_m","kgPerMeter","kg_per_m","pesoMetro","peso_metro","pesoPorMetro","weightPerMeter"]);
+  }
+  function stockKgPerUnit(mat){
+    return firstPositive(mat,["kgu","kg_ud","kgPerUnit","kg_per_unit","pesoUnidad","peso_unidad","pesoPorUnidad","weightPerUnit"]);
+  }
+
+  function extractDims(name){
+    const s=norm(name).replace(/ø/g,"diam ").replace(/∅/g,"diam ");
+    const m=s.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/i);
+    if(m) return m.slice(1).filter(Boolean).map(Number);
+    const d=s.match(/(?:diam|redondo|tubo redondo|red)\s*(\d+(?:\.\d+)?)(?:\s*x\s*(\d+(?:\.\d+)?))?/i);
+    if(d) return d.slice(1).filter(Boolean).map(Number);
+    const chapa=s.match(/chapa\s*(?:de\s*)?(\d+(?:\.\d+)?)/i);
+    if(chapa) return [1000,Number(chapa[1])];
+    return [];
+  }
+  function kgPerMeterFromName(name){
+    const s=norm(name), d=extractDims(name);
+    let kgm=0;
+    if(d.length>=3){
+      const a=d[0],b=d[1],t=d[2];
+      if(s.includes("angulo")||s.includes("angular")||s.includes("l ")) kgm=Math.max(0,(a+b-t)*t*0.00785);
+      else kgm=Math.max(0,(2*t*(a+b-2*t))*0.00785);
+    }else if(d.length===2){
+      const a=d[0],b=d[1];
+      const diameter=s.includes("diam")||s.includes("ø")||s.includes("tubo redondo")||s.includes("redondo")||s.includes("barra redonda");
+      if(diameter && !s.includes("macizo") && b>0 && b<(a/2)) kgm=Math.max(0,Math.PI*b*(a-b)*0.00785);
+      else if(s.includes("pletina")||s.includes("planchuela")||s.includes("llanta")) kgm=Math.max(0,a*b*0.00785);
+      else if(s.includes("redondo")||s.includes("macizo")||s.includes("barra redonda")){ const r=a/2; kgm=Math.PI*r*r*0.00785; }
+      else kgm=Math.max(0.6,(a+b)*0.018);
+    }else if(d.length===1){
+      const a=d[0];
+      if(s.includes("redondo")||s.includes("macizo")){ const r=a/2; kgm=Math.PI*r*r*0.00785; }
+      else kgm=Math.max(0.5,a*0.035);
+    }
+    return Number.isFinite(kgm) && kgm>0 ? kgm : 0;
+  }
+  function isSheet(name){ const s=norm(name); return s.includes("chapa")||s.includes("malla")||s.includes("panel")||s.includes("plancha"); }
+  function sheetFactor(name){ const s=norm(name); if(s.includes("perforad")||s.includes("punzonad")) return .60; if(s.includes("malla")||s.includes("rejilla")) return .55; return 1; }
+  function kgPerUnitFromName(name){
+    const s=norm(name), d=extractDims(name);
+    if(isSheet(name) && (s.includes("sandwich")||s.includes("sadwich")||s.includes("sandwitch")||s.includes("panel aislante")) && d.length>=2){
+      const kg=(d[0]/1000)*(d[1]/1000)*13.2;
+      return Number.isFinite(kg)&&kg>0?kg:0;
+    }
+    if(isSheet(name) && d.length>=3){
+      const kg=(d[0]/1000)*(d[1]/1000)*(d[2]/1000)*7850*sheetFactor(name);
+      return Number.isFinite(kg)&&kg>0?kg:0;
+    }
+    return 0;
+  }
+
+  function lineRate(name,id){
+    const manual=manualWeight(name,id);
+    if(manual && manual.basis==="kg/m") return manual;
+    const mat=stockMaterial(id,name);
+    const fromStock=stockKgPerMeter(mat);
+    if(fromStock>0) return {value:fromStock,basis:"kg/m",source:"Peso de la ficha de Stock"};
+    const automatic=kgPerMeterFromName(name);
+    if(automatic>0) return {value:automatic,basis:"kg/m",source:"Estimación automática por medidas"};
+    return null;
+  }
+  function unitRate(name,id){
+    const manual=manualWeight(name,id);
+    if(manual && manual.basis==="kg/ud") return manual;
+    const mat=stockMaterial(id,name);
+    const fromStock=stockKgPerUnit(mat);
+    if(fromStock>0) return {value:fromStock,basis:"kg/ud",source:"Peso de la ficha de Stock"};
+    const automatic=kgPerUnitFromName(name);
+    if(automatic>0) return {value:automatic,basis:"kg/ud",source:"Estimación automática por dimensiones"};
+    return null;
+  }
+  function rowMeta(rows,name){
+    const key=norm(name);
+    const row=(Array.isArray(rows)?rows:[]).find(x=>norm(x?.mat||x?.material||x?.name)===key) || {};
+    return {id:String(row.stockMatId||row.linked_matId||row.matId||""),row};
+  }
+
+  function calculateWeight(lineales,unidades,barras,accesorios){
+    const lineDetails=[], unitDetails=[];
+    let lineKg=0, unitKg=0, unknownUnits=0;
+    Object.keys(lineales||{}).forEach(name=>{
+      const mm=n(lineales[name]);
+      const meta=rowMeta(barras,name);
+      const rate=lineRate(name,meta.id);
+      const kg=rate ? (mm/1000)*rate.value : 0;
+      if(rate) lineKg+=kg;
+      lineDetails.push({name,mm,id:meta.id,rate,kg});
+    });
+    Object.keys(unidades||{}).forEach(name=>{
+      const qty=n(unidades[name]);
+      const meta=rowMeta(accesorios,name);
+      const rate=unitRate(name,meta.id);
+      const kg=rate ? qty*rate.value : 0;
+      if(rate) unitKg+=kg; else if(qty>0) unknownUnits++;
+      unitDetails.push({name,qty,id:meta.id,rate,kg});
+    });
+    return {lineKg,unitKg,totalKg:lineKg+unitKg,unknownUnits,lineDetails,unitDetails};
+  }
+
+  function renderWeight(lineales,unidades,barras,accesorios){
+    const result=calculateWeight(lineales,unidades,barras,accesorios);
+    const lineRows=document.getElementById("lineRows");
+    const unitRows=document.getElementById("unitRows");
+    const kpi=document.getElementById("kpiWeight");
+    const note=document.getElementById("kpiWeightNote");
+    const lineTotal=document.getElementById("sumLineWeight");
+    const coverage=document.getElementById("weightCoverageNote");
+
+    if(kpi) kpi.textContent=fmt(result.totalKg,2)+" kg";
+    if(note){
+      const parts=[fmt(result.lineKg,2)+" kg de perfiles por longitud real"];
+      if(result.unitKg>0) parts.push(fmt(result.unitKg,2)+" kg de chapas/unidades conocidas");
+      note.textContent=parts.join(" · ")+". Sin contar la merma de barras.";
+    }
+    if(lineTotal) lineTotal.textContent=fmt(result.lineKg,2)+" kg";
+
+    if(lineRows){
+      lineRows.innerHTML=result.lineDetails.length ? result.lineDetails.map(item=>{
+        const rate=item.rate;
+        const rateHtml=rate ? `<span class="ldh-weight-rate">${fmt(rate.value,3)}</span><span class="ldh-weight-source ${rate.source.startsWith("Peso manual")?"manual":""}">${esc(rate.source)}</span>` : `<span class="muted">Sin peso</span>`;
+        const kgHtml=rate ? `<span class="ldh-weight-value">${fmt(item.kg,2)} kg</span>` : `<span class="muted">—</span>`;
+        return `<tr><td>${esc(item.name)}</td><td class="right">${fmt(item.mm,0)}</td><td class="right">${rateHtml}</td><td class="right">${kgHtml}</td></tr>`;
+      }).join("") : `<tr><td colspan="4"><div class="empty">Sin materiales lineales.</div></td></tr>`;
+    }
+
+    if(unitRows){
+      unitRows.innerHTML=result.unitDetails.length ? result.unitDetails.map(item=>{
+        const rate=item.rate;
+        const rateHtml=rate ? `<span class="ldh-weight-rate">${fmt(rate.value,3)} kg/ud</span><span class="ldh-weight-source ${rate.source.startsWith("Peso manual")?"manual":""}">${esc(rate.source)}</span>` : `<span class="muted">Sin peso definido</span>`;
+        const kgHtml=rate ? `<span class="ldh-weight-value">${fmt(item.kg,2)} kg</span>` : `<span class="muted">No incluido</span>`;
+        return `<tr><td>${esc(item.name)}</td><td class="right">${fmt(item.qty,3)}</td><td class="right">${rateHtml}</td><td class="right">${kgHtml}</td></tr>`;
+      }).join("") : `<tr><td colspan="4"><div class="empty">Sin accesorios.</div></td></tr>`;
+    }
+
+    if(coverage){
+      coverage.innerHTML=`<strong>Criterio:</strong> perfiles calculados con los metros exactos utilizados, no con barras completas. ${result.unknownUnits ? `${result.unknownUnits} accesorio${result.unknownUnits===1?"":"s"} sin peso definido no se incluye${result.unknownUnits===1?"":"n"} en el total.` : "Todos los materiales con peso conocido están incluidos."}`;
+    }
+
+    if(window.App && window.App.last){
+      window.App.last.peso_utilizado_kg=result.totalKg;
+      window.App.last.peso_lineales_kg=result.lineKg;
+      window.App.last.peso_unidades_kg=result.unitKg;
+      window.App.last.peso_detalle={lineales:result.lineDetails,unidades:result.unitDetails};
+    }
+    window.__LDH_CALC_WEIGHT_LAST=result;
+  }
+
+  function install(){
+    const App=window.App;
+    if(!App || App.__weightV3Hooked) return false;
+    App.__weightV3Hooked=true;
+    const original=App.renderResults.bind(App);
+    App.renderResults=function(lineales,unidades,barras,accesorios){
+      const out=original(lineales,unidades,barras,accesorios);
+      renderWeight(lineales||{},unidades||{},barras||[],accesorios||[]);
+      return out;
+    };
+    renderWeight({}, {}, [], []);
+    return true;
+  }
+
+  if(!install()){
+    let tries=0;
+    const timer=setInterval(()=>{
+      tries++;
+      if(install() || tries>100) clearInterval(timer);
+    },50);
+  }
+  window.LDH_CALC_WEIGHT_V3={recalculate:()=>{
+    const last=window.App?.last||{};
+    renderWeight(last.lineales||{},last.unidades||{},last.barras||[],last.accesorios||[]);
+  }};
 })();
 </script>
 
