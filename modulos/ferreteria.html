@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="ldh-build" content="FERRETERIA-V2-IDB-RECEPCIONES-PREPARACION-20260806">
 <title>LDH v2 · Ferretería</title>
 <style>
 :root{
@@ -6753,6 +6754,188 @@ window.LDH_borrarMovimientosTodos = function(){
   };
 
   setTimeout(function(){ try{ if(typeof window.render === 'function') window.render(); }catch(e){} }, 0);
+})();
+</script>
+
+
+
+<script id="LDH_FERRETERIA_V2_IDB_RECEPCIONES_PREPARACION_20260806">
+(function(){
+  'use strict';
+  if(window.__LDH_FERRETERIA_V2_IDB__) return;
+  window.__LDH_FERRETERIA_V2_IDB__ = true;
+
+  const BUILD = 'FERRETERIA-V2-IDB-RECEPCIONES-PREPARACION-20260806';
+  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
+  const IDB_NAME = 'ldh_workshop_resilient_v1';
+  const IDB_STORE = 'snapshots';
+  const IDB_KEY = 'ferreteria_db';
+  const channelName = 'ldh_ferreteria_v69';
+
+  function openIdb(){
+    return new Promise((resolve, reject) => {
+      if(!window.indexedDB) return reject(new Error('IndexedDB no disponible.'));
+      const request = indexedDB.open(IDB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if(!database.objectStoreNames.contains(IDB_STORE)){
+          database.createObjectStore(IDB_STORE, {keyPath:'key'});
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('No se pudo abrir IndexedDB.'));
+    });
+  }
+
+  async function idbGet(key){
+    const database = await openIdb();
+    try{
+      return await new Promise((resolve, reject) => {
+        const tx = database.transaction(IDB_STORE, 'readonly');
+        const request = tx.objectStore(IDB_STORE).get(key);
+        request.onsuccess = () => resolve(request.result?.value ?? null);
+        request.onerror = () => reject(request.error || new Error('No se pudo leer IndexedDB.'));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  async function idbPut(key, value){
+    const database = await openIdb();
+    try{
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put({key, value, updatedAt:Date.now()});
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error('No se pudo guardar IndexedDB.'));
+        tx.onabort = () => reject(tx.error || new Error('Guardado IndexedDB cancelado.'));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  function timestamp(value){
+    const parsed = Date.parse(String(value?.updatedAt || value?.actualizadoEn || ''));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function normalize(value){
+    const result = value && typeof value === 'object' ? value : {};
+    result.version = result.version || '2.0-ferreteria-comun';
+    result.companies = Array.isArray(result.companies) ? result.companies : [];
+    result.materials = Array.isArray(result.materials) ? result.materials : [];
+    result.stock = Array.isArray(result.stock) ? result.stock : [];
+    result.movements = Array.isArray(result.movements) ? result.movements : [];
+    result.jobs = Array.isArray(result.jobs) ? result.jobs : [];
+    result.reservations = Array.isArray(result.reservations) ? result.reservations : [];
+    result.assignments = Array.isArray(result.assignments) ? result.assignments : [];
+    result.reservationDebts = Array.isArray(result.reservationDebts) ? result.reservationDebts : [];
+    return result;
+  }
+
+  function writeCompatibility(dbValue){
+    const raw = JSON.stringify(dbValue);
+    let local = false;
+    let session = false;
+    try{ localStorage.setItem(STORAGE_KEY, raw); local = true; }
+    catch(error){ console.warn('[Ferreteria V2] localStorage lleno; se conserva IndexedDB.', error); }
+    try{ sessionStorage.setItem(STORAGE_KEY, raw); session = true; }
+    catch(error){ console.warn('[Ferreteria V2] sessionStorage no disponible.', error); }
+    return {local, session};
+  }
+
+  function announce(updatedAt){
+    try{
+      const channel = new BroadcastChannel(channelName);
+      channel.postMessage({type:'ferreteria-updated', updatedAt});
+      channel.close();
+    }catch(_){ }
+  }
+
+  async function persist(dbValue){
+    const normalized = normalize(dbValue);
+    normalized.updatedAt = new Date().toISOString();
+    writeCompatibility(normalized);
+    try{ await idbPut(IDB_KEY, normalized); }
+    catch(error){ console.warn('[Ferreteria V2] No se pudo guardar IndexedDB.', error); }
+    announce(normalized.updatedAt);
+    return normalized;
+  }
+
+  const previousSave = window.save;
+  window.save = save = function saveFerreteriaResilienteV2(){
+    try{
+      db = normalize(db);
+      db.updatedAt = new Date().toISOString();
+      writeCompatibility(db);
+      idbPut(IDB_KEY, db)
+        .then(() => announce(db.updatedAt))
+        .catch(error => console.warn('[Ferreteria V2] Guardado IndexedDB pendiente fallo.', error));
+      return true;
+    }catch(error){
+      console.error('[Ferreteria V2] No se pudo guardar.', error);
+      try{ return typeof previousSave === 'function' ? previousSave() : false; }
+      catch(_){ return false; }
+    }
+  };
+
+  async function adoptLatest(){
+    let best = null;
+    try{
+      const sessionRaw = sessionStorage.getItem(STORAGE_KEY);
+      if(sessionRaw) best = JSON.parse(sessionRaw);
+    }catch(_){ }
+    try{
+      const indexed = await idbGet(IDB_KEY);
+      if(indexed && (!best || timestamp(indexed) >= timestamp(best))) best = indexed;
+    }catch(error){
+      console.warn('[Ferreteria V2] No se pudo leer IndexedDB.', error);
+    }
+    try{
+      const localRaw = localStorage.getItem(STORAGE_KEY);
+      const local = localRaw ? JSON.parse(localRaw) : null;
+      if(local && (!best || timestamp(local) > timestamp(best))) best = local;
+    }catch(_){ }
+
+    if(best && (!window.db || timestamp(best) >= timestamp(window.db))){
+      db = window.db = normalize(best);
+      window.__LDH_FERRETERIA_MEMORY_DB = db;
+      writeCompatibility(db);
+      try{ if(typeof window.refreshSelectors === 'function') window.refreshSelectors(); }catch(_){ }
+      try{ if(typeof window.render === 'function') window.render(); }catch(_){ }
+    }else if(window.db){
+      try{ await idbPut(IDB_KEY, normalize(window.db)); }catch(_){ }
+    }
+  }
+
+  window.addEventListener('storage', event => {
+    if(event.key !== STORAGE_KEY || !event.newValue) return;
+    try{
+      const incoming = normalize(JSON.parse(event.newValue));
+      if(!window.db || timestamp(incoming) >= timestamp(window.db)){
+        db = window.db = incoming;
+        window.__LDH_FERRETERIA_MEMORY_DB = db;
+        idbPut(IDB_KEY, db).catch(() => {});
+        try{ if(typeof window.render === 'function') window.render(); }catch(_){ }
+      }
+    }catch(error){ console.warn('[Ferreteria V2] Actualizacion entre pestanas invalida.', error); }
+  });
+
+  try{
+    const channel = new BroadcastChannel(channelName);
+    channel.onmessage = event => {
+      if(event?.data?.type === 'ferreteria-updated') adoptLatest();
+    };
+    window.__LDH_FERRETERIA_CHANNEL_V2 = channel;
+  }catch(_){ }
+
+  window.LDH_FerreteriaPersistV2 = persist;
+  window.LDH_FerreteriaReloadV2 = adoptLatest;
+  setTimeout(adoptLatest, 50);
+  window.addEventListener('focus', adoptLatest);
+  console.info('[Ferreteria V2] Persistencia resistente activa', BUILD);
 })();
 </script>
 
