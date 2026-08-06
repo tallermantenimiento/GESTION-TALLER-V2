@@ -1694,7 +1694,7 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 </style>
 
 
-<meta name="ldh-build" content="INDEX-ESTADISTICA-PESO-MANUAL-MATERIAL-V2-20260806">
+<meta name="ldh-build" content="INDEX-ESTADISTICA-DEDUP-FUENTES-V3-20260806">
 <style id="LDH_INDEX_STATS_DELETE_ROW_CSS_0508">
   .ldh-iron-company-table th.action,
   .ldh-iron-company-table td.action,
@@ -4501,6 +4501,51 @@ function collectAssignments(db){
   }
 
 
+  /* V3 · Evita contabilizar la misma necesidad en varias capas del flujo.
+     Solo deduplica cuando empresa, referencia, material y cantidad coinciden.
+     Prioridad: Fabricación nube > Asignación > Reserva > Preparación. */
+  function LDH_IronStats_sourcePriority(row){
+    const type = String((row && row.sourceType) || "").toLowerCase();
+    const source = norm(row && row.source);
+    if(type === "fabrication_cloud" || source.includes("fabricacionnube")) return 400;
+    if(type === "assignment" || source === "asignacion") return 300;
+    if(type === "reservation" || source === "reserva") return 250;
+    if(type === "preparation" || source === "preparacion") return 200;
+    return 100;
+  }
+  function LDH_IronStats_crossSourceKey(row){
+    const qty = num(row && row.qty);
+    const qtyKey = Number.isFinite(qty) ? qty.toFixed(6) : "0.000000";
+    return [
+      norm((row && (row.company || row.companyId)) || ""),
+      norm((row && row.ref) || ""),
+      norm((row && (row.material || row.materialId)) || ""),
+      qtyKey
+    ].join("|");
+  }
+  function LDH_IronStats_dedupeCrossSources(rows){
+    const input = Array.isArray(rows) ? rows : [];
+    const groups = new Map();
+    input.forEach((row,index)=>{
+      const key = LDH_IronStats_crossSourceKey(row);
+      const list = groups.get(key) || [];
+      list.push({row,index,priority:LDH_IronStats_sourcePriority(row),type:String((row && row.sourceType) || (row && row.source) || "")});
+      groups.set(key,list);
+    });
+
+    const keep = new Set();
+    groups.forEach(list=>{
+      const sourceTypes = new Set(list.map(item=>norm(item.type)));
+      if(sourceTypes.size <= 1){
+        list.forEach(item=>keep.add(item.index));
+        return;
+      }
+      const best = Math.max(...list.map(item=>item.priority));
+      list.filter(item=>item.priority === best).forEach(item=>keep.add(item.index));
+    });
+    return input.filter((row,index)=>keep.has(index));
+  }
+
   function collectAllRows(db){
     const rows = [];
     (db.assignments||[]).forEach(a=>{
@@ -4613,7 +4658,7 @@ function collectAssignments(db){
       rows.push(...collectAdvancedFabricacionNube(db, rows));
     }catch(e){}
 
-    return rows;
+    return LDH_IronStats_dedupeCrossSources(rows);
   }
   function aggregate(rows){
     const db = readDB();
@@ -5229,6 +5274,8 @@ function collectAssignments(db){
     render();
   }
 
+  window.LDH_IRON_STATS_DEDUP_V3 = true;
+  window.LDH_IronStats_dedupeCrossSources = LDH_IronStats_dedupeCrossSources;
   window.LDH_IronStats_render = render;
   window.LDH_IronStats_toggleDetalle = toggleDetalle;
   window.LDH_IronStats_openCompany = openCompanyDetail;
