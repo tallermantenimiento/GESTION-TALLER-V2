@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V68-FISICO-DUPLICADOS-FIREBASE-20260805" />
+<meta name="ldh-build" content="PREPARACION-V69-FERRETERIA-RECIBIDO-CUOTA-SEGURA-20260806" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
@@ -491,7 +491,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V68-FISICO-DUPLICADOS-FIREBASE-20260805">
+<meta name="ldh-fix" content="PREPARACION-V69-FERRETERIA-RECIBIDO-CUOTA-SEGURA-20260806">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -21241,6 +21241,567 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
     if(attempts < 180) setTimeout(start, 50);
     else console.error('[Preparacion V68] No se pudo instalar el lector fisico homonimo.');
   })();
+})();
+</script>
+
+
+
+<script id="LDH_PREP_V69_FERRETERIA_RECIBIDO_CUOTA_SEGURA_20260806">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V69_RECEIVED_ROUTER__) return;
+  window.__LDH_PREP_V69_RECEIVED_ROUTER__ = true;
+
+  const BUILD = 'PREPARACION-V69-FERRETERIA-RECIBIDO-CUOTA-SEGURA-20260806';
+  const FER_KEY = 'ldh_v2_ferreteria_stock_v1';
+  const SESSION_OVERRIDE_PREFIX = '__ldh_session_override_v58__:';
+  const IDB_NAME = 'ldh_workshop_resilient_v1';
+  const IDB_STORE = 'snapshots';
+  const FER_IDB_KEY = 'ferreteria_db';
+  const receiving = new Set();
+
+  function num(value){
+    const parsed = Number.parseFloat(String(value ?? '').replace(',', '.'));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function norm(value){
+    return String(value ?? '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[x×*]/g, 'x')
+      .replace(/[^a-z0-9]+/g, '');
+  }
+
+  function safeId(value){
+    return String(value ?? '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'sin_id';
+  }
+
+  function lineName(line){
+    return String(line?.mat ?? line?.material ?? line?.name ?? line?.title ?? '').trim();
+  }
+
+  function lineUnit(line){
+    return String(line?.unit ?? line?.unidad ?? line?.ud ?? 'ud').trim();
+  }
+
+  function active(row){
+    const status = norm(row?.status ?? row?.estado ?? 'activa');
+    return ![
+      'cancelada','cancelado','cerrada','cerrado','consumida','consumido',
+      'liberada','liberado','devuelta','devuelto','anulada','anulado',
+      'consolidada','consolidadov66','canceladaprueba'
+    ].includes(status);
+  }
+
+  function rowQty(row){
+    return Math.max(0, num(row?.pendingQty ?? row?.qtyPending ?? row?.qty ?? row?.cantidad ?? row?.amount));
+  }
+
+  function referenceAliases(reference){
+    const raw = String(reference ?? '').trim();
+    const aliases = new Set([norm(raw)]);
+    const base = raw.match(/^(OT-\d{6}-\d{3})(?:-[A-Z])?(?:\b|\s|:)/i);
+    if(base?.[1]) aliases.add(norm(base[1]));
+    return aliases;
+  }
+
+  function rowReferenceMatches(row, aliases){
+    const values = [
+      row?.ref,row?.jobRef,row?.reference,row?.referencia,row?.workRef,row?.pedidoRef
+    ].map(norm).filter(Boolean);
+    return values.some(value => aliases.has(value));
+  }
+
+  function deepClone(value){
+    try{ return structuredClone(value); }
+    catch(_){ return JSON.parse(JSON.stringify(value)); }
+  }
+
+  function openIdb(){
+    return new Promise((resolve, reject) => {
+      if(!window.indexedDB) return reject(new Error('IndexedDB no disponible.'));
+      const request = indexedDB.open(IDB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if(!database.objectStoreNames.contains(IDB_STORE)){
+          database.createObjectStore(IDB_STORE, {keyPath:'key'});
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('No se pudo abrir IndexedDB.'));
+    });
+  }
+
+  async function idbPut(key, value){
+    const database = await openIdb();
+    try{
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put({key, value, updatedAt:Date.now()});
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error('No se pudo guardar en IndexedDB.'));
+        tx.onabort = () => reject(tx.error || new Error('Guardado IndexedDB cancelado.'));
+      });
+    } finally {
+      database.close();
+    }
+    return true;
+  }
+
+  function storeString(key, value){
+    let local = false;
+    let session = false;
+    try{
+      localStorage.setItem(key, value);
+      local = true;
+    }catch(error){
+      console.warn('[Preparacion V69] localStorage lleno para', key, error);
+    }
+    try{
+      sessionStorage.setItem(key, value);
+      session = true;
+      if(local) sessionStorage.removeItem(SESSION_OVERRIDE_PREFIX + key);
+      else sessionStorage.setItem(SESSION_OVERRIDE_PREFIX + key, '1');
+    }catch(error){
+      console.warn('[Preparacion V69] sessionStorage no disponible para', key, error);
+    }
+    return {local, session};
+  }
+
+  function normalizeFerDb(db){
+    const result = db && typeof db === 'object' ? db : {};
+    result.version = result.version || '2.0-ferreteria-comun';
+    result.companies = Array.isArray(result.companies) ? result.companies : [];
+    result.materials = Array.isArray(result.materials) ? result.materials : [];
+    result.stock = Array.isArray(result.stock) ? result.stock : [];
+    result.movements = Array.isArray(result.movements) ? result.movements : [];
+    result.jobs = Array.isArray(result.jobs) ? result.jobs : [];
+    result.reservations = Array.isArray(result.reservations) ? result.reservations : [];
+    result.assignments = Array.isArray(result.assignments) ? result.assignments : [];
+    result.reservationDebts = Array.isArray(result.reservationDebts) ? result.reservationDebts : [];
+    return result;
+  }
+
+  function resolveFerMaterial(db, line){
+    const ids = [
+      line?.linked_matId,line?.stockMatId,line?.matId,line?.stockLinkId,line?.stockId
+    ].map(value => String(value ?? '').trim()).filter(Boolean);
+    let material = db.materials.find(row => {
+      const id = String(row?.id ?? row?.materialId ?? row?.matId ?? '').trim();
+      return id && ids.includes(id);
+    });
+    if(material) return material;
+
+    const wanted = norm(lineName(line) || line?.stockLinkLabel || line?.linked_matName);
+    if(!wanted) return null;
+    const wantedUnit = norm(lineUnit(line));
+    return db.materials.find(row => {
+      const name = norm(row?.name ?? row?.nombre ?? row?.material);
+      const unit = norm(row?.unit ?? row?.unidad ?? 'ud');
+      const unitCompatible = !wantedUnit || !unit || wantedUnit === unit
+        || (['ud','uds','und','unds','unidad','unidades'].includes(wantedUnit)
+          && ['ud','uds','und','unds','unidad','unidades'].includes(unit));
+      return name === wanted && unitCompatible;
+    }) || null;
+  }
+
+  function isFerreteriaLine(line){
+    const sourceText = norm([
+      line?.stockLinkEmpresa,line?.linkSource,line?.stockSource,line?.source,
+      line?.linkedStore,line?.warehouse,line?.cat,line?.category,line?.grp,line?.group
+    ].filter(Boolean).join(' '));
+    if(sourceText.includes('ferreteria') || sourceText.includes('prefabricado')) return true;
+
+    try{
+      const linkedId = String(
+        line?.linked_matId ?? line?.stockMatId ?? line?.matId ?? line?.stockLinkId ?? ''
+      ).trim();
+      if(linkedId && typeof window.LDH_getCurrentHardwareByIdV45 === 'function'){
+        if(window.LDH_getCurrentHardwareByIdV45(linkedId)) return true;
+      }
+      if(typeof window.LDH_findCurrentHardwareMaterialV45 === 'function'){
+        const found = window.LDH_findCurrentHardwareMaterialV45(line);
+        if(found && norm(lineUnit(line)) !== 'barra') return true;
+      }
+    }catch(_){ }
+    return false;
+  }
+
+  async function persistFerDb(db){
+    db.updatedAt = new Date().toISOString();
+    const raw = JSON.stringify(db);
+    const storage = storeString(FER_KEY, raw);
+    let indexed = false;
+    try{
+      await idbPut(FER_IDB_KEY, db);
+      indexed = true;
+    }catch(error){
+      console.warn('[Preparacion V69] No se pudo guardar Ferreteria en IndexedDB', error);
+    }
+    window.__LDH_FERRETERIA_MEMORY_DB = db;
+    window.__LDH_HARDWARE_MEMORY_DB = db;
+    try{
+      const channel = new BroadcastChannel('ldh_ferreteria_v69');
+      channel.postMessage({type:'ferreteria-updated', updatedAt:db.updatedAt});
+      channel.close();
+    }catch(_){ }
+    try{
+      window.dispatchEvent(new CustomEvent('ldh:ferreteria-updated', {
+        detail:{source:'preparacion_v69', updatedAt:db.updatedAt}
+      }));
+    }catch(_){ }
+    if(!storage.local && !storage.session && !indexed){
+      throw new Error('No se pudo guardar la recepcion en Ferreteria.');
+    }
+    return {storage, indexed};
+  }
+
+  async function receiveFerreteria(line, index){
+    const reference = String(window.refActual ?? (typeof refActual !== 'undefined' ? refActual : '') ?? '').trim();
+    if(!reference) throw new Error('El pedido no tiene referencia.');
+
+    const requested = Math.max(0, num(line?.qty_pedida ?? line?.qty));
+    if(!requested) throw new Error('La linea no tiene cantidad pedida.');
+    const appliedBefore = Math.min(requested, Math.max(0, num(line?.aplicado_qty)));
+    const targetPhysicalReceipt = Math.max(0, requested - appliedBefore);
+
+    let sourceDb = null;
+    try{
+      if(typeof window.LDH_readFerreteriaDBV45 === 'function'){
+        sourceDb = window.LDH_readFerreteriaDBV45();
+      }
+    }catch(_){ }
+    if(!sourceDb){
+      try{ sourceDb = JSON.parse(sessionStorage.getItem(FER_KEY) || 'null'); }catch(_){ }
+    }
+    if(!sourceDb){
+      try{ sourceDb = JSON.parse(localStorage.getItem(FER_KEY) || 'null'); }catch(_){ }
+    }
+    if(!sourceDb) throw new Error('No se encuentra la base actual de Ferreteria.');
+
+    const db = normalizeFerDb(deepClone(sourceDb));
+    const material = resolveFerMaterial(db, line);
+    if(!material){
+      throw new Error(`No se encuentra ${lineName(line)} en Ferreteria.`);
+    }
+
+    const materialId = String(material.id ?? material.materialId ?? material.matId ?? '').trim();
+    if(!materialId) throw new Error('El material de Ferreteria no tiene identificador.');
+    const materialName = String(material.name ?? material.nombre ?? lineName(line));
+    const aliases = referenceAliases(reference);
+    const operationId = 'mov_prep_received_fer_v69_'
+      + safeId(reference) + '_' + safeId(materialId) + '_' + String(index);
+    const now = new Date().toISOString();
+
+    const priorMovements = db.movements.filter(row => {
+      const rowId = String(row?.id ?? row?.movementId ?? row?.idempotencyKey ?? '');
+      const rowMaterial = String(row?.materialId ?? row?.matId ?? '').trim();
+      const sameMaterial = rowMaterial === materialId
+        || norm(row?.material ?? row?.materialName ?? row?.name) === norm(materialName);
+      const sameReference = rowReferenceMatches(row, aliases);
+      const source = norm(`${row?.source ?? ''} ${row?.reason ?? ''} ${row?.origen ?? ''}`);
+      const sameLine = Number(row?.lineIndex ?? index) === Number(index);
+      return rowId === operationId
+        || (sameMaterial && sameReference && sameLine
+          && (source.includes('recibidofisicoferreteria') || source.includes('preparacionrecepcionferreteria')));
+    });
+    const alreadyReceived = priorMovements.reduce((sum,row) => sum + rowQty(row), 0);
+    const qtyToAdd = Math.max(0, targetPhysicalReceipt - alreadyReceived);
+
+    if(qtyToAdd > 0){
+      db.movements.push({
+        id:operationId,
+        movementId:operationId,
+        idempotencyKey:operationId,
+        companyId:'fer_common',
+        materialId,
+        matId:materialId,
+        material:materialName,
+        materialName,
+        name:materialName,
+        unit:String(material.unit ?? material.unidad ?? lineUnit(line)),
+        unidad:String(material.unidad ?? material.unit ?? lineUnit(line)),
+        type:'entrada',
+        tipo:'entrada',
+        qty:qtyToAdd,
+        cantidad:qtyToAdd,
+        amount:qtyToAdd,
+        date:now,
+        ref:reference,
+        jobRef:reference,
+        lineIndex:Number(index),
+        company:String((window.metaActual ?? (typeof metaActual !== 'undefined' ? metaActual : {}))?.empresa ?? ''),
+        empresa:String((window.metaActual ?? (typeof metaActual !== 'undefined' ? metaActual : {}))?.empresa ?? ''),
+        source:'preparacion_recepcion_ferreteria_v69',
+        reason:'recibido_fisico_ferreteria_v69',
+        origen:'preparacion_recibido',
+        note:'Recepcion confirmada desde Preparacion',
+        createdAt:now,
+        updatedAt:now
+      });
+    }
+
+    const receiptAssignmentId = 'asg_prep_received_fer_v69_'
+      + safeId(reference) + '_' + safeId(materialId) + '_' + String(index);
+    const matchingAssignments = db.assignments.filter(row => {
+      if(!active(row)) return false;
+      const rowMaterial = String(row?.materialId ?? row?.matId ?? '').trim();
+      const sameMaterial = rowMaterial === materialId
+        || norm(row?.material ?? row?.materialName ?? row?.name) === norm(materialName);
+      return sameMaterial && rowReferenceMatches(row, aliases);
+    });
+    const receiptRows = matchingAssignments.filter(row => {
+      const id = String(row?.id ?? row?.assignmentId ?? '');
+      const source = norm(`${row?.source ?? ''} ${row?.reason ?? ''}`);
+      return id === receiptAssignmentId || source.includes('recibidofisicoferreteria');
+    });
+    const otherAssigned = matchingAssignments
+      .filter(row => !receiptRows.includes(row))
+      .reduce((sum,row) => sum + rowQty(row), 0);
+    const targetReceiptAssignment = Math.max(0, requested - otherAssigned);
+    let assignment = receiptRows[0] || null;
+
+    if(targetReceiptAssignment > 0){
+      if(!assignment){
+        assignment = {
+          id:receiptAssignmentId,
+          assignmentId:receiptAssignmentId,
+          companyId:'fer_common',
+          materialId,
+          matId:materialId,
+          material:materialName,
+          materialName,
+          ref:reference,
+          jobRef:reference,
+          lineIndex:Number(index),
+          assignmentType:'ferreteria_recibida',
+          source:'preparacion_recepcion_ferreteria_v69',
+          reason:'recibido_fisico_ferreteria_v69',
+          phase:'preparacion',
+          fase:'preparacion',
+          status:'activa',
+          estado:'activa',
+          createdAt:now
+        };
+        db.assignments.push(assignment);
+      }
+      assignment.qty = targetReceiptAssignment;
+      assignment.cantidad = targetReceiptAssignment;
+      assignment.pendingQty = targetReceiptAssignment;
+      assignment.qtyPending = targetReceiptAssignment;
+      assignment.status = 'activa';
+      assignment.estado = 'activa';
+      assignment.phase = 'preparacion';
+      assignment.fase = 'preparacion';
+      assignment.updatedAt = now;
+    }
+
+    receiptRows.slice(1).forEach(row => {
+      row.status = 'consolidada_v69';
+      row.estado = 'consolidada_v69';
+      row.pendingQty = 0;
+      row.qtyPending = 0;
+      row.updatedAt = now;
+    });
+
+    await persistFerDb(db);
+    return {
+      remoteDB:db,
+      materialId,
+      materialName,
+      operationId,
+      requested,
+      qtyAdded:qtyToAdd,
+      sourceKind:'ferreteria',
+      excessPriorReceipt:Math.max(0, alreadyReceived - targetPhysicalReceipt)
+    };
+  }
+
+  function compatFirebaseDb(){
+    try{
+      if(!window.firebase || !firebase.firestore) return null;
+      const app = (firebase.apps || []).find(item => item?.options?.projectId === 'gestion-taller-v2');
+      return app ? firebase.firestore(app) : firebase.firestore();
+    }catch(_){ return null; }
+  }
+
+  async function persistPreparation(reference, lines, meta){
+    const receptionKey = 'prep_recepcion_' + reference;
+    const metaKey = 'prep_meta_' + reference;
+    const receptionValue = JSON.stringify(lines || []);
+    const metaValue = JSON.stringify(meta || {});
+    const receptionStore = storeString(receptionKey, receptionValue);
+    const metaStore = storeString(metaKey, metaValue);
+    try{
+      storeString('prep_import_guard_ts', String(Date.now()));
+      storeString('prep_last_import_ref', reference);
+      storeString('prep_focus_ref', reference);
+    }catch(_){ }
+
+    let remote = false;
+    const database = compatFirebaseDb();
+    if(database){
+      try{
+        const docRef = database.collection('taller_data').doc('preparacion');
+        await database.runTransaction(async transaction => {
+          const snap = await transaction.get(docRef);
+          const old = snap.exists ? (snap.data() || {}) : {};
+          const data = {...(old.data || {})};
+          data[receptionKey] = receptionValue;
+          data[metaKey] = metaValue;
+          const keys = Array.from(new Set([
+            ...(Array.isArray(old.keys) ? old.keys : Object.keys(old.data || {})),
+            receptionKey,metaKey
+          ])).sort();
+          transaction.set(docRef, {
+            schema:old.schema || 'prep_live_sync_v6_authoritative',
+            updatedAt:Date.now(),
+            updatedBy:'prep_v69_' + Math.random().toString(36).slice(2,8),
+            reason:'recibido_cuota_segura_v69:' + reference,
+            data,
+            keys
+          }, {merge:true});
+        });
+        remote = true;
+      }catch(error){
+        console.warn('[Preparacion V69] No se pudo confirmar la ficha en Firebase', error);
+      }
+    }
+
+    return {
+      local:receptionStore.local || metaStore.local,
+      session:receptionStore.session || metaStore.session,
+      remote
+    };
+  }
+
+  function finalizeLine(current, requested, result){
+    current.linked_matId = result.materialId;
+    current.stockMatId = result.materialId;
+    current.matId = result.materialId;
+    current.linked_matName = result.materialName;
+    current.stockLinkLabel = result.materialName;
+    current.qty_recibida = requested;
+    current.recibida = requested;
+    current.aplicado_qty = requested;
+    current.ok = true;
+    current.completo = true;
+    current.done = true;
+    current.isDone = true;
+    current.isCompleted = true;
+    current._ldh_received_operation_v69 = result.operationId;
+    current._ldh_received_confirmed_v69_at = new Date().toISOString();
+    if(result.sourceKind === 'ferreteria'){
+      current.stockLinkEmpresa = 'Ferreteria';
+      current.linkSource = 'ferreteria_v69';
+    }
+    if(!Array.isArray(current.trace)) current.trace = [];
+    if(!current.trace.some(row => row?.operationId === result.operationId)){
+      current.trace.push({
+        at:current._ldh_received_confirmed_v69_at,
+        qty:requested,
+        qtyAddedToPhysical:result.qtyAdded,
+        operationId:result.operationId,
+        source:result.sourceKind === 'ferreteria'
+          ? 'recibido_ferreteria_v69'
+          : 'recibido_fisico_v69'
+      });
+    }
+  }
+
+  window.LDH_marcarRecibidoCompleto = async function LDH_marcarRecibidoCompletoV69(index){
+    const lines = window.estadoMateriales ?? (typeof estadoMateriales !== 'undefined' ? estadoMateriales : []);
+    const line = lines?.[index];
+    if(!line) return;
+
+    const reference = String(window.refActual ?? (typeof refActual !== 'undefined' ? refActual : '') ?? '').trim();
+    const lineId = String(
+      line.id ?? line.lineId ?? line.uid ?? line.linked_matId
+      ?? line.stockMatId ?? line.matId ?? lineName(line)
+    );
+    const lockKey = `${reference}|${index}|${lineId}`;
+    if(receiving.has(lockKey)) return;
+
+    const requested = Math.max(0, num(line.qty_pedida ?? line.qty));
+    if(!requested) return;
+    if(num(line.qty_recibida ?? line.recibida) >= requested) return;
+
+    receiving.add(lockKey);
+    const button = document.activeElement instanceof HTMLButtonElement
+      ? document.activeElement : null;
+    const oldText = button?.textContent || 'RECIBIDO';
+    if(button){
+      button.disabled = true;
+      button.textContent = 'GUARDANDO...';
+    }
+
+    const cleanup = window.LDH_prepCleanupLockV62;
+    const wasCleanupLocked = !!(cleanup?.isLocked && cleanup.isLocked(line));
+    try{
+      if(cleanup?.clearLock) cleanup.clearLock(line);
+      delete line._ldh_cleanup_tombstone_v62_at;
+      delete line._ldh_cleanup_tombstone_v62_ref;
+      delete line._ldh_cleanup_tombstone_v62_material;
+
+      const result = isFerreteriaLine(line)
+        ? await receiveFerreteria(line, index)
+        : await window.LDH_prepReceivePhysicalCloudV66(line, index);
+      result.sourceKind = result.sourceKind || 'stock';
+
+      const current = typeof window.LDH_prepFindCurrentLineV66 === 'function'
+        ? window.LDH_prepFindCurrentLineV66(index, result.materialId, result.materialName)
+        : lines[index];
+      if(!current) throw new Error('La linea ya no esta disponible en Preparacion.');
+      finalizeLine(current, requested, result);
+
+      const persistence = await persistPreparation(
+        reference,
+        window.estadoMateriales ?? lines,
+        window.metaActual ?? (typeof metaActual !== 'undefined' ? metaActual : {})
+      );
+
+      if(!persistence.local && !persistence.session && !persistence.remote){
+        throw new Error(
+          'La entrada ha quedado registrada, pero no se pudo guardar la ficha de Preparacion. No repitas el clic.'
+        );
+      }
+
+      if(typeof window.renderTabla === 'function') window.renderTabla();
+      if(typeof window.cargarLista === 'function') window.cargarLista();
+
+      if(result.excessPriorReceipt > 0){
+        alert(
+          'La recepcion ha quedado registrada sin sumar otra entrada.\n\n' +
+          `Se detecto un exceso previo de ${result.excessPriorReceipt}. ` +
+          'No se ha modificado automaticamente ese excedente.'
+        );
+      }
+    }catch(error){
+      if(wasCleanupLocked && cleanup?.setLock) cleanup.setLock(line);
+      console.error('[Preparacion V69] Recibido:', error);
+      alert(
+        'No se ha completado la recepcion.\n\n' +
+        String(error?.message || error || 'Error de persistencia.')
+      );
+    }finally{
+      receiving.delete(lockKey);
+      if(button && button.isConnected){
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    }
+  };
+
+  window.LDH_prepReceiveFerreteriaV69 = receiveFerreteria;
+  window.LDH_PREP_V69_RECEIVED_ROUTER = true;
+  console.info('[Preparacion V69] Router Recibido activo', BUILD);
 })();
 </script>
 
