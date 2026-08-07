@@ -5877,7 +5877,7 @@ function ldhRefreshWeightUI(){
 })();
 </script>
 
-<style id="LDH_INDEX_MASTER_BACKUP_V1_CSS">
+<style id="LDH_INDEX_MASTER_BACKUP_V2_CSS">
   #ldhMasterBackupSection .ldh-backup-card{cursor:default;min-height:0}
   #ldhMasterBackupSection .ldh-backup-card:hover{transform:none}
   .ldh-backup-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
@@ -5888,7 +5888,7 @@ function ldhRefreshWeightUI(){
   .ldh-backup-note{margin-top:9px;padding:9px 10px;border:1px solid rgba(56,189,248,.18);border-radius:10px;background:rgba(56,189,248,.06);color:#bfdbfe;font-size:10px;line-height:1.45}
 </style>
 
-<script id="LDH_INDEX_MASTER_BACKUP_UI_V1">
+<script id="LDH_INDEX_MASTER_BACKUP_UI_V2">
 (function(){
   function install(){
     if(document.getElementById('ldhMasterBackupSection')) return;
@@ -5908,7 +5908,7 @@ function ldhRefreshWeightUI(){
             <button class="btn" type="button" id="ldhMasterBackupExportBtn">💾 Exportar JSON completo</button>
           </div>
           <div class="ldh-backup-status" id="ldhMasterBackupStatus">Preparado para crear una copia. No se escribirá nada en Firebase.</div>
-          <div class="ldh-backup-note">El archivo lleva versión de formato, inventario de módulos, comprobación SHA-256 y avisos si alguna fuente remota no pudo leerse.</div>
+          <div class="ldh-backup-note">El archivo lleva versión de formato, inventario de módulos, SHA-256 y filtro automático de claves, tokens, credenciales y sesiones sensibles.</div>
         </div>
       </div>`;
     footer.parentNode.insertBefore(section, footer);
@@ -5918,14 +5918,15 @@ function ldhRefreshWeightUI(){
 })();
 </script>
 
-<script type="module" id="LDH_INDEX_MASTER_BACKUP_EXPORT_V1_20260807">
+<script type="module" id="LDH_INDEX_MASTER_BACKUP_EXPORT_V2_20260807">
 (async function(){
   'use strict';
-  if(window.__LDH_MASTER_BACKUP_EXPORT_V1__) return;
-  window.__LDH_MASTER_BACKUP_EXPORT_V1__ = true;
+  if(window.__LDH_MASTER_BACKUP_EXPORT_V2__) return;
+  window.__LDH_MASTER_BACKUP_EXPORT_V2__ = true;
 
   const FORMAT = 'LDH_MASTER_BACKUP';
-  const VERSION = 1;
+  const VERSION = 2;
+  const SECURITY_POLICY = 'LDH_SECRET_FILTER_V1';
   const FIREBASE_VERSION = '12.7.0';
   const STOCK_CONFIG = {
     apiKey:'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',
@@ -5964,10 +5965,26 @@ function ldhRefreshWeightUI(){
   function errText(error){
     return String((error && (error.code || error.message)) || error || 'error');
   }
+  function normalizedSecurityKey(key){
+    return String(key || '').toLowerCase().replace(/[^a-z0-9]/g,'');
+  }
+  function isSensitiveKey(key){
+    const n = normalizedSecurityKey(key);
+    if(!n) return false;
+    const markers = [
+      'apikey','clientsecret','accesstoken','refreshtoken','idtoken','authtoken',
+      'bearertoken','password','passwd','privatekey','secretkey','credentials',
+      'credential','geminikey','openaikey','anthropickey','githubtoken','slacktoken'
+    ];
+    if(markers.some(marker => n.includes(marker))) return true;
+    if(/(?:gemini|openai|anthropic|google|github|slack|aws).*(?:key|token|secret)$/.test(n)) return true;
+    return false;
+  }
   function shouldSkipStorageKey(key){
     const k = String(key || '');
     if(!k) return true;
     if(/^firebase:/i.test(k)) return true;
+    if(isSensitiveKey(k)) return true;
     if(k === 'LDH_LIVE_CLIENT_ID' || k === 'LDH_LIVE_LAST_REV' || k === '__LDH_LIVE_DIRTY_AT') return true;
     if(k === 'LDH_AUTORESTORE_ONCE') return true;
     return false;
@@ -5975,15 +5992,63 @@ function ldhRefreshWeightUI(){
   function collectStorage(storage){
     const out = {};
     const errors = [];
+    let sensitiveSkipped = 0;
     try{
       for(let i=0;i<storage.length;i++){
         const key = storage.key(i);
-        if(shouldSkipStorageKey(key)) continue;
+        if(shouldSkipStorageKey(key)){
+          if(isSensitiveKey(key) || /^firebase:/i.test(String(key || ''))) sensitiveSkipped++;
+          continue;
+        }
         try{ out[key] = storage.getItem(key); }
         catch(error){ errors.push({key, error:errText(error)}); }
       }
     }catch(error){ errors.push({key:'*', error:errText(error)}); }
-    return {data:out, errors};
+    return {data:out, errors, sensitiveSkipped};
+  }
+
+  const SECRET_VALUE_PATTERNS = [
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+    /\bAIza[0-9A-Za-z_-]{30,}\b/g,
+    /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+    /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+    /\bAKIA[0-9A-Z]{16}\b/g,
+    /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+    /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g,
+    /\bBearer\s+[A-Za-z0-9._~+\/-=]{20,}/gi
+  ];
+  function sanitizeSecretString(value, stats){
+    let out = String(value);
+    const trimmed = out.trim();
+    if((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))){
+      try{
+        const parsed = JSON.parse(out);
+        out = JSON.stringify(sanitizeBackupValue(parsed, stats));
+        stats.jsonStringsSanitized++;
+      }catch(_){ }
+    }
+    SECRET_VALUE_PATTERNS.forEach(pattern => {
+      pattern.lastIndex = 0;
+      out = out.replace(pattern, () => { stats.redactedValues++; return '[REDACTED_SECRET]'; });
+    });
+    return out;
+  }
+  function sanitizeBackupValue(value, stats, seen){
+    if(value == null) return value;
+    const type = typeof value;
+    if(type === 'string') return sanitizeSecretString(value, stats);
+    if(type !== 'object') return value;
+    seen = seen || new WeakSet();
+    if(seen.has(value)) return {$type:'Circular'};
+    seen.add(value);
+    if(Array.isArray(value)) return value.map(item => sanitizeBackupValue(item, stats, seen));
+    const out = {};
+    Object.keys(value).forEach(key => {
+      if(isSensitiveKey(key)){ stats.omittedFields++; return; }
+      out[key] = sanitizeBackupValue(value[key], stats, seen);
+    });
+    return out;
   }
   function safeValue(value, seen){
     if(value == null) return value;
@@ -6247,12 +6312,20 @@ function ldhRefreshWeightUI(){
       checks.filter(c=>!c.ok).forEach(c=>warnings.push(`${c.name}: ${c.error || 'no disponible'}`));
       const complete = checks.filter(c=>c.required).every(c=>c.ok);
 
-      const data = {
+      const securityStats = {
+        policy:SECURITY_POLICY,
+        storageKeysOmitted:Number(local.sensitiveSkipped || 0) + Number(session.sensitiveSkipped || 0),
+        omittedFields:0,
+        redactedValues:0,
+        jsonStringsSanitized:0
+      };
+      const rawData = {
         localStorage:local.data,
         sessionStorage:session.data,
         indexedDB:indexed,
         cloud
       };
+      const data = sanitizeBackupValue(rawData, securityStats);
       const payloadText = JSON.stringify(data);
       const digest = await sha256(payloadText);
       const modules = moduleInventory();
@@ -6275,6 +6348,13 @@ function ldhRefreshWeightUI(){
           sessionStorageKeys:Object.keys(session.data).length,
           indexedDatabases:Object.keys(indexed.databases || {}).length,
           cloudChecks:checks,
+          security:{
+            policy:securityStats.policy,
+            storageKeysOmitted:securityStats.storageKeysOmitted,
+            omittedFields:securityStats.omittedFields,
+            redactedValues:securityStats.redactedValues,
+            jsonStringsSanitized:securityStats.jsonStringsSanitized
+          },
           sha256:digest,
           warningCount:warnings.length
         },
@@ -6285,14 +6365,15 @@ function ldhRefreshWeightUI(){
       const filename = `LDH_BACKUP_COMPLETO_${fileStamp(startedAt)}.json`;
       downloadJson(finalJson, filename);
       const mb = (new Blob([finalJson]).size / 1024 / 1024).toFixed(2);
+      const secretCount = securityStats.storageKeysOmitted + securityStats.omittedFields + securityStats.redactedValues;
       if(complete){
-        setStatus(`✓ Copia completa exportada · ${Object.keys(local.data).length} claves locales · ${modules.length} módulos inventariados · ${mb} MB`, 'ok');
+        setStatus(`✓ Copia completa exportada · ${Object.keys(local.data).length} claves locales · ${modules.length} módulos · ${secretCount} elemento(s) sensible(s) filtrado(s) · ${mb} MB`, 'ok');
       }else{
-        setStatus(`⚠ JSON exportado con ${warnings.length} aviso(s). Conserva el archivo, pero no lo consideres copia maestra hasta revisar los avisos. · ${mb} MB`, 'warn');
+        setStatus(`⚠ JSON exportado con ${warnings.length} aviso(s) · ${secretCount} elemento(s) sensible(s) filtrado(s). Conserva el archivo, pero no lo consideres copia maestra hasta revisar los avisos. · ${mb} MB`, 'warn');
       }
-      console.info('[LDH Master Backup V1]', {filename, complete, checks, warnings, sha256:digest});
+      console.info('[LDH Master Backup V2]', {filename, complete, checks, warnings, security:securityStats, sha256:digest});
     }catch(error){
-      console.error('[LDH Master Backup V1] Error', error);
+      console.error('[LDH Master Backup V2] Error', error);
       setStatus('✗ No se pudo crear la copia: ' + errText(error), 'bad');
       alert('No se ha podido crear la copia general.\n\n' + errText(error));
     }finally{
@@ -6306,8 +6387,9 @@ function ldhRefreshWeightUI(){
     if(btn.dataset.boundMasterBackup === '1') return;
     btn.dataset.boundMasterBackup = '1';
     btn.addEventListener('click', exportMasterBackup);
+    window.LDH_exportMasterBackupV2 = exportMasterBackup;
     window.LDH_exportMasterBackupV1 = exportMasterBackup;
-    console.info('[Index] Backup maestro JSON V1 preparado · solo lectura');
+    console.info('[Index] Backup maestro JSON V2 preparado · secretos filtrados · solo lectura');
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind, {once:true});
   else bind();
