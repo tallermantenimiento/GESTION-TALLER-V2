@@ -4047,8 +4047,19 @@ function collectAssignments(db){
       return cleaned;
     }catch(e){ return []; }
   }
+  function isCommonStockCompany(c){
+    if(!c) return false;
+    if(c.sharedStock === true || c.sharedPool === true || c.isSharedStock === true) return true;
+    const keys = [
+      c.id, c.companyId, c.empresaId,
+      c.name, c.nombre, c.empresa, c.company,
+      c.code, c.codigo, c.label
+    ].map(norm).filter(Boolean);
+    return keys.some(k => k === "stock comun" || k === "stock comun global" || k === "almacen comun");
+  }
   function stockCompaniesFromDB(db){
     // La lista del Stock descargada de Firebase es la fuente oficial.
+    // STOCK COMUN es un origen/almacen compartido, no una empresa de consumo.
     // El maestro local antiguo solo se usa como respaldo si Stock no trae empresas.
     const source = Array.isArray(db && db.companies) && db.companies.length
       ? db.companies
@@ -4057,6 +4068,7 @@ function collectAssignments(db){
     const out = [];
     source.forEach(c=>{
       if(c && c.statDemo) return;
+      if(isCommonStockCompany(c)) return;
       const id = String(c && (c.id || c.companyId || c.name || c.nombre || c.empresa) || "").trim();
       const name = String(c && (c.name || c.nombre || c.empresa || c.code || c.codigo || c.id) || "").trim();
       const code = String(c && (c.code || c.codigo || "") || "").trim();
@@ -4546,6 +4558,60 @@ function collectAssignments(db){
     return input.filter((row,index)=>keep.has(index));
   }
 
+  function isCommonStockAssignment(a){
+    if(!a || typeof a !== "object") return false;
+    if(a.sharedStock === true) return true;
+    const text = norm([a.assignmentType, a.reason, a.source, a.originCompany, a.fromEmpresa].join(" "));
+    return text.includes("stock comun") || text.includes("almacen comun");
+  }
+  function commonStockConsumer(db, a){
+    const ref = String(a.consumerRef || a.ref || a.jobRef || a.jobId || "").trim();
+    let companyId = String(a.consumerCompanyId || a.destinationCompanyId || a.destCompanyId || "").trim();
+    let companyText = String(a.consumerEmpresa || a.consumerCompany || a.destinationCompany || a.empresaDestino || "").trim();
+
+    // Compatibilidad con asignaciones antiguas: Preparacion ya conoce la empresa
+    // del pedido y la conserva en prep_meta_<ref>.
+    if((!companyId || !companyText) && ref){
+      const localMeta = parseAnyStore("prep_meta_" + ref, {}) || {};
+      if(!companyId) companyId = String(localMeta.companyId || localMeta.empresaId || "").trim();
+      if(!companyText) companyText = String(localMeta.empresa || localMeta.company || localMeta.emp || localMeta.empresaReceptora || "").trim();
+
+      // Si el menú está en otro equipo, usar también el prep_meta descargado
+      // desde la nube de Fabricación/Preparación.
+      if(!companyId || !companyText){
+        try{
+          const pkg = advRemotePackage();
+          const remoteMeta = pkg ? (advPackageMeta(pkg, ref) || {}) : {};
+          if(!companyId) companyId = String(remoteMeta.companyId || remoteMeta.empresaId || "").trim();
+          if(!companyText) companyText = String(remoteMeta.empresa || remoteMeta.company || remoteMeta.emp || remoteMeta.empresaReceptora || "").trim();
+        }catch(e){}
+      }
+
+      // Último respaldo: localizar la referencia en los trabajos del Stock.
+      if(!companyId || !companyText){
+        const job = (db.jobs || []).find(j=>{
+          const jobRef = String(j && (j.ref || j.referencia || j.jobRef || j.id || j.jobId) || "").trim();
+          return jobRef && norm(jobRef) === norm(ref);
+        });
+        if(job){
+          if(!companyId) companyId = String(job.companyId || job.empresaId || "").trim();
+          if(!companyText) companyText = String(job.empresa || job.company || job.companyName || job.empresaNombre || "").trim();
+        }
+      }
+    }
+
+    const resolved = resolveActiveCompany(db, companyId, companyText || companyId);
+    if(resolved){
+      return {
+        companyId:String(resolved.id || resolved.name || resolved.code || companyId || companyText),
+        company:String(resolved.name || resolved.code || resolved.id || companyText || companyId)
+      };
+    }
+    if(companyId || companyText){
+      return {companyId:companyId || companyText, company:companyText || companyId};
+    }
+    return null;
+  }
   function collectAllRows(db){
     const rows = [];
     (db.assignments||[]).forEach(a=>{
@@ -4553,31 +4619,46 @@ function collectAssignments(db){
       const materialId = a.materialId || a.matId || a.toMaterialId;
       const m = materialById(db, materialId);
       if(!m || !isIronMaterial(m)) return;
+
+      const commonStock = isCommonStockAssignment(a);
       let companyId = a.companyId || a.toCompanyId || "";
-      if(!companyId && a.jobId){
-        const j = jobById(db, a.jobId);
-        companyId = j && (j.companyId || j.empresaId || j.company);
+      let compName = "";
+
+      if(commonStock){
+        const consumer = commonStockConsumer(db, a);
+        if(!consumer) return;
+        companyId = consumer.companyId;
+        compName = consumer.company;
+      }else{
+        if(!companyId && a.jobId){
+          const j = jobById(db, a.jobId);
+          companyId = j && (j.companyId || j.empresaId || j.company);
+        }
+        if(!companyId) return;
+        compName = companyName(db, companyId);
       }
+
       if(!companyId) return;
-      const compName = companyName(db, companyId);
       if(!companyIsActive(db, companyId, compName)) return;
       const qty = assignmentQty(a);
       if(qty <= 0) return;
       const dateObj = getLineDate(db, a, a.jobId);
       const recordId = String(a.id || a.assignmentId || a.asignacionId || "");
       rows.push({
-        source:"Asignación",
+        source:commonStock ? "STOCK COMÚN" : "Asignación",
         sourceType:"assignment",
         recordId,
         rowKey:recordId ? "assignment:" + recordId : "",
         companyId,
         company:compName,
+        originCompanyId:commonStock ? String(a.companyId || a.fromCompanyId || "") : "",
+        originCompany:commonStock ? "STOCK COMÚN" : "",
         materialId,
         material:String(m.name || m.nombre || materialId),
         unit:String(m.unit || m.unidad || m.units || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
-        ref:String(a.ref || a.jobRef || a.jobId || ""),
+        ref:String(a.consumerRef || a.ref || a.jobRef || a.jobId || ""),
         dateObj
       });
     });
@@ -5785,6 +5866,14 @@ function ldhRefreshWeightUI(){
     },err=>console.warn("Pesos manuales de estadística sin escucha en vivo",err));
     ldhRefreshWeightUI();
   }catch(e){ console.warn("Pesos manuales de estadística: Firebase no disponible; se conservarán localmente",e); }
+})();
+</script>
+
+
+<script id="LDH_INDEX_STOCK_COMUN_IMPUTACION_DESTINO_20260807">
+(function(){
+  window.__LDH_INDEX_BUILD = "INDEX-STOCK-COMUN-IMPUTACION-DESTINO-V1-20260807";
+  console.info("[Index] STOCK COMÚN se imputa a empresa destino; origen conservado en ficha");
 })();
 </script>
 
