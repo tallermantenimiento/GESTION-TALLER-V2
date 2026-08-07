@@ -5877,5 +5877,443 @@ function ldhRefreshWeightUI(){
 })();
 </script>
 
+<style id="LDH_INDEX_MASTER_BACKUP_V1_CSS">
+  #ldhMasterBackupSection .ldh-backup-card{cursor:default;min-height:0}
+  #ldhMasterBackupSection .ldh-backup-card:hover{transform:none}
+  .ldh-backup-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .ldh-backup-status{margin-top:10px;color:#9fb0c8;font-size:11px;line-height:1.45}
+  .ldh-backup-status.ok{color:#86efac}
+  .ldh-backup-status.warn{color:#fde68a}
+  .ldh-backup-status.bad{color:#fecaca}
+  .ldh-backup-note{margin-top:9px;padding:9px 10px;border:1px solid rgba(56,189,248,.18);border-radius:10px;background:rgba(56,189,248,.06);color:#bfdbfe;font-size:10px;line-height:1.45}
+</style>
+
+<script id="LDH_INDEX_MASTER_BACKUP_UI_V1">
+(function(){
+  function install(){
+    if(document.getElementById('ldhMasterBackupSection')) return;
+    const footer = document.querySelector('main .footer');
+    if(!footer) return;
+    const section = document.createElement('section');
+    section.className = 'group';
+    section.id = 'ldhMasterBackupSection';
+    section.innerHTML = `
+      <div class="section-head"><div><h3>Copia de seguridad general</h3><p>Copia maestra de los datos del programa. Esta primera fase solo exporta: no modifica ni restaura ningún dato.</p></div></div>
+      <div class="grid">
+        <div class="card ldh-backup-card">
+          <div class="top"><div class="ico">🛡️</div><span class="badge ok">seguridad</span></div>
+          <h4>Backup completo JSON</h4>
+          <p>Incluye datos locales de todos los módulos, almacenamiento auxiliar y las fuentes Firebase principales disponibles.</p>
+          <div class="ldh-backup-actions">
+            <button class="btn" type="button" id="ldhMasterBackupExportBtn">💾 Exportar JSON completo</button>
+          </div>
+          <div class="ldh-backup-status" id="ldhMasterBackupStatus">Preparado para crear una copia. No se escribirá nada en Firebase.</div>
+          <div class="ldh-backup-note">El archivo lleva versión de formato, inventario de módulos, comprobación SHA-256 y avisos si alguna fuente remota no pudo leerse.</div>
+        </div>
+      </div>`;
+    footer.parentNode.insertBefore(section, footer);
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, {once:true});
+  else install();
+})();
+</script>
+
+<script type="module" id="LDH_INDEX_MASTER_BACKUP_EXPORT_V1_20260807">
+(async function(){
+  'use strict';
+  if(window.__LDH_MASTER_BACKUP_EXPORT_V1__) return;
+  window.__LDH_MASTER_BACKUP_EXPORT_V1__ = true;
+
+  const FORMAT = 'LDH_MASTER_BACKUP';
+  const VERSION = 1;
+  const FIREBASE_VERSION = '12.7.0';
+  const STOCK_CONFIG = {
+    apiKey:'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',
+    authDomain:'gestion-taller-stock.firebaseapp.com',
+    projectId:'gestion-taller-stock',
+    storageBucket:'gestion-taller-stock.firebasestorage.app',
+    messagingSenderId:'164944519480',
+    appId:'1:164944519480:web:bfa9173d22f88a3b56e1cd'
+  };
+  const FLOW_CONFIG = {
+    apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
+    authDomain:'gestion-taller-v2.firebaseapp.com',
+    projectId:'gestion-taller-v2',
+    storageBucket:'gestion-taller-v2.firebasestorage.app',
+    messagingSenderId:'888590823508',
+    appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'
+  };
+  const ORDERS_CONFIG = {
+    apiKey:'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
+    authDomain:'gestion-taller-2a439.firebaseapp.com',
+    projectId:'gestion-taller-2a439',
+    storageBucket:'gestion-taller-2a439.firebasestorage.app',
+    messagingSenderId:'498579673950',
+    appId:'1:498579673950:web:eb626781a5b509957db5cf'
+  };
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const statusEl = () => document.getElementById('ldhMasterBackupStatus');
+  const buttonEl = () => document.getElementById('ldhMasterBackupExportBtn');
+  function setStatus(text, cls=''){
+    const el = statusEl();
+    if(!el) return;
+    el.textContent = text;
+    el.className = 'ldh-backup-status' + (cls ? ' ' + cls : '');
+  }
+  function errText(error){
+    return String((error && (error.code || error.message)) || error || 'error');
+  }
+  function shouldSkipStorageKey(key){
+    const k = String(key || '');
+    if(!k) return true;
+    if(/^firebase:/i.test(k)) return true;
+    if(k === 'LDH_LIVE_CLIENT_ID' || k === 'LDH_LIVE_LAST_REV' || k === '__LDH_LIVE_DIRTY_AT') return true;
+    if(k === 'LDH_AUTORESTORE_ONCE') return true;
+    return false;
+  }
+  function collectStorage(storage){
+    const out = {};
+    const errors = [];
+    try{
+      for(let i=0;i<storage.length;i++){
+        const key = storage.key(i);
+        if(shouldSkipStorageKey(key)) continue;
+        try{ out[key] = storage.getItem(key); }
+        catch(error){ errors.push({key, error:errText(error)}); }
+      }
+    }catch(error){ errors.push({key:'*', error:errText(error)}); }
+    return {data:out, errors};
+  }
+  function safeValue(value, seen){
+    if(value == null) return value;
+    const type = typeof value;
+    if(type === 'string' || type === 'number' || type === 'boolean') return value;
+    if(type === 'bigint') return String(value);
+    if(type === 'function' || type === 'symbol' || type === 'undefined') return null;
+    if(value instanceof Date) return {$type:'Date', value:value.toISOString()};
+    try{
+      if(value && typeof value.toDate === 'function'){
+        const date = value.toDate();
+        if(date instanceof Date) return {$type:'Timestamp', value:date.toISOString()};
+      }
+    }catch(_){ }
+    if(value instanceof Blob) return {$type:'Blob', size:value.size, mime:value.type || ''};
+    if(value instanceof ArrayBuffer) return {$type:'ArrayBuffer', byteLength:value.byteLength};
+    if(ArrayBuffer.isView(value)) return {$type:value.constructor?.name || 'TypedArray', values:Array.from(value)};
+    if(type === 'object'){
+      seen = seen || new WeakSet();
+      if(seen.has(value)) return {$type:'Circular'};
+      seen.add(value);
+      if(Array.isArray(value)) return value.map(item => safeValue(item, seen));
+      const out = {};
+      Object.keys(value).forEach(key => {
+        try{ out[key] = safeValue(value[key], seen); }catch(error){ out[key] = {$type:'ReadError', error:errText(error)}; }
+      });
+      return out;
+    }
+    return String(value);
+  }
+
+  async function collectIndexedDb(){
+    const result = {supported:false, databases:{}, warnings:[]};
+    if(!window.indexedDB){
+      result.warnings.push('IndexedDB no disponible en este navegador.');
+      return result;
+    }
+    if(typeof indexedDB.databases !== 'function'){
+      result.warnings.push('El navegador no permite enumerar IndexedDB; no se ha abierto ninguna base para evitar modificar el equipo.');
+      return result;
+    }
+    result.supported = true;
+    let list = [];
+    try{ list = await indexedDB.databases(); }
+    catch(error){ result.warnings.push('No se pudieron enumerar las bases IndexedDB: ' + errText(error)); return result; }
+    const allowed = (list || []).filter(item => {
+      const name = String(item && item.name || '');
+      return name && !/firebase|firestore/i.test(name) && /(ldh|taller|workshop|ferreteria|stock)/i.test(name);
+    });
+    for(const info of allowed){
+      const name = String(info.name || '');
+      try{
+        const database = await new Promise((resolve,reject)=>{
+          const request = indexedDB.open(name);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error || new Error('No se pudo abrir ' + name));
+          request.onupgradeneeded = () => {
+            try{ request.transaction.abort(); }catch(_){ }
+            reject(new Error('La base ' + name + ' requería actualización; se omitió para no modificarla.'));
+          };
+        });
+        const dbOut = {version:database.version, stores:{}};
+        const stores = Array.from(database.objectStoreNames || []);
+        for(const storeName of stores){
+          try{
+            const rows = await new Promise((resolve,reject)=>{
+              const tx = database.transaction(storeName,'readonly');
+              const store = tx.objectStore(storeName);
+              const req = store.getAll();
+              req.onsuccess = () => resolve(req.result || []);
+              req.onerror = () => reject(req.error || new Error('No se pudo leer ' + storeName));
+            });
+            dbOut.stores[storeName] = safeValue(rows);
+          }catch(error){ dbOut.stores[storeName] = {error:errText(error)}; }
+        }
+        database.close();
+        result.databases[name] = dbOut;
+      }catch(error){ result.databases[name] = {error:errText(error)}; }
+    }
+    return result;
+  }
+
+  async function sha256(text){
+    try{
+      if(!crypto?.subtle) return '';
+      const bytes = new TextEncoder().encode(text);
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      return Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');
+    }catch(_){ return ''; }
+  }
+
+  function moduleInventory(){
+    const found = [];
+    document.querySelectorAll('main a.card[href], #quickNav a[href]').forEach(link=>{
+      const href = String(link.getAttribute('href') || '').trim();
+      if(!href || !/\.html(?:$|[?#])/i.test(href)) return;
+      const card = link.closest('.card');
+      const label = String(card?.querySelector('h4')?.textContent || link.textContent || href).replace(/\s+/g,' ').trim();
+      if(!found.some(item=>item.href === href)) found.push({href,label});
+    });
+    return found;
+  }
+
+  function appForProject(firebaseApp, config, name){
+    const {initializeApp,getApps} = firebaseApp;
+    return getApps().find(app=>app?.options?.projectId === config.projectId) || initializeApp(config, name);
+  }
+
+  async function cloudSnapshot(){
+    const out = {projects:{}, warnings:[]};
+    let firebaseApp, firestore, authApi;
+    try{
+      firebaseApp = await import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app.js`);
+      firestore = await import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-firestore.js`);
+      authApi = await import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-auth.js`);
+    }catch(error){
+      out.warnings.push('No se pudieron cargar las librerías Firebase: ' + errText(error));
+      return out;
+    }
+
+    const readDoc = async (db, parts) => {
+      const path = parts.join('/');
+      try{
+        const ref = firestore.doc(db, ...parts);
+        let snap;
+        try{ snap = firestore.getDocFromServer ? await firestore.getDocFromServer(ref) : await firestore.getDoc(ref); }
+        catch(_){ snap = await firestore.getDoc(ref); }
+        return {ok:true, path, exists:snap.exists(), data:snap.exists()?safeValue(snap.data()):null};
+      }catch(error){ return {ok:false, path, error:errText(error)}; }
+    };
+    const readCollection = async (db, parts) => {
+      const path = parts.join('/');
+      try{
+        const ref = firestore.collection(db, ...parts);
+        let snap;
+        try{ snap = firestore.getDocsFromServer ? await firestore.getDocsFromServer(ref) : await firestore.getDocs(ref); }
+        catch(_){ snap = await firestore.getDocs(ref); }
+        return {ok:true, path, count:snap.size, docs:snap.docs.map(d=>({id:d.id,data:safeValue(d.data())}))};
+      }catch(error){ return {ok:false, path, error:errText(error)}; }
+    };
+
+    // STOCK
+    try{
+      setStatus('Copia 3/6 · Leyendo Stock desde Firebase...');
+      const app = appForProject(firebaseApp, STOCK_CONFIG, 'ldh-master-backup-stock-v1');
+      const db = firestore.getFirestore(app);
+      out.projects.stock = {
+        projectId:STOCK_CONFIG.projectId,
+        stock:await readDoc(db,['taller_data','stock']),
+        chunks:await readCollection(db,['taller_data','stock','chunks']),
+        stockMaterials:await readCollection(db,['stock_materials']),
+        ironStatsExclusions:await readDoc(db,['taller_data','iron_stats_exclusions']),
+        ironStatsWeightOverrides:await readDoc(db,['taller_data','iron_stats_weight_overrides'])
+      };
+    }catch(error){ out.projects.stock = {projectId:STOCK_CONFIG.projectId,error:errText(error)}; }
+
+    // PREPARACION / FABRICACION / CONFIGURACION
+    try{
+      setStatus('Copia 4/6 · Leyendo Preparación, Fabricación y Configuración...');
+      const app = appForProject(firebaseApp, FLOW_CONFIG, 'ldh-master-backup-flow-v1');
+      const db = firestore.getFirestore(app);
+      out.projects.flow = {
+        projectId:FLOW_CONFIG.projectId,
+        preparacion:await readDoc(db,['taller_data','preparacion']),
+        fabricacion:await readDoc(db,['taller_data','fabricacion']),
+        fabricacionDeleted:await readCollection(db,['taller_data','fabricacion','deleted']),
+        backupMain:await readDoc(db,['backups','backup_main']),
+        backupMainChunks:await readCollection(db,['backups','backup_main','chunks'])
+      };
+    }catch(error){ out.projects.flow = {projectId:FLOW_CONFIG.projectId,error:errText(error)}; }
+
+    // AGENDA / ORDENES
+    try{
+      setStatus('Copia 5/6 · Leyendo Agenda y órdenes de trabajo...');
+      const app = appForProject(firebaseApp, ORDERS_CONFIG, 'ldh-master-backup-orders-v1');
+      let authState = {attempted:false, signedIn:false};
+      try{
+        const auth = authApi.getAuth(app);
+        if(auth.currentUser) authState = {attempted:false,signedIn:true,uid:auth.currentUser.uid || ''};
+        else{
+          authState.attempted = true;
+          try{
+            const cred = await authApi.signInAnonymously(auth);
+            authState.signedIn = !!cred?.user;
+            authState.uid = cred?.user?.uid || '';
+          }catch(error){ authState.error = errText(error); }
+        }
+      }catch(error){ authState.error = errText(error); }
+      const db = firestore.getFirestore(app);
+      out.projects.orders = {
+        projectId:ORDERS_CONFIG.projectId,
+        auth:authState,
+        base:await readDoc(db,['taller_data','work_orders']),
+        orders:await readCollection(db,['taller_data','work_orders','orders']),
+        deleted:await readCollection(db,['taller_data','work_orders','deleted']),
+        notifications:await readCollection(db,['taller_data','work_orders','notifications']),
+        departmentsBase:await readDoc(db,['taller_data','work_order_departments']),
+        departments:await readCollection(db,['taller_data','work_order_departments','departments']),
+        departmentOrders:await readCollection(db,['taller_data','work_order_departments','orders']),
+        deletedDepartments:await readCollection(db,['taller_data','work_order_departments','deleted_departments']),
+        deletedDepartmentOrders:await readCollection(db,['taller_data','work_order_departments','deleted_orders'])
+      };
+    }catch(error){ out.projects.orders = {projectId:ORDERS_CONFIG.projectId,error:errText(error)}; }
+
+    return out;
+  }
+
+  function cloudChecks(cloud){
+    const checks = [];
+    const add = (name, source, required=true) => {
+      const ok = !!(source && source.ok && (source.exists !== false));
+      checks.push({name, required, ok, error:source?.error || (!source ? 'sin resultado' : source.exists === false ? 'documento inexistente' : '')});
+    };
+    add('Stock principal', cloud?.projects?.stock?.stock, true);
+    add('Preparación', cloud?.projects?.flow?.preparacion, true);
+    add('Fabricación', cloud?.projects?.flow?.fabricacion, true);
+    add('Órdenes de trabajo', cloud?.projects?.orders?.orders, true);
+    add('Configuración backup_main', cloud?.projects?.flow?.backupMain, false);
+    add('Ferretería IndexedDB', {ok:true,exists:true}, false);
+    return checks;
+  }
+
+  function downloadJson(data, filename){
+    const blob = new Blob([data], {type:'application/json;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1500);
+  }
+
+  function fileStamp(date){
+    const pad = n => String(n).padStart(2,'0');
+    return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+  }
+
+  async function exportMasterBackup(){
+    const btn = buttonEl();
+    if(btn?.disabled) return;
+    if(btn) btn.disabled = true;
+    const startedAt = new Date();
+    try{
+      setStatus('Copia 1/6 · Recopilando datos locales...');
+      const local = collectStorage(localStorage);
+      const session = collectStorage(sessionStorage);
+
+      setStatus('Copia 2/6 · Revisando almacenamiento auxiliar...');
+      const indexed = await collectIndexedDb();
+
+      const cloud = await cloudSnapshot();
+      setStatus('Copia 6/6 · Verificando y generando archivo...');
+
+      const checks = cloudChecks(cloud);
+      const warnings = [];
+      [...local.errors,...session.errors].forEach(item=>warnings.push(`Storage ${item.key}: ${item.error}`));
+      (indexed.warnings || []).forEach(w=>warnings.push(w));
+      (cloud.warnings || []).forEach(w=>warnings.push(w));
+      checks.filter(c=>!c.ok).forEach(c=>warnings.push(`${c.name}: ${c.error || 'no disponible'}`));
+      const complete = checks.filter(c=>c.required).every(c=>c.ok);
+
+      const data = {
+        localStorage:local.data,
+        sessionStorage:session.data,
+        indexedDB:indexed,
+        cloud
+      };
+      const payloadText = JSON.stringify(data);
+      const digest = await sha256(payloadText);
+      const modules = moduleInventory();
+      const backup = {
+        format:FORMAT,
+        version:VERSION,
+        createdAt:startedAt.toISOString(),
+        createdAtLocal:startedAt.toLocaleString('es-ES'),
+        complete,
+        source:{
+          href:location.href,
+          origin:location.origin,
+          indexBuild:document.querySelector('meta[name="ldh-build"]')?.content || window.__LDH_INDEX_BUILD || '',
+          userAgent:navigator.userAgent
+        },
+        manifest:{
+          modules,
+          moduleCount:modules.length,
+          localStorageKeys:Object.keys(local.data).length,
+          sessionStorageKeys:Object.keys(session.data).length,
+          indexedDatabases:Object.keys(indexed.databases || {}).length,
+          cloudChecks:checks,
+          sha256:digest,
+          warningCount:warnings.length
+        },
+        warnings,
+        data
+      };
+      const finalJson = JSON.stringify(backup);
+      const filename = `LDH_BACKUP_COMPLETO_${fileStamp(startedAt)}.json`;
+      downloadJson(finalJson, filename);
+      const mb = (new Blob([finalJson]).size / 1024 / 1024).toFixed(2);
+      if(complete){
+        setStatus(`✓ Copia completa exportada · ${Object.keys(local.data).length} claves locales · ${modules.length} módulos inventariados · ${mb} MB`, 'ok');
+      }else{
+        setStatus(`⚠ JSON exportado con ${warnings.length} aviso(s). Conserva el archivo, pero no lo consideres copia maestra hasta revisar los avisos. · ${mb} MB`, 'warn');
+      }
+      console.info('[LDH Master Backup V1]', {filename, complete, checks, warnings, sha256:digest});
+    }catch(error){
+      console.error('[LDH Master Backup V1] Error', error);
+      setStatus('✗ No se pudo crear la copia: ' + errText(error), 'bad');
+      alert('No se ha podido crear la copia general.\n\n' + errText(error));
+    }finally{
+      if(btn) btn.disabled = false;
+    }
+  }
+
+  function bind(){
+    const btn = buttonEl();
+    if(!btn){ setTimeout(bind,100); return; }
+    if(btn.dataset.boundMasterBackup === '1') return;
+    btn.dataset.boundMasterBackup = '1';
+    btn.addEventListener('click', exportMasterBackup);
+    window.LDH_exportMasterBackupV1 = exportMasterBackup;
+    console.info('[Index] Backup maestro JSON V1 preparado · solo lectura');
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind, {once:true});
+  else bind();
+})();
+</script>
+
+
 </body>
 </html>
