@@ -885,6 +885,14 @@
 </script>
 
 <script type="module" id="LDH_FABRICACION_FIRESTORE_SYNC_2107">
+(async function(){
+try{
+  const initialCloudEl = document.getElementById("cloudStatus");
+  if(initialCloudEl){
+    initialCloudEl.textContent = "Nube: conectando...";
+    initialCloudEl.classList.remove("ok","bad");
+    initialCloudEl.classList.add("warn");
+  }
 const firebaseConfig = {
   apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
   authDomain: "gestion-taller-v2.firebaseapp.com",
@@ -894,12 +902,18 @@ const firebaseConfig = {
   appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
 };
 
-const {initializeApp,getApps,getApp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
-const {getAuth,onAuthStateChanged,signInAnonymously} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+const {initializeApp,getApps} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
 const {getFirestore,collection,doc,getDoc,getDocs,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-const auth = getAuth(app);
+// V4: este proyecto ya no depende de Auth anonimo. La Informativa lee este
+// mismo documento sin login; Fabricacion usa el mismo acceso directo y deja
+// de quedarse bloqueada esperando una sesion anonima que ya no existe.
+const apps = getApps();
+let app = apps.find(candidate => candidate.options && candidate.options.projectId === firebaseConfig.projectId);
+if(!app){
+  const defaultApp = apps.find(candidate => candidate.name === '[DEFAULT]');
+  app = defaultApp ? initializeApp(firebaseConfig, 'ldh-fabricacion-cloud-v4') : initializeApp(firebaseConfig);
+}
 const db = getFirestore(app);
 
 const DOC_REF = doc(db, "taller_data", "fabricacion");
@@ -1169,7 +1183,8 @@ async function publish(force=false){
       status("Nube conectada · " + (pkg.counts.refs || 0) + " refs", "ok");
     }catch(e){
       console.error("publish fabricacion error", e);
-      status("Nube error", "bad");
+      const code = String((e && (e.code || e.message)) || e || "error").replace(/^firestore\//, "");
+      status("Nube error · " + code, "bad");
     }
   }, force ? 100 : 900);
 }
@@ -1295,15 +1310,8 @@ window.LDH_fabricacionPublishNow = () => publish(true);
 window.LDH_fabricacionRestoreCloudNow = restoreIfRemoteBetter;
 window.LDH_fabricacionDeleteRef = deleteRefPermanently;
 
-onAuthStateChanged(auth, async user=>{
-  if(!user){
-    try{ await signInAnonymously(auth); return; }
-    catch(e){
-      authReady = false;
-      status("Nube sin login", "bad");
-      return;
-    }
-  }
+async function startLegacyCloudSyncV4(){
+  // Firestore se prueba directamente. No se espera ni se solicita Auth anonimo.
   authReady = true;
   status("Nube comprobando...", "warn");
   try{
@@ -1311,8 +1319,9 @@ onAuthStateChanged(auth, async user=>{
   }catch(error){
     deleteSyncReady = false;
     console.warn("No se pudo cargar el registro de borrados",error);
-    status("Nube: borrado no disponible","bad");
+    status("Nube: borrado no disponible","warn");
   }
+
   await restoreIfRemoteBetter();
   applyKnownDeletedRefs();
   hookApp();
@@ -1321,24 +1330,29 @@ onAuthStateChanged(auth, async user=>{
   onSnapshot(DOC_REF, snap=>{
     if(!snap.exists()) return;
     const remote = withoutDeletedRefs(snap.data() || {});
-    // Aunque estemos aplicando otra actualización, una transacción de Almacén
+    // Aunque estemos aplicando otra actualizacion, una transaccion de Almacen
     // no puede descartarse: contiene el estado autoritativo de ALM/ENT.
     if(ignorePublish && !isAlmacenAuthoritative(remote)) return;
     const remoteStamp = String(remote.updatedAtISO || "");
     if(remoteStamp && remoteStamp === lastRemoteUpdated) return;
     lastRemoteUpdated = remoteStamp;
 
-    // Antes solo se aceptaba la nube cuando traía más referencias. Por eso una
-    // entrega (mismas referencias, cantidades distintas) podía quedar ignorada.
-    // Ahora también se acepta la misma colección cuando su revisión es posterior.
     if(remoteShouldReplaceLocal(remote)){
       applyRemotePackage(remote);
       status("Nube actualizada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
     }
   }, err=>{
     console.warn("snapshot fabricacion error", err);
-    status("Nube escucha error", "bad");
+    const code = String((err && (err.code || err.message)) || err || "error").replace(/^firestore\//, "");
+    status("Nube escucha error · " + code, "bad");
   });
+}
+
+startLegacyCloudSyncV4().catch(error=>{
+  console.error("Inicio nube Fabricacion V4", error);
+  authReady = false;
+  const code = String((error && (error.code || error.message)) || error || "error").replace(/^firestore\//, "");
+  status("Nube no disponible · " + code, "bad");
 });
 
 window.addEventListener("storage", ev=>{
@@ -1349,7 +1363,21 @@ window.addEventListener("storage", ev=>{
 
 setTimeout(hookApp, 500);
 setTimeout(hookApp, 1500);
+
+}catch(error){
+  console.error("Inicializacion nube Fabricacion V4", error);
+  const el = document.getElementById("cloudStatus");
+  if(el){
+    const code = String((error && (error.code || error.message)) || error || "error").replace(/^firestore\//, "");
+    el.textContent = "Nube: no disponible · " + code;
+    el.classList.remove("ok","warn");
+    el.classList.add("bad");
+  }
+}
+})();
 </script>
+
+<!-- LDH_FABRICACION_CLOUD_DIRECT_V4_20260807 -->
 
 <!-- LDH_FABRICACION_ALMACENAMIENTO_SEGURO_NO_DESTRUCTIVO_V4_20260730 -->
 
