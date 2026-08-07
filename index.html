@@ -5886,6 +5886,13 @@ function ldhRefreshWeightUI(){
   .ldh-backup-status.warn{color:#fde68a}
   .ldh-backup-status.bad{color:#fecaca}
   .ldh-backup-note{margin-top:9px;padding:9px 10px;border:1px solid rgba(56,189,248,.18);border-radius:10px;background:rgba(56,189,248,.06);color:#bfdbfe;font-size:10px;line-height:1.45}
+  .ldh-restore-preview{display:none;margin-top:10px;padding:10px;border:1px solid rgba(34,211,238,.24);border-radius:10px;background:rgba(8,47,73,.32);font-size:10px;line-height:1.5;color:#dbeafe}
+  .ldh-restore-preview.show{display:block}
+  .ldh-restore-preview strong{color:#fff}
+  .ldh-restore-preview .ok{color:#86efac}
+  .ldh-restore-preview .warn{color:#fde68a}
+  #ldhMasterRestoreRunBtn{display:none}
+  #ldhMasterRestoreRunBtn.show{display:inline-flex}
 </style>
 
 <script id="LDH_INDEX_MASTER_BACKUP_UI_V2">
@@ -5898,7 +5905,7 @@ function ldhRefreshWeightUI(){
     section.className = 'group';
     section.id = 'ldhMasterBackupSection';
     section.innerHTML = `
-      <div class="section-head"><div><h3>Copia de seguridad general</h3><p>Copia maestra de los datos del programa. Esta primera fase solo exporta: no modifica ni restaura ningún dato.</p></div></div>
+      <div class="section-head"><div><h3>Copia de seguridad general</h3><p>Copia maestra de los datos del programa. Permite exportar una copia completa y restaurarla después de validarla.</p></div></div>
       <div class="grid">
         <div class="card ldh-backup-card">
           <div class="top"><div class="ico">🛡️</div><span class="badge ok">seguridad</span></div>
@@ -5906,9 +5913,13 @@ function ldhRefreshWeightUI(){
           <p>Incluye datos locales de todos los módulos, almacenamiento auxiliar y las fuentes Firebase principales disponibles.</p>
           <div class="ldh-backup-actions">
             <button class="btn" type="button" id="ldhMasterBackupExportBtn">💾 Exportar JSON completo</button>
+            <button class="btn" type="button" id="ldhMasterRestoreSelectBtn">♻️ Importar / validar JSON</button>
+            <button class="btn" type="button" id="ldhMasterRestoreRunBtn">⚠️ Restaurar copia validada</button>
+            <input type="file" id="ldhMasterRestoreFile" accept=".json,application/json" hidden>
           </div>
-          <div class="ldh-backup-status" id="ldhMasterBackupStatus">Preparado para crear una copia. No se escribirá nada en Firebase.</div>
-          <div class="ldh-backup-note">El archivo lleva versión de formato, inventario de módulos, SHA-256 y filtro automático de claves, tokens, credenciales y sesiones sensibles.</div>
+          <div class="ldh-backup-status" id="ldhMasterBackupStatus">Preparado para exportar o validar una copia. La restauración nunca empieza sin confirmación.</div>
+          <div class="ldh-restore-preview" id="ldhMasterRestorePreview"></div>
+          <div class="ldh-backup-note">El archivo lleva versión de formato, inventario de módulos, SHA-256 y filtro automático de claves, tokens, credenciales y sesiones sensibles. Al restaurar se conservan las credenciales y sesiones sensibles del navegador que no forman parte de la copia.</div>
         </div>
       </div>`;
     footer.parentNode.insertBefore(section, footer);
@@ -6392,6 +6403,480 @@ function ldhRefreshWeightUI(){
     console.info('[Index] Backup maestro JSON V2 preparado · secretos filtrados · solo lectura');
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind, {once:true});
+  else bind();
+})();
+</script>
+
+
+<script type="module" id="LDH_INDEX_MASTER_RESTORE_V1_20260807">
+(async function(){
+  'use strict';
+  if(window.__LDH_MASTER_RESTORE_V1__) return;
+  window.__LDH_MASTER_RESTORE_V1__ = true;
+
+  const FORMAT = 'LDH_MASTER_BACKUP';
+  const SUPPORTED_VERSION = 2;
+  const FIREBASE_VERSION = '12.7.0';
+  const STOCK_CONFIG = {
+    apiKey:'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',
+    authDomain:'gestion-taller-stock.firebaseapp.com',
+    projectId:'gestion-taller-stock',
+    storageBucket:'gestion-taller-stock.firebasestorage.app',
+    messagingSenderId:'164944519480',
+    appId:'1:164944519480:web:bfa9173d22f88a3b56e1cd'
+  };
+  const FLOW_CONFIG = {
+    apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
+    authDomain:'gestion-taller-v2.firebaseapp.com',
+    projectId:'gestion-taller-v2',
+    storageBucket:'gestion-taller-v2.firebasestorage.app',
+    messagingSenderId:'888590823508',
+    appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'
+  };
+  const ORDERS_CONFIG = {
+    apiKey:'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
+    authDomain:'gestion-taller-2a439.firebaseapp.com',
+    projectId:'gestion-taller-2a439',
+    storageBucket:'gestion-taller-2a439.firebasestorage.app',
+    messagingSenderId:'498579673950',
+    appId:'1:498579673950:web:eb626781a5b509957db5cf'
+  };
+
+  let validatedBackup = null;
+  let validatedFileName = '';
+  let firebaseModules = null;
+
+  const statusEl = () => document.getElementById('ldhMasterBackupStatus');
+  const selectBtn = () => document.getElementById('ldhMasterRestoreSelectBtn');
+  const restoreBtn = () => document.getElementById('ldhMasterRestoreRunBtn');
+  const fileEl = () => document.getElementById('ldhMasterRestoreFile');
+  const previewEl = () => document.getElementById('ldhMasterRestorePreview');
+  const exportBtn = () => document.getElementById('ldhMasterBackupExportBtn');
+
+  function setStatus(text, cls=''){
+    const el = statusEl();
+    if(!el) return;
+    el.textContent = text;
+    el.className = 'ldh-backup-status' + (cls ? ' ' + cls : '');
+  }
+  function errText(error){ return String((error && (error.code || error.message)) || error || 'error'); }
+  function esc(value){
+    return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  }
+  function isPlainObject(v){ return !!v && typeof v === 'object' && !Array.isArray(v); }
+  function normalizedSecurityKey(key){ return String(key || '').toLowerCase().replace(/[^a-z0-9]/g,''); }
+  function isSensitiveKey(key){
+    const n = normalizedSecurityKey(key);
+    if(!n) return false;
+    const markers = [
+      'apikey','clientsecret','accesstoken','refreshtoken','idtoken','authtoken',
+      'bearertoken','password','passwd','privatekey','secretkey','credentials',
+      'credential','geminikey','openaikey','anthropickey','githubtoken','slacktoken'
+    ];
+    if(markers.some(marker => n.includes(marker))) return true;
+    return /(?:gemini|openai|anthropic|google|github|slack|aws).*(?:key|token|secret)$/.test(n);
+  }
+  function shouldSkipStorageKey(key){
+    const k = String(key || '');
+    if(!k) return true;
+    if(/^firebase:/i.test(k)) return true;
+    if(isSensitiveKey(k)) return true;
+    if(k === 'LDH_LIVE_CLIENT_ID' || k === 'LDH_LIVE_LAST_REV' || k === '__LDH_LIVE_DIRTY_AT') return true;
+    if(k === 'LDH_AUTORESTORE_ONCE') return true;
+    return false;
+  }
+  async function sha256(text){
+    if(!crypto?.subtle) throw new Error('Este navegador no permite verificar SHA-256.');
+    const bytes = new TextEncoder().encode(text);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');
+  }
+  function countCollection(source){ return source?.ok && Array.isArray(source.docs) ? source.docs.length : 0; }
+  function cloudDocCount(cloud){
+    const p = cloud?.projects || {};
+    let n = 0;
+    [p.stock?.stock,p.stock?.ironStatsExclusions,p.stock?.ironStatsWeightOverrides,p.flow?.preparacion,p.flow?.fabricacion,p.flow?.backupMain,p.orders?.base,p.orders?.departmentsBase]
+      .forEach(x=>{ if(x?.ok && x.exists !== false) n++; });
+    [p.stock?.chunks,p.stock?.stockMaterials,p.flow?.fabricacionDeleted,p.flow?.backupMainChunks,p.orders?.orders,p.orders?.deleted,p.orders?.notifications,p.orders?.departments,p.orders?.departmentOrders,p.orders?.deletedDepartments,p.orders?.deletedDepartmentOrders]
+      .forEach(x=>{ n += countCollection(x); });
+    return n;
+  }
+  function requiredCloudSources(backup){
+    const p = backup?.data?.cloud?.projects || {};
+    return [
+      ['Stock principal',p.stock?.stock],
+      ['Preparación',p.flow?.preparacion],
+      ['Fabricación',p.flow?.fabricacion],
+      ['Órdenes de trabajo',p.orders?.orders]
+    ];
+  }
+  function resetValidated(){
+    validatedBackup = null;
+    validatedFileName = '';
+    const rb = restoreBtn();
+    if(rb){ rb.classList.remove('show'); rb.disabled = false; }
+    const pv = previewEl();
+    if(pv){ pv.classList.remove('show'); pv.innerHTML = ''; }
+  }
+  async function validateBackupFile(file){
+    resetValidated();
+    if(!file) return;
+    setStatus('Validando copia · leyendo JSON...', '');
+    let backup;
+    try{
+      const text = await file.text();
+      backup = JSON.parse(text);
+    }catch(error){ throw new Error('El archivo no contiene un JSON válido. ' + errText(error)); }
+    if(!isPlainObject(backup)) throw new Error('La raíz del JSON no es un objeto de copia válido.');
+    if(backup.format !== FORMAT) throw new Error('Formato no reconocido. Se esperaba ' + FORMAT + '.');
+    if(Number(backup.version) !== SUPPORTED_VERSION) throw new Error('Versión de copia no compatible. Se admite la versión ' + SUPPORTED_VERSION + '.');
+    if(!backup.complete) throw new Error('La copia está marcada como incompleta. Por seguridad no se habilita la restauración.');
+    if(!isPlainObject(backup.data)) throw new Error('Falta el bloque data de la copia.');
+    if(!isPlainObject(backup.data.localStorage) || !isPlainObject(backup.data.sessionStorage)) throw new Error('La copia no contiene los bloques de almacenamiento local esperados.');
+    if(!isPlainObject(backup.data.cloud?.projects)) throw new Error('La copia no contiene el bloque Firebase esperado.');
+    const projects = backup.data.cloud.projects;
+    if(projects.stock?.projectId !== STOCK_CONFIG.projectId || projects.flow?.projectId !== FLOW_CONFIG.projectId || projects.orders?.projectId !== ORDERS_CONFIG.projectId){
+      throw new Error('La copia pertenece a un conjunto de proyectos Firebase distinto del configurado en este programa.');
+    }
+    for(const [name,source] of requiredCloudSources(backup)){
+      if(!source?.ok || source.exists === false) throw new Error('Fuente obligatoria no restaurable: ' + name + '.');
+    }
+    const expected = String(backup.manifest?.sha256 || '').trim().toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(expected)) throw new Error('La copia no contiene una huella SHA-256 válida.');
+    setStatus('Validando copia · comprobando integridad SHA-256...', '');
+    const actual = await sha256(JSON.stringify(backup.data));
+    if(actual !== expected) throw new Error('La huella SHA-256 no coincide. El archivo puede estar alterado o dañado.');
+
+    validatedBackup = backup;
+    validatedFileName = file.name || 'copia.json';
+    const localCount = Object.keys(backup.data.localStorage || {}).length;
+    const sessionCount = Object.keys(backup.data.sessionStorage || {}).length;
+    const indexedCount = Object.keys(backup.data.indexedDB?.databases || {}).length;
+    const cloudCount = cloudDocCount(backup.data.cloud);
+    const filtered = Number(backup.manifest?.security?.storageKeysOmitted || 0) + Number(backup.manifest?.security?.omittedFields || 0) + Number(backup.manifest?.security?.redactedValues || 0);
+    const pv = previewEl();
+    if(pv){
+      pv.innerHTML = '<strong>Copia validada</strong><br>' +
+        'Archivo: ' + esc(validatedFileName) + '<br>' +
+        'Fecha: ' + esc(backup.createdAtLocal || backup.createdAt || 'sin fecha') + ' · Formato V' + esc(backup.version) + '<br>' +
+        '<span class="ok">✓ SHA-256 correcto · copia completa</span><br>' +
+        'Contenido: ' + localCount + ' claves locales · ' + sessionCount + ' de sesión · ' + indexedCount + ' base(s) IndexedDB · ' + cloudCount + ' documento(s) Firebase.<br>' +
+        (filtered ? '<span class="warn">' + filtered + ' elemento(s) sensible(s) fueron filtrados al exportar y no se restaurarán.</span>' : 'No se detectaron elementos sensibles filtrados en el manifiesto.');
+      pv.classList.add('show');
+    }
+    const rb = restoreBtn();
+    if(rb) rb.classList.add('show');
+    setStatus('✓ JSON validado. Revisa el resumen y pulsa “Restaurar copia validada” para continuar.', 'ok');
+  }
+
+  function restoreStorage(storage, snapshot){
+    const errors = [];
+    const current = [];
+    try{ for(let i=0;i<storage.length;i++) current.push(storage.key(i)); }
+    catch(error){ errors.push('No se pudieron enumerar las claves actuales: ' + errText(error)); }
+    current.filter(Boolean).forEach(key=>{
+      if(shouldSkipStorageKey(key)) return;
+      try{ storage.removeItem(key); }catch(error){ errors.push('No se pudo eliminar ' + key + ': ' + errText(error)); }
+    });
+    Object.entries(snapshot || {}).forEach(([key,value])=>{
+      if(shouldSkipStorageKey(key)) return;
+      try{ storage.setItem(key, value == null ? '' : String(value)); }
+      catch(error){ errors.push('No se pudo restaurar ' + key + ': ' + errText(error)); }
+    });
+    return errors;
+  }
+
+  function reviveIndexedValue(value){
+    if(value == null || typeof value !== 'object') return value;
+    if(Array.isArray(value)) return value.map(reviveIndexedValue);
+    if(value.$type === 'Date' || value.$type === 'Timestamp'){
+      const d = new Date(value.value || '');
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const typed = {
+      Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float32Array,Float64Array,
+      ...(typeof BigInt64Array !== 'undefined' ? {BigInt64Array} : {}),
+      ...(typeof BigUint64Array !== 'undefined' ? {BigUint64Array} : {})
+    };
+    if(value.$type && Array.isArray(value.values) && typed[value.$type]){
+      try{ return new typed[value.$type](value.values); }catch(_){ return value.values.slice(); }
+    }
+    if(value.$type === 'Circular' || value.$type === 'ReadError') return null;
+    const out = {};
+    Object.entries(value).forEach(([k,v])=>{ out[k] = reviveIndexedValue(v); });
+    return out;
+  }
+  function hasUnsupportedIndexedMarker(value){
+    if(value == null || typeof value !== 'object') return false;
+    if(Array.isArray(value)) return value.some(hasUnsupportedIndexedMarker);
+    if(value.$type === 'Blob' || value.$type === 'ArrayBuffer') return true;
+    return Object.values(value).some(hasUnsupportedIndexedMarker);
+  }
+  function hasInlineKey(row, keyPath){
+    const get = (obj,path) => String(path).split('.').every(part => {
+      if(obj == null || !Object.prototype.hasOwnProperty.call(Object(obj),part)) return false;
+      obj = obj[part];
+      return true;
+    });
+    if(Array.isArray(keyPath)) return keyPath.every(k=>get(row,k));
+    if(typeof keyPath === 'string' && keyPath) return get(row,keyPath);
+    return true;
+  }
+  async function restoreIndexedDb(indexedBackup){
+    const warnings = [];
+    if(!indexedBackup?.supported || !isPlainObject(indexedBackup.databases)) return warnings;
+    if(!window.indexedDB || typeof indexedDB.databases !== 'function'){
+      warnings.push('IndexedDB: el navegador no permite enumerar bases; se ha omitido esta parte.');
+      return warnings;
+    }
+    let existing = [];
+    try{ existing = await indexedDB.databases(); }
+    catch(error){ warnings.push('IndexedDB: no se pudieron enumerar las bases actuales: ' + errText(error)); return warnings; }
+    const existingNames = new Set((existing || []).map(x=>String(x?.name || '')).filter(Boolean));
+    for(const [dbName,dbBackup] of Object.entries(indexedBackup.databases || {})){
+      if(!dbName || /firebase|firestore/i.test(dbName)) continue;
+      if(!existingNames.has(dbName)){
+        warnings.push('IndexedDB ' + dbName + ': no existe en este navegador; se omite para no crear una estructura incorrecta.');
+        continue;
+      }
+      if(!isPlainObject(dbBackup?.stores)){
+        warnings.push('IndexedDB ' + dbName + ': la copia no contiene stores restaurables.');
+        continue;
+      }
+      let db;
+      try{
+        db = await new Promise((resolve,reject)=>{
+          const req = indexedDB.open(dbName);
+          req.onsuccess = ()=>resolve(req.result);
+          req.onerror = ()=>reject(req.error || new Error('No se pudo abrir ' + dbName));
+          req.onupgradeneeded = ()=>{ try{ req.transaction.abort(); }catch(_){} reject(new Error('La base requería actualización.')); };
+        });
+        for(const [storeName,rows] of Object.entries(dbBackup.stores || {})){
+          if(!Array.isArray(rows)) { warnings.push('IndexedDB ' + dbName + '/' + storeName + ': datos no restaurables; se omite.'); continue; }
+          if(!db.objectStoreNames.contains(storeName)){ warnings.push('IndexedDB ' + dbName + ': falta el store ' + storeName + '; se omite.'); continue; }
+          if(rows.some(hasUnsupportedIndexedMarker)){
+            warnings.push('IndexedDB ' + dbName + '/' + storeName + ': contiene Blob/ArrayBuffer sin contenido binario en la copia V2; se omite para no corromperlo.');
+            continue;
+          }
+          await new Promise((resolve,reject)=>{
+            const tx = db.transaction(storeName,'readwrite');
+            const store = tx.objectStore(storeName);
+            if(store.keyPath == null && !store.autoIncrement){
+              tx.abort();
+              reject(new Error('usa claves externas que la copia V2 no conserva'));
+              return;
+            }
+            if(store.keyPath != null && rows.some(row=>!hasInlineKey(row,store.keyPath))){
+              tx.abort();
+              reject(new Error('faltan claves internas necesarias en alguna fila'));
+              return;
+            }
+            tx.oncomplete = ()=>resolve();
+            tx.onerror = ()=>reject(tx.error || new Error('Error de transacción'));
+            tx.onabort = ()=>reject(tx.error || new Error('Transacción cancelada'));
+            const clearReq = store.clear();
+            clearReq.onerror = ()=>{ try{ tx.abort(); }catch(_){} };
+            clearReq.onsuccess = ()=>{
+              try{
+                for(const row of rows){
+                  const req = store.put(reviveIndexedValue(row));
+                  req.onerror = ()=>{ try{ tx.abort(); }catch(_){} };
+                }
+              }catch(error){ try{ tx.abort(); }catch(_){} }
+            };
+          }).catch(error=>warnings.push('IndexedDB ' + dbName + '/' + storeName + ': ' + errText(error) + '.'));
+        }
+      }catch(error){ warnings.push('IndexedDB ' + dbName + ': ' + errText(error) + '.'); }
+      finally{ try{ db?.close(); }catch(_){} }
+    }
+    return warnings;
+  }
+
+  async function getFirebaseModules(){
+    if(firebaseModules) return firebaseModules;
+    const [firebaseApp,firestore,authApi] = await Promise.all([
+      import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app.js`),
+      import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-firestore.js`),
+      import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-auth.js`)
+    ]);
+    firebaseModules = {firebaseApp,firestore,authApi};
+    return firebaseModules;
+  }
+  function appForProject(firebaseApp, config, name){
+    const {initializeApp,getApps} = firebaseApp;
+    return getApps().find(app=>app?.options?.projectId === config.projectId) || initializeApp(config,name);
+  }
+  function reviveFirestoreValue(value, firestore){
+    if(value == null || typeof value !== 'object') return value;
+    if(Array.isArray(value)) return value.map(v=>reviveFirestoreValue(v,firestore));
+    if(value.$type === 'Timestamp' && value.value){
+      const d = new Date(value.value);
+      if(!Number.isNaN(d.getTime())) return firestore.Timestamp.fromDate(d);
+    }
+    if(value.$type === 'Date' && value.value){
+      const d = new Date(value.value);
+      if(!Number.isNaN(d.getTime())) return d;
+    }
+    if(value.$type === 'ArrayBuffer') return null;
+    if(value.$type === 'Blob') return null;
+    if(value.$type && Array.isArray(value.values)) return value.values.slice();
+    if(value.$type === 'Circular' || value.$type === 'ReadError') return null;
+    const out = {};
+    Object.entries(value).forEach(([k,v])=>{ out[k] = reviveFirestoreValue(v,firestore); });
+    return out;
+  }
+  async function applyOpsInBatches(db, firestore, ops){
+    const LIMIT = 400;
+    for(let start=0; start<ops.length; start+=LIMIT){
+      const batch = firestore.writeBatch(db);
+      for(const op of ops.slice(start,start+LIMIT)){
+        if(op.type === 'delete') batch.delete(op.ref);
+        else batch.set(op.ref,op.data);
+      }
+      await batch.commit();
+    }
+  }
+  async function restoreDoc(db, firestore, parts, source){
+    if(!source?.ok) return {skipped:true};
+    const ref = firestore.doc(db,...parts);
+    if(source.exists === false){ await firestore.deleteDoc(ref); return {deleted:true}; }
+    await firestore.setDoc(ref,reviveFirestoreValue(source.data || {},firestore));
+    return {written:true};
+  }
+  async function restoreCollection(db, firestore, parts, source){
+    if(!source?.ok || !Array.isArray(source.docs)) return {skipped:true,count:0};
+    const coll = firestore.collection(db,...parts);
+    let current;
+    try{ current = firestore.getDocsFromServer ? await firestore.getDocsFromServer(coll) : await firestore.getDocs(coll); }
+    catch(_){ current = await firestore.getDocs(coll); }
+    const backupById = new Map(source.docs.map(item=>[String(item.id),item]));
+    const ops = [];
+    // Primero se escriben todos los documentos de la copia. Las eliminaciones sobrantes van al final
+    // para reducir el riesgo de pérdida si una fase posterior falla.
+    source.docs.forEach(item=>{
+      const id = String(item.id || '');
+      if(!id) return;
+      ops.push({type:'set',ref:firestore.doc(coll,id),data:reviveFirestoreValue(item.data || {},firestore)});
+    });
+    current.docs.forEach(snap=>{ if(!backupById.has(snap.id)) ops.push({type:'delete',ref:snap.ref}); });
+    await applyOpsInBatches(db,firestore,ops);
+    return {count:source.docs.length,operations:ops.length};
+  }
+
+  async function restoreFirebase(backup){
+    const {firebaseApp,firestore,authApi} = await getFirebaseModules();
+    const projects = backup.data.cloud.projects || {};
+    const results = [];
+
+    setStatus('Restauración 1/5 · Stock Firebase...', 'warn');
+    {
+      const app = appForProject(firebaseApp,STOCK_CONFIG,'ldh-master-restore-stock-v1');
+      const db = firestore.getFirestore(app);
+      const src = projects.stock || {};
+      await restoreDoc(db,firestore,['taller_data','stock'],src.stock);
+      await restoreCollection(db,firestore,['taller_data','stock','chunks'],src.chunks);
+      await restoreCollection(db,firestore,['stock_materials'],src.stockMaterials);
+      await restoreDoc(db,firestore,['taller_data','iron_stats_exclusions'],src.ironStatsExclusions);
+      await restoreDoc(db,firestore,['taller_data','iron_stats_weight_overrides'],src.ironStatsWeightOverrides);
+      results.push('Stock');
+    }
+
+    setStatus('Restauración 2/5 · Preparación, Fabricación y Configuración...', 'warn');
+    {
+      const app = appForProject(firebaseApp,FLOW_CONFIG,'ldh-master-restore-flow-v1');
+      const db = firestore.getFirestore(app);
+      const src = projects.flow || {};
+      await restoreDoc(db,firestore,['taller_data','preparacion'],src.preparacion);
+      await restoreDoc(db,firestore,['taller_data','fabricacion'],src.fabricacion);
+      await restoreCollection(db,firestore,['taller_data','fabricacion','deleted'],src.fabricacionDeleted);
+      await restoreDoc(db,firestore,['backups','backup_main'],src.backupMain);
+      await restoreCollection(db,firestore,['backups','backup_main','chunks'],src.backupMainChunks);
+      results.push('Flujo');
+    }
+
+    setStatus('Restauración 3/5 · Agenda y órdenes de trabajo...', 'warn');
+    {
+      const app = appForProject(firebaseApp,ORDERS_CONFIG,'ldh-master-restore-orders-v1');
+      const auth = authApi.getAuth(app);
+      if(!auth.currentUser) await authApi.signInAnonymously(auth);
+      const db = firestore.getFirestore(app);
+      const src = projects.orders || {};
+      await restoreDoc(db,firestore,['taller_data','work_orders'],src.base);
+      await restoreCollection(db,firestore,['taller_data','work_orders','orders'],src.orders);
+      await restoreCollection(db,firestore,['taller_data','work_orders','deleted'],src.deleted);
+      await restoreCollection(db,firestore,['taller_data','work_orders','notifications'],src.notifications);
+      await restoreDoc(db,firestore,['taller_data','work_order_departments'],src.departmentsBase);
+      await restoreCollection(db,firestore,['taller_data','work_order_departments','departments'],src.departments);
+      await restoreCollection(db,firestore,['taller_data','work_order_departments','orders'],src.departmentOrders);
+      await restoreCollection(db,firestore,['taller_data','work_order_departments','deleted_departments'],src.deletedDepartments);
+      await restoreCollection(db,firestore,['taller_data','work_order_departments','deleted_orders'],src.deletedDepartmentOrders);
+      results.push('Órdenes');
+    }
+    return results;
+  }
+
+  async function runRestore(){
+    if(!validatedBackup) return;
+    const stamp = validatedBackup.createdAtLocal || validatedBackup.createdAt || 'sin fecha';
+    const ok = confirm(
+      'RESTAURAR COPIA GENERAL\n\n' +
+      'Archivo: ' + validatedFileName + '\n' +
+      'Fecha de la copia: ' + stamp + '\n\n' +
+      'Esta operación sustituirá los datos actuales incluidos en la copia, tanto locales como en Firebase. ' +
+      'Las credenciales y sesiones sensibles excluidas del backup se conservarán.\n\n' +
+      'Cierra otras pestañas del programa antes de continuar.\n\n' +
+      '¿Confirmas la restauración?'
+    );
+    if(!ok) return;
+
+    const sb = selectBtn(), rb = restoreBtn(), eb = exportBtn();
+    if(sb) sb.disabled = true;
+    if(rb) rb.disabled = true;
+    if(eb) eb.disabled = true;
+    try{
+      await restoreFirebase(validatedBackup);
+
+      setStatus('Restauración 4/5 · Almacenamiento local e IndexedDB...', 'warn');
+      const storageErrors = [
+        ...restoreStorage(localStorage,validatedBackup.data.localStorage),
+        ...restoreStorage(sessionStorage,validatedBackup.data.sessionStorage)
+      ];
+      const indexedWarnings = await restoreIndexedDb(validatedBackup.data.indexedDB);
+      const warnings = [...storageErrors,...indexedWarnings];
+
+      setStatus('Restauración 5/5 · Finalizando y recargando...', warnings.length ? 'warn' : 'ok');
+      const message = warnings.length
+        ? 'La copia principal se ha restaurado, con ' + warnings.length + ' aviso(s) en almacenamiento auxiliar.\n\n' + warnings.slice(0,8).join('\n') + (warnings.length>8?'\n…':'') + '\n\nEl programa se recargará ahora.'
+        : '✓ Copia restaurada correctamente.\n\nEl programa se recargará ahora para cargar los datos restaurados.';
+      alert(message);
+      location.reload();
+    }catch(error){
+      console.error('[LDH Master Restore V1] Error',error);
+      setStatus('✗ Restauración detenida por error: ' + errText(error) + '. Revisa Firebase/conexión antes de volver a intentarlo.', 'bad');
+      alert('La restauración se ha detenido.\n\n' + errText(error) + '\n\nNo se ha continuado con las fases posteriores. Alguna fase anterior puede haberse aplicado ya; revisa el estado antes de volver a intentarlo.');
+    }finally{
+      if(sb) sb.disabled = false;
+      if(rb) rb.disabled = false;
+      if(eb) eb.disabled = false;
+    }
+  }
+
+  function bind(){
+    const sb = selectBtn(), fe = fileEl(), rb = restoreBtn();
+    if(!sb || !fe || !rb){ setTimeout(bind,100); return; }
+    if(sb.dataset.boundMasterRestore === '1') return;
+    sb.dataset.boundMasterRestore = '1';
+    sb.addEventListener('click',()=>{ fe.value=''; fe.click(); });
+    fe.addEventListener('change',async()=>{
+      try{ await validateBackupFile(fe.files?.[0]); }
+      catch(error){ resetValidated(); setStatus('✗ Copia rechazada: ' + errText(error), 'bad'); alert('No se puede restaurar este archivo.\n\n' + errText(error)); }
+    });
+    rb.addEventListener('click',runRestore);
+    window.LDH_validateMasterBackupV2 = validateBackupFile;
+    window.LDH_restoreMasterBackupV1 = runRestore;
+    console.info('[Index] Restaurador maestro V1 preparado · valida formato, integridad y fuentes antes de escribir');
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',bind,{once:true});
   else bind();
 })();
 </script>
