@@ -1136,12 +1136,27 @@ function applyRemotePackage(pkg){
   const appliedStamp = String(pkg.updatedAtISO || "");
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
-  setStore(DB_KEY, pkg.ldh_db);
+
+  // Blindaje de aislamiento: Fabricacion comparte la clave historica ldh_db con
+  // otros modulos. Al restaurar desde la nube SOLO sustituye los pools que
+  // pertenecen a Fabricacion y conserva conceptos, compras, miniAgenda, empresas, etc.
+  const remoteDb = parse(pkg.ldh_db, {}) || {};
+  const localDb = parse(getStore(DB_KEY), {}) || {};
+  const mergedDb = {...localDb};
+  ["deliveries","fabricacion","fab","trabajos","deliveryCompanies"].forEach(k=>{
+    if(Array.isArray(remoteDb[k])) mergedDb[k] = remoteDb[k];
+  });
+  // La revision local se alinea con la revision remota aplicada para evitar
+  // que el mismo paquete se reprocese continuamente.
+  mergedDb.updatedAt = appliedStamp || remoteDb.updatedAt || mergedDb.updatedAt || new Date().toISOString();
+  setStore(DB_KEY, JSON.stringify(mergedDb));
+
+  // Estas dos claves son propias de Fabricacion.
   setStore(INBOX_KEY, pkg.inbox || "[]");
   setStore(OVERRIDE_KEY, pkg.overrides || "{}");
 
-  Object.entries(pkg.prepMeta || {}).forEach(([ref, raw])=>setStore("prep_meta_" + ref, raw));
-  Object.entries(pkg.prepRecepcion || {}).forEach(([ref, raw])=>setStore("prep_recepcion_" + ref, raw));
+  // prep_meta_* y prep_recepcion_* pertenecen a Preparacion. Fabricacion los
+  // puede leer, pero nunca debe rebobinarlos con una copia historica de su nube.
 
   setTimeout(()=>{
     try{
