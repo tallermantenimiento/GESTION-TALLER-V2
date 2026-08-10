@@ -168,6 +168,10 @@
     const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
     try{ return !!(ref && window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(e){ return false; }
   }
+  function isAgendaTerminal(refOrItem){
+    const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
+    try{ return !!(ref && window.LDH_isAgendaTerminalRef && window.LDH_isAgendaTerminalRef(ref)); }catch(e){ return false; }
+  }
   function fmtDate(v){ if(!v) return ""; const s = String(v); const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : s; }
   function todayISO(){ return new Date().toISOString().slice(0,10); }
   function uid(p){ return p + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,7); }
@@ -180,7 +184,8 @@
       this.load();
       this.mergeInbox();
       this.mergePrepMeta();
-      this.save(false);
+      // Abrir Fabricacion no crea una revision nueva por si solo.
+      this.save(false, false);
       this.loadCompanies();
       this.render();
       window.addEventListener("storage", ev=>{
@@ -209,8 +214,8 @@
       });
     },
 
-    save(showError=true){
-      this.state.updatedAt = new Date().toISOString();
+    save(showError=true, touchRevision=true){
+      if(touchRevision !== false) this.state.updatedAt = new Date().toISOString();
       const ok = setStore(DB_KEY, JSON.stringify(this.state));
       if(!ok && showError) alert("No se pudo guardar Fabricación porque el almacenamiento del navegador está lleno.");
       return ok;
@@ -466,7 +471,7 @@
     },
 
     counters(items){
-      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted && !isCloudDeleted(x));
+      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted && !isCloudDeleted(x) && !isAgendaTerminal(x));
       return all.reduce((a,it)=>{
         const f=this.ensureFlow(it);
         a.fab += n(f.fab);
@@ -495,7 +500,7 @@
       const companyFilter = document.getElementById("companyFilter").value;
       const stage = document.getElementById("stageFilter").value;
       return this.allItems()
-        .filter(it=>!it.archived && !it.deleted && !isCloudDeleted(it))
+        .filter(it=>!it.archived && !it.deleted && !isCloudDeleted(it) && !isAgendaTerminal(it))
         .filter(it=>{
           const f=this.ensureFlow(it);
           if(stage === "fab") return n(f.fab) > 0;
@@ -1314,7 +1319,8 @@ function hookApp(){
     return res;
   };
 
-  publish(true);
+  // No publicar una copia completa solo por abrir la pagina. Las acciones reales
+  // siguen publicando; esto evita que un PC antiguo contamine la nube al arrancar.
   return true;
 }
 window.LDH_fabricacionPublishNow = () => publish(true);
@@ -1336,7 +1342,8 @@ async function startLegacyCloudSyncV4(){
   await restoreIfRemoteBetter();
   applyKnownDeletedRefs();
   hookApp();
-  publish(true);
+  // Sin publicacion automatica al arrancar. Se espera a una accion real o a
+  // la reconciliacion segura con Agenda.
 
   onSnapshot(DOC_REF, snap=>{
     if(!snap.exists()) return;
@@ -1351,6 +1358,9 @@ async function startLegacyCloudSyncV4(){
     if(remoteShouldReplaceLocal(remote)){
       applyRemotePackage(remote);
       status("Nube actualizada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
+      setTimeout(()=>{
+        try{ window.LDH_reconcileFabricacionWithAgenda && window.LDH_reconcileFabricacionWithAgenda(false); }catch(e){}
+      }, 350);
     }
   }, err=>{
     console.warn("snapshot fabricacion error", err);
@@ -1444,10 +1454,119 @@ setTimeout(hookApp, 1500);
     const auth=getAuth(app), db=getFirestore(app);
     const ordersCol=collection(db,'taller_data','work_orders','orders');
     let authReady=false;
-    onAuthStateChanged(auth,user=>{
+    const agendaTerminalRefs = new Set();
+    window.LDH_isAgendaTerminalRef = ref => agendaTerminalRefs.has(String(ref || '').trim());
+
+    function agendaState(order){
+      return String(order && (order.workflowStateV2 || order.workflowState || order.workState || order.orderState) || '')
+        .trim().toLowerCase().replace(/[\s-]+/g,'_');
+    }
+    function agendaIsTerminal(order){
+      const status = String(order && order.status || '').trim().toLowerCase();
+      if(status && status !== 'pending') return true;
+      const st = agendaState(order);
+      return ['finished','terminado','finalizado','almacen','en_almacen','delivered','entregado','cancelled','canceled','anulado','cancelado'].includes(st);
+    }
+    function agendaFlow(order){
+      const f = order && order.phaseFlowV2 && typeof order.phaseFlowV2 === 'object' ? order.phaseFlowV2 : {};
+      return cleanFlow(f);
+    }
+    function baseReference(ref){
+      const value = String(ref || '').trim();
+      const m = value.match(/^(OT-\d{6}-\d{3})/i);
+      return m ? m[1].toUpperCase() : value;
+    }
+    function newest(rows){
+      return (rows || []).slice().sort((a,b)=>Number(b.updatedAtMs||b.completedAtMs||0)-Number(a.updatedAtMs||a.completedAtMs||0))[0] || null;
+    }
+    function applyAgendaTerminalToLocal(ref, order){
+      const appObj = window.App;
+      if(!appObj || !ref) return false;
+      const central = agendaFlow(order);
+      let changed = false;
+      let representative = null;
+      ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
+        const arr = Array.isArray(appObj.state && appObj.state[pool]) ? appObj.state[pool] : [];
+        arr.forEach(item=>{
+          const itemRef = String(item && (item.ref || item.referencia) || '').trim();
+          if(itemRef !== ref) return;
+          const f = appObj.ensureFlow(item);
+          if(Number(f.fab||f.fabricacion||0) > 0 || Number(f.pintura||0) > 0 || !item.hideFromFab || item.keepInFab){
+            changed = true;
+          }
+          f.fab = 0;
+          f.fabricacion = 0;
+          f.pintura = 0;
+          // Solo se completan ALM/ENT con valores centrales positivos; nunca se
+          // inventan cantidades ni se reduce lo ya confirmado localmente.
+          if(Number(central.almacen||0) > Number(f.almacen||0)) f.almacen = Number(central.almacen||0);
+          if(Number(central.entregado||0) > Number(f.entregado||0)) f.entregado = Number(central.entregado||0);
+          item.flow = f;
+          item.hideFromFab = true;
+          item.keepInFab = false;
+          if(Number(f.almacen||0) > 0){ item.fase='almacen'; item.estado='almacen'; }
+          else if(Number(f.entregado||0) > 0){ item.fase='entregado'; item.estado='entregado'; }
+          else { item.fase='finalizado'; item.estado='finalizado'; }
+          representative = item;
+        });
+      });
+      if(representative){
+        appObj.writeOverride(representative);
+        appObj.updateInbox(representative);
+      }
+      return changed;
+    }
+    async function reconcileAgendaTerminalStates(publishClean=true){
+      if(!authReady || !window.App) return false;
+      try{
+        const currentItems = window.App.allItems ? window.App.allItems() : [];
+        const refs = Array.from(new Set(currentItems.map(item=>String(item && (item.ref||item.referencia) || '').trim()).filter(Boolean)));
+        if(!refs.length) return false;
+        const snap = await getDocs(ordersCol);
+        const rows = snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
+        const byId = new Map(rows.map(row=>[String(row.id||''),row]));
+        const byRef = new Map();
+        rows.forEach(row=>{
+          const r = String(row.reference || row.ref || '').trim();
+          if(!r) return;
+          if(!byRef.has(r)) byRef.set(r,[]);
+          byRef.get(r).push(row);
+        });
+
+        let changed = false;
+        agendaTerminalRefs.clear();
+        currentItems.forEach(item=>{
+          const ref = String(item && (item.ref||item.referencia) || '').trim();
+          if(!ref) return;
+          const id = String(item.agendaOrderId || item.orderId || '').trim();
+          let order = id ? byId.get(id) : null;
+          if(!order) order = newest(byRef.get(ref));
+          if(!order){
+            const base = baseReference(ref);
+            if(base && base !== ref) order = newest(byRef.get(base));
+          }
+          if(!order || !agendaIsTerminal(order)) return;
+          agendaTerminalRefs.add(ref);
+          if(applyAgendaTerminalToLocal(ref,order)) changed = true;
+        });
+
+        if(window.App.save) window.App.save(false,false);
+        if(window.App.render) window.App.render();
+        if(changed && publishClean && window.LDH_fabricacionPublishNow){
+          setTimeout(()=>{ try{ window.LDH_fabricacionPublishNow(); }catch(e){} },250);
+        }
+        return changed;
+      }catch(error){
+        console.warn('[Fabricacion] reconciliacion terminal con Agenda',error);
+        return false;
+      }
+    }
+    window.LDH_reconcileFabricacionWithAgenda = reconcileAgendaTerminalStates;
+    onAuthStateChanged(auth,async user=>{
       if(user){
         authReady=true;
         readyResolve(true);
+        await reconcileAgendaTerminalStates(true);
         const reconcile=delay=>setTimeout(()=>{
           try{ window.App?.syncAllWorkflow?.('fabricacion_reconciliacion'); }
           catch(error){ console.warn('[Workflow V2] reconciliación',error); }
@@ -1487,6 +1606,13 @@ setTimeout(hookApp, 1500);
       const flow=cleanFlow(payload.phaseFlowV2||payload.flow||current.phaseFlowV2||{});
       const preserveState=payload.preserveState===true;
       const currentState=String(current.workflowStateV2||current.workflowState||'').trim();
+      const currentStatus=String(current.status||'').trim().toLowerCase();
+      const currentStateNorm=currentState.toLowerCase().replace(/[\s-]+/g,'_');
+      const terminalCurrent=(currentStatus && currentStatus!=='pending') || ['finished','terminado','finalizado','almacen','en_almacen','delivered','entregado','cancelled','canceled','anulado','cancelado'].includes(currentStateNorm);
+      if(preserveState && terminalCurrent && (flow.fabricacion>0 || flow.pintura>0)){
+        console.warn('[Workflow V2] Se ignora reconciliacion antigua sobre orden terminal', reference);
+        return true;
+      }
       const state=preserveState && currentState
         ? currentState
         : stateFromFlow(flow,payload.state||payload.workflowStateV2||currentState);
@@ -1525,5 +1651,6 @@ setTimeout(hookApp, 1500);
 <!-- LDH_FABRICACION_ALMACEN_AUTORITATIVO_V3_20260803 -->
 
 <!-- LDH_FABRICACION_NO_RESUCITA_POR_TS_V1_20260810 -->
+<!-- LDH_FABRICACION_AGENDA_TERMINAL_AUTORITATIVA_V1_20260810 -->
 </body>
 </html>
