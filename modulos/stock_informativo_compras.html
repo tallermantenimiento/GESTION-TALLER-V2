@@ -1779,9 +1779,6 @@ ensureAutomaticAccess();
         const localFlow = phaseFlow(prev);
         const remoteFlow = phaseFlow(remote);
         const localFlowTotal = localFlow.fabricacion + localFlow.pintura + localFlow.almacen + localFlow.entregado;
-        const remoteFlowTotal = remoteFlow.fabricacion + remoteFlow.pintura + remoteFlow.almacen + remoteFlow.entregado;
-        const localFlowUpdatedAt = Number(prev.workflowUpdatedAtMs)||0;
-        const remoteFlowUpdatedAt = Number(remote.workflowUpdatedAtMs)||0;
 
         // La app informativa NO decide el estado general. El documento recibido de
         // Agenda/Firestore es siempre la autoridad para EN PREPARACIÓN, ESPERANDO
@@ -1802,14 +1799,9 @@ ensureAutomaticAccess();
             : remote[key];
         });
 
-        // V14: la cache local no puede congelar un reparto antiguo (por ejemplo FAB 14)
-        // por encima de una phaseFlowV2 mas reciente publicada por Fabricacion en Ordenes.
-        // Si la lectura directa de Fabricacion esta viva, el bridge la reaplica al render.
-        // Si no lo esta, manda la version remota de Ordenes cuando sea igual o mas reciente.
-        const remoteFlowIsAuthoritative = remoteFlowTotal > 0 && remoteFlowUpdatedAt >= localFlowUpdatedAt;
-        merged.phaseFlowV2 = remoteFlowIsAuthoritative
-          ? remoteFlow
-          : (localFlowTotal > 0 ? localFlow : remoteFlow);
+        // Las pills de fases pueden proceder de la lectura directa de Fabricación.
+        // Se conserva ese reparto local si ya existe; en caso contrario se usa el remoto.
+        merged.phaseFlowV2 = localFlowTotal > 0 ? localFlow : remoteFlow;
         merged.updatedAtMs = Math.max(remoteUpdatedAt,localUpdatedAt);
         local.set(remote.id,normalizeOrder(merged));
       });
@@ -2567,7 +2559,7 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
     const {getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
     const {getAuth,onAuthStateChanged} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
     const {
-      getFirestore,collection,doc,setDoc,deleteDoc,getDocs,onSnapshot,runTransaction,serverTimestamp,writeBatch
+      getFirestore,collection,doc,setDoc,deleteDoc,getDocs,getDocsFromServer,onSnapshot,query,where,runTransaction,serverTimestamp,writeBatch
     } = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
     let app = null;
@@ -2583,6 +2575,67 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
     const deletedCol = collection(db,'taller_data','work_orders','deleted');
     const notificationsCol = collection(db,'taller_data','work_orders','notifications');
     let mounted = false;
+    let ordersUnsubscribe = null;
+    let deletedUnsubscribe = null;
+    let reconnectTimer = null;
+    let forceSyncRunning = false;
+    let lastCloudUpdatedAt = null;
+    let lastCloudUpdatedAtServerMs = 0;
+
+    function rememberCloudRows(rows){
+      (Array.isArray(rows) ? rows : []).forEach(row=>{
+        const stamp = row && row.updatedAt;
+        if(!stamp || typeof stamp.toMillis !== 'function') return;
+        const ms = Number(stamp.toMillis())||0;
+        if(ms > lastCloudUpdatedAtServerMs){
+          lastCloudUpdatedAtServerMs = ms;
+          lastCloudUpdatedAt = stamp;
+        }
+      });
+    }
+
+    function stopListeners(){
+      try{ if(typeof ordersUnsubscribe === 'function') ordersUnsubscribe(); }catch(error){}
+      try{ if(typeof deletedUnsubscribe === 'function') deletedUnsubscribe(); }catch(error){}
+      ordersUnsubscribe = null;
+      deletedUnsubscribe = null;
+    }
+
+    function scheduleReconnect(){
+      if(reconnectTimer || !auth.currentUser) return;
+      reconnectTimer = setTimeout(()=>{
+        reconnectTimer = null;
+        if(!auth.currentUser) return;
+        stopListeners();
+        mounted = false;
+        mount().catch(error=>{
+          console.error('WorkOrders reconexión',error);
+          window.WorkOrders?.updateSyncStatus('Reintentando sincronización de órdenes…',false);
+          scheduleReconnect();
+        });
+      },1500);
+    }
+
+    async function forceOrdersServerSync(reason='manual'){
+      if(forceSyncRunning || !auth.currentUser || navigator.onLine === false) return;
+      forceSyncRunning = true;
+      try{
+        const target = lastCloudUpdatedAt
+          ? query(ordersCol,where('updatedAt','>',lastCloudUpdatedAt))
+          : ordersCol;
+        const snapshot = await getDocsFromServer(target);
+        const rows = snapshot.docs.map(d=>({id:d.id,...d.data()}));
+        if(rows.length){
+          rememberCloudRows(rows);
+          window.WorkOrders?.mergeFromCloud(rows);
+        }
+      }catch(error){
+        console.warn(`WorkOrders comprobación servidor (${reason})`,error);
+        if(reason !== 'watchdog') window.WorkOrders?.updateSyncStatus('Reconectando órdenes…',false);
+      }finally{
+        forceSyncRunning = false;
+      }
+    }
 
     function cleanOrder(order){
       const out = {};
@@ -2665,30 +2718,61 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
 
       window.WorkOrders?.attachCloud(cloud);
 
-      // El listener entrega tambien el estado inicial; evitamos una lectura duplicada.
-      onSnapshot(deletedCol,snapshot=>{
+      // Escucha principal de órdenes. Si Firestore corta el listener, se vuelve a
+      // montar automáticamente sin exigir F5/Ctrl+F5.
+      deletedUnsubscribe = onSnapshot(deletedCol,snapshot=>{
         window.WorkOrders?.applyDeletedIds(snapshot.docs.map(item=>item.id));
       },error=>{
         console.error('WorkOrders deleted onSnapshot',error);
-        window.WorkOrders?.updateSyncStatus('No se puede verificar el registro de eliminaciones',false);
+        window.WorkOrders?.updateSyncStatus('Reconectando registro de eliminaciones…',false);
+        scheduleReconnect();
       });
 
-      onSnapshot(ordersCol,snapshot=>{
+      ordersUnsubscribe = onSnapshot(ordersCol,snapshot=>{
         const rows = snapshot.docs.map(d=>({id:d.id,...d.data()}));
+        rememberCloudRows(rows);
         // La informativa escucha y representa. No republica su cache local al abrir.
         window.WorkOrders?.mergeFromCloud(rows);
       },error=>{
         console.error('WorkOrders onSnapshot',error);
-        window.WorkOrders?.updateSyncStatus('Sincronización no disponible · datos locales',false);
+        window.WorkOrders?.updateSyncStatus('Reconectando órdenes…',false);
+        scheduleReconnect();
       });
+
+      // Verificación inicial contra servidor por si el primer snapshot procede de caché.
+      setTimeout(()=>forceOrdersServerSync('mount'),1200);
     }
+
+    // Segundo blindaje: una consulta incremental al servidor rescata cualquier cambio
+    // de Agenda que un listener haya podido perder. Solo pide documentos con updatedAt
+    // de servidor posterior al último recibido, por lo que normalmente devuelve 0 filas.
+    const ordersWatchdog = setInterval(()=>{
+      if(document.visibilityState === 'visible') forceOrdersServerSync('watchdog');
+    },30000);
+
+    window.addEventListener('focus',()=>forceOrdersServerSync('focus'));
+    window.addEventListener('online',()=>forceOrdersServerSync('online'));
+    document.addEventListener('visibilitychange',()=>{
+      if(document.visibilityState === 'visible') forceOrdersServerSync('visible');
+    });
+    window.addEventListener('beforeunload',()=>{
+      clearInterval(ordersWatchdog);
+      if(reconnectTimer) clearTimeout(reconnectTimer);
+      stopListeners();
+    },{once:true});
 
     onAuthStateChanged(auth,user=>{
       if(user) mount().catch(error=>{
         console.error(error);
+        mounted = false;
         window.WorkOrders?.updateSyncStatus('Error conectando sincronización',false);
+        scheduleReconnect();
       });
-      else window.WorkOrders?.updateSyncStatus('Órdenes: conectando automáticamente…',false);
+      else{
+        stopListeners();
+        mounted = false;
+        window.WorkOrders?.updateSyncStatus('Órdenes: conectando automáticamente…',false);
+      }
     });
   }catch(error){
     console.error('WorkOrders Firestore init',error);
@@ -3997,6 +4081,6 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
 })();
 </script>
 
-<!-- LDH_INFO_PHASEFLOW_REMOTE_FRESHNESS_V14_20260807 -->
+<!-- LDH_INFORMATIVA_AUTOSYNC_ORDENES_V1_20260810 -->
 </body>
 </html>
