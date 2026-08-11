@@ -23842,4 +23842,200 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 })();
 </script>
 
+
+<!-- LDH_PREP_FERRETERIA_FIRESTORE_DIRECT_SYNC_20260811 -->
+<script id="LDH_PREP_FERRETERIA_FIRESTORE_DIRECT_SYNC_20260811">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_FERRETERIA_DIRECT_SYNC_20260811__) return;
+  window.__LDH_PREP_FERRETERIA_DIRECT_SYNC_20260811__ = true;
+
+  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
+  const CHANNEL_NAME = 'ldh_ferreteria_v69';
+  const APP_NAME = 'ldh-prep-ferreteria-sync-20260811';
+  const DOC_COL = 'taller_ferreteria_v2';
+  const DOC_ID = 'main';
+  const CLIENT_KEY = 'LDH_PREP_FER_SYNC_CLIENT_ID';
+  const BUILD = 'PREP-FER-DIRECT-SYNC-20260811';
+  const firebaseConfig = {
+    apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
+    authDomain: 'gestion-taller-2a439.firebaseapp.com',
+    projectId: 'gestion-taller-2a439',
+    storageBucket: 'gestion-taller-2a439.firebasestorage.app',
+    messagingSenderId: '498579673950',
+    appId: '1:498579673950:web:eb626781a5b509957db5cf'
+  };
+
+  let app=null, auth=null, fs=null, unsub=null;
+  let applyingRemote=false;
+  let saveTimer=null;
+  let lastRemoteRev='';
+  let lastPublishedHash='';
+
+  function log(){ try{ console.log.apply(console, ['[Prep Fer Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
+  function warn(){ try{ console.warn.apply(console, ['[Prep Fer Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
+  function now(){ return new Date().toISOString(); }
+  function clientId(){
+    try{
+      let id = localStorage.getItem(CLIENT_KEY);
+      if(!id){ id = 'prep_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,8); localStorage.setItem(CLIENT_KEY,id); }
+      return id;
+    }catch(_){ return 'prep_' + Math.random().toString(36).slice(2,8); }
+  }
+  const CLIENT_ID = clientId();
+
+  function loadScript(src){
+    return new Promise((resolve,reject)=>{
+      if(document.querySelector('script[src="'+src+'"]')) return resolve();
+      const el=document.createElement('script');
+      el.src=src; el.async=true;
+      el.onload=resolve;
+      el.onerror=()=>reject(new Error('No se pudo cargar '+src));
+      document.head.appendChild(el);
+    });
+  }
+  async function ensureFirebase(){
+    if(!window.firebase || !firebase.apps){
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    }else{
+      if(!firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
+      if(!firebase.firestore) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    }
+    try{ app = firebase.app(APP_NAME); }
+    catch(_){ app = firebase.initializeApp(firebaseConfig, APP_NAME); }
+    auth = firebase.auth(app);
+    fs = firebase.firestore(app);
+    if(!auth.currentUser){
+      try{ await auth.signInAnonymously(); }
+      catch(e){ warn('Auth anonima no disponible para Ferreteria', e); throw e; }
+    }
+  }
+  function docRef(){ return fs.collection(DOC_COL).doc(DOC_ID); }
+  function emptyDB(){ return {version:'2.0-ferreteria-comun',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],assignments:[],reservationDebts:[]}; }
+  function normalize(db){
+    const out = Object.assign(emptyDB(), (db && typeof db === 'object') ? db : {});
+    ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
+    return out;
+  }
+  function hash(obj){
+    const s = JSON.stringify(obj || {});
+    let h=2166136261;
+    for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h,16777619); }
+    return String(h>>>0)+':'+s.length;
+  }
+  function norm(v){ return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
+  function arrayMerge(remoteArr, localArr, keyFn){
+    const out=[]; const pos=new Map();
+    function put(x){
+      if(!x || typeof x !== 'object') return;
+      const k = keyFn(x) || ('anon_' + out.length + '_' + Math.random().toString(36).slice(2));
+      if(pos.has(k)) out[pos.get(k)] = Object.assign({}, out[pos.get(k)], x);
+      else{ pos.set(k,out.length); out.push(x); }
+    }
+    (Array.isArray(remoteArr)?remoteArr:[]).forEach(put);
+    (Array.isArray(localArr)?localArr:[]).forEach(put);
+    return out;
+  }
+  function mergeDB(remote, local){
+    const r=normalize(remote), l=normalize(local);
+    const out = Object.assign({}, r, l);
+    out.companies = arrayMerge(r.companies,l.companies,x=>x.id||x.companyId||x.code||x.nombre||x.name);
+    out.materials = arrayMerge(r.materials,l.materials,x=>x.id||x.materialId||(norm(x.type||x.tipo)+'|'+norm(x.family||x.familia||x.grp)+'|'+norm(x.name||x.nombre)));
+    out.stock = arrayMerge(r.stock,l.stock,x=>x.id||[x.companyId,x.empresaId,x.materialId,x.matId].map(v=>String(v||'')).join('|'));
+    out.movements = arrayMerge(r.movements,l.movements,x=>x.id||x.movementId||[x.companyId,x.materialId,x.matId,x.type,x.tipo,x.qty,x.cantidad,x.date,x.fecha,x.source,x.origen].map(v=>String(v||'')).join('|'));
+    out.jobs = arrayMerge(r.jobs,l.jobs,x=>x.id||x.ref||x.reference||x.referencia);
+    out.reservations = arrayMerge(r.reservations,l.reservations,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status,x.phase].map(v=>String(v||'')).join('|'));
+    out.assignments = arrayMerge(r.assignments,l.assignments,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status,x.phase,x.source].map(v=>String(v||'')).join('|'));
+    out.reservationDebts = arrayMerge(r.reservationDebts,l.reservationDebts,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status].map(v=>String(v||'')).join('|'));
+    out.updatedAt = now();
+    out.lastSyncBuild = BUILD;
+    return normalize(out);
+  }
+  function readLocal(){
+    try{ const raw = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY); return raw ? normalize(JSON.parse(raw)) : null; }
+    catch(_){ return null; }
+  }
+  function writeLocal(db){
+    const clean = normalize(db);
+    clean.updatedAt = clean.updatedAt || now();
+    const raw = JSON.stringify(clean);
+    applyingRemote = true;
+    try{ window.__LDH_FERRETERIA_MEMORY_DB = clean; }catch(_){ }
+    try{ localStorage.setItem(STORAGE_KEY, raw); }catch(e){ warn('localStorage no acepta Ferreteria', e); }
+    try{ sessionStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
+    try{
+      const ch = new BroadcastChannel(CHANNEL_NAME);
+      ch.postMessage({type:'ferreteria-updated', source:'prep-direct-sync', updatedAt:clean.updatedAt});
+      ch.close();
+    }catch(_){ }
+    try{ window.dispatchEvent(new StorageEvent('storage',{key:STORAGE_KEY,newValue:raw})); }catch(_){ }
+    setTimeout(()=>{ applyingRemote=false; }, 80);
+    try{ if(typeof window.renderTabla === 'function' && String(window.refActual || '').trim()) window.renderTabla(); }catch(_){ }
+    return clean;
+  }
+  async function readRemote(){
+    const snap = await docRef().get();
+    if(!snap.exists) return null;
+    const data = snap.data() || {};
+    return normalize(data.payload && typeof data.payload === 'object' ? data.payload : data);
+  }
+  async function publishDB(localDB, reason){
+    if(!fs || !localDB || applyingRemote) return false;
+    const remote = await readRemote();
+    const merged = remote ? mergeDB(remote, localDB) : normalize(localDB);
+    merged.updatedAt = now();
+    merged.lastWriter = CLIENT_ID;
+    merged.lastReason = reason || 'preparacion';
+    const h = hash(merged);
+    if(h === lastPublishedHash) return true;
+    await docRef().set({
+      payload: merged,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAtIso: merged.updatedAt,
+      clientId: CLIENT_ID,
+      revision: Date.now().toString(36)+'_'+CLIENT_ID,
+      build: BUILD,
+      materialsCount: merged.materials.length,
+      movementsCount: merged.movements.length,
+      assignmentsCount: merged.assignments.length,
+      reservationsCount: merged.reservations.length
+    }, {merge:false});
+    lastPublishedHash = h;
+    writeLocal(merged);
+    return true;
+  }
+  window.LDH_publishFerreteriaDirectFromMemory = function(db){
+    return publishDB(db || window.__LDH_FERRETERIA_MEMORY_DB || readLocal(), 'preparacion_direct_publish')
+      .catch(e=>{ warn('No se pudo publicar Ferreteria desde Preparacion', e); return false; });
+  };
+  window.LDH_scheduleFerreteriaCloudPublish = function(){
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(()=>{
+      window.LDH_publishFerreteriaDirectFromMemory(window.__LDH_FERRETERIA_MEMORY_DB || readLocal());
+    }, 700);
+  };
+  async function start(){
+    try{
+      await ensureFirebase();
+      const remote = await readRemote();
+      if(remote) writeLocal(remote); // prioridad absoluta a la nube de Ferreteria; NO subimos la copia local antigua al abrir Preparacion.
+      if(unsub) unsub();
+      unsub = docRef().onSnapshot(snap=>{
+        if(!snap.exists) return;
+        const data = snap.data() || {};
+        const rev = String(data.revision || data.updatedAtIso || '');
+        if(rev && rev === lastRemoteRev) return;
+        lastRemoteRev = rev;
+        const payload = data.payload && typeof data.payload === 'object' ? data.payload : data;
+        writeLocal(payload);
+      }, e=>warn('onSnapshot Ferreteria error', e));
+      log('Activo', BUILD);
+    }catch(e){ warn('Sync Ferreteria no iniciado en Preparacion', e); }
+  }
+  setTimeout(start, 250);
+})();
+</script>
+
 </body></html>
