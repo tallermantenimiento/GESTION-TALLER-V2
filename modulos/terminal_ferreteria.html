@@ -1620,7 +1620,7 @@
   const DOC_COL = 'taller_ferreteria_v2';
   const DOC_ID = 'main';
   const CLIENT_KEY = 'LDH_FER_V2_SYNC_CLIENT_ID';
-  const BUILD = 'FER-V2-FIRESTORE-SAFE-MERGE-20260811';
+  const BUILD = 'FER-V2-FIRESTORE-SAFE-MERGE-POLL-20260811';
   const firebaseConfig = {
     apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
     authDomain: 'gestion-taller-2a439.firebaseapp.com',
@@ -1631,9 +1631,10 @@
   };
 
   let app=null, auth=null, fs=null, unsub=null;
-  let started=false, applyingRemote=false, saving=false, saveTimer=null;
+  let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null;
   let lastUploadedHash='';
   let lastRemoteRev='';
+  let lastRemoteHash='';
 
   function log(){ try{ console.log.apply(console, ['[Fer V2 Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
   function warn(){ try{ console.warn.apply(console, ['[Fer V2 Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
@@ -1787,19 +1788,38 @@
     clearTimeout(saveTimer);
     saveTimer=setTimeout(()=>uploadMerged(reason), 700);
   }
-  async function applyRemote(data, rev, remoteClientId){
-    if(!data || remoteClientId === CLIENT_ID || rev === lastRemoteRev) return;
+  async function applyRemote(data, rev, remoteClientId, reason){
+    if(!data) return;
+    const remoteHash = hash(data);
+    if(remoteClientId === CLIENT_ID && rev === lastRemoteRev && remoteHash === lastRemoteHash) return;
+    if(rev && rev === lastRemoteRev && remoteHash === lastRemoteHash) return;
     lastRemoteRev = rev || '';
+    lastRemoteHash = remoteHash;
     const local = readLocal();
     const merged = local ? mergeDB(data, local) : normalize(data);
     writeLocal(merged);
-    log('Remoto aplicado mediante merge seguro', {materials:merged.materials.length, movements:merged.movements.length});
+    log('Remoto aplicado mediante merge seguro', reason || '', {materials:merged.materials.length, movements:merged.movements.length});
     setTimeout(()=>{
       try{ if(typeof window.LDH_FerreteriaReloadV2 === 'function') window.LDH_FerreteriaReloadV2(); }catch(_){ }
       try{ if(typeof window.refreshItemsFromStock === 'function') window.refreshItemsFromStock(); }catch(_){ }
       try{ if(typeof window.render === 'function') window.render(); }catch(_){ }
       try{ if(typeof window.goBackMain === 'function') window.goBackMain(); else if(typeof window.screenItems === 'function') window.screenItems(); }catch(_){ }
-    }, 100);
+      try{
+        const ev = new CustomEvent('ldh-ferreteria-v2-remote-update', {detail:{reason:reason||'remote'}});
+        window.dispatchEvent(ev);
+      }catch(_){ }
+    }, 80);
+  }
+
+  async function pullRemote(reason){
+    if(!started || saving || applyingRemote || !fs) return;
+    try{
+      const snap = await docRef().get();
+      if(!snap.exists) return;
+      const d = snap.data() || {};
+      const payload = d.payload || d;
+      await applyRemote(payload, d.revision || d.updatedAtIso || '', d.clientId || '', reason || 'poll');
+    }catch(e){ warn('Error en pull remoto', reason, e); }
   }
   async function start(){
     try{
@@ -1815,9 +1835,11 @@
         if(!snap.exists || saving) return;
         const d=snap.data()||{};
         const payload=d.payload || d;
-        applyRemote(payload, d.revision || d.updatedAtIso || '', d.clientId || '').catch(e=>warn('Error aplicando remoto', e));
+        applyRemote(payload, d.revision || d.updatedAtIso || '', d.clientId || '', 'onSnapshot').catch(e=>warn('Error aplicando remoto', e));
       }, e=>warn('onSnapshot error', e));
-      log('Activo', BUILD);
+      if(pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(()=>{ if(document.visibilityState !== 'hidden') pullRemote('poll_30s_visible'); }, 30000);
+      log('Activo', BUILD + ' + POLL_SEGURO_30S_VISIBLE');
     }catch(e){ warn('Sync no iniciado', e); }
   }
 
@@ -1834,7 +1856,8 @@
   window.LDH_FerreteriaV2SyncNow = function(){ return uploadMerged('manual'); };
   window.LDH_FerreteriaV2SyncStatus = function(){ return {started, saving, clientId:CLIENT_ID, build:BUILD, doc:DOC_COL+'/'+DOC_ID}; };
   window.addEventListener('online', ()=>scheduleUpload('online'));
-  window.addEventListener('focus', ()=>scheduleUpload('focus'));
+  window.addEventListener('focus', ()=>{ scheduleUpload('focus'); setTimeout(()=>pullRemote('focus_pull'), 200); });
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'visible') setTimeout(()=>pullRemote('visible_pull'), 200); });
   setTimeout(start, 300);
 })();
 </script>
