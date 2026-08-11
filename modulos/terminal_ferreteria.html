@@ -221,6 +221,8 @@
   const HIST_KEY = "tablet_hist_ferreteria_v3_clean";
   const HIST_LIMIT = 500;
   const STOCK_DB_KEY = "taller_stock_v3_data";
+  const FER_V2_DB_KEY = "ldh_v2_ferreteria_stock_v1";
+  const FER_COMMON_COMPANY_ID = "fer_common";
   const USE_FIRESTORE_STOCK = true;
   const FIRESTORE_STOCK_DOC = { col: "taller_stock", doc: "main" };
   const USE_FIRESTORE_OPS = true;
@@ -260,17 +262,104 @@
     }
   }
 
+  function nQty(v){
+    const n = Number(String(v ?? 0).replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function normTxt(v){
+    return String(v || '')
+      .toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g,'')
+      .replace(/[^a-z0-9]+/g,' ')
+      .trim();
+  }
+  function isV2DB(db){ return !!(db && db.__source === 'fer_v2'); }
+  function saveV2DB(db){
+    if(!db) return;
+    const clean = {...db};
+    delete clean.__source;
+    clean.updatedAt = new Date().toISOString();
+    localStorage.setItem(FER_V2_DB_KEY, JSON.stringify(clean));
+    try{
+      const ch = new BroadcastChannel('ldh_ferreteria_v69');
+      ch.postMessage({type:'ferreteria-updated', updatedAt:clean.updatedAt});
+      ch.close();
+    }catch(_){ }
+  }
   function loadStockDB(){
+    try{
+      const rawV2 = localStorage.getItem(FER_V2_DB_KEY) || sessionStorage.getItem(FER_V2_DB_KEY);
+      if(rawV2){
+        const dbV2 = JSON.parse(rawV2);
+        if(dbV2 && Array.isArray(dbV2.materials) && Array.isArray(dbV2.movements)){
+          dbV2.__source = 'fer_v2';
+          dbV2.assignments = Array.isArray(dbV2.assignments) ? dbV2.assignments : [];
+          dbV2.reservations = Array.isArray(dbV2.reservations) ? dbV2.reservations : [];
+          return dbV2;
+        }
+      }
+    }catch(e){ console.warn('No se pudo leer Ferretería V2:', e); }
     try{
       const raw = localStorage.getItem(STOCK_DB_KEY);
       if(!raw) return null;
       const db = JSON.parse(raw);
       if(!db || !Array.isArray(db.materials) || !Array.isArray(db.movements)) return null;
+      db.__source = 'old_stock';
       return db;
     }catch(e){ return null; }
   }
+  function movementSignedQty(db, m){
+    const q = nQty(m.qty ?? m.cantidad ?? m.units ?? m.unidades);
+    const t = String(m.type || m.tipo || (isV2DB(db) ? 'entrada' : 'in')).toLowerCase();
+    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return 0;
+    if(['entrada','in','ajuste_pos','devolucion'].includes(t)) return q;
+    if(['salida','out','ajuste_neg','consumo'].includes(t)) return -q;
+    return q;
+  }
   function getStockFromDB(db, matId){
+    if(isV2DB(db)){
+      return (db.movements||[])
+        .filter(m=>String(m.companyId || FER_COMMON_COMPANY_ID) === FER_COMMON_COMPANY_ID)
+        .filter(m=>String(m.materialId || m.matId || '') === String(matId))
+        .reduce((a,m)=> a + movementSignedQty(db,m), 0);
+    }
     return (db.movements||[]).filter(m=>m.matId===matId).reduce((a,m)=> (m.type==='in'? a + Number(m.qty||0) : a - Number(m.qty||0)), 0);
+  }
+  function isActiveReserveStatus(st){
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','recibida','recibido','cancelada prueba','cancelada_prueba'].includes(normTxt(st || 'activa'));
+  }
+  function sameV2Material(obj, materialId, materialName){
+    if(!obj) return false;
+    const ids = [obj.materialId,obj.matId,obj.stockMaterialId,obj.v2MaterialId,obj.toMaterialId].map(v=>String(v||'')).filter(Boolean);
+    if(ids.includes(String(materialId || ''))) return true;
+    const n1 = normTxt(materialName || materialId);
+    const n2 = normTxt([obj.materialName,obj.material,obj.mat,obj.name,obj.nombre,obj.descripcion].join(' '));
+    return !!(n1 && n2 && (n1 === n2 || n1.includes(n2) || n2.includes(n1)));
+  }
+  function isLoanReserve(a){
+    const txt = normTxt((a && (a.assignmentType || a.reason || a.origen || a.source)) || '');
+    return txt.includes('otra empresa') || txt.includes('prestamo') || txt.includes('deuda') || !!(a && a.toCompanyId);
+  }
+  function phaseOk(a){
+    const ph = normTxt((a && (a.phase || a.fase)) || 'preparacion');
+    return !ph || ['preparacion','fabricacion'].includes(ph);
+  }
+  function reservedFromDB(db, matId, matName){
+    if(!isV2DB(db)) return 0;
+    let total = 0;
+    (db.assignments||[]).forEach(a=>{
+      if(!sameV2Material(a, matId, matName)) return;
+      if(!isActiveReserveStatus(a.status || a.estado)) return;
+      if(!phaseOk(a)) return;
+      if(isLoanReserve(a)) return;
+      total += Math.max(0, nQty(a.pendingQty ?? a.qtyPending ?? a.pendiente ?? a.qty ?? a.cantidad ?? a.units ?? a.unidades));
+    });
+    (db.reservations||[]).forEach(r=>{
+      if(!sameV2Material(r, matId, matName)) return;
+      if(!isActiveReserveStatus(r.status || r.estado)) return;
+      total += Math.max(0, nQty(r.pendingQty ?? r.qtyPending ?? r.pendiente ?? r.qty ?? r.cantidad ?? r.units ?? r.unidades));
+    });
+    return total;
   }
 
   function isFerreteria(m){
@@ -286,19 +375,46 @@
     const db = loadStockDB();
     if(!db){
       ITEMS = [];
-      return {ok:false, reason:"No existe la base de datos de stock. Abre stock.html una vez para inicializarla."};
+      return {ok:false, reason:"No existe la base de datos de stock. Abre stock.html o ferreteria.html una vez para inicializarla."};
+    }
+    if(isV2DB(db)){
+      const mats = (db.materials||[]).filter(m => String(m.type||m.tipo||'').toLowerCase() === 'ferreteria' || isFerreteria({cat:'Ferretería', grp:m.family || m.familia || ''}));
+      ITEMS = mats.map(m=>{
+        const stock = getStockFromDB(db, m.id);
+        const reserved = reservedFromDB(db, m.id, m.name || m.nombre);
+        const free = Math.max(0, stock - reserved);
+        return {
+          id: m.id,
+          name: m.name || m.nombre || 'Material',
+          unit: m.unit || m.unidad || "ud",
+          stock,
+          reserved,
+          free,
+          usageCount: 0,
+          family: m.family || m.familia || m.grp || "Ferretería",
+          source: 'fer_v2'
+        };
+      });
+      return {ok:true, source:'fer_v2'};
     }
     const mats = (db.materials||[]).filter(isFerreteria);
-    ITEMS = mats.map(m=>({
-      id: m.id,
-      name: m.name,
-      unit: m.unit || "ud",
-      stock: getStockFromDB(db, m.id),
-      usageCount: 0,
-      family: m.grp || m.cat || "Ferretería"
-    }));
-    return {ok:true};
+    ITEMS = mats.map(m=>{
+      const stock = getStockFromDB(db, m.id);
+      return {
+        id: m.id,
+        name: m.name,
+        unit: m.unit || "ud",
+        stock,
+        reserved: 0,
+        free: stock,
+        usageCount: 0,
+        family: m.grp || m.cat || "Ferretería",
+        source: 'old_stock'
+      };
+    });
+    return {ok:true, source:'old_stock'};
   }
+
 
   function stockDocRef(){ return fbDb.collection(FIRESTORE_STOCK_DOC.col).doc(FIRESTORE_STOCK_DOC.doc); }
 
@@ -396,8 +512,78 @@
     }
   }
 
+  async function applyMovementToCurrentStock(matId, qty, type){
+    const currentDB = loadStockDB();
+    if(isV2DB(currentDB)){
+      const mat = (currentDB.materials||[]).find(m => String(m.id) === String(matId));
+      const realBefore = getStockFromDB(currentDB, matId);
+      const reserved = reservedFromDB(currentDB, matId, mat && (mat.name || mat.nombre));
+      const freeBefore = Math.max(0, realBefore - reserved);
+      if(type === 'out' && freeBefore < qty){
+        return {ok:false, msg:'SIN STOCK LIBRE: este material tiene reservas activas.', stockAfter:realBefore, freeAfter:freeBefore};
+      }
+      const movementId = genId();
+      currentDB.movements = Array.isArray(currentDB.movements) ? currentDB.movements : [];
+      currentDB.movements.push({
+        id: movementId,
+        companyId: FER_COMMON_COMPANY_ID,
+        materialId: matId,
+        matId,
+        type: type === 'in' ? 'entrada' : 'salida',
+        tipo: type === 'in' ? 'entrada' : 'salida',
+        qty,
+        cantidad: qty,
+        date: new Date().toISOString(),
+        fecha: new Date().toISOString(),
+        source: type === 'in' ? 'TERMINAL_FERRETERIA_V2_ENTRADA' : 'TERMINAL_FERRETERIA_V2_SALIDA',
+        origen: type === 'in' ? 'TERMINAL_FERRETERIA_V2_ENTRADA' : 'TERMINAL_FERRETERIA_V2_SALIDA',
+        device: (navigator.userAgent||''),
+        sessionId: state.sessionId || 'SIN_SESION',
+        operator: state.operator || ''
+      });
+      saveV2DB(currentDB);
+      const stockAfter = type === 'in' ? realBefore + qty : realBefore - qty;
+      const freeAfter = Math.max(0, stockAfter - reserved);
+      return {ok:true, stockAfter, freeAfter, reserved, movementId};
+    }
+    return await applyMovementToStockFirestore(matId, qty, type);
+  }
+
+
 
   async function createMaterialInFirestore(payload){
+    const currentDB = loadStockDB();
+    if(isV2DB(currentDB)){
+      const materialId = 'fer_' + genId();
+      const initialQty = Number(payload.initialQty || 0);
+      const mat = {
+        id: materialId,
+        name: String(payload.name || '').trim(),
+        family: String(payload.grp || 'Ferretería').trim(),
+        type: 'ferreteria',
+        unit: String(payload.unit || 'ud').trim() || 'ud',
+        min: Number(payload.min || 0),
+        createdFrom: 'terminal_ferreteria_v2'
+      };
+      currentDB.materials = Array.isArray(currentDB.materials) ? currentDB.materials : [];
+      currentDB.movements = Array.isArray(currentDB.movements) ? currentDB.movements : [];
+      const dup = currentDB.materials.find(m => normTxt(m.type||'') === 'ferreteria' && normTxt(m.family||m.familia||'') === normTxt(mat.family) && normTxt(m.name||m.nombre||'') === normTxt(mat.name));
+      if(dup) return {ok:false, msg:'Ya existe un material con ese nombre en ese grupo.'};
+      currentDB.materials.push(mat);
+      let movementId = null;
+      if(initialQty > 0){
+        movementId = genId();
+        currentDB.movements.push({
+          id: movementId, companyId: FER_COMMON_COMPANY_ID, materialId, matId: materialId,
+          type:'entrada', tipo:'entrada', qty:initialQty, cantidad:initialQty,
+          date:new Date().toISOString(), fecha:new Date().toISOString(),
+          source:'TERMINAL_FERRETERIA_V2_NEW_MATERIAL', origen:'TERMINAL_FERRETERIA_V2_NEW_MATERIAL',
+          operator: state.operator || '', sessionId: state.sessionId || 'SIN_SESION'
+        });
+      }
+      saveV2DB(currentDB);
+      return {ok:true, material:mat, movementId, stockAfter:initialQty};
+    }
     if(!USE_FIRESTORE_STOCK || !fsReady) return {ok:false, msg:"Firestore no listo (stock)."};
 
     const ref = stockDocRef();
@@ -477,6 +663,14 @@
   function getFerreteriaGroups(){
     const db = loadStockDB();
     if(!db || !Array.isArray(db.materials)) return [];
+    if(isV2DB(db)){
+      return Array.from(new Set(
+        db.materials
+          .filter(m => String(m.type||m.tipo||'').toLowerCase() === 'ferreteria' || String(m.family||m.familia||'').trim())
+          .map(m => String(m.family || m.familia || m.grp || "Ferretería").trim())
+          .filter(Boolean)
+      )).sort((a,b)=>a.localeCompare(b,'es'));
+    }
     return Array.from(new Set(
       db.materials
         .filter(isFerreteria)
@@ -546,6 +740,25 @@
   }
 
   async function updateMaterialInFirestore(payload){
+    const currentDB = loadStockDB();
+    if(isV2DB(currentDB)){
+      currentDB.materials = Array.isArray(currentDB.materials) ? currentDB.materials : [];
+      const idx = currentDB.materials.findIndex(m => m && String(m.id) === String(payload.id));
+      if(idx === -1) return {ok:false, msg:'No se encontró el material.'};
+      const dup = currentDB.materials.find(m => m && String(m.id) !== String(payload.id) && normTxt(m.type||'') === 'ferreteria' && normTxt(m.family||m.familia||'') === normTxt(payload.grp||'') && normTxt(m.name||m.nombre||'') === normTxt(payload.name||''));
+      if(dup) return {ok:false, msg:'Ya existe un material con ese nombre en ese grupo.'};
+      currentDB.materials[idx] = {
+        ...currentDB.materials[idx],
+        name: String(payload.name || '').trim(),
+        family: String(payload.grp || 'Ferretería').trim(),
+        type: 'ferreteria',
+        unit: String(payload.unit || 'ud').trim() || 'ud',
+        min: Number(payload.min || 0),
+        updatedFrom: 'terminal_ferreteria_v2'
+      };
+      saveV2DB(currentDB);
+      return {ok:true, material:currentDB.materials[idx]};
+    }
     if(!USE_FIRESTORE_STOCK || !fsReady) return {ok:false, msg:'Firestore no listo (stock).'};
     const ref = stockDocRef();
     try{
@@ -595,6 +808,17 @@
   }
 
   async function deleteMaterialInFirestore(matId){
+    const currentDB = loadStockDB();
+    if(isV2DB(currentDB)){
+      currentDB.materials = Array.isArray(currentDB.materials) ? currentDB.materials : [];
+      currentDB.movements = Array.isArray(currentDB.movements) ? currentDB.movements : [];
+      const mat = currentDB.materials.find(m => m && String(m.id) === String(matId));
+      if(!mat) return {ok:false, msg:'No se encontró el material.'};
+      currentDB.materials = currentDB.materials.filter(m => !(m && String(m.id) === String(matId)));
+      currentDB.movements = currentDB.movements.filter(mv => !(mv && String(mv.materialId || mv.matId || '') === String(matId)));
+      saveV2DB(currentDB);
+      return {ok:true, removed:mat};
+    }
     if(!USE_FIRESTORE_STOCK || !fsReady) return {ok:false, msg:'Firestore no listo (stock).'};
     const ref = stockDocRef();
     try{
@@ -1020,9 +1244,12 @@
         const isOpenClass = autoExpand ? 'open' : '';
         const isShowClass = autoExpand ? 'show' : '';
         const itemsHtml = list.map(it => {
-          const [cls,lbl]=detectLowTag(it.stock);
+          const libre = it.free ?? it.stock;
+          const reservado = it.reserved || 0;
+          const [cls,lbl]=detectLowTag(libre);
           const warnTag = cls ? `<span class="tag ${cls}">${lbl}</span>`:'';
-          const outDisabled = it.stock < step ? 'disabled' : '';
+          const reserveTag = reservado > 0 ? `<span class="tag low">RES ${reservado}</span>` : '';
+          const outDisabled = libre < step ? 'disabled' : '';
           return `
             <div class="item">
               <div class="left">
@@ -1030,12 +1257,13 @@
                 <div class="meta">
                   <span class="muted">Usos: <b>${it.usageCount}</b></span>
                   ${warnTag}
+                  ${reserveTag}
                 </div>
               </div>
               <div class="right">
                 <div class="kpi" style="min-width:140px; padding:10px">
-                  <div class="lbl">Stock</div>
-                  <div class="val" style="font-size:18px">${it.stock} ${escapeHtml(it.unit)}</div>
+                  <div class="lbl">Libre / Físico</div>
+                  <div class="val" style="font-size:18px">${libre} / ${it.stock} ${escapeHtml(it.unit)}</div>
                 </div>
                 <button class="miniBtn sel" data-sel="${it.id}">Abrir</button>
                 <button class="miniBtn" data-edit="${it.id}">Editar</button>
@@ -1083,7 +1311,7 @@
           const id=b.getAttribute("data-quick-out");
           const it=ITEMS.find(x=>x.id===id);
           if(!it) return;
-          if(it.stock<step){ toast("No hay suficiente stock.", false); return; }
+          if((it.free ?? it.stock)<step){ toast("No hay suficiente stock libre. Puede estar reservado.", false); return; }
           await doMovement(it, step, 'out');
           render();
         };
@@ -1105,12 +1333,13 @@
 
   async function doMovement(it, qty, type){
     const beforeStock = it.stock;
+    const beforeFree = (it.free ?? it.stock);
     state.lastAction = { itemId: it.id, stockBefore: beforeStock, qty, movementId:null, type };
-    const res = await applyMovementToStockFirestore(it.id, qty, type);
+    const res = await applyMovementToCurrentStock(it.id, qty, type);
     if(!res.ok){ toast(res.msg || (type==='in' ? 'No se pudo agregar.' : 'SIN STOCK'), false); return; }
     refreshItemsFromStock();
     const it2 = ITEMS.find(x=>x.id===it.id);
-    if(it2) it.stock = it2.stock;
+    if(it2) { it.stock = it2.stock; it.reserved = it2.reserved || 0; it.free = it2.free ?? it2.stock; }
     state.lastAction.movementId = res.movementId;
     addHist({
       ts: nowISO(),
@@ -1122,21 +1351,23 @@
       delta: type === 'in' ? qty : -qty,
       unit: it.unit,
       stockBefore: beforeStock,
+      freeBefore: beforeFree,
       stockAfter: res.stockAfter,
+      freeAfter: res.freeAfter ?? res.stockAfter,
       device: type === 'in' ? "TERMINAL_FERRETERIA_ENTRADA" : "TERMINAL_FERRETERIA",
       movementId: res.movementId,
       moveType: type
     });
     toast(type === 'in'
-      ? `Añadido ${qty} ${it.unit} (${res.stockAfter} en stock).`
-      : `Descontado ${qty} ${it.unit} (${res.stockAfter} restantes).`, true);
+      ? `Añadido ${qty} ${it.unit} (físico ${res.stockAfter} · libre ${res.freeAfter ?? res.stockAfter}).`
+      : `Descontado ${qty} ${it.unit} (físico ${res.stockAfter} · libre ${res.freeAfter ?? res.stockAfter}).`, true);
   }
 
   function screenConsume(){
     state.view="main"; setBadge();
     const it=ITEMS.find(x=>x.id===state.activeItemId);
     if(!it){ screenItems(); return; }
-    const canUse = it.stock>0;
+    const canUse = (it.free ?? it.stock) > 0;
     $wrap.innerHTML = `
       <div class="row">
         <div>
@@ -1152,9 +1383,9 @@
       </div>
       <div class="sep"></div>
       <div class="grid3">
-        <div class="kpi"><div class="lbl">Familia</div><div class="val">${escapeHtml(it.family)}</div></div>
-        <div class="kpi"><div class="lbl">Stock</div><div class="val big">${it.stock}</div><div class="muted">${escapeHtml(it.unit)}</div></div>
-        <div class="kpi"><div class="lbl">Sync</div><div class="val">${USE_FIRESTORE_STOCK && fsReady ? "Firestore OK" : "Local"}</div></div>
+        <div class="kpi"><div class="lbl">Físico</div><div class="val big">${it.stock}</div><div class="muted">${escapeHtml(it.unit)}</div></div>
+        <div class="kpi"><div class="lbl">Reservado</div><div class="val big">${it.reserved || 0}</div><div class="muted">${escapeHtml(it.unit)}</div></div>
+        <div class="kpi"><div class="lbl">Libre</div><div class="val big">${it.free ?? it.stock}</div><div class="muted">${escapeHtml(it.unit)}</div></div>
       </div>
       <div class="sep"></div>
       <div class="grid2">
@@ -1166,8 +1397,8 @@
       </div>
       <div class="grid3" style="margin-top:14px">
         <button class="btn ${canUse ? 'accent':'disabled'}" id="use1">CONSUMIR 1</button>
-        <button class="btn ${it.stock>=5 ? 'accent':'disabled'}" id="use5">CONSUMIR 5</button>
-        <button class="btn ${it.stock>=10 ? 'accent':'disabled'}" id="use10">CONSUMIR 10</button>
+        <button class="btn ${(it.free ?? it.stock)>=5 ? 'accent':'disabled'}" id="use5">CONSUMIR 5</button>
+        <button class="btn ${(it.free ?? it.stock)>=10 ? 'accent':'disabled'}" id="use10">CONSUMIR 10</button>
       </div>
       <div class="sep"></div>
       <div class="grid2">
@@ -1187,9 +1418,9 @@
     byId('chgItem').onclick = ()=>{ state.activeItemId=null; screenItems(); };
     byId('editItem').onclick = ()=>openEditMaterialModal(it.id);
     byId('logout').onclick = ()=>{ state.operator=null; state.sessionId=null; state.activeItemId=null; screenOperator(); };
-    byId('use1').onclick = async ()=>{ if(it.stock<1) return; await doMovement(it,1,'out'); screenConsume(); };
-    byId('use5').onclick = async ()=>{ if(it.stock<5) return; await doMovement(it,5,'out'); screenConsume(); };
-    byId('use10').onclick = async ()=>{ if(it.stock<10) return; await doMovement(it,10,'out'); screenConsume(); };
+    byId('use1').onclick = async ()=>{ if((it.free ?? it.stock)<1) return; await doMovement(it,1,'out'); screenConsume(); };
+    byId('use5').onclick = async ()=>{ if((it.free ?? it.stock)<5) return; await doMovement(it,5,'out'); screenConsume(); };
+    byId('use10').onclick = async ()=>{ if((it.free ?? it.stock)<10) return; await doMovement(it,10,'out'); screenConsume(); };
     byId('add1').onclick = async ()=>{ await doMovement(it,1,'in'); screenConsume(); };
     byId('add5').onclick = async ()=>{ await doMovement(it,5,'in'); screenConsume(); };
     byId('add10').onclick = async ()=>{ await doMovement(it,10,'in'); screenConsume(); };
@@ -1197,7 +1428,7 @@
       const raw = (byId('qtyOutIn').value||'').trim();
       const qty = parseInt(raw,10);
       if(!raw || isNaN(qty) || qty<=0){ toast('Introduce una cantidad válida.', false); return; }
-      if(it.stock<qty){ toast('No hay suficiente stock para esa cantidad.', false); return; }
+      if((it.free ?? it.stock)<qty){ toast('No hay suficiente stock libre para esa cantidad. Puede estar reservado.', false); return; }
       await doMovement(it, qty, 'out');
       byId('qtyOutIn').value='';
       screenConsume();
