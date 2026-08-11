@@ -6939,5 +6939,161 @@ window.LDH_borrarMovimientosTodos = function(){
 })();
 </script>
 
+
+
+<!-- LDH_FERRETERIA_RESERVAS_VISIBLES_LIBERAR_20260811 -->
+<style id="LDH_FERRETERIA_RESERVAS_VISIBLES_LIBERAR_20260811_CSS">
+  /* En Ferretería común mostramos Reservado y Libre real. El resto de columnas internas siguen ocultas. */
+  .stock-table col.col-reservado,
+  .family-body col.col-reservado{display:table-column!important;width:92px!important}
+  .stock-table th.ferreteria-hidden:nth-child(5),
+  .stock-table td.ferreteria-hidden:nth-child(5),
+  .family-body td.ferreteria-hidden:nth-child(5){display:table-cell!important}
+  .stock-table th:nth-child(5),
+  .stock-table td:nth-child(5),
+  .family-body td:nth-child(5){text-align:center!important}
+  .ldh-fer-res-box{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+  .ldh-fer-res-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border:1px solid rgba(245,158,11,.28);background:rgba(245,158,11,.08);border-radius:12px;padding:9px 10px}
+  .ldh-fer-res-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+  .ldh-fer-res-main b{white-space:normal;word-break:break-word}
+</style>
+<script id="LDH_FERRETERIA_RESERVAS_VISIBLES_LIBERAR_20260811_JS">
+(function(){
+  function _ferNorm(v){
+    return String(v||'').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+  }
+  function _ferQty(x){
+    const v = x && (x.pendingQty ?? x.qtyPending ?? x.pendiente ?? x.qty ?? x.cantidad ?? x.units ?? x.unidades ?? 0);
+    const n = Number(String(v ?? 0).replace(',','.'));
+    return Number.isFinite(n) ? Math.max(0,n) : 0;
+  }
+  function _ferActive(st){
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','cancelada_prueba'].includes(_ferNorm(st||'activa'));
+  }
+  function _ferSameMaterial(obj, materialId){
+    if(!obj) return false;
+    const ids = [obj.materialId,obj.matId,obj.stockMaterialId,obj.v2MaterialId,obj.toMaterialId]
+      .map(v=>String(v||'')).filter(Boolean);
+    if(ids.includes(String(materialId||''))) return true;
+    try{
+      const m = typeof materialById==='function' ? (materialById(materialId)||{}) : {};
+      const name = _ferNorm(m.name || m.nombre || m.material || materialId);
+      const txt = _ferNorm([obj.materialName,obj.material,obj.mat,obj.name,obj.nombre,obj.descripcion].join(' '));
+      return !!(name && txt && (name===txt || name.includes(txt) || txt.includes(name)));
+    }catch(e){ return false; }
+  }
+  function _ferIsLoan(a){
+    const typ = _ferNorm((a && (a.assignmentType || a.reason || a.origen || a.source)) || '');
+    return typ.includes('otra empresa') || typ.includes('prestamo') || typ.includes('deuda') || !!(a && a.toCompanyId);
+  }
+  function _ferPhaseOK(a){
+    const ph = _ferNorm((a && (a.phase || a.fase)) || 'preparacion');
+    return !ph || ['preparacion','fabricacion'].includes(ph);
+  }
+  window.LDH_ferReservasAsignacionesActivas = function(materialId){
+    const out=[];
+    try{
+      (db.assignments||[]).forEach(a=>{
+        if(!_ferSameMaterial(a, materialId)) return;
+        if(!_ferActive(a.status || a.estado)) return;
+        if(!_ferPhaseOK(a)) return;
+        if(_ferIsLoan(a)) return;
+        const q = _ferQty(a);
+        if(q<=0) return;
+        out.push({kind:'assignment', id:a.id || a.assignmentId || '', qty:q, ref:a.ref || a.jobRef || a.referencia || a.trabajoRef || 'sin referencia', phase:a.phase || a.fase || 'preparacion', raw:a});
+      });
+      (db.reservations||[]).forEach(r=>{
+        if(!_ferSameMaterial(r, materialId)) return;
+        if(!_ferActive(r.status || r.estado)) return;
+        if(typeof isAutoReceivedPrepReservation==='function' && isAutoReceivedPrepReservation(r)) return;
+        const q = _ferQty(r);
+        if(q<=0) return;
+        out.push({kind:'reservation', id:r.id || r.reservationId || '', qty:q, ref:r.ref || r.jobRef || r.trabajoRef || 'sin referencia', phase:r.phase || r.fase || 'preparacion', raw:r});
+      });
+    }catch(e){ console.warn('LDH_ferReservasAsignacionesActivas', e); }
+    return out;
+  };
+  window.reservedStock = function(companyId, materialId){
+    return (window.LDH_ferReservasAsignacionesActivas(materialId)||[]).reduce((s,r)=>s+Number(r.qty||0),0);
+  };
+  window.freeStock = function(companyId, materialId){
+    const real = typeof realStock==='function' ? realStock(FER_COMMON_COMPANY_ID, materialId) : 0;
+    const res = window.reservedStock(companyId, materialId);
+    return Math.max(0, real - res);
+  };
+  window.LDH_liberarReservaFerreteria = function(kind, id, materialId){
+    if(!id) return alert('No se encuentra el identificador de la reserva.');
+    let row = null;
+    if(kind === 'assignment') row = (db.assignments||[]).find(x => String(x.id||x.assignmentId||'') === String(id));
+    else row = (db.reservations||[]).find(x => String(x.id||x.reservationId||'') === String(id));
+    if(!row) return alert('No se encuentra la reserva/asignación.');
+    const q = _ferQty(row);
+    const ref = row.ref || row.jobRef || row.referencia || row.trabajoRef || 'sin referencia';
+    if(!confirm('¿Liberar esta reserva?\n\nTrabajo: ' + ref + '\nCantidad: ' + (typeof fmt==='function'?fmt(q):q) + '\n\nNo se tocará el stock físico.')) return;
+    row.status = 'liberada';
+    row.estado = 'liberada';
+    row.releasedAt = new Date().toISOString();
+    row.updatedAt = new Date().toISOString();
+    row.releaseReason = 'Liberada desde Ferretería común. No toca stock físico.';
+    if(typeof save==='function') save();
+    if(typeof render==='function') render();
+    window.LDH_verReservasFerreteria(materialId);
+  };
+  window.LDH_verReservasFerreteria = function(materialId){
+    const m = typeof materialById==='function' ? materialById(materialId) : null;
+    const unit = m && (m.unit || m.unidad || '');
+    const rows = window.LDH_ferReservasAsignacionesActivas(materialId)||[];
+    const body = rows.length ? `<div class="ldh-fer-res-box">${rows.map(r=>`
+      <div class="ldh-fer-res-row">
+        <div class="ldh-fer-res-main">
+          <span class="pill warn">RESERVA</span>
+          <b>${esc(r.ref)}</b>
+          <span>${fmt(r.qty)} ${esc(unit||'')}</span>
+          <span class="muted">${esc(r.phase||'')}</span>
+        </div>
+        <button class="btn small danger" onclick="LDH_liberarReservaFerreteria('${esc(r.kind)}','${esc(r.id)}','${esc(materialId)}')">Liberar</button>
+      </div>`).join('')}</div>` : '<div class="empty">No hay reservas activas para este material.</div>';
+    if(typeof openModal==='function') openModal('Reservas de ' + (m ? m.name : materialId), body, '<button class="btn" onclick="closeModal()">Cerrar</button>');
+  };
+  window.rowHTML = function(s,m){
+    const real=realStock(FER_COMMON_COMPANY_ID,m.id),
+          reservado=reservedStock(FER_COMMON_COMPANY_ID,m.id),
+          free=freeStock(FER_COMMON_COMPANY_ID,m.id),
+          min=Number(s.min||0);
+    const cls=free<=0?'stock-bad':(free<=min?'stock-warn':'stock-ok');
+    const resCls=reservado>0?'stock-warn':'stock-ok';
+    const verReservasBtn = reservado>0 ? `<button class="btn small warn" onclick="LDH_verReservasFerreteria('${esc(m.id)}')">Ver reservas</button>` : '';
+
+    return `<tr draggable="true" data-stock-id="${esc(s.id)}" ondragstart="stockDragStart(event,'${esc(s.id)}')" ondragover="stockDragOver(event,'${esc(s.id)}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${esc(s.id)}')" ondragend="stockDragEnd(event)">
+      <td class="drag-cell">
+        <span class="drag-handle" title="Arrastra para ordenar">☰</span>
+        <div class="orderBtns"><button class="btn small" onclick="moveStock('${esc(s.id)}',-1)">↑</button><button class="btn small" onclick="moveStock('${esc(s.id)}',1)">↓</button></div>
+      </td>
+      <td>
+        <div class="matname">${esc(m.name)}</div>
+        <div class="sub">${esc(s.location||'')}</div>
+      </td>
+      <td>${esc(m.family||'')}</td>
+      <td class="num ${real<=0?'stock-bad':'stock-ok'}">${fmt(real)} ${esc(m.unit||'')}</td>
+      <td class="num ferreteria-hidden ${resCls}">${fmt(reservado)} ${esc(m.unit||'')}</td>
+      <td class="num ferreteria-hidden">0</td>
+      <td class="num ferreteria-hidden">0</td>
+      <td class="num ferreteria-hidden">0</td>
+      <td class="num ${cls}">${fmt(free)} ${esc(m.unit||'')}</td>
+      <td class="ferreteria-hidden"></td>
+      <td class="actions-cell">
+        <button class="btn small ok" onclick="openMoveModal('entrada','${esc(m.id)}')">Entrada</button>
+        <button class="btn small danger" onclick="openMoveModal('salida','${esc(m.id)}')">Salida</button>
+        ${verReservasBtn}
+        <button class="btn small" onclick="openMaterialDetail('${esc(m.id)}')">Editar</button>
+      </td>
+    </tr>`;
+  };
+  try{ if(typeof render==='function') render(); }catch(e){ console.warn(e); }
+})();
+</script>
+
 </body>
 </html>
