@@ -1836,19 +1836,17 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
   </div>
   <div class="ldh-home-alerts-body">
     <div class="ldh-home-alerts-group">
-      <h4>📅 Agenda / fechas</h4>
+      <h4>📅 Agenda diaria</h4>
       <div id="ldhHomeDateAlerts" class="ldh-alert-list"></div>
       <div class="ldh-alert-foot">
-        <span>Estos avisos se borran manualmente desde Inicio.</span>
-        <button type="button" class="ldh-alert-clear" id="ldhHomeClearDateAlerts">Borrar avisos de fecha</button>
+        <span>Cada aviso se quita desde su propia ficha al pulsar Ver.</span>
       </div>
     </div>
     <div class="ldh-home-alerts-group">
       <h4>📋 Órdenes de Trabajo</h4>
       <div id="ldhHomeOrderAlerts" class="ldh-alert-list"></div>
       <div class="ldh-alert-foot">
-        <span>Órdenes nuevas y cambios se limpian con el botón VISTO existente en Órdenes.</span>
-        <a class="ldh-alert-action" href="modulos/agenda_diaria.html#orders">Ver órdenes</a>
+        <span>Los avisos se abren individualmente. Las órdenes nuevas se limpian con VISTO en su línea.</span>
       </div>
     </div>
   </div>
@@ -6982,6 +6980,7 @@ function ldhRefreshWeightUI(){
   const WORK_KEY = 'ldh_work_orders_v1';
   const DB_KEYS = ['ldh_db','TallerFlowDB'];
   const DISMISS_KEY = 'ldh_home_date_alerts_dismissed_v1';
+  const ORDER_NOTICE_CUTOVER_MS = new Date('2026-08-12T09:39:00+02:00').getTime();
   const FIREBASE_PROJECT_ID = 'gestion-taller-2a439';
   const firebaseConfig = {
     apiKey: "AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo",
@@ -7069,23 +7068,6 @@ function ldhRefreshWeightUI(){
       ));
     });
 
-    const localOrders = state.orders.length ? state.orders : safeJson(readStore(WORK_KEY), []);
-    (Array.isArray(localOrders) ? localOrders : []).forEach((order,index)=>{
-      if(!order || String(order.status||'pending') !== 'pending' || order.archivedV2) return;
-      const iso = norm(order.deliveryDate || order.execDate || order.fechaEjecucion || order.datePrev);
-      const diff = diffDays(iso);
-      if(diff === null || diff > 1) return;
-      const id = norm(order.id || order.reference || index);
-      const ref = norm(order.reference || order.ref || 'Orden sin referencia');
-      const company = norm(order.companyName || order.company || '');
-      const title = diff < 0 ? 'Orden de trabajo en retraso' : diff === 0 ? 'Orden de trabajo para hoy' : 'Orden de trabajo para mañana';
-      push(makeDateAlert(diff < 0 ? 'late' : diff === 0 ? 'today' : 'tomorrow',
-        `order-${id}-${iso}`,
-        title,
-        `${fmtDate(iso)} · ${ref}${company ? ' · ' + company : ''}`,
-        `modulos/agenda_diaria.html?ldhFocus=orders&ldhTarget=${encodeURIComponent(id)}&ldhKind=${diff < 0 ? 'late' : diff === 0 ? 'today' : 'tomorrow'}&ldhAlertId=${encodeURIComponent(`${diff < 0 ? 'late' : diff === 0 ? 'today' : 'tomorrow'}|order-${id}-${iso}`)}#orders`
-      ));
-    });
 
     const rank = {late:0,today:1,tomorrow:2};
     out.sort((a,b)=>(rank[a.kind]??9)-(rank[b.kind]??9) || a.subtitle.localeCompare(b.subtitle,'es'));
@@ -7093,23 +7075,58 @@ function ldhRefreshWeightUI(){
     return out;
   }
   function collectOrderAlerts(){
-    const pending = new Set((state.orders||[])
-      .filter(o=>o && String(o.status||'pending') === 'pending' && !o.archivedV2)
-      .map(o=>String(o.id||'').trim()));
-    return (state.notifications||[])
-      .filter(n => n && n.orderId && pending.has(String(n.orderId)) && (n.type === 'new_order' || n.type === 'priority_changed'))
+    const rows = [];
+    const off = dismissed();
+    const localOrders = state.orders.length ? state.orders : safeJson(readStore(WORK_KEY), []);
+    const pendingOrders = (Array.isArray(localOrders) ? localOrders : [])
+      .filter(o=>o && String(o.status||'pending') === 'pending' && !o.archivedV2);
+    const pending = new Set(pendingOrders.map(o=>String(o.id||'').trim()));
+
+    pendingOrders.forEach((order,index)=>{
+      const iso = norm(order.deliveryDate || order.execDate || order.fechaEjecucion || order.datePrev);
+      const diff = diffDays(iso);
+      if(diff === null || diff > 1) return;
+      const id = norm(order.id || order.reference || index);
+      const alertKind = diff < 0 ? 'late' : diff === 0 ? 'today' : 'tomorrow';
+      const alertId = `${alertKind}|order-${id}-${iso}`;
+      if(off[alertId]) return;
+      const ref = norm(order.reference || order.ref || 'Orden sin referencia');
+      const company = norm(order.companyName || order.company || '');
+      const title = diff < 0 ? 'Orden de trabajo en retraso' : diff === 0 ? 'Orden de trabajo para hoy' : 'Orden de trabajo para mañana';
+      rows.push({
+        id:alertId,
+        kind:alertKind,
+        title,
+        subtitle:`${fmtDate(iso)} · ${ref}${company ? ' · ' + company : ''}`,
+        href:`modulos/agenda_diaria.html?ldhFocus=orders&ldhTarget=${encodeURIComponent(id)}&ldhKind=${alertKind}&ldhAlertId=${encodeURIComponent(alertId)}#orders`,
+        icon: alertKind === 'late' ? '!' : alertKind === 'today' ? '●' : '◷',
+        orderRank: alertKind === 'late' ? 0 : alertKind === 'today' ? 1 : 2
+      });
+    });
+
+    (state.notifications||[])
+      .filter(n => {
+        if(!n || !n.orderId || !pending.has(String(n.orderId))) return false;
+        if(n.type !== 'new_order' && n.type !== 'priority_changed') return false;
+        const created = Number(n.createdAtMs || n.createdAt || 0);
+        return created && created >= ORDER_NOTICE_CUTOVER_MS;
+      })
       .sort((a,b)=>Number(b.createdAtMs||0)-Number(a.createdAtMs||0))
-      .map(n=>{
+      .forEach(n=>{
         const isPrio = n.type === 'priority_changed';
-        return {
+        rows.push({
           id:n.id || `${n.type}-${n.orderId}`,
           kind:isPrio ? 'priority' : 'new',
           title:isPrio ? 'Cambio de prioridad / orden' : 'Orden de trabajo nueva',
           subtitle:`${n.reference || 'Sin referencia'}${n.companyName ? ' · ' + n.companyName : ''}`,
           href:`modulos/agenda_diaria.html?ldhFocus=orders&ldhTarget=${encodeURIComponent(n.orderId)}&ldhNotice=${encodeURIComponent(n.id || '')}&ldhKind=${isPrio ? 'priority' : 'new'}#orders`,
-          icon:isPrio ? '↕' : '+'
-        };
+          icon:isPrio ? '↕' : '+',
+          orderRank:isPrio ? 4 : 3
+        });
       });
+
+    rows.sort((a,b)=>(a.orderRank??9)-(b.orderRank??9) || String(a.subtitle||'').localeCompare(String(b.subtitle||''),'es'));
+    return rows;
   }
   function renderList(el, rows, emptyText){
     if(!el) return;
