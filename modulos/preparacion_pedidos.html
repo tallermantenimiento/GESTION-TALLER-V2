@@ -2214,10 +2214,15 @@ function LDH_readFerreteriaDBV45(){
      Ferreteria. La pantalla de Ferreteria PC es la autoridad visual; por eso
      leemos primero la clave local compartida que usa ese modulo. */
   const orderedSources = [];
-  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:localStorage.getItem(LDH_FERRETERIA_KEYS_V45[0])}); }catch(_){}
-  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:sessionStorage.getItem(LDH_FERRETERIA_KEYS_V45[0])}); }catch(_){}
+  /* LDH_PREP_FERRETERIA_CLOUD_READONLY_PRIORITY_20260811
+     La fuente correcta para accesorios es la nube propia de Ferretería V2.
+     Se lee en memoria, SOLO lectura, con una app Firebase separada. No se publica
+     nada desde Preparación y no se fusiona con copias locales viejas. */
+  try{ if(window.__LDH_FERRETERIA_CLOUD_DB_RO) orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:window.__LDH_FERRETERIA_CLOUD_DB_RO}); }catch(_){}
   try{ if(window.__LDH_FERRETERIA_MEMORY_DB) orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:window.__LDH_FERRETERIA_MEMORY_DB}); }catch(_){}
   try{ if(window.__LDH_HARDWARE_MEMORY_DB) orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:window.__LDH_HARDWARE_MEMORY_DB}); }catch(_){}
+  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:localStorage.getItem(LDH_FERRETERIA_KEYS_V45[0])}); }catch(_){}
+  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:sessionStorage.getItem(LDH_FERRETERIA_KEYS_V45[0])}); }catch(_){}
   try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[1], value:localStorage.getItem(LDH_FERRETERIA_KEYS_V45[1])}); }catch(_){}
   try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[1], value:sessionStorage.getItem(LDH_FERRETERIA_KEYS_V45[1])}); }catch(_){}
 
@@ -24031,5 +24036,116 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
   setTimeout(start, 250);
 })();
 </script>
+
+
+
+<!-- LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811 -->
+<script id="LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_FER_CLOUD_RO_20260811__) return;
+  window.__LDH_PREP_FER_CLOUD_RO_20260811__ = true;
+
+  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
+  const APP_NAME = 'ldh-prep-ferreteria-readonly-20260811';
+  const DOC_COL = 'taller_ferreteria_v2';
+  const DOC_ID = 'main';
+  const firebaseConfig = {
+    apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
+    authDomain: 'gestion-taller-2a439.firebaseapp.com',
+    projectId: 'gestion-taller-2a439',
+    storageBucket: 'gestion-taller-2a439.firebasestorage.app',
+    messagingSenderId: '498579673950',
+    appId: '1:498579673950:web:eb626781a5b509957db5cf'
+  };
+
+  let fs=null, auth=null, lastRevision='';
+
+  function warn(){ try{ console.warn.apply(console, ['[Prep Fer ReadOnly]'].concat([].slice.call(arguments))); }catch(_){ } }
+  function loadScript(src){
+    return new Promise((resolve,reject)=>{
+      if(document.querySelector('script[src="'+src+'"]')) return resolve();
+      const el=document.createElement('script');
+      el.src=src; el.async=true;
+      el.onload=resolve;
+      el.onerror=()=>reject(new Error('No se pudo cargar '+src));
+      document.head.appendChild(el);
+    });
+  }
+  async function ensureFirebase(){
+    if(!window.firebase || !firebase.apps){
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    }else{
+      if(!firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
+      if(!firebase.firestore) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    }
+    let app;
+    try{ app = firebase.app(APP_NAME); }
+    catch(_){ app = firebase.initializeApp(firebaseConfig, APP_NAME); }
+    auth = firebase.auth(app);
+    fs = firebase.firestore(app);
+    if(!auth.currentUser){
+      try{ await auth.signInAnonymously(); }catch(e){ warn('No se pudo iniciar sesión anónima', e); throw e; }
+    }
+  }
+  function normalize(db){
+    const out = Object.assign({
+      version:'2.0-ferreteria-comun', companies:[], materials:[], stock:[],
+      movements:[], jobs:[], reservations:[], assignments:[], reservationDebts:[]
+    }, (db && typeof db === 'object') ? db : {});
+    ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
+    return out;
+  }
+  function applyPayload(payload, revision){
+    const clean = normalize(payload && payload.payload ? payload.payload : payload);
+    if(!clean.materials.length) return;
+    window.__LDH_FERRETERIA_CLOUD_DB_RO = clean;
+    window.__LDH_FERRETERIA_MEMORY_DB = clean;
+    try{ sessionStorage.setItem(STORAGE_KEY, JSON.stringify(clean)); }catch(_){ }
+    try{
+      const raw = JSON.stringify(clean);
+      localStorage.setItem(STORAGE_KEY, raw);
+      window.dispatchEvent(new StorageEvent('storage',{key:STORAGE_KEY,newValue:raw}));
+    }catch(_){ }
+    try{
+      if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla();
+    }catch(_){ }
+    try{
+      let badge=document.getElementById('ldhPrepFerCloudBadge');
+      if(!badge){
+        badge=document.createElement('span');
+        badge.id='ldhPrepFerCloudBadge';
+        badge.style.cssText='position:fixed;left:8px;bottom:34px;z-index:99999;padding:3px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.55);background:rgba(6,78,59,.75);color:#bbf7d0;font-size:10px;font-weight:900;';
+        document.body.appendChild(badge);
+      }
+      badge.textContent='Ferretería V2 lectura directa OK';
+    }catch(_){ }
+  }
+  async function start(){
+    try{
+      await ensureFirebase();
+      const ref = fs.collection(DOC_COL).doc(DOC_ID);
+      const snap = await ref.get();
+      if(snap.exists){
+        const data=snap.data() || {};
+        lastRevision = String(data.revision || data.updatedAtIso || data.updatedAt || '');
+        applyPayload(data,lastRevision);
+      }
+      ref.onSnapshot(s=>{
+        if(!s.exists) return;
+        const data=s.data() || {};
+        const rev=String(data.revision || data.updatedAtIso || data.updatedAt || Date.now());
+        if(rev && rev === lastRevision) return;
+        lastRevision = rev;
+        applyPayload(data,rev);
+      }, e=>warn('onSnapshot', e));
+    }catch(e){ warn('No se pudo activar lectura directa de Ferretería', e); }
+  }
+  setTimeout(start, 300);
+})();
+</script>
+<!-- /LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811 -->
 
 </body></html>
