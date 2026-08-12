@@ -7017,6 +7017,7 @@ function ldhRefreshWeightUI(){
   const DISMISS_KEY = 'ldh_home_date_alerts_dismissed_v1';
   const VOICE_ENABLED_KEY = 'ldh_voice_agenda_enabled_v1';
   const VOICE_ACK_KEY = 'ldh_voice_agenda_ack_v1';
+  const CUSTOM_REMINDERS_KEY = 'ldh_voice_custom_reminders_v1';
   const ORDER_NOTICE_CUTOVER_MS = new Date('2026-08-12T09:39:00+02:00').getTime();
   const FIREBASE_PROJECT_ID = 'gestion-taller-2a439';
   const firebaseConfig = {
@@ -7033,6 +7034,46 @@ function ldhRefreshWeightUI(){
   let voiceTimer = null;
   let voiceLastSpeakAt = 0;
   let voiceActiveIds = [];
+  let voiceAudioCtx = null;
+
+  function playVoiceBeep(){
+    try{
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if(!AudioCtx) return Promise.resolve();
+      if(!voiceAudioCtx) voiceAudioCtx = new AudioCtx();
+      const ctx = voiceAudioCtx;
+      const resume = ctx.state === 'suspended' ? ctx.resume().catch(()=>{}) : Promise.resolve();
+      return resume.then(()=>new Promise(resolve=>{
+        const now = ctx.currentTime;
+        const compressor = ctx.createDynamicsCompressor();
+        compressor.threshold.setValueAtTime(-24, now);
+        compressor.knee.setValueAtTime(18, now);
+        compressor.ratio.setValueAtTime(6, now);
+        compressor.attack.setValueAtTime(0.003, now);
+        compressor.release.setValueAtTime(0.16, now);
+        compressor.connect(ctx.destination);
+        function tone(start, freq, duration){
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(freq, start);
+          gain.gain.setValueAtTime(0.0001, start);
+          gain.gain.exponentialRampToValueAtTime(0.88, start + 0.025);
+          gain.gain.setValueAtTime(0.88, start + Math.max(0.03, duration - 0.07));
+          gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+          osc.connect(gain);
+          gain.connect(compressor);
+          osc.start(start);
+          osc.stop(start + duration + 0.03);
+        }
+        tone(now, 1040, 0.24);
+        tone(now + 0.30, 1320, 0.30);
+        setTimeout(resolve, 900);
+      }));
+    }catch(e){
+      return Promise.resolve();
+    }
+  }
 
   function $(id){ return document.getElementById(id); }
   function safeJson(raw, fallback){ try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; } }
@@ -7129,6 +7170,42 @@ function ldhRefreshWeightUI(){
     }
     return false;
   }
+  function readCustomVoiceReminders(){
+    const rows = safeJson(readStore(CUSTOM_REMINDERS_KEY), []);
+    return Array.isArray(rows) ? rows.filter(Boolean) : [];
+  }
+  function reminderAlertId(r){
+    return `reminder|${norm(r && r.id)}|${norm(r && r.date)}|${norm(r && r.time)}`;
+  }
+  function reminderDueMs(r){
+    const date = norm(r && r.date);
+    const time = norm(r && r.time) || '00:00';
+    const m = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const h = time.match(/^(\d{2}):(\d{2})/);
+    if(!m || !h) return NaN;
+    return new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), Number(h[1]), Number(h[2]), 0, 0).getTime();
+  }
+  function collectCustomVoiceReminders(){
+    const ack = voiceAck();
+    const now = Date.now();
+    return readCustomVoiceReminders()
+      .filter(r=>r && !r.done && !r.deleted && norm(r.text))
+      .map(r=>({r, ms:reminderDueMs(r), alertId:reminderAlertId(r)}))
+      .filter(x=>Number.isFinite(x.ms) && x.ms <= now && !ack[x.alertId])
+      .sort((a,b)=>a.ms-b.ms)
+      .map(x=>({
+        id:x.alertId,
+        type:'reminder',
+        text:norm(x.r.text),
+        title:norm(x.r.text),
+        iso:norm(x.r.date),
+        time:norm(x.r.time),
+        createdToday:false
+      }));
+  }
+  function collectAllVoiceTargets(){
+    return collectVoiceTodayTargets().concat(collectCustomVoiceReminders());
+  }
   function collectVoiceTodayTargets(){
     const db = readAgendaDb();
     const off = dismissed();
@@ -7148,6 +7225,8 @@ function ldhRefreshWeightUI(){
       seen.add(alertId);
       out.push({
         id: alertId,
+        type: 'agenda',
+        text: 'Tienes una tarea en la agenda programada para hoy.',
         itemId: id,
         iso,
         title: norm(item.desc || item.descripcion || item.task || item.tarea) || 'Tarea de agenda diaria',
@@ -7169,10 +7248,10 @@ function ldhRefreshWeightUI(){
     if(status){
       if(hasTargets){
         status.textContent = voiceEnabled()
-          ? `Hay ${targets.length} tarea(s) de Agenda diaria para hoy. La voz repetirá el aviso hasta pulsar OK.`
-          : `Hay ${targets.length} tarea(s) para hoy. Pulsa Activar voz para permitir el aviso hablado.`;
+          ? `Hay ${targets.length} aviso(s) hablado(s) pendiente(s). La voz repetirá cada 6 segundos hasta pulsar OK.`
+          : `Hay ${targets.length} aviso(s) hablado(s) pendiente(s). Pulsa Activar voz para permitir el aviso hablado.`;
       }else{
-        status.textContent = voiceEnabled() ? 'Voz activada. No hay tareas de Agenda diaria para hoy pendientes de aviso hablado.' : 'Pulsa activar para permitir que el navegador hable.';
+        status.textContent = voiceEnabled() ? 'Voz activada. No hay avisos hablados pendientes.' : 'Pulsa activar para permitir que el navegador hable.';
       }
     }
     if(enableBtn) enableBtn.style.display = voiceEnabled() ? 'none' : '';
@@ -7180,55 +7259,71 @@ function ldhRefreshWeightUI(){
     if(ackBtn) ackBtn.style.display = hasTargets ? '' : 'none';
   }
   function speakAgendaVoice(force){
-    const targets = collectVoiceTodayTargets();
+    const targets = collectAllVoiceTargets();
     voiceActiveIds = targets.map(t=>t.id);
     updateVoicePanel(targets);
     if(!targets.length || !voiceEnabled()) return;
     const now = Date.now();
-    if(!force && now - voiceLastSpeakAt < 30000) return;
+    if(!force && now - voiceLastSpeakAt < 5800) return;
     voiceLastSpeakAt = now;
     try{
       window.speechSynthesis.cancel();
-      const msg = targets.length === 1
-        ? 'Tienes una tarea de agenda prevista para hoy.'
-        : `Tienes ${targets.length} tareas de agenda previstas para hoy.`;
-      const u = new SpeechSynthesisUtterance(msg);
-      u.lang = 'es-ES';
-      u.rate = 0.95;
-      u.pitch = 1;
-      u.volume = 1;
-      const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
-      const es = voices.find(v=>/^es(-|_)?/i.test(v.lang || '')) || voices.find(v=>/spanish|español/i.test(v.name || ''));
-      if(es) u.voice = es;
-      window.speechSynthesis.speak(u);
+      const agendaCount = targets.filter(t=>t.type === 'agenda').length;
+      const reminderTexts = targets.filter(t=>t.type === 'reminder').map(t=>t.text).filter(Boolean);
+      const parts = [];
+      if(agendaCount > 0) parts.push('Tienes una tarea en la agenda programada para hoy.');
+      reminderTexts.forEach(txt=>parts.push(txt));
+      const msg = parts.join(' ');
+      const speakNow = ()=>{
+        const u = new SpeechSynthesisUtterance(msg);
+        u.lang = 'es-ES';
+        u.rate = 0.82;
+        u.pitch = 1.78;
+        u.volume = 1;
+        const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+        const spanishVoices = voices.filter(v => /^es/i.test(v.lang || ''));
+        const preferredNames = /(google|elvira|helena|laura|lucia|maria|monica|paulina|sabina|female|mujer|sofia|isabel|paloma)/i;
+        const avoidedNames = /(pablo|alvaro|jorge|carlos|male|hombre)/i;
+        const youthfulVoice = spanishVoices.find(v => preferredNames.test(v.name || '') && !avoidedNames.test(v.name || ''))
+          || spanishVoices.find(v => !avoidedNames.test(v.name || ''))
+          || voices.find(v => /es[-_]?ES/i.test(v.lang || ''))
+          || voices.find(v => /^es/i.test(v.lang || ''));
+        if(youthfulVoice) u.voice = youthfulVoice;
+        window.speechSynthesis.speak(u);
+      };
+      playVoiceBeep().then(()=>setTimeout(speakNow, 1200));
     }catch(error){
       console.warn('[Inicio voz agenda] No se pudo hablar', error);
     }
   }
+
   function startVoiceLoop(){
     if(voiceTimer) clearInterval(voiceTimer);
-    voiceTimer = setInterval(()=>speakAgendaVoice(false), 5000);
+    voiceTimer = setInterval(()=>speakAgendaVoice(false), 6000);
     speakAgendaVoice(false);
   }
   function enableVoice(){
     setVoiceEnabled(true);
     try{
+      playVoiceBeep();
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance('Voz de avisos activada.');
       u.lang = 'es-ES';
+      u.rate = 0.82;
+      u.pitch = 1.78;
       u.volume = 0.85;
       window.speechSynthesis.speak(u);
     }catch(e){}
     voiceLastSpeakAt = 0;
-    setTimeout(()=>speakAgendaVoice(true), 900);
+    setTimeout(()=>speakAgendaVoice(true), 1200);
   }
   function disableVoice(){
     setVoiceEnabled(false);
     try{ window.speechSynthesis.cancel(); }catch(e){}
-    updateVoicePanel(collectVoiceTodayTargets());
+    updateVoicePanel(collectAllVoiceTargets());
   }
   function ackVoiceToday(){
-    const targets = collectVoiceTodayTargets();
+    const targets = collectAllVoiceTargets();
     const ack = voiceAck();
     targets.forEach(t=>{ ack[t.id] = Date.now(); });
     writeVoiceAck(ack);
@@ -7427,7 +7522,7 @@ function ldhRefreshWeightUI(){
     setInterval(()=>{ readLocalOrders(); render(); }, 60000);
   });
   window.addEventListener('storage', e=>{
-    if([WORK_KEY,'ldh_db','TallerFlowDB',DISMISS_KEY,VOICE_ACK_KEY,VOICE_ENABLED_KEY].includes(e.key)) readLocalOrders();
+    if([WORK_KEY,'ldh_db','TallerFlowDB',DISMISS_KEY,VOICE_ACK_KEY,VOICE_ENABLED_KEY,CUSTOM_REMINDERS_KEY].includes(e.key)) readLocalOrders();
   });
   try{ window.speechSynthesis.onvoiceschanged = ()=>speakAgendaVoice(false); }catch(e){}
 })();
