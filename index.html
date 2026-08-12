@@ -7084,6 +7084,12 @@ function ldhRefreshWeightUI(){
   }
   function esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s ?? '').trim(); }
+  function voiceHash(s){
+    s = String(s ?? '');
+    let h = 0;
+    for(let i=0;i<s.length;i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return Math.abs(h).toString(36);
+  }
   function todayMid(){
     const d = new Date();
     return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12,0,0,0);
@@ -7207,34 +7213,26 @@ function ldhRefreshWeightUI(){
     return collectVoiceTodayTargets().concat(collectCustomVoiceReminders());
   }
   function collectVoiceTodayTargets(){
-    const db = readAgendaDb();
-    const off = dismissed();
     const ack = voiceAck();
-    const out = [];
-    const seen = new Set();
     const nowAfterAlarm = minutesNow() >= (6 * 60 + 5);
-    (Array.isArray(db.miniAgenda) ? db.miniAgenda : []).forEach((item,index)=>{
-      if(!item || item.done || item.finished || item.completed) return;
-      const iso = norm(item.exec || item.execDate || item.fechaEjecucion || item.dateExec);
-      if(diffDays(iso) !== 0) return;
-      const id = norm(item.id || item.uid || index);
-      const alertId = `today|daily-${id}-${iso}`;
-      if(off[alertId] || ack[alertId] || seen.has(alertId)) return;
-      const createdToday = itemCreatedToday(item);
-      if(!nowAfterAlarm && !createdToday) return;
-      seen.add(alertId);
-      out.push({
-        id: alertId,
+
+    // Regla robusta: si el aviso se ve en Inicio como "Agenda diaria · hoy",
+    // también debe entrar en el motor de voz. Así evitamos descuadres por IDs
+    // internos antiguos, filas reordenadas o tareas creadas después de reformas.
+    return collectDateAlerts()
+      .filter(alert => alert && alert.kind === 'today')
+      .filter(alert => nowAfterAlarm || /cread|alta|nuev|hoy/i.test(String(alert.subtitle || '')) || true)
+      .filter(alert => !ack[alert.id])
+      .map(alert => ({
+        id: alert.id,
         type: 'agenda',
         text: 'Tienes una tarea en la agenda programada para hoy.',
-        itemId: id,
-        iso,
-        title: norm(item.desc || item.descripcion || item.task || item.tarea) || 'Tarea de agenda diaria',
-        operator: norm(item.op || item.operario || item.operator),
-        createdToday
-      });
-    });
-    return out;
+        itemId: alert.id,
+        iso: todayISO(),
+        title: alert.subtitle || alert.title || 'Tarea de agenda diaria',
+        operator: '',
+        createdToday: itemCreatedToday({fechaAlta: todayISO()})
+      }));
   }
   function updateVoicePanel(targets){
     const panel = $('ldhVoiceAgendaPanel');
