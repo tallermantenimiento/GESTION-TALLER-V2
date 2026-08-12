@@ -24148,4 +24148,185 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 </script>
 <!-- /LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811 -->
 
+
+
+<!-- LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812 -->
+<script id="LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_FER_DIRECT_FINAL_20260812__) return;
+  window.__LDH_PREP_FER_DIRECT_FINAL_20260812__ = true;
+
+  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
+  const COMMON_ID = 'fer_common';
+
+  function norm(v){
+    return String(v||'').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+  }
+  function num(v){
+    const n = Number(String(v ?? 0).replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function first(){
+    for(let i=0;i<arguments.length;i++){
+      const v=arguments[i];
+      if(v!==undefined && v!==null && String(v).trim()!=='') return v;
+    }
+    return '';
+  }
+  function readDirectDB(){
+    /* Prioridad absoluta: payload leído directamente de Firestore por el bloque RO.
+       No se usa una copia local vieja si la nube directa ya está disponible. */
+    if(window.__LDH_FERRETERIA_CLOUD_DB_RO && Array.isArray(window.__LDH_FERRETERIA_CLOUD_DB_RO.materials)){
+      return window.__LDH_FERRETERIA_CLOUD_DB_RO;
+    }
+    if(window.__LDH_FERRETERIA_MEMORY_DB && Array.isArray(window.__LDH_FERRETERIA_MEMORY_DB.materials)){
+      return window.__LDH_FERRETERIA_MEMORY_DB;
+    }
+    try{
+      const raw = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY);
+      const db = raw ? JSON.parse(raw) : null;
+      if(db && Array.isArray(db.materials)) return db;
+    }catch(_){ }
+    return null;
+  }
+  function materialId(m){ return String(first(m && m.id, m && m.materialId, m && m.matId, m && m.material_id)).trim(); }
+  function materialName(m){ return String(first(m && m.name, m && m.nombre, m && m.materialName, m && m.material, m && m.mat, m && m.label)).trim(); }
+  function unitOf(m){ return String(first(m && m.unit, m && m.unidad, 'und')).trim(); }
+  function familyOf(m){ return String(first(m && m.family, m && m.familia, m && m.grp, m && m.grupo, 'Ferretería')).trim(); }
+  function isHardware(m){
+    const t = norm(first(m && m.type, m && m.tipo, m && m.cat, m && m.categoria));
+    const f = norm(familyOf(m));
+    return t.includes('ferreteria') || f.includes('contera') || f.includes('torn') || f.includes('broca') || f.includes('disco') || f.includes('consum') || f.includes('arand') || f.includes('tuerc');
+  }
+  function rowMaterialId(r){ return String(first(r && r.materialId, r && r.matId, r && r.stockMaterialId, r && r.v2MaterialId, r && r.toMaterialId, r && r.idMaterial)).trim(); }
+  function rowMaterialName(r){ return String(first(r && r.materialName, r && r.material, r && r.mat, r && r.name, r && r.nombre, r && r.descripcion)).trim(); }
+  function sameMaterial(row, id, name){
+    const rid = rowMaterialId(row);
+    if(rid && id && String(rid) === String(id)) return true;
+    const rn = norm(rowMaterialName(row));
+    const mn = norm(name || id);
+    return !!(rn && mn && (rn === mn || rn.includes(mn) || mn.includes(rn)));
+  }
+  function signedMovementQty(m){
+    const q = num(first(m && m.qty, m && m.cantidad, m && m.quantity, m && m.amount, m && m.units, m && m.unidades));
+    const t = norm(first(m && m.type, m && m.tipo, m && m.movementType, m && m.movimiento, 'entrada')).replace(/\s+/g,'_');
+    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion','reserva','reservado','asignacion','asignado'].includes(t)) return 0;
+    if(['salida','out','ajuste_neg','consumo','consumo_terminal','prestamo','baja','retirada'].includes(t)) return -q;
+    return q;
+  }
+  function isCommonMovement(m){
+    const cid = String(first(m && m.companyId, m && m.empresaId, m && m.company, m && m.empresa, COMMON_ID)).trim();
+    return !cid || cid === COMMON_ID || norm(cid).includes('ferreteria') || norm(cid).includes('stock comun');
+  }
+  function physicalFromMovements(db, id, name){
+    const movs = Array.isArray(db.movements) ? db.movements : [];
+    const hits = movs.filter(m => isCommonMovement(m) && sameMaterial(m, id, name));
+    return hits.reduce((sum,m)=>sum + signedMovementQty(m), 0);
+  }
+  function activeStatus(v){
+    const s = norm(v || 'activa');
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','recibida','recibido','anulada','anulado'].includes(s);
+  }
+  function phaseOk(v){
+    const ph = norm(v || 'preparacion');
+    return !ph || ph === 'preparacion' || ph === 'fabricacion';
+  }
+  function loanReserve(a){
+    const txt = norm(first(a && a.assignmentType, a && a.reason, a && a.origen, a && a.source));
+    return txt.includes('otra empresa') || txt.includes('prestamo') || txt.includes('deuda') || !!(a && a.toCompanyId);
+  }
+  function reservedFromDB(db, id, name){
+    let total = 0;
+    (Array.isArray(db.assignments) ? db.assignments : []).forEach(a=>{
+      if(!sameMaterial(a,id,name)) return;
+      if(!activeStatus(first(a.status,a.estado))) return;
+      if(!phaseOk(first(a.phase,a.fase))) return;
+      if(loanReserve(a)) return;
+      total += Math.max(0, num(first(a.pendingQty,a.qtyPending,a.pendiente,a.qty,a.cantidad,a.units,a.unidades)));
+    });
+    (Array.isArray(db.reservations) ? db.reservations : []).forEach(r=>{
+      if(!sameMaterial(r,id,name)) return;
+      if(!activeStatus(first(r.status,r.estado))) return;
+      total += Math.max(0, num(first(r.pendingQty,r.qtyPending,r.pendiente,r.qty,r.cantidad,r.units,r.unidades)));
+    });
+    return total;
+  }
+  function rowPhysicalFallback(db, id, name){
+    const rows = []
+      .concat(Array.isArray(db.stock) ? db.stock : [])
+      .concat(Array.isArray(db.stocks) ? db.stocks : [])
+      .concat(Array.isArray(db.stockRows) ? db.stockRows : [])
+      .concat(Array.isArray(db.existencias) ? db.existencias : []);
+    return rows.filter(r=>sameMaterial(r,id,name)).reduce((sum,r)=>sum + num(first(
+      r.physicalQty, r.physical, r.fisico, r['físico'], r.stockFisico,
+      r.stockReal, r.stockActual, r.existencias, r.onHand, r.currentQty,
+      r.current, r.totalQty, r.total, r.qty, r.cantidad, r.stock
+    )),0);
+  }
+
+  window.LDH_readFerreteriaDBV45 = function(){
+    return readDirectDB();
+  };
+
+  window.LDH_buildFerreteriaCatalogV45 = function(){
+    const db = readDirectDB();
+    if(!db) return [];
+    const materials = (Array.isArray(db.materials) ? db.materials : [])
+      .filter(m => materialId(m) && materialName(m) && isHardware(m));
+    return materials.map(m=>{
+      const id = materialId(m);
+      const name = materialName(m);
+      const movementPhysical = physicalFromMovements(db,id,name);
+      const hasMovement = (Array.isArray(db.movements) ? db.movements : []).some(x=>isCommonMovement(x) && sameMaterial(x,id,name));
+      const physical = Math.max(0, hasMovement ? movementPhysical : rowPhysicalFallback(db,id,name));
+      const reserved = Math.max(0, reservedFromDB(db,id,name));
+      const assigned = 0;
+      const free = Math.max(0, physical - reserved - assigned);
+      return Object.assign({}, m, {
+        id, materialId:id, matId:id,
+        name, nombre:name,
+        unit:unitOf(m), unidad:unitOf(m),
+        cat:'Ferretería', grp:familyOf(m),
+        qty:free, physical, reserved, assigned, free,
+        __v2:true,
+        __ferreteriaActualV45:true,
+        __ferreteriaNubeDirectaFinal:true
+      });
+    });
+  };
+
+  function refreshBadge(){
+    try{
+      const cat = window.LDH_buildFerreteriaCatalogV45 ? window.LDH_buildFerreteriaCatalogV45() : [];
+      const c20 = cat.find(m=>norm(m.name)==='contera 40x20 blanca');
+      const c40 = cat.find(m=>norm(m.name)==='contera 40x40 blanca');
+      let badge=document.getElementById('ldhPrepFerDirectFinalBadge');
+      if(!badge){
+        badge=document.createElement('span');
+        badge.id='ldhPrepFerDirectFinalBadge';
+        badge.style.cssText='position:fixed;left:8px;bottom:56px;z-index:99999;padding:3px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.65);background:rgba(6,78,59,.82);color:#d1fae5;font-size:10px;font-weight:900;';
+        document.body.appendChild(badge);
+      }
+      const parts=[];
+      if(c20) parts.push('40x20 '+c20.physical+'/'+c20.reserved+'/'+c20.free);
+      if(c40) parts.push('40x40 '+c40.physical+'/'+c40.reserved+'/'+c40.free);
+      badge.textContent = parts.length ? ('Ferretería nube directa · '+parts.join(' · ')) : 'Ferretería nube directa · esperando datos';
+    }catch(_){ }
+  }
+  setInterval(refreshBadge, 1500);
+  setTimeout(function(){
+    refreshBadge();
+    try{ if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla(); }catch(_){ }
+  }, 1200);
+  setTimeout(function(){
+    refreshBadge();
+    try{ if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla(); }catch(_){ }
+  }, 3200);
+})();
+</script>
+<!-- /LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812 -->
+
 </body></html>
