@@ -8019,6 +8019,38 @@ window.ejecutarDevolucion = function(matId, maxQty){
       list.innerHTML = cancellationHtml + priorityHtml;
     },
 
+    async acknowledgeOrderNotifications(orderId,button){
+      const ids = this.notifications
+        .filter(item=>item && item.orderId===orderId && (item.type==='new_order' || item.type==='priority_changed'))
+        .map(item=>item.id)
+        .filter(Boolean);
+      if(!ids.length) return;
+      if(!this.cloud?.acknowledgeNotification){
+        alert('Espera a que la sincronización esté conectada para marcar como visto.');
+        return;
+      }
+      if(button){
+        button.disabled = true;
+        button.textContent = 'Visto…';
+      }
+      try{
+        for(const id of ids){
+          await this.cloud.acknowledgeNotification(id);
+        }
+        const seen = new Set(ids);
+        this.notifications = this.notifications.filter(item=>!seen.has(item.id));
+        this.render();
+        this.renderNotifications();
+      }catch(error){
+        console.error('No se pudieron marcar como vistos los avisos de la orden', error);
+        if(button){
+          button.disabled = false;
+          button.textContent = '✓ VISTO';
+        }
+        alert('No se ha podido marcar como visto. Comprueba la conexión e inténtalo de nuevo.');
+      }
+    },
+
     async acknowledgeNotification(id,button){
       const notification = this.notifications.find(item=>item.id===id);
       if(!notification) return;
@@ -8365,18 +8397,21 @@ window.ejecutarDevolucion = function(matId, maxQty){
       if(empty) empty.style.display = rows.length ? 'none' : 'block';
       if(body){
         body.innerHTML = rows.map((o,index)=>{
-          const newOrderNotice = this.notifications.find(notification=>
-            notification.type === 'new_order' && notification.orderId === o.id
+          const rowNotices = this.notifications.filter(notification=>
+            (notification.type === 'new_order' || notification.type === 'priority_changed') && notification.orderId === o.id
           );
+          const newOrderNotice = rowNotices.find(notification=>notification.type === 'new_order');
+          const priorityNotice = rowNotices.find(notification=>notification.type === 'priority_changed');
+          const visibleNotice = newOrderNotice || priorityNotice;
           const workflow = workflowView(o);
           const cancellationPending = !!normalizeCancellationRequest(o.cancellationRequestV1);
           const rowClasses = [
             workflow.rowClass,
-            newOrderNotice ? 'wo-new-order-row' : ''
+            newOrderNotice ? 'wo-new-order-row' : (priorityNotice ? 'wo-new-order-row' : '')
           ].filter(Boolean).join(' ');
           return `<tr${rowClasses ? ` class="${rowClasses}"` : ''}>
             <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:rows.length},(_,position)=>`<option value="${position+1}"${position===index?' selected':''}>${position+1}</option>`).join('')}</select></td>
-            <td class="wo-reference">${esc(o.reference)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${phasePills(o)}${cancellationPending?'<span class="wo-cancel-request-pill">⚠ ANULACIÓN PENDIENTE</span>':''}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}</td>
+            <td class="wo-reference">${esc(o.reference)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${phasePills(o)}${cancellationPending?'<span class="wo-cancel-request-pill">⚠ ANULACIÓN PENDIENTE</span>':''}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}${priorityNotice?'<span class="wo-new-order-pill">↕ CAMBIO PRIORIDAD</span>':''}</td>
             <td>${esc(fmtDate(o.entryDate))}</td>
             <td>${esc(fmtDate(o.deliveryDate))}</td>
             <td class="wo-company">${esc(o.companyName)}</td>
@@ -8384,7 +8419,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
             <td class="wo-desc"><strong>${esc(o.description)}</strong>${o.material?`<div style="margin-top:5px;color:#9fb0c8">Material: ${esc(o.material)}</div>`:''}</td>
             <td>${esc(finishText(o))}</td>
             <td><div class="wo-actions">
-              ${newOrderNotice?`<button type="button" class="wo-small-btn wo-seen-new-btn" onclick="WorkOrders.acknowledgeNotification('${esc(newOrderNotice.id)}',this)">✓ VISTO</button>`:''}
+              ${visibleNotice?`<button type="button" class="wo-small-btn wo-seen-new-btn" onclick="WorkOrders.acknowledgeOrderNotifications('${esc(o.id)}',this)">✓ VISTO</button>`:''}
               ${['','preparing'].includes(workflow.state)?`<button type="button" class="wo-small-btn wo-send-calc-btn" onclick="WorkOrders.sendToCalculation('${esc(o.id)}')">${workflow.state === 'preparing' ? '↗ ABRIR CÁLCULO' : '➡ MANDAR A CÁLCULO'}</button>`:''}
               <button type="button" class="wo-small-btn" onclick="WorkOrders.viewOrder('${esc(o.id)}')">Ver</button>
               <button type="button" class="wo-small-btn wo-state-corrector-btn" onclick="WorkOrders.openStatePicker('${esc(o.id)}')">↻ CAMBIAR ESTADO</button>
