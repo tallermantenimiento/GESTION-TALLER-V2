@@ -186,6 +186,27 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 }
 .ldh-alert-clear:hover{background:rgba(148,163,184,.12)}
 #ldhHomeAlertSync{color:#86efac;font-size:11px;font-weight:850}
+.ldh-voice-alert{
+  margin-top:12px;
+  border:1px solid rgba(56,189,248,.28);
+  border-radius:16px;
+  padding:12px;
+  background:linear-gradient(135deg,rgba(14,165,233,.10),rgba(2,6,23,.26));
+  display:none;
+  gap:10px;
+  align-items:center;
+  justify-content:space-between;
+  flex-wrap:wrap;
+}
+.ldh-voice-alert.show{display:flex}
+.ldh-voice-main{display:flex;align-items:center;gap:10px;min-width:220px;color:#dff7ff;font-size:12px;font-weight:850}
+.ldh-voice-main b{display:block;color:#fff;font-size:13px}
+.ldh-voice-main small{display:block;color:var(--mut);font-size:11px;margin-top:2px;font-weight:750}
+.ldh-voice-dot{width:34px;height:34px;border-radius:12px;display:grid;place-items:center;background:rgba(56,189,248,.14);border:1px solid rgba(56,189,248,.25);font-size:17px}
+.ldh-voice-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ldh-voice-btn{border:1px solid rgba(56,189,248,.36);background:rgba(14,165,233,.13);color:#e0f2fe;border-radius:12px;padding:8px 10px;font-size:11px;font-weight:950;cursor:pointer}
+.ldh-voice-btn.ok{border-color:rgba(34,197,94,.42);background:rgba(34,197,94,.12);color:#bbf7d0}
+.ldh-voice-btn.off{border-color:rgba(239,68,68,.32);background:rgba(239,68,68,.10);color:#fecaca}
 @media(max-width:900px){.ldh-home-alerts-body{grid-template-columns:1fr}.ldh-alert-row{grid-template-columns:auto 1fr}.ldh-alert-action{grid-column:2}}
 
 </style>
@@ -1848,6 +1869,20 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
       <div class="ldh-alert-foot">
         <span>Los avisos se abren individualmente. Las órdenes nuevas se limpian con VISTO en su línea.</span>
       </div>
+    </div>
+  </div>
+  <div class="ldh-voice-alert" id="ldhVoiceAgendaPanel" aria-live="polite">
+    <div class="ldh-voice-main">
+      <span class="ldh-voice-dot">🔊</span>
+      <span>
+        <b id="ldhVoiceAgendaTitle">Aviso por voz de Agenda diaria</b>
+        <small id="ldhVoiceAgendaStatus">Pulsa activar para permitir que el navegador hable.</small>
+      </span>
+    </div>
+    <div class="ldh-voice-actions">
+      <button class="ldh-voice-btn" type="button" id="ldhVoiceEnableBtn">Activar voz</button>
+      <button class="ldh-voice-btn ok" type="button" id="ldhVoiceAckBtn">OK, ya lo he visto</button>
+      <button class="ldh-voice-btn off" type="button" id="ldhVoiceDisableBtn">Desactivar voz</button>
     </div>
   </div>
 </section>
@@ -6980,6 +7015,8 @@ function ldhRefreshWeightUI(){
   const WORK_KEY = 'ldh_work_orders_v1';
   const DB_KEYS = ['ldh_db','TallerFlowDB'];
   const DISMISS_KEY = 'ldh_home_date_alerts_dismissed_v1';
+  const VOICE_ENABLED_KEY = 'ldh_voice_agenda_enabled_v1';
+  const VOICE_ACK_KEY = 'ldh_voice_agenda_ack_v1';
   const ORDER_NOTICE_CUTOVER_MS = new Date('2026-08-12T09:39:00+02:00').getTime();
   const FIREBASE_PROJECT_ID = 'gestion-taller-2a439';
   const firebaseConfig = {
@@ -6993,6 +7030,9 @@ function ldhRefreshWeightUI(){
 
   let state = { orders:[], notifications:[], cloudReady:false };
   let lastDateAlertIds = [];
+  let voiceTimer = null;
+  let voiceLastSpeakAt = 0;
+  let voiceActiveIds = [];
 
   function $(id){ return document.getElementById(id); }
   function safeJson(raw, fallback){ try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; } }
@@ -7039,6 +7079,164 @@ function ldhRefreshWeightUI(){
     }
     return {};
   }
+  function todayISO(){
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+  function minutesNow(){
+    const d = new Date();
+    return d.getHours() * 60 + d.getMinutes();
+  }
+  function extractDateOnly(v){
+    const s = String(v ?? '').trim();
+    if(!s) return '';
+    const m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+    if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+    const m2 = s.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    if(m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
+    return '';
+  }
+  function voiceEnabled(){
+    return readStore(VOICE_ENABLED_KEY) === '1';
+  }
+  function setVoiceEnabled(v){
+    try{ localStorage.setItem(VOICE_ENABLED_KEY, v ? '1' : '0'); }catch(e){}
+    try{ sessionStorage.setItem(VOICE_ENABLED_KEY, v ? '1' : '0'); }catch(e){}
+  }
+  function voiceAck(){
+    return safeJson(readStore(VOICE_ACK_KEY), {});
+  }
+  function writeVoiceAck(obj){
+    const raw = JSON.stringify(obj || {});
+    try{ localStorage.setItem(VOICE_ACK_KEY, raw); }catch(e){}
+    try{ sessionStorage.setItem(VOICE_ACK_KEY, raw); }catch(e){}
+  }
+  function itemCreatedToday(item){
+    const vals = [
+      item?.createdAtMs, item?.createdAt, item?.created, item?.addedAt, item?.alta,
+      item?.fechaAlta, item?.dateAlta, item?.hoy, item?.start, item?.date, item?.createdDate
+    ];
+    const t = todayISO();
+    for(const v of vals){
+      if(v === undefined || v === null || v === '') continue;
+      if(typeof v === 'number'){
+        const d = new Date(v);
+        if(!Number.isNaN(d.getTime())){
+          const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+          if(iso === t) return true;
+        }
+      }else if(extractDateOnly(v) === t) return true;
+    }
+    return false;
+  }
+  function collectVoiceTodayTargets(){
+    const db = readAgendaDb();
+    const off = dismissed();
+    const ack = voiceAck();
+    const out = [];
+    const seen = new Set();
+    const nowAfterAlarm = minutesNow() >= (6 * 60 + 5);
+    (Array.isArray(db.miniAgenda) ? db.miniAgenda : []).forEach((item,index)=>{
+      if(!item || item.done || item.finished || item.completed) return;
+      const iso = norm(item.exec || item.execDate || item.fechaEjecucion || item.dateExec);
+      if(diffDays(iso) !== 0) return;
+      const id = norm(item.id || item.uid || index);
+      const alertId = `today|daily-${id}-${iso}`;
+      if(off[alertId] || ack[alertId] || seen.has(alertId)) return;
+      const createdToday = itemCreatedToday(item);
+      if(!nowAfterAlarm && !createdToday) return;
+      seen.add(alertId);
+      out.push({
+        id: alertId,
+        itemId: id,
+        iso,
+        title: norm(item.desc || item.descripcion || item.task || item.tarea) || 'Tarea de agenda diaria',
+        operator: norm(item.op || item.operario || item.operator),
+        createdToday
+      });
+    });
+    return out;
+  }
+  function updateVoicePanel(targets){
+    const panel = $('ldhVoiceAgendaPanel');
+    const status = $('ldhVoiceAgendaStatus');
+    const enableBtn = $('ldhVoiceEnableBtn');
+    const ackBtn = $('ldhVoiceAckBtn');
+    const disableBtn = $('ldhVoiceDisableBtn');
+    if(!panel) return;
+    const hasTargets = Array.isArray(targets) && targets.length > 0;
+    panel.classList.toggle('show', hasTargets || voiceEnabled());
+    if(status){
+      if(hasTargets){
+        status.textContent = voiceEnabled()
+          ? `Hay ${targets.length} tarea(s) de Agenda diaria para hoy. La voz repetirá el aviso hasta pulsar OK.`
+          : `Hay ${targets.length} tarea(s) para hoy. Pulsa Activar voz para permitir el aviso hablado.`;
+      }else{
+        status.textContent = voiceEnabled() ? 'Voz activada. No hay tareas de Agenda diaria para hoy pendientes de aviso hablado.' : 'Pulsa activar para permitir que el navegador hable.';
+      }
+    }
+    if(enableBtn) enableBtn.style.display = voiceEnabled() ? 'none' : '';
+    if(disableBtn) disableBtn.style.display = voiceEnabled() ? '' : 'none';
+    if(ackBtn) ackBtn.style.display = hasTargets ? '' : 'none';
+  }
+  function speakAgendaVoice(force){
+    const targets = collectVoiceTodayTargets();
+    voiceActiveIds = targets.map(t=>t.id);
+    updateVoicePanel(targets);
+    if(!targets.length || !voiceEnabled()) return;
+    const now = Date.now();
+    if(!force && now - voiceLastSpeakAt < 30000) return;
+    voiceLastSpeakAt = now;
+    try{
+      window.speechSynthesis.cancel();
+      const msg = targets.length === 1
+        ? 'Tienes una tarea de agenda prevista para hoy.'
+        : `Tienes ${targets.length} tareas de agenda previstas para hoy.`;
+      const u = new SpeechSynthesisUtterance(msg);
+      u.lang = 'es-ES';
+      u.rate = 0.95;
+      u.pitch = 1;
+      u.volume = 1;
+      const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+      const es = voices.find(v=>/^es(-|_)?/i.test(v.lang || '')) || voices.find(v=>/spanish|español/i.test(v.name || ''));
+      if(es) u.voice = es;
+      window.speechSynthesis.speak(u);
+    }catch(error){
+      console.warn('[Inicio voz agenda] No se pudo hablar', error);
+    }
+  }
+  function startVoiceLoop(){
+    if(voiceTimer) clearInterval(voiceTimer);
+    voiceTimer = setInterval(()=>speakAgendaVoice(false), 5000);
+    speakAgendaVoice(false);
+  }
+  function enableVoice(){
+    setVoiceEnabled(true);
+    try{
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance('Voz de avisos activada.');
+      u.lang = 'es-ES';
+      u.volume = 0.85;
+      window.speechSynthesis.speak(u);
+    }catch(e){}
+    voiceLastSpeakAt = 0;
+    setTimeout(()=>speakAgendaVoice(true), 900);
+  }
+  function disableVoice(){
+    setVoiceEnabled(false);
+    try{ window.speechSynthesis.cancel(); }catch(e){}
+    updateVoicePanel(collectVoiceTodayTargets());
+  }
+  function ackVoiceToday(){
+    const targets = collectVoiceTodayTargets();
+    const ack = voiceAck();
+    targets.forEach(t=>{ ack[t.id] = Date.now(); });
+    writeVoiceAck(ack);
+    try{ window.speechSynthesis.cancel(); }catch(e){}
+    voiceLastSpeakAt = 0;
+    render();
+  }
+
   function collectDateAlerts(){
     const db = readAgendaDb();
     const out = [];
@@ -7156,6 +7354,7 @@ function ldhRefreshWeightUI(){
     if(kpi) kpi.textContent = String(total);
     const sync = $('ldhHomeAlertSync');
     if(sync) sync.textContent = state.cloudReady ? 'Avisos conectados a nube' : 'Avisos desde copia local';
+    speakAgendaVoice(false);
   }
 
   function clearDateAlerts(){
@@ -7216,13 +7415,21 @@ function ldhRefreshWeightUI(){
     if(toggle && panel) toggle.addEventListener('click',()=>panel.classList.toggle('collapsed'));
     const clear = $('ldhHomeClearDateAlerts');
     if(clear) clear.addEventListener('click', clearDateAlerts);
+    const voiceEnable = $('ldhVoiceEnableBtn');
+    const voiceAckBtn = $('ldhVoiceAckBtn');
+    const voiceDisable = $('ldhVoiceDisableBtn');
+    if(voiceEnable) voiceEnable.addEventListener('click', enableVoice);
+    if(voiceAckBtn) voiceAckBtn.addEventListener('click', ackVoiceToday);
+    if(voiceDisable) voiceDisable.addEventListener('click', disableVoice);
+    startVoiceLoop();
     readLocalOrders();
     initCloud();
     setInterval(()=>{ readLocalOrders(); render(); }, 60000);
   });
   window.addEventListener('storage', e=>{
-    if([WORK_KEY,'ldh_db','TallerFlowDB',DISMISS_KEY].includes(e.key)) readLocalOrders();
+    if([WORK_KEY,'ldh_db','TallerFlowDB',DISMISS_KEY,VOICE_ACK_KEY,VOICE_ENABLED_KEY].includes(e.key)) readLocalOrders();
   });
+  try{ window.speechSynthesis.onvoiceschanged = ()=>speakAgendaVoice(false); }catch(e){}
 })();
 </script>
 
