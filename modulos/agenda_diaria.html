@@ -10068,21 +10068,36 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 </script>
 
 
-<script id="LDH_HOME_FOCUS_FROM_ALERTS_V1_20260812">
+<script id="LDH_HOME_FOCUS_FROM_ALERTS_V2_20260812">
 (function(){
   'use strict';
   const params = new URLSearchParams(location.search || '');
   const focus = String(params.get('ldhFocus') || '').trim();
   const target = String(params.get('ldhTarget') || '').trim();
   const kind = String(params.get('ldhKind') || '').trim();
+  const alertId = String(params.get('ldhAlertId') || '').trim();
+  const noticeId = String(params.get('ldhNotice') || '').trim();
   if(!focus || !target) return;
+
+  const DISMISS_KEY = 'ldh_home_date_alerts_dismissed_v1';
+  const DATE_KINDS = new Set(['late','today','tomorrow']);
 
   const cssEscape = (value) => {
     try{ return CSS.escape(String(value)); }
     catch(e){ return String(value).replace(/[^a-zA-Z0-9_-]/g,'\\$&'); }
   };
+  const safeJson = (raw, fallback) => { try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; } };
+  const readStore = (key) => {
+    try{ const v = localStorage.getItem(key); if(v) return v; }catch(e){}
+    try{ const v = sessionStorage.getItem(key); if(v) return v; }catch(e){}
+    return '';
+  };
+  const writeStore = (key, value) => {
+    try{ localStorage.setItem(key, value); }catch(e){}
+    try{ sessionStorage.setItem(key, value); }catch(e){}
+  };
 
-  window.__LDH_HOME_ACTIVE_FOCUS__ = { focus, target, kind, scrolled:false };
+  window.__LDH_HOME_ACTIVE_FOCUS__ = { focus, target, kind, alertId, noticeId, scrolled:false, panelReady:false, applied:false };
 
   function clearCurrent(){
     document.querySelectorAll('.ldh-focus-target').forEach(el=>{
@@ -10100,16 +10115,59 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
     return 'AVISO';
   }
 
+  function ensureFocusBanner(row){
+    const active = window.__LDH_HOME_ACTIVE_FOCUS__;
+    if(!active) return;
+    let bar = document.getElementById('ldhFocusAlertBar');
+    if(!bar){
+      bar = document.createElement('div');
+      bar.id = 'ldhFocusAlertBar';
+      bar.style.cssText = 'margin:0 0 14px;padding:12px 14px;border:1px solid rgba(56,189,248,.45);border-radius:14px;background:linear-gradient(90deg,rgba(14,165,233,.20),rgba(15,23,42,.60));color:#e0f2fe;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px;font-weight:850;box-shadow:0 10px 24px rgba(0,0,0,.25)';
+      const shell = document.querySelector('.wo-shell') || document.querySelector('.main') || document.body;
+      const tabs = document.querySelector('.wo-tabs');
+      if(tabs && tabs.parentNode) tabs.parentNode.insertBefore(bar, tabs.nextSibling);
+      else shell.insertBefore(bar, shell.firstChild);
+    }
+    const label = labelForKind(active.kind);
+    const isDate = DATE_KINDS.has(active.kind);
+    const left = `<div><strong>${label}</strong><div style="margin-top:3px;color:#b8c9df;font-size:12px">Se ha resaltado solo la fila que has abierto desde Inicio.</div></div>`;
+    const right = isDate
+      ? `<button type="button" id="ldhDismissThisDateAlert" style="border:1px solid rgba(239,68,68,.48);background:rgba(127,29,29,.55);color:#fee2e2;border-radius:10px;padding:8px 11px;font-weight:950;cursor:pointer">Quitar esta alerta</button>`
+      : `<span style="color:#b8c9df;font-size:12px">Para quitarla usa el botón <b>✓ VISTO</b> de esta orden.</span>`;
+    bar.innerHTML = left + right;
+    const btn = document.getElementById('ldhDismissThisDateAlert');
+    if(btn && !btn.__wired){
+      btn.__wired = true;
+      btn.addEventListener('click',()=>{
+        const id = active.alertId;
+        if(id){
+          const off = safeJson(readStore(DISMISS_KEY), {});
+          off[id] = Date.now();
+          writeStore(DISMISS_KEY, JSON.stringify(off));
+          try{ window.dispatchEvent(new StorageEvent('storage',{key:DISMISS_KEY,newValue:JSON.stringify(off)})); }catch(e){}
+        }
+        clearCurrent();
+        bar.remove();
+        window.__LDH_HOME_ACTIVE_FOCUS__ = null;
+        alert('Alerta quitada. No se ha modificado la tarea ni la orden.');
+      });
+    }
+  }
+
   function orderStillRequiresHighlight(orderId){
-    if(kind !== 'new' && kind !== 'priority') return true;
+    const active = window.__LDH_HOME_ACTIVE_FOCUS__;
+    if(!active || (active.kind !== 'new' && active.kind !== 'priority')) return true;
     const wo = window.WorkOrders;
     if(!wo || !Array.isArray(wo.notifications)) return true;
     const hasNotice = wo.notifications.some(n =>
       n && String(n.orderId || '') === String(orderId) &&
-      (n.type === 'new_order' || n.type === 'priority_changed')
+      (n.type === 'new_order' || n.type === 'priority_changed') &&
+      (!active.noticeId || String(n.id || '') === String(active.noticeId))
     );
     if(!hasNotice){
       clearCurrent();
+      const bar = document.getElementById('ldhFocusAlertBar');
+      if(bar) bar.remove();
       window.__LDH_HOME_ACTIVE_FOCUS__ = null;
       return false;
     }
@@ -10128,37 +10186,45 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       pill.textContent = labelForKind(kind);
       refCell.appendChild(pill);
     }
+    ensureFocusBanner(row);
     if(scroll){
       setTimeout(()=>{
-        try{ row.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){ row.scrollIntoView(); }
-      },180);
+        try{ row.scrollIntoView({behavior:'auto', block:'center'}); }catch(e){ row.scrollIntoView(); }
+      },120);
     }
     return true;
+  }
+
+  function showCorrectPanel(active){
+    if(active.panelReady) return;
+    try{ if(window.App && typeof App.router === 'function') App.router('mini_agenda'); }catch(e){}
+    if(active.focus === 'orders'){
+      try{ if(window.WorkOrders && typeof WorkOrders.showPanel === 'function') WorkOrders.showPanel('orders'); }catch(e){}
+    }else if(active.focus === 'daily'){
+      try{ if(window.WorkOrders && typeof WorkOrders.showPanel === 'function') WorkOrders.showPanel('daily'); }catch(e){}
+    }
+    active.panelReady = true;
   }
 
   function apply(scroll){
     const active = window.__LDH_HOME_ACTIVE_FOCUS__;
     if(!active) return false;
+    showCorrectPanel(active);
     if(active.focus === 'orders'){
-      try{ if(window.App && typeof App.router === 'function') App.router('mini_agenda'); }catch(e){}
-      try{ if(window.WorkOrders && typeof WorkOrders.showPanel === 'function') WorkOrders.showPanel('orders'); }catch(e){}
       if(!orderStillRequiresHighlight(active.target)) return false;
       const row = document.querySelector('[data-ldh-order-id="' + cssEscape(active.target) + '"]');
       if(row){
         const ok = markRow(row, scroll && !active.scrolled);
-        if(ok) active.scrolled = true;
+        if(ok){ active.scrolled = true; active.applied = true; }
         return ok;
       }
       return false;
     }
     if(active.focus === 'daily'){
-      try{ if(window.App && typeof App.router === 'function') App.router('mini_agenda'); }catch(e){}
-      try{ if(window.WorkOrders && typeof WorkOrders.showPanel === 'function') WorkOrders.showPanel('daily'); }catch(e){}
-      try{ if(window.App && typeof App.renderMiniAgenda === 'function') App.renderMiniAgenda(); }catch(e){}
       const row = document.querySelector('[data-ldh-mini-id="' + cssEscape(active.target) + '"], [data-ldh-mini-index="' + cssEscape(active.target) + '"]');
       if(row){
         const ok = markRow(row, scroll && !active.scrolled);
-        if(ok) active.scrolled = true;
+        if(ok){ active.scrolled = true; active.applied = true; }
         return ok;
       }
       return false;
@@ -10171,7 +10237,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       const original = App.renderMiniAgenda;
       App.renderMiniAgenda = function(){
         const res = original.apply(this, arguments);
-        setTimeout(()=>apply(false),40);
+        setTimeout(()=>apply(false),80);
         return res;
       };
       App.__LDH_HOME_FOCUS_PATCHED__ = true;
@@ -10180,7 +10246,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       const original = WorkOrders.render;
       WorkOrders.render = function(){
         const res = original.apply(this, arguments);
-        setTimeout(()=>apply(false),40);
+        setTimeout(()=>apply(false),80);
         return res;
       };
       WorkOrders.__LDH_HOME_FOCUS_PATCHED__ = true;
@@ -10190,13 +10256,14 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
   document.addEventListener('DOMContentLoaded',()=>{
     patchRenderers();
     let attempts = 0;
-    const timer = setInterval(()=>{
+    const tryOnce = () => {
       patchRenderers();
-      apply(true);
+      const found = apply(true);
       attempts++;
-      if(attempts > 25 && window.__LDH_HOME_ACTIVE_FOCUS__?.scrolled) clearInterval(timer);
-    },500);
-    setTimeout(()=>apply(true),250);
+      if(found || attempts >= 20) return;
+      setTimeout(tryOnce,350);
+    };
+    setTimeout(tryOnce,250);
   });
 
   window.LDH_applyFocusFromHome = apply;
