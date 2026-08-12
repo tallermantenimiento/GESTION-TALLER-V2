@@ -24329,4 +24329,272 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 </script>
 <!-- /LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812 -->
 
+
+
+<!-- LDH_PREP_CONSUME_FERRETERIA_ON_FAB_20260812 -->
+<script id="LDH_PREP_CONSUME_FERRETERIA_ON_FAB_20260812">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_CONSUME_FER_ON_FAB_20260812__) return;
+  window.__LDH_PREP_CONSUME_FER_ON_FAB_20260812__ = true;
+
+  const APP_NAME = 'ldh-prep-ferreteria-consume-20260812';
+  const DOC_COL = 'taller_ferreteria_v2';
+  const DOC_ID = 'main';
+  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
+  const COMMON_ID = 'fer_common';
+  const firebaseConfig = {
+    apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
+    authDomain: 'gestion-taller-2a439.firebaseapp.com',
+    projectId: 'gestion-taller-2a439',
+    storageBucket: 'gestion-taller-2a439.firebasestorage.app',
+    messagingSenderId: '498579673950',
+    appId: '1:498579673950:web:eb626781a5b509957db5cf'
+  };
+
+  let app=null, auth=null, fs=null;
+
+  function norm(v){
+    return String(v||'').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+  }
+  function num(v){
+    const n = Number(String(v ?? 0).replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function first(){
+    for(let i=0;i<arguments.length;i++){
+      const v=arguments[i];
+      if(v!==undefined && v!==null && String(v).trim()!=='') return v;
+    }
+    return '';
+  }
+  function sameRef(a,b){ return norm(a) === norm(b); }
+  function activeStatus(row){
+    const s = norm(first(row && row.status, row && row.estado, 'activa'));
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','anulada','anulado','inactiva','inactivo'].includes(s);
+  }
+  function phaseOk(row){
+    const ph = norm(first(row && row.phase, row && row.fase, 'preparacion'));
+    return !ph || ph === 'preparacion' || ph === 'fabricacion';
+  }
+  function isFerAssignment(row){
+    const txt = norm(first(row && row.assignmentType, row && row.reason, row && row.source, row && row.origen));
+    return txt.includes('ferreteria');
+  }
+  function assignmentRef(row){
+    return String(first(row && row.consumerRef, row && row.jobRef, row && row.ref, row && row.reference, row && row.referencia)).trim();
+  }
+  function assignmentQty(row){
+    return Math.max(0, num(first(row && row.pendingQty, row && row.qtyPending, row && row.pendiente, row && row.qty, row && row.cantidad, row && row.units, row && row.unidades)));
+  }
+  function normalizeDB(db){
+    const out = Object.assign({
+      version:'2.0-ferreteria-comun', companies:[], materials:[], stock:[], movements:[], jobs:[], reservations:[], assignments:[], reservationDebts:[]
+    }, (db && typeof db === 'object') ? db : {});
+    ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
+    return out;
+  }
+  function materialLabel(db, id){
+    const m = (db.materials||[]).find(x => String(first(x.id,x.materialId,x.matId,x.material_id)) === String(id));
+    return m ? String(first(m.name,m.nombre,m.materialName,m.material,m.mat,id)) : String(id||'');
+  }
+  function writeLocal(db){
+    const clean = normalizeDB(db);
+    const raw = JSON.stringify(clean);
+    try{ window.__LDH_FERRETERIA_CLOUD_DB_RO = clean; }catch(_){ }
+    try{ window.__LDH_FERRETERIA_MEMORY_DB = clean; }catch(_){ }
+    try{ localStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
+    try{ sessionStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
+    try{ window.dispatchEvent(new StorageEvent('storage',{key:STORAGE_KEY,newValue:raw})); }catch(_){ }
+    try{ if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla(); }catch(_){ }
+  }
+  function loadScript(src){
+    return new Promise((resolve,reject)=>{
+      if(document.querySelector('script[src="'+src+'"]')) return resolve();
+      const el=document.createElement('script');
+      el.src=src; el.async=true;
+      el.onload=resolve;
+      el.onerror=()=>reject(new Error('No se pudo cargar '+src));
+      document.head.appendChild(el);
+    });
+  }
+  async function ensureFirebase(){
+    if(!window.firebase || !firebase.apps){
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    }else{
+      if(!firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
+      if(!firebase.firestore) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    }
+    try{ app = firebase.app(APP_NAME); }
+    catch(_){ app = firebase.initializeApp(firebaseConfig, APP_NAME); }
+    auth = firebase.auth(app);
+    fs = firebase.firestore(app);
+    if(!auth.currentUser){ await auth.signInAnonymously(); }
+  }
+
+  async function consumeFerreteriaForRef(workRef){
+    const refText = String(workRef || '').trim();
+    if(!refText) return {consumedQty:0, consumedAssignments:0};
+    await ensureFirebase();
+    const docRef = fs.collection(DOC_COL).doc(DOC_ID);
+    const result = await fs.runTransaction(async (tx)=>{
+      const snap = await tx.get(docRef);
+      if(!snap.exists) throw new Error('No existe la nube de Ferretería.');
+      const data = snap.data() || {};
+      const db = normalizeDB(data.payload && typeof data.payload === 'object' ? data.payload : data);
+      const assignments = db.assignments;
+      const movements = db.movements;
+      const movementIds = new Set(movements.map(m=>String(m && m.id || '')));
+      const now = new Date().toISOString();
+      let consumedQty = 0;
+      let consumedAssignments = 0;
+
+      assignments.forEach((a)=>{
+        if(!a || typeof a !== 'object') return;
+        if(!isFerAssignment(a)) return;
+        if(!sameRef(assignmentRef(a), refText)) return;
+        if(!activeStatus(a) || !phaseOk(a)) return;
+        const qty = assignmentQty(a);
+        if(qty <= 0) return;
+        const materialId = String(first(a.materialId,a.matId,a.stockMaterialId,a.v2MaterialId,a.toMaterialId)).trim();
+        if(!materialId) return;
+        const assignmentId = String(first(a.id,a.assignmentId, materialId + '_' + refText + '_' + qty)).replace(/[^a-zA-Z0-9_-]+/g,'_');
+        const movementId = 'mov_ferreteria_fabricacion_' + assignmentId;
+        if(!movementIds.has(movementId)){
+          movements.push({
+            id: movementId,
+            companyId: COMMON_ID,
+            empresaId: COMMON_ID,
+            materialId: materialId,
+            matId: materialId,
+            materialName: first(a.materialName,a.material,a.name,materialLabel(db,materialId)),
+            type: 'salida',
+            tipo: 'salida',
+            qty: qty,
+            cantidad: qty,
+            date: now,
+            createdAt: now,
+            ref: refText,
+            jobRef: refText,
+            concept: first(a.concept,a.concepto,''),
+            reason: 'consumo_ferreteria_al_mandar_fabricacion',
+            source: 'preparacion_pedidos_consumo_ferreteria_fabricacion_20260812',
+            assignmentId: assignmentId,
+            debtExempt: true,
+            returnRequired: false
+          });
+          movementIds.add(movementId);
+          consumedQty += qty;
+        }
+        a.status = 'consumida';
+        a.estado = 'consumida';
+        a.phase = 'fabricacion';
+        a.fase = 'fabricacion';
+        a.consumedQty = qty;
+        a.consumedAt = now;
+        a.updatedAt = now;
+        a.movementId = movementId;
+        consumedAssignments += 1;
+      });
+
+      if(consumedAssignments > 0){
+        db.assignments = assignments;
+        db.movements = movements;
+        db.updatedAt = now;
+        db.lastWriter = 'preparacion_pedidos';
+        db.lastReason = 'consumo_ferreteria_fabricacion';
+        tx.set(docRef, {
+          payload: db,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          updatedAtIso: now,
+          revision: Date.now().toString(36) + '_prep_fer_consume',
+          build: 'PREP-CONSUME-FERRETERIA-FAB-20260812',
+          materialsCount: db.materials.length,
+          movementsCount: db.movements.length,
+          assignmentsCount: db.assignments.length,
+          reservationsCount: db.reservations.length
+        }, {merge:false});
+      }
+      return {db, consumedQty, consumedAssignments};
+    });
+    if(result && result.db) writeLocal(result.db);
+    return {consumedQty: result.consumedQty || 0, consumedAssignments: result.consumedAssignments || 0};
+  }
+
+  window.LDH_consumirFerreteriaAlMandarFabricacion = consumeFerreteriaForRef;
+
+  const previousConfirm = window.confirmarTodoRecepcion;
+  window.confirmarTodoRecepcion = async function(){
+    const reference = String(window.refActual ?? refActual ?? '').trim();
+    const stage = typeof window.LDH_getTrabajoStage === 'function'
+      ? window.LDH_getTrabajoStage(reference)
+      : 'preparacion';
+
+    /* Si el trabajo ya estaba enviado y solo queda Ferretería reservada, regularizamos
+       sin reenviar ni volver a descontar hierro. */
+    if(stage && stage !== 'preparacion'){
+      if(!confirm('Este trabajo ya está en Fabricación o en una fase posterior.\n\n¿Quieres regularizar solo la Ferretería pendiente de este pedido?')) return;
+      try{
+        const fer = await consumeFerreteriaForRef(reference);
+        alert(fer.consumedQty > 0
+          ? ('✅ Ferretería regularizada.\n\nConsumido físicamente en Ferretería: ' + fer.consumedQty)
+          : 'No había Ferretería pendiente para este pedido.');
+      }catch(e){
+        console.error(e);
+        alert('No se pudo regularizar Ferretería.\n\n' + String(e && (e.code || e.message) || e));
+      }
+      return;
+    }
+
+    const ironLines = Array.isArray(window.estadoMateriales ?? estadoMateriales)
+      ? (window.estadoMateriales ?? estadoMateriales)
+      : [];
+    if (ironLines.some((line) => String(line && line.unit || '').toLowerCase() === 'barra')
+        && !(window.metaActual ?? metaActual).tipo_hierro) {
+      (window.metaActual ?? metaActual).tipo_hierro = 'Negro';
+      try { setAny(KM(reference), JSON.stringify(window.metaActual ?? metaActual)); } catch (_) {}
+    }
+
+    const input = document.getElementById('inputUnidades');
+    const currentMeta = window.metaActual ?? metaActual;
+    const units = parseFloat(input && input.value) || currentMeta.unidades || 0;
+    if(units <= 0){
+      alert('⛔ Indica las UNIDADES.');
+      if(input) input.focus();
+      return;
+    }
+    if(!confirm(
+      'Mandar a FABRICACIÓN:\nUnidades: ' + units + '\n\n' +
+      'El hierro reservado/asignado y la Ferretería reservada se descontarán ahora del stock físico.'
+    )) return;
+
+    const button = document.getElementById('btnFaseTrabajo');
+    const oldText = button && button.textContent || '';
+    if(button){ button.disabled = true; button.textContent = 'Actualizando Stock…'; }
+    try{
+      const main = await window.LDH_consumirStockAsignadoAlMandarFabricacion(reference);
+      const fer = await consumeFerreteriaForRef(reference);
+      mandarAFabricacion(units, false);
+      let msg = '✅ Enviado a Fabricación.';
+      msg += '\n\nStock principal consumido físicamente: ' + (main && main.consumedQty || 0);
+      msg += '\nFerretería consumida físicamente: ' + (fer && fer.consumedQty || 0);
+      alert(msg);
+    }catch(e){
+      console.error('No se pudo consolidar el stock al mandar a Fabricación', e);
+      alert('No se ha enviado el trabajo a Fabricación.\n\nNo se ha descontado material físico porque no se pudo confirmar la actualización en la nube.\n\n' + String(e && (e.code || e.message) || e || 'Error de sincronización'));
+    }finally{
+      if(button && !currentMeta.en_fabricacion){
+        button.disabled = false;
+        button.textContent = oldText || '💾 Mandar a fabricación';
+      }
+    }
+  };
+})();
+</script>
+<!-- /LDH_PREP_CONSUME_FERRETERIA_ON_FAB_20260812 -->
+
 </body></html>
