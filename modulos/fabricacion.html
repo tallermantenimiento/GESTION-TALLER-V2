@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · empresas desde Stock vivo</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -480,22 +480,50 @@
     },
 
     loadCompanies(){
-      // La lista del filtro debe reflejar SOLO las empresas configuradas actualmente
-      // en Stock (maestro centralizado). No reutilizamos nombres de pedidos/entregas
-      // historicos porque reintroducen empresas antiguas ya eliminadas.
+      // FUENTE AUTORITATIVA: la base viva del modulo Stock.
+      // Asi el desplegable refleja exactamente las empresas que existen AHORA
+      // y no conserva nombres procedentes de pedidos, entregas o maestros antiguos.
       const names = new Set();
-      const pushConfigured = v => {
-        const name = String(v && (v.name || v.nombre || v.company || v.empresa || v.id || v) || "").trim();
-        if(!name) return;
-        // STOCK COMUN es un almacen logico del modulo Stock, no una empresa productiva.
-        if(norm(name) === "stock comun") return;
+      const companyNorm = value => String(value ?? "")
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+      const isCommonStock = company => {
+        if(!company) return false;
+        if(company && typeof company === "object" && (company.sharedStock === true || company.sharedPool === true || company.isSharedStock === true)) return true;
+        const values = company && typeof company === "object"
+          ? [company.id,company.companyId,company.empresaId,company.name,company.nombre,company.company,company.empresa,company.code,company.codigo,company.label]
+          : [company];
+        return values.map(companyNorm).filter(Boolean).some(v =>
+          v === "stock comun" || v === "stock comun global" || v === "almacen comun" ||
+          v.includes("stock comun") || v.includes("almacen comun")
+        );
+      };
+      const pushConfigured = value => {
+        if(!value || isCommonStock(value)) return;
+        const name = String(value && typeof value === "object"
+          ? (value.name || value.nombre || value.company || value.empresa || value.code || value.codigo || "")
+          : value).trim();
+        if(!name || isCommonStock(name)) return;
         names.add(name);
       };
 
+      let liveCompanies = null;
       try{
-        const master = parse(getStore("ldh_company_master_v1"), null);
-        if(master && Array.isArray(master.companies)) master.companies.forEach(pushConfigured);
+        const liveStock = parse(getStore("ldh_v2_company_stock_v1"), null);
+        if(liveStock && Array.isArray(liveStock.companies)) liveCompanies = liveStock.companies;
       }catch(e){}
+
+      // Solo si el Stock vivo aun no esta disponible usamos el maestro como respaldo.
+      if(Array.isArray(liveCompanies)){
+        liveCompanies.forEach(pushConfigured);
+      }else{
+        try{
+          const master = parse(getStore("ldh_company_master_v1"), null);
+          if(master && Array.isArray(master.companies)) master.companies.forEach(pushConfigured);
+        }catch(e){}
+      }
 
       const sel = document.getElementById("companyFilter");
       const current = sel.value;
