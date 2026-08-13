@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
-  <meta name="ldh-build" content="CALC-PESO-MATERIAL-USADO-V3-20260806">
+  <meta name="ldh-build" content="CALC-PLETINA-MM-V1-20260813">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -171,6 +171,7 @@
 
     <section class="card">
       <h2 style="margin-top:0">Optimización de Barras (estándar 6.000 mm)</h2>
+      <div class="muted" style="margin:-6px 0 12px">Las PLETINAS se mantienen en mm reales; la barra a comprar se decidirá en Preparación según el stock disponible.</div>
       <table>
         <thead><tr><th>Perfil</th><th class="right">Total m</th><th class="right">Barras necesarias</th><th class="right">Merma mm</th></tr></thead>
         <tbody id="barRows"></tbody>
@@ -274,12 +275,26 @@
     return {
       id:sid,
       name:String(m.name || m.nombre || m.material || m.label || sid),
-      unit:String(m.unit || m.unidad || "")
+      unit:String(m.unit || m.unidad || ""),
+      family:String(m.family || m.familia || m.grp || m.group || ""),
+      type:String(m.type || m.tipo || m.cat || m.categoria || "")
     };
   }
   function isPaintMaterial(m){
     const s = norm([m.name,m.nombre,m.material,m.cat,m.categoria,m.grp,m.grupo,m.familia].join(" "));
     return s.includes("pintura") || s.includes("bote") || s.includes("disolvente") || s.includes("solvente");
+  }
+  function isPletinaMaterial(name, m){
+    const txt = norm([
+      name,
+      m && m.name,
+      m && m.family,
+      m && m.familia,
+      m && m.grp,
+      m && m.group,
+      m && m.type
+    ].filter(Boolean).join(" "));
+    return /(^|\s)pletina(\s|$)/.test(txt) || txt.includes("pletina");
   }
   function parseLine(line){
     if(!line) return null;
@@ -636,16 +651,22 @@
         lineales[p.name] += totalMm;
         const stockMatId = conceptLineStockId(concept, "line", p.name, p);
         const mat = materialById(stockMatId);
+        const esPletina = isPletinaMaterial(p.name, mat);
         const barrasNecesarias = Math.ceil(totalMm / BAR_MM);
         barras.push({
           mat:p.name, material:p.name, name:p.name,
-          // Preparación trabaja en barras completas. No enviamos fracciones tipo 2.5666.
-          qty: barrasNecesarias,
-          qty_pedida: barrasNecesarias,
+          // PLETINA se conserva en mm reales. El resto de perfiles mantiene el flujo por barras.
+          qty: esPletina ? totalMm : barrasNecesarias,
+          qty_pedida: esPletina ? totalMm : barrasNecesarias,
           barras_necesarias: barrasNecesarias,
           total_mm: totalMm,
           mm: totalMm,
-          unit:"barra", unidad:"barra", tipo:"barra", type:"barra",
+          gestion_mm: esPletina,
+          pletina_mm: esPletina,
+          measureMode: esPletina ? "mm_real" : "barra",
+          commercial_bar_mm: BAR_MM,
+          unit:esPletina ? "mm" : "barra", unidad:esPletina ? "mm" : "barra",
+          tipo:esPletina ? "pletina_mm" : "barra", type:esPletina ? "pletina_mm" : "barra",
           stockMatId:stockMatId || "", matId:stockMatId || "", linked_matId:stockMatId || "",
           linked_matName: mat ? mat.name : ""
         });
@@ -694,6 +715,7 @@
         lineales,
         unidades,
         barras,
+        pletinas_mm:barras.filter(x=>x && x.pletina_mm),
         accesorios
       };
       this.renderResults(lineales, unidades, barras, accesorios);
@@ -712,8 +734,13 @@
       const unames = Object.keys(unidades || {});
       unitRows.innerHTML = unames.length ? unames.map(k=>`<tr><td>${esc(k)}</td><td class="right">${fmt(unidades[k],3)}</td></tr>`).join("") : `<tr><td colspan="2"><div class="empty">Sin accesorios.</div></td></tr>`;
 
+      const lineInfo = new Map((barras || []).map(x=>[norm(x && (x.name || x.mat || x.material)), x]));
       barRows.innerHTML = lnames.length ? lnames.map(k=>{
         const mm = n(lineales[k]);
+        const info = lineInfo.get(norm(k)) || null;
+        if(info && info.pletina_mm){
+          return `<tr><td>${esc(k)} <span class="pill">PLETINA · MM</span></td><td class="right">${fmt(mm/1000,2)}</td><td class="right"><span class="pill">Se decide en Preparación</span></td><td class="right">—</td></tr>`;
+        }
         const bars = Math.ceil(mm / BAR_MM);
         const merma = Math.max(0, (bars * BAR_MM) - mm);
         return `<tr><td>${esc(k)}</td><td class="right">${fmt(mm/1000,2)}</td><td class="right"><span class="pill">${bars}</span></td><td class="right">${fmt(merma,0)}</td></tr>`;
@@ -732,6 +759,16 @@
       if(!data) return alert("Selecciona un concepto y calcula primero.");
       if(!data.ref) return alert("Introduce una referencia.");
       if(!data.empresa) return alert("Selecciona la empresa receptora para este pedido.");
+
+      const pletinasMm = (data.barras || []).filter(x=>x && x.pletina_mm && n(x.qty_pedida ?? x.qty) > 0);
+      const prepPletinaReady = String(getStore("LDH_PREP_PLETINA_MM_READY_V1") || "") === "1";
+      if(pletinasMm.length && !prepPletinaReady){
+        return alert(
+          "Protección PLETINA/MM activa.\n\n" +
+          "Este cálculo contiene pletina medida en milímetros reales y la versión actual de Preparación todavía no está marcada como compatible.\n\n" +
+          "No se ha enviado ni reservado nada. Actualiza Preparación en la siguiente fase antes de enviar este pedido."
+        );
+      }
 
       const isCompositePart = !!(this.agendaHandoff && this.agendaHandoff.composite && this.agendaHandoff.partId);
       const exactCompositeRef = String(this.agendaHandoff && this.agendaHandoff.partReference || data.ref || "").trim();
@@ -769,8 +806,10 @@
         cantidad:data.vars.cantidad || 1,
         vars:data.vars,
         lineales:data.lineales,
+        lineales_mm:data.lineales,
         unidades_detalle:data.unidades,
         barras:data.barras,
+        pletinas_mm:(data.barras || []).filter(x=>x && x.pletina_mm),
         accesorios:data.accesorios,
         materiales:[...data.barras, ...data.accesorios],
         createdAt:new Date().toISOString()
