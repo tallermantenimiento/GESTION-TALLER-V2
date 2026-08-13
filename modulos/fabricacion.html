@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · empresas desde Stock vivo · filtro V3</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · empresas desde Stock vivo · filtro V3 · recuperación Agenda V6</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -1193,6 +1193,62 @@ function withoutDeletedRefs(pkg){
   // deleted, pero no se destruyen dentro de ldh_db; así pueden recuperarse con seguridad.
   return pkg;
 }
+function fabPoolItemKey(item){
+  if(!item || typeof item !== "object") return "";
+  const ref = refValue(item);
+  if(ref) return "ref:" + ref;
+  const id = String(item.id || item.pedido_uid || item.pedido_id || item.orderId || item.agendaOrderId || "").trim();
+  return id ? "id:" + id : "";
+}
+function mergeFabricacionPoolPreserveRefs(localRows, remoteRows){
+  const out = [];
+  const index = new Map();
+  const add = (row, remoteWins) => {
+    if(!row || typeof row !== "object") return;
+    const key = fabPoolItemKey(row);
+    if(key && index.has(key)){
+      const pos = index.get(key);
+      const previous = out[pos] || {};
+      const merged = remoteWins ? {...previous, ...row} : {...row, ...previous};
+      merged.flow = remoteWins
+        ? {...(previous.flow || {}), ...(row.flow || {})}
+        : {...(row.flow || {}), ...(previous.flow || {})};
+      out[pos] = merged;
+      return;
+    }
+    if(key) index.set(key, out.length);
+    out.push({...row, flow: row.flow && typeof row.flow === "object" ? {...row.flow} : row.flow});
+  };
+  (Array.isArray(localRows) ? localRows : []).forEach(row=>add(row,false));
+  // Para una referencia presente en ambos lados, la revision remota aceptada manda.
+  // Las referencias que solo existen localmente se conservan: una nube parcial nunca
+  // puede hacer desaparecer un trabajo activo por simple ausencia del paquete remoto.
+  (Array.isArray(remoteRows) ? remoteRows : []).forEach(row=>add(row,true));
+  return out;
+}
+function mergeFabricacionInbox(localRaw, remoteRaw){
+  const localRows = parse(localRaw, []) || [];
+  const remoteRows = parse(remoteRaw, []) || [];
+  return JSON.stringify(mergeFabricacionPoolPreserveRefs(localRows, remoteRows));
+}
+function mergeFabricacionOverrides(localRaw, remoteRaw){
+  const localMap = parse(localRaw, {}) || {};
+  const remoteMap = parse(remoteRaw, {}) || {};
+  // La nube aceptada manda en referencias coincidentes, pero no borra overrides
+  // locales de referencias que la copia remota no contiene.
+  return JSON.stringify({...localMap, ...remoteMap});
+}
+function dbPoolRefs(ldh){
+  const refs = new Set();
+  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+    const rows = Array.isArray(ldh && ldh[pool]) ? ldh[pool] : [];
+    rows.forEach(row=>{
+      const ref = refValue(row);
+      if(ref) refs.add(ref);
+    });
+  });
+  return refs;
+}
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
   pkg = withoutDeletedRefs(pkg);
@@ -1200,23 +1256,36 @@ function applyRemotePackage(pkg){
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
 
-  // Blindaje de aislamiento: Fabricacion comparte la clave historica ldh_db con
-  // otros modulos. Al restaurar desde la nube SOLO sustituye los pools que
-  // pertenecen a Fabricacion y conserva conceptos, compras, miniAgenda, empresas, etc.
+  // V6: restauracion por FUSION, nunca por sustitucion destructiva.
+  // Fabricacion comparte ldh_db con otros modulos y, ademas, un paquete remoto
+  // puede ser parcial. Por eso se conservan referencias locales ausentes en nube.
   const remoteDb = parse(pkg.ldh_db, {}) || {};
   const localDb = parse(getStore(DB_KEY), {}) || {};
+  const localRefsBefore = dbPoolRefs(localDb);
+  const remoteRefs = dbPoolRefs(remoteDb);
+  const localOnlyRefs = Array.from(localRefsBefore).filter(ref=>!remoteRefs.has(ref) && !deletedRefs.has(ref));
+
   const mergedDb = {...localDb};
-  ["deliveries","fabricacion","fab","trabajos","deliveryCompanies"].forEach(k=>{
-    if(Array.isArray(remoteDb[k])) mergedDb[k] = remoteDb[k];
+  ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
+    mergedDb[k] = mergeFabricacionPoolPreserveRefs(localDb[k], remoteDb[k]);
   });
-  // La revision local se alinea con la revision remota aplicada para evitar
-  // que el mismo paquete se reprocese continuamente.
+  if(Array.isArray(remoteDb.deliveryCompanies) || Array.isArray(localDb.deliveryCompanies)){
+    const seen = new Set();
+    mergedDb.deliveryCompanies = [];
+    [...(Array.isArray(localDb.deliveryCompanies)?localDb.deliveryCompanies:[]), ...(Array.isArray(remoteDb.deliveryCompanies)?remoteDb.deliveryCompanies:[])].forEach(value=>{
+      const key = typeof value === "object" ? JSON.stringify(value) : String(value);
+      if(seen.has(key)) return;
+      seen.add(key);
+      mergedDb.deliveryCompanies.push(value);
+    });
+  }
+
+  // Se alinea revision con el paquete remoto aplicado. Si hemos conservado refs
+  // locales que faltaban en nube, despues se republica la fusion completa.
   mergedDb.updatedAt = appliedStamp || remoteDb.updatedAt || mergedDb.updatedAt || new Date().toISOString();
   setStore(DB_KEY, JSON.stringify(mergedDb));
-
-  // Estas dos claves son propias de Fabricacion.
-  setStore(INBOX_KEY, pkg.inbox || "[]");
-  setStore(OVERRIDE_KEY, pkg.overrides || "{}");
+  setStore(INBOX_KEY, mergeFabricacionInbox(getStore(INBOX_KEY), pkg.inbox || "[]"));
+  setStore(OVERRIDE_KEY, mergeFabricacionOverrides(getStore(OVERRIDE_KEY), pkg.overrides || "{}"));
 
   // prep_meta_* y prep_recepcion_* pertenecen a Preparacion. Fabricacion los
   // puede leer, pero nunca debe rebobinarlos con una copia historica de su nube.
@@ -1227,6 +1296,11 @@ function applyRemotePackage(pkg){
       if(window.App && window.App.reload) window.App.reload(false);
     }catch(e){}
     ignorePublish = false;
+    if(localOnlyRefs.length){
+      // La nube recibio una copia parcial. Publicamos la union para que los trabajos
+      // preservados no vuelvan a faltar en otro PC.
+      setTimeout(()=>{ try{ publish(true); }catch(e){} }, 350);
+    }
   }, 200);
   return true;
 }
@@ -1599,12 +1673,103 @@ setTimeout(hookApp, 1500);
       }
       return changed;
     }
+    function canonicalWorkCode(ref){
+      const value = String(ref || '').trim();
+      const m = value.match(/^(OT-\d{6}-\d{3}(?:-[A-Z])?)/i);
+      return m ? m[1].toUpperCase() : value.toUpperCase();
+    }
+    function readBrowserStore(key){
+      try{ const v=localStorage.getItem(key); if(v!==null) return v; }catch(_){ }
+      try{ const v=sessionStorage.getItem(key); if(v!==null) return v; }catch(_){ }
+      return '';
+    }
+    function prepMetaForAgendaOrder(order){
+      const orderId = String(order && order.id || '').trim();
+      const wantedCode = canonicalWorkCode(order && (order.reference || order.ref));
+      const keys = [];
+      const addStore = store => {
+        try{
+          for(let i=0;i<store.length;i++){
+            const key=store.key(i)||'';
+            if(key.startsWith('prep_meta_') && !keys.includes(key)) keys.push(key);
+          }
+        }catch(_){ }
+      };
+      addStore(localStorage); addStore(sessionStorage);
+      let byCode = null;
+      for(const key of keys){
+        const fullRef = key.replace(/^prep_meta_/,'').trim();
+        let meta = null;
+        try{ meta=JSON.parse(readBrowserStore(key)||'null'); }catch(_){ meta=null; }
+        if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos) continue;
+        const metaOrderId = String(meta.agenda_order_id || meta.orderId || meta.workOrderId || '').trim();
+        const candidate = {ref:fullRef,meta};
+        if(orderId && metaOrderId && metaOrderId===orderId) return candidate;
+        if(wantedCode && canonicalWorkCode(fullRef)===wantedCode && !byCode) byCode=candidate;
+      }
+      return byCode;
+    }
+    function agendaIsWorkshopActive(order){
+      if(!order || agendaIsTerminal(order)) return false;
+      const f=agendaFlow(order);
+      if(Number(f.fabricacion||0)>0 || Number(f.pintura||0)>0) return true;
+      const st=agendaState(order);
+      return ['fabrication','fabricacion','en_fabricacion','painting','pintura','en_pintura'].includes(st);
+    }
+    function findFabricacionItemForAgenda(order){
+      const appObj=window.App;
+      if(!appObj) return null;
+      const items=appObj.allItems ? appObj.allItems() : [];
+      const orderId=String(order && order.id || '').trim();
+      if(orderId){
+        const byId=items.find(item=>String(item && (item.agendaOrderId || item.orderId || '')).trim()===orderId);
+        if(byId) return byId;
+      }
+      const code=canonicalWorkCode(order && (order.reference || order.ref));
+      if(!code) return null;
+      return items.find(item=>canonicalWorkCode(item && (item.ref || item.referencia))===code) || null;
+    }
+    function buildFabricacionItemFromAgenda(order){
+      const prep=prepMetaForAgendaOrder(order);
+      const meta=prep && prep.meta || {};
+      const reference=String(prep && prep.ref || order.reference || order.ref || '').trim();
+      const central=agendaFlow(order);
+      let fab=Number(central.fabricacion||0), pintura=Number(central.pintura||0);
+      let almacen=Number(central.almacen||0), entregado=Number(central.entregado||0);
+      const total=Math.max(1,
+        Number(order.quantity||order.cantidad||order.unidades||order.uds||0)||0,
+        Number(meta.unidades||meta.uds||meta.total||meta.cantidad||0)||0,
+        fab+pintura+almacen+entregado
+      );
+      if(fab+pintura<=0){
+        const st=agendaState(order);
+        if(st.includes('paint') || st.includes('pint')) pintura=total;
+        else fab=total;
+      }
+      const phase=pintura>0 && fab<=0 ? 'pintura' : 'fabricacion';
+      return {
+        id: String(meta.pedido_uid || meta.pedido_id || order.id || ('AGENDA-'+reference)),
+        agendaOrderId:String(order.id||''), orderId:String(order.id||''),
+        ref:reference, referencia:reference,
+        concept:String(meta.concepto || meta.concept || order.description || order.concept || order.concepto || 'Sin concepto'),
+        concepto:String(meta.concepto || meta.concept || order.description || order.concept || order.concepto || 'Sin concepto'),
+        company:String(meta.empresa || meta.company || order.companyName || order.company || order.empresa || ''),
+        empresa:String(meta.empresa || meta.company || order.companyName || order.company || order.empresa || ''),
+        total, unidades:total, delivered:entregado,
+        status:'pendiente', estado:phase, fase:phase, tipo:'fabricacion',
+        keepInFab:true, hideFromFab:false, archived:false,
+        datePed:String(order.entryDate || meta.fecha_pedido || meta.datePed || '').trim(),
+        datePrev:String(order.deliveryDate || meta.fecha_entrega || meta.datePrev || '').trim(),
+        flow:{fab,fabricacion:fab,pintura,almacen,entregado},
+        unassignedBorrow:meta.unassignedBorrow || meta.unassigned_borrow || null,
+        notes:'Recuperado desde Agenda activa',
+        recoveredFromAgenda:true,
+        agendaUpdatedAtMs:Number(order.updatedAtMs||order.workflowUpdatedAtMs||0)||Date.now()
+      };
+    }
     async function reconcileAgendaTerminalStates(publishClean=true){
       if(!authReady || !window.App) return false;
       try{
-        const currentItems = window.App.allItems ? window.App.allItems() : [];
-        const refs = Array.from(new Set(currentItems.map(item=>String(item && (item.ref||item.referencia) || '').trim()).filter(Boolean)));
-        if(!refs.length) return false;
         const snap = await getDocs(ordersCol);
         const rows = snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
         const byId = new Map(rows.map(row=>[String(row.id||''),row]));
@@ -1617,7 +1782,27 @@ setTimeout(hookApp, 1500);
         });
 
         let changed = false;
+        let recovered = 0;
         agendaTerminalRefs.clear();
+
+        // V6: Agenda es autoritativa para saber que una OT sigue activa en taller.
+        // Si Fabricacion perdio la fila por una restauracion parcial, se reconstruye.
+        rows.forEach(order=>{
+          if(!agendaIsWorkshopActive(order)) return;
+          if(findFabricacionItemForAgenda(order)) return;
+          const item=buildFabricacionItemFromAgenda(order);
+          if(!item.ref) return;
+          try{
+            if(window.LDH_isFabricacionDeletedRef && (window.LDH_isFabricacionDeletedRef(item.ref) || window.LDH_isFabricacionDeletedRef(String(order.reference||'')))) return;
+          }catch(_){ }
+          window.App.upsertEveryPool(item);
+          recovered += 1;
+          changed = true;
+        });
+
+        // Tras recuperar las ausentes, Agenda tambien sigue siendo autoritativa
+        // para retirar de la vista las que ya son terminales.
+        const currentItems = window.App.allItems ? window.App.allItems() : [];
         currentItems.forEach(item=>{
           const ref = String(item && (item.ref||item.referencia) || '').trim();
           if(!ref) return;
@@ -1625,22 +1810,26 @@ setTimeout(hookApp, 1500);
           let order = id ? byId.get(id) : null;
           if(!order) order = newest(byRef.get(ref));
           if(!order){
-            const base = baseReference(ref);
-            if(base && base !== ref) order = newest(byRef.get(base));
+            const code=canonicalWorkCode(ref);
+            order=rows.filter(row=>canonicalWorkCode(row.reference||row.ref)===code).sort((a,b)=>Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0))[0] || null;
           }
           if(!order || !agendaIsTerminal(order)) return;
           agendaTerminalRefs.add(ref);
           if(applyAgendaTerminalToLocal(ref,order)) changed = true;
         });
 
-        if(window.App.save) window.App.save(false,false);
+        if(window.App.save) window.App.save(false, changed);
         if(window.App.render) window.App.render();
+        if(recovered>0){
+          const el=document.getElementById('cloudStatus');
+          if(el){ el.textContent='Agenda recuperada · '+recovered+' trabajo'+(recovered===1?'':'s'); el.classList.add('ok'); }
+        }
         if(changed && publishClean && window.LDH_fabricacionPublishNow){
-          setTimeout(()=>{ try{ window.LDH_fabricacionPublishNow(); }catch(e){} },250);
+          setTimeout(()=>{ try{ window.LDH_fabricacionPublishNow(); }catch(e){} },300);
         }
         return changed;
       }catch(error){
-        console.warn('[Fabricacion] reconciliacion terminal con Agenda',error);
+        console.warn('[Fabricacion] reconciliacion activa/terminal con Agenda',error);
         return false;
       }
     }
@@ -1806,5 +1995,6 @@ setTimeout(hookApp, 1500);
 })();
 </script>
 <!-- LDH_FAB_COMPANY_FILTER_NO_COMMON_V3_20260813 -->
+<!-- LDH_FAB_RECUPERA_AGENDA_ACTIVA_V6_20260813 -->
 </body>
 </html>
