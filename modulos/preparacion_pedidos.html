@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V85-PLETINA-MM-LEGACY-REPAIR-20260813" />
+<meta name="ldh-build" content="PREPARACION-V86-ARRANQUE-LIGERO-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -2329,6 +2329,15 @@ function LDH_movementSignV45(row){
 }
 
 function LDH_buildFerreteriaCatalogV45(){
+  // V86: durante una misma apertura/render se consultaba el catalogo completo
+  // muchas veces (una o dos por linea). Cache muy corta para conservar datos vivos
+  // pero evitar reconstrucciones repetidas dentro del mismo ciclo de pantalla.
+  try{
+    const cached = window.__LDH_PREP_HW_CATALOG_CACHE_V86;
+    if(cached && Array.isArray(cached.items) && (Date.now() - Number(cached.at||0)) < 1200){
+      return cached.items;
+    }
+  }catch(_){ }
   const db = LDH_readFerreteriaDBV45();
   if(!db) return [];
 
@@ -2465,7 +2474,9 @@ function LDH_buildFerreteriaCatalogV45(){
     byIdentity.set(identity,material);
   });
 
-  return Array.from(byIdentity.values());
+  const result = Array.from(byIdentity.values());
+  try{ window.__LDH_PREP_HW_CATALOG_CACHE_V86 = {at:Date.now(),items:result}; }catch(_){ }
+  return result;
 }
 
 function LDH_getCurrentHardwareByIdV45(id){
@@ -2506,6 +2517,7 @@ function LDH_saveFerreteriaDBV46(db){
   if(!saved) return false;
 
   window.__LDH_FERRETERIA_MEMORY_DB = db;
+  try{ delete window.__LDH_PREP_HW_CATALOG_CACHE_V86; }catch(_){ }
   try{
     window.dispatchEvent(new StorageEvent("storage",{
       key:LDH_FERRETERIA_KEYS_V45[0],
@@ -3396,7 +3408,16 @@ function LDH_aplicarVinculosConfiguracionActuales(lines, meta){
     for(const key of ["ldh_db","TallerFlowDB"]){
       try{
         const raw = getAny(key);
-        const parsed = raw ? JSON.parse(raw) : null;
+        let parsed = null;
+        const cache = window.__LDH_PREP_CONCEPT_DB_CACHE_V86;
+        if(raw && cache && cache.key === key && cache.raw === raw){
+          parsed = cache.db;
+        }else{
+          parsed = raw ? JSON.parse(raw) : null;
+          if(parsed && Array.isArray(parsed.concepts)){
+            window.__LDH_PREP_CONCEPT_DB_CACHE_V86 = {key,raw,db:parsed};
+          }
+        }
         if(parsed && Array.isArray(parsed.concepts)){
           db = parsed;
           break;
@@ -3560,16 +3581,10 @@ if (metaActual.en_fabricacion === undefined) metaActual.en_fabricacion = false;
 
   // Hidratación de "No asignado" desde registro global (por si el pedido viene de otro módulo)
   const gb = getGlobalBorrow(ref);
-  if(gb && (!metaActual.unassignedBorrow || !Array.isArray((metaActual.unassignedBorrow||{}).items) || metaActual.unassignedBorrow.items.length===0)){
+  if(gb && typeof gb === "object" && Array.isArray(gb.items) && gb.items.length){
     metaActual.unassignedBorrow = gb;
-    // no forzamos guardado aquí; se guardará al primer cambio
+    // no forzamos guardado aqui; se guardara al primer cambio
   }
-
-// Si el pedido tiene deuda de "no asignado" guardada globalmente, la re-hidratamos aquí
-const gBorrow = getGlobalBorrow(ref);
-if(gBorrow && typeof gBorrow === "object" && Array.isArray(gBorrow.items) && gBorrow.items.length){
-  metaActual.unassignedBorrow = gBorrow;
-}
 
   estadoMateriales = JSON.parse(getAny(KP(ref)) || "[]");
       // Normaliza líneas antiguas (compatibilidad): algunos guardados usan 'material' en vez de 'mat'
@@ -23858,7 +23873,9 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   }
   function start(){
     markBuild();
-    [1200,5000,12000].forEach(delay => setTimeout(repair,delay));
+    // V86: mantenimiento pesado desactivado al arrancar.
+    // Sigue disponible de forma manual si alguna vez hace falta reparar duplicados.
+    window.LDH_PREP_repararDuplicadosStockManualV77 = repair;
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',start,{once:true});
   else start();
@@ -24156,7 +24173,9 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   function start(){
     markBuild();
     protectStockReceiver();
-    [3200,8500,17000].forEach(delay => setTimeout(repair,delay));
+    // V86: no recorrer/reparar todo Stock automaticamente al entrar en Preparacion.
+    // La proteccion de recepcion sigue activa y la reparacion queda disponible manualmente.
+    window.LDH_PREP_repararCruceCatalogosManualV77 = repair;
     [500,1800,5000].forEach(delay => setTimeout(protectStockReceiver,delay));
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',start,{once:true});
@@ -24601,7 +24620,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   };
 
   function installReceivedOverride(){const current=window.LDH_marcarRecibidoCompleto;if(typeof current!=="function"||current.__ldhPletinaMmV84)return;const base=current;const wrapped=function(index){const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(isPletinaMmLine(line))return window.LDH_pletinaRecibirBarra(index);return base.apply(this,arguments);};wrapped.__ldhPletinaMmV84=true;wrapped.__ldhPletinaMmV84Base=base;window.LDH_marcarRecibidoCompleto=wrapped;}
-  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V85-PLETINA-MM-LEGACY-REPAIR-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v85';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V85';break;}}
+  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V86-ARRANQUE-LIGERO-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v86';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V86';break;}}
   try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
   function refresh(){try{installReceivedOverride();markBuild();if(typeof renderTabla==='function'&&currentRef())renderTabla();}catch(_){ }}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true});else[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
@@ -24616,14 +24635,14 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <script id="LDH_PREP_V85_PLETINA_MM_LEGACY_REPAIR_MARK_20260813">
 (function(){
   'use strict';
-  const BUILD='PREPARACION-V85-PLETINA-MM-LEGACY-REPAIR-20260813';
+  const BUILD='PREPARACION-V86-ARRANQUE-LIGERO-20260813';
   function mark(){
     try{
       window.__LDH_PREP_CANONICAL_BUILD=BUILD;
       document.documentElement.dataset.ldhPrepBuild=BUILD;
-      document.documentElement.dataset.ldhPrepPletina='v85';
+      document.documentElement.dataset.ldhPrepPletina='v86';
       const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
-      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V85';break;}
+      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V86';break;}
     }catch(_){ }
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mark,{once:true});else mark();
@@ -24632,5 +24651,40 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 })();
 </script>
 <!-- LDH_PREP_V85_PLETINA_MM_LEGACY_REPAIR_20260813 -->
+
+
+<script id="LDH_PREP_V86_ARRANQUE_LIGERO_20260813">
+(function(){
+  'use strict';
+  const BUILD='PREPARACION-V86-ARRANQUE-LIGERO-20260813';
+  function mark(){
+    try{
+      window.__LDH_PREP_CANONICAL_BUILD=BUILD;
+      document.documentElement.dataset.ldhPrepBuild=BUILD;
+      document.documentElement.dataset.ldhPrepPerformance='v86';
+      const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
+      for(const selector of selectors){
+        const status=document.querySelector(selector);
+        if(!status) continue;
+        const base=String(status.textContent||'Preparacion').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
+        status.textContent=(base||'Preparacion')+' · V86';
+        break;
+      }
+    }catch(_){ }
+  }
+  function clearCachesOnStorage(ev){
+    try{
+      const key=String(ev&&ev.key||'');
+      if(key==='ldh_db'||key==='TallerFlowDB') delete window.__LDH_PREP_CONCEPT_DB_CACHE_V86;
+      if(key.includes('ferreteria')) delete window.__LDH_PREP_HW_CATALOG_CACHE_V86;
+    }catch(_){ }
+  }
+  window.addEventListener('storage',clearCachesOnStorage);
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',mark,{once:true}); else mark();
+  [300,1200,3500].forEach(d=>setTimeout(mark,d));
+  console.info('[Preparacion V86] Arranque ligero: reparaciones V77 manuales y catalogos cacheados');
+})();
+</script>
+<!-- LDH_PREP_V86_ARRANQUE_LIGERO_20260813 -->
 
 </body></html>
