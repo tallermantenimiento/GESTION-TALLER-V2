@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V90-FISICO-REAL-SIN-TRAZAS-20260813" />
+<meta name="ldh-build" content="PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -5160,14 +5160,50 @@ function LDH_exactRowQty(r){
   )).replace(",", ".")) || 0;
 }
 function LDH_exactRealStock(db, companyId, materialId){
-  const movs = (db.movements||[]).filter(m =>
-    String(LDH_exactFirst(m.companyId,m.empresaId,m.empresa,m.company)) === String(companyId) &&
-    String(LDH_exactFirst(m.materialId,m.matId,m.material,m.material_id)) === String(materialId)
-  );
+  // V91: compatibilidad segura con filas legacy. Algunas existencias antiguas
+  // guardan empresa/material por NOMBRE (p.ej. "SKLUM" / "Ø 25") y otras por ID.
+  // Stock las considera la misma ficha; Preparacion debe hacer exactamente lo mismo.
+  const companyAliases = new Set();
+  const materialAliases = new Set();
+  const addAlias = (set, value) => {
+    const raw = String(value ?? "").trim();
+    if(!raw) return;
+    set.add(raw);
+    const n = LDH_exactNorm(raw);
+    if(n) set.add(n);
+  };
 
-  // V90: solo los movimientos FISICOS sustituyen el saldo de la fila Stock.
-  // Reservas, asignaciones y trazas de Preparacion tienen signo 0 y antes bastaba
-  // con que existiera una de ellas para que el fisico se calculase erroneamente en 0.
+  addAlias(companyAliases, companyId);
+  try{
+    (db.companies||[]).forEach(c=>{
+      const ids = [c&&c.id,c&&c.companyId,c&&c.empresaId].map(v=>String(v??"").trim()).filter(Boolean);
+      if(!ids.includes(String(companyId??"").trim())) return;
+      [c&&c.id,c&&c.companyId,c&&c.empresaId,c&&c.name,c&&c.nombre,c&&c.empresa,c&&c.company,c&&c.code,c&&c.codigo]
+        .forEach(v=>addAlias(companyAliases,v));
+    });
+  }catch(e){}
+
+  addAlias(materialAliases, materialId);
+  try{
+    (db.materials||[]).forEach(m=>{
+      const ids = [m&&m.id,m&&m.materialId,m&&m.matId,m&&m.material_id].map(v=>String(v??"").trim()).filter(Boolean);
+      if(!ids.includes(String(materialId??"").trim())) return;
+      [m&&m.id,m&&m.materialId,m&&m.matId,m&&m.material_id,m&&m.name,m&&m.nombre,m&&m.material,m&&m.mat,m&&m.label]
+        .forEach(v=>addAlias(materialAliases,v));
+    });
+  }catch(e){}
+
+  const aliasMatch = (set, values) => values.some(v=>{
+    const raw=String(v??"").trim();
+    if(!raw) return false;
+    return set.has(raw) || set.has(LDH_exactNorm(raw));
+  });
+  const sameCompany = row => aliasMatch(companyAliases,[row&&row.companyId,row&&row.empresaId,row&&row.empresa,row&&row.company,row&&row.companyName,row&&row.empresaNombre]);
+  const sameMaterial = row => aliasMatch(materialAliases,[row&&row.materialId,row&&row.matId,row&&row.material_id,row&&row.material,row&&row.mat,row&&row.materialName,row&&row.nombreMaterial,row&&row.name,row&&row.nombre]);
+
+  const movs = (db.movements||[]).filter(m => sameCompany(m) && sameMaterial(m));
+
+  // Solo los movimientos FISICOS sustituyen el saldo de la fila Stock.
   const physicalMovs = movs.filter(m =>
     LDH_exactMovementSign(LDH_exactFirst(m.type,m.tipo,"entrada")) !== 0
   );
@@ -5179,8 +5215,7 @@ function LDH_exactRealStock(db, companyId, materialId){
   }
 
   return (db.stock||[])
-    .filter(s => String(LDH_exactFirst(s.companyId,s.empresaId,s.empresa,s.company)) === String(companyId))
-    .filter(s => String(LDH_exactFirst(s.materialId,s.matId,s.material,s.material_id)) === String(materialId))
+    .filter(s => sameCompany(s) && sameMaterial(s))
     .reduce((a,s)=>a+LDH_exactRowQty(s),0);
 }
 function LDH_exactFindMaterial(db, companyId, line){
@@ -24837,7 +24872,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   };
 
   function installReceivedOverride(){const current=window.LDH_marcarRecibidoCompleto;if(typeof current!=="function"||current.__ldhPletinaMmV84)return;const base=current;const wrapped=function(index){const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(isPletinaMmLine(line))return window.LDH_pletinaRecibirBarra(index);return base.apply(this,arguments);};wrapped.__ldhPletinaMmV84=true;wrapped.__ldhPletinaMmV84Base=base;window.LDH_marcarRecibidoCompleto=wrapped;}
-  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V90-FISICO-REAL-SIN-TRAZAS-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v86';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V90';break;}}
+  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v86';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V91';break;}}
   try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
   function refresh(){try{installReceivedOverride();markBuild();if(typeof renderTabla==='function'&&currentRef())renderTabla();}catch(_){ }}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true});else[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
@@ -24852,14 +24887,14 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <script id="LDH_PREP_V85_PLETINA_MM_LEGACY_REPAIR_MARK_20260813">
 (function(){
   'use strict';
-  const BUILD='PREPARACION-V90-FISICO-REAL-SIN-TRAZAS-20260813';
+  const BUILD='PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813';
   function mark(){
     try{
       window.__LDH_PREP_CANONICAL_BUILD=BUILD;
       document.documentElement.dataset.ldhPrepBuild=BUILD;
       document.documentElement.dataset.ldhPrepPletina='v86';
       const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
-      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V90';break;}
+      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V91';break;}
     }catch(_){ }
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mark,{once:true});else mark();
@@ -24873,7 +24908,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <script id="LDH_PREP_V86_ARRANQUE_LIGERO_20260813">
 (function(){
   'use strict';
-  const BUILD='PREPARACION-V90-FISICO-REAL-SIN-TRAZAS-20260813';
+  const BUILD='PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813';
   function mark(){
     try{
       window.__LDH_PREP_CANONICAL_BUILD=BUILD;
@@ -24884,7 +24919,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
         const status=document.querySelector(selector);
         if(!status) continue;
         const base=String(status.textContent||'Preparacion').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent=(base||'Preparacion')+' · V90';
+        status.textContent=(base||'Preparacion')+' · V91';
         break;
       }
     }catch(_){ }
@@ -24916,7 +24951,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <script id="LDH_PREP_V88_LIBERAR_RESERVA_LINEA_20260813">
 (function(){
   'use strict';
-  const BUILD='PREPARACION-V90-FISICO-REAL-SIN-TRAZAS-20260813';
+  const BUILD='PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813';
   function mark(){
     try{
       window.__LDH_PREP_CANONICAL_BUILD=BUILD;
@@ -24926,7 +24961,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
         const status=document.querySelector(selector);
         if(!status) continue;
         const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent=(base||'Preparación')+' · V90';
+        status.textContent=(base||'Preparación')+' · V91';
         break;
       }
     }catch(_){ }
