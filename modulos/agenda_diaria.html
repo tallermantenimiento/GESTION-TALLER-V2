@@ -2392,6 +2392,20 @@ _fmtPartialStore(s){
             if(!this.state.miniAgenda) this.state.miniAgenda = [];
             if(!this.state.concepts) this.state.concepts = [];
             if(!this.state.deliveryOrders) this.state.deliveryOrders = { prefixOrder:{}, refOrder:{} };
+
+            // MINI_AGENDA_UNIQUE_ID_V1
+            // Las tareas antiguas no tenían ID propio. Se les asigna una sola vez
+            // para que borrar/recrear una tarea con el mismo texto no herede el "VISTO" anterior.
+            try{
+                let miniIdsChanged = false;
+                (this.state.miniAgenda||[]).forEach((item,index)=>{
+                    if(!item || item.id || item.uid) return;
+                    item.id = 'mini_' + Date.now().toString(36) + '_' + index.toString(36) + '_' + Math.random().toString(36).slice(2,8);
+                    miniIdsChanged = true;
+                });
+                if(miniIdsChanged) this.saveData();
+            }catch(e){}
+
             // Los conceptos son generales: eliminar cualquier empresa guardada en el concepto (migración)
             try{
                 let changed = false;
@@ -2813,6 +2827,7 @@ saveData() {
         }
 
         const item = {
+            id: 'mini_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,8),
             alta: document.getElementById('miniHoy').value,
             exec: document.getElementById('miniPrev').value,
             op: op,
@@ -7540,7 +7555,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
           inps[1].value = Number(fp).toFixed(3);
         }
         if(nm === 'disolvente universal (mezcla)'){
-          inps[1].value = Number(fd).toFixed(3);
+          inps[1].value = Number(fd).toFixed(4);
         }
       });
       // actualizar textarea para que se guarde
@@ -7588,7 +7603,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       conceptName: ($('cfgName')||{}).value || '',
       perfiles,
       pendientes,
-      returnTo:'configuracion.html'
+      returnTo:'agenda_diaria.html#config'
     };
 
     window.name = IN_PREFIX + JSON.stringify(payload);
@@ -7597,17 +7612,44 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
   function handleReturnFromPintura(){
     try{
+      const OUT_PENDING_KEY = 'LDH_PINTURA_OUT_PENDING_V2';
+      const OUT_LAST_KEY = 'LDH_PINTURA_OUT_LAST_V2';
+      let payload = null;
+
+      // 1) vía clásica: window.name
       if(window.name && window.name.startsWith(OUT_PREFIX)){
         const raw = window.name.slice(OUT_PREFIX.length);
         window.name = '';
-        const payload = JSON.parse(raw);
-        restoreDraft();
-        tryShowConfig();
-        const fp = payload.factorPintura;
-        const fd = payload.factorDisolvente;
-        applyFactorsToConcept(fp, fd);
-        try{ alert('Factores recibidos de Cálculo Pintura ✅'); }catch(e){}
+        payload = JSON.parse(raw);
       }
+
+      // 2) vía robusta: localStorage pendiente
+      if(!payload){
+        try{
+          const raw = localStorage.getItem(OUT_PENDING_KEY);
+          if(raw) payload = JSON.parse(raw);
+        }catch(e){}
+      }
+
+      if(!payload) return;
+
+      // consumir pendiente para que no se aplique dos veces al recargar
+      try{ localStorage.removeItem(OUT_PENDING_KEY); localStorage.setItem(OUT_LAST_KEY, JSON.stringify(payload)); }catch(e){}
+
+      restoreDraft();
+      tryShowConfig();
+
+      // Compatibilidad: aceptar nombres antiguos y nuevos
+      const fp = Number(payload.factorPintura ?? payload.factorBote4L ?? 0);
+      const fd = Number(payload.factorDisolvente ?? payload.factorBidon25L ?? 0);
+
+      if(!(fp > 0) && !(fd > 0)){
+        alert('He vuelto desde Cálculo Pintura, pero los factores recibidos son 0. Revisa que hubiera superficie y pintura calculada.');
+        return;
+      }
+
+      applyFactorsToConcept(fp, fd);
+      try{ alert('Factores recibidos de Cálculo Pintura ✅'); }catch(e){}
     }catch(e){ console.warn(e); }
   }
 
