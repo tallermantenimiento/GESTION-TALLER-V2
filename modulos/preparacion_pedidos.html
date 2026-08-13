@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V81-PLETINA-MM-20260813" />
+<meta name="ldh-build" content="PREPARACION-V82-PLETINA-MM-UNIDADES-BLINDADAS-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -494,7 +494,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V81-PLETINA-MM-20260813">
+<meta name="ldh-fix" content="PREPARACION-V82-PLETINA-MM-UNIDADES-BLINDADAS-20260813">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -6015,15 +6015,44 @@ function renderTabla() {
 
   estadoMateriales.forEach((linea, index) => {
     const pedida = toNum(linea.qty_pedida);
-    const isPletinaMm = (typeof window.LDH_isPletinaMmLine === "function") && window.LDH_isPletinaMmLine(linea);
+    const isPletinaMm = ((typeof window.LDH_isPletinaMmLine === "function") && window.LDH_isPletinaMmLine(linea)) ||
+      (((String((linea && (linea.unit || linea.unidad)) || "").trim().toLowerCase() === "mm") || linea.pletina_mm === true || linea.gestion_mm === true) &&
+       String((linea && (linea.mat || linea.material || linea.name || linea.linked_matName || linea.stockLinkLabel)) || "").toLowerCase().includes("pletina"));
     let recibida = toNum(linea.qty_recibida);
+
+    // V82 · PLETINA/MM: la cantidad recibida se expresa SIEMPRE en mm.
+    // Las asignaciones/reservas del stock particular siguen expresadas en barras y
+    // nunca pueden copiarse directamente a Recibida. Si V81 dejó un falso 1/2 mm
+    // por esa mezcla de unidades, se reconstruye desde las asignaciones PLETINA/MM
+    // autoritativas una vez que el conector especializado está disponible.
+    try{
+      const fnPletina = window.LDH_asignadoPropioStockParaLinea;
+      const srcPletina = (typeof window.LDH_pletinaSourceInfo === "function") ? window.LDH_pletinaSourceInfo(linea) : null;
+      const stockPletinaConocido = !!(srcPletina && ((srcPletina.common && srcPletina.common.pack) || (srcPletina.company && srcPletina.company.pack)));
+      if(isPletinaMm && fnPletina && fnPletina.__ldhPletinaMmV82 && stockPletinaConocido){
+        const mmAsignados = Math.max(0, toNum(fnPletina(linea)));
+        const mmAutoritativos = pedida > 0 ? Math.min(pedida, mmAsignados) : mmAsignados;
+        const hayRastroGenerico = Array.isArray(linea.trace) && linea.trace.some(t=>String(t && t.source || "") === "stock_asignado_propio_sync");
+        if(hayRastroGenerico || Math.abs(recibida - mmAutoritativos) > 0.000001){
+          linea.qty_recibida = mmAutoritativos;
+          linea.recibida = mmAutoritativos;
+          linea.aplicado_qty = mmAutoritativos;
+          linea.stock_consumed_qty = mmAutoritativos;
+          recibida = mmAutoritativos;
+          if(Array.isArray(linea.trace)) linea.trace = linea.trace.filter(t=>String(t && t.source || "") !== "stock_asignado_propio_sync");
+          linea.ok = pedida > 0 && mmAutoritativos >= pedida;
+          linea.completo = linea.ok; linea.done = linea.ok; linea.isDone = linea.ok; linea.isCompleted = linea.ok;
+          try{ _dirtyOkByQty = true; }catch(e){}
+        }
+      }
+    }catch(e){}
 
     // Si Stock ya tiene una asignación propia para esta referencia/material,
     // Preparación debe reflejarla como recibida. Esto corrige los casos en que
     // se asignan barras desde "Asignar libre" pero la columna Recibida queda a 0.
     try{
       const asigPropia = (typeof LDH_asignadoPropioStockParaLinea === "function") ? LDH_asignadoPropioStockParaLinea(linea) : 0;
-      if(asigPropia > recibida){
+      if(!isPletinaMm && asigPropia > recibida){
         const targetRec = pedida > 0 ? Math.min(pedida, asigPropia) : asigPropia;
         linea.qty_recibida = targetRec;
         linea.recibida = targetRec;
@@ -6046,7 +6075,7 @@ function renderTabla() {
     try{
       const lentInfo = LDH_lentOutForLine(linea);
       const lentQty = toNum(lentInfo && lentInfo.qty);
-      if(lentQty > 0){
+      if(!isPletinaMm && lentQty > 0){
         const baseRec = LDH_baseReceivedBeforeLoan(linea, pedida);
         linea.qty_recibida_base_before_lent = baseRec;
         const netRec = Math.max(0, baseRec - lentQty);
@@ -6061,7 +6090,7 @@ function renderTabla() {
           try{ _dirtyOkByQty = true; }catch(e){}
         }
         recibida = netRec;
-      }else if(linea.qty_recibida_base_before_lent !== undefined && linea.qty_recibida_base_before_lent !== null && String(linea.qty_recibida_base_before_lent)!==""){
+      }else if(!isPletinaMm && linea.qty_recibida_base_before_lent !== undefined && linea.qty_recibida_base_before_lent !== null && String(linea.qty_recibida_base_before_lent)!==""){
         const restoreRec = toNum(linea.qty_recibida_base_before_lent);
         if(restoreRec > toNum(linea.qty_recibida)){
           linea.qty_recibida = restoreRec;
@@ -6140,7 +6169,7 @@ function renderTabla() {
       );
       const trazaPrestamoTxt = (typeof LDH_trazabilidadPrestamosStockLinea === "function") ? String(LDH_trazabilidadPrestamosStockLinea(linea)||"") : "";
 
-      if(qPrestadoVisible > 0 || trazaPrestamoTxt.toUpperCase().includes("PRESTADO A")){
+      if(!isPletinaMm && (qPrestadoVisible > 0 || trazaPrestamoTxt.toUpperCase().includes("PRESTADO A"))){
         const qPrestamo = qPrestadoVisible > 0 ? qPrestadoVisible : 1;
         const baseAntesPrestamo = Math.max(
           toNum(linea.qty_recibida_base_before_lent),
@@ -6267,7 +6296,7 @@ function renderTabla() {
     // - Si Stock v2 dice que este material está asignado a este trabajo, reflejarlo como recibido.
     // - Si parte de lo asignado se ha prestado a otro trabajo/empresa, BAJAR la recibida neta.
     try{
-      if(typeof _v2CompanyStockInfo === "function"){
+      if(!isPletinaMm && typeof _v2CompanyStockInfo === "function"){
         const infAsig = _v2CompanyStockInfo(linea, linkedMat);
         const qAsig = toNum(infAsig && infAsig.asignado);
         const qPrestadoFuera = (typeof LDH_prestadoFueraStockLineaQty === "function") ? toNum(LDH_prestadoFueraStockLineaQty(linea)) : 0;
@@ -6300,7 +6329,7 @@ function renderTabla() {
     try{
       const _lentFinal = (typeof LDH_lentOutForLine === "function") ? LDH_lentOutForLine(linea) : {qty:0,items:[]};
       const _lentQtyFinal = toNum(_lentFinal && _lentFinal.qty);
-      if(_lentQtyFinal > 0){
+      if(!isPletinaMm && _lentQtyFinal > 0){
         const _baseFinal = (typeof LDH_baseReceivedBeforeLoan === "function") ? LDH_baseReceivedBeforeLoan(linea, pedida) : Math.max(toNum(linea.qty_recibida_base_before_lent), toNum(linea.qty_recibida), toNum(linea.recibida));
         const _netFinal = Math.max(0, _baseFinal - _lentQtyFinal);
         linea.qty_recibida_base_before_lent = _baseFinal;
@@ -6322,6 +6351,10 @@ function renderTabla() {
 
     const diff = recibida - yaAplicada;
     const falta = Math.max(0, pedida - recibida);
+    const pletinaBuyInfo = (isPletinaMm && typeof window.LDH_pletinaCompraInfo === "function")
+      ? window.LDH_pletinaCompraInfo(linea)
+      : null;
+    const pletinaDebeComprar = !!(isPletinaMm && falta > 0 && pletinaBuyInfo && toNum(pletinaBuyInfo.barsToBuy) > 0);
 
     let btnHtml = "";
     if(isPletinaMm){
@@ -6341,7 +6374,7 @@ function renderTabla() {
     if (falta > 0) {
       if(isPletinaMm){
         const pSrc = (typeof window.LDH_pletinaSourceInfo === "function") ? window.LDH_pletinaSourceInfo(linea) : null;
-        const pBuy = (typeof window.LDH_pletinaCompraInfo === "function") ? window.LDH_pletinaCompraInfo(linea) : null;
+        const pBuy = pletinaBuyInfo;
         if(pSrc && pSrc.company && pSrc.company.ownReservedBars > 0){
           btnHtml += `<button class="btn-mini" onclick="LDH_pletinaUsarReservaEmpresa(${index})">Usar reserva empresa (${Math.floor(pSrc.company.ownReservedBars)} barra)</button>`;
         }
@@ -6415,9 +6448,11 @@ function renderTabla() {
       <td>
         <div class="ldh-recibida-cell">
           <input type="number" value="${recibida}" ${isPletinaMm ? "readonly" : `oninput="updateQty(${index}, this)"`}>
-          <button type="button" class="btn-mini ldh-recibido-btn${isComplete ? " disabled" : ""}"
-            onclick="LDH_marcarRecibidoCompleto(${index})" ${isComplete ? "disabled" : ""}
-            title="${isPletinaMm ? "Registrar la recepción física de 1 barra completa y sumar su longitud a STOCK COMÚN" : "Completar automáticamente la cantidad recibida de esta fila"}">${isPletinaMm ? "Recibir 1 barra" : "Recibido"}</button>
+          ${isPletinaMm
+            ? (pletinaDebeComprar
+                ? `<button type="button" class="btn-mini ldh-recibido-btn" onclick="LDH_marcarRecibidoCompleto(${index})" title="Registrar la recepción física de 1 barra completa y sumar su longitud a STOCK COMÚN">Recibir 1 barra</button>`
+                : ``)
+            : `<button type="button" class="btn-mini ldh-recibido-btn${isComplete ? " disabled" : ""}" onclick="LDH_marcarRecibidoCompleto(${index})" ${isComplete ? "disabled" : ""} title="Completar automáticamente la cantidad recibida de esta fila">Recibido</button>`}
         </div>
       </td>
       <td>${btnHtml}${btnComprasInfo}${btnVincular}</td>
@@ -24213,13 +24248,13 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 </script>
 
 
-<script id="LDH_PREP_PLETINA_MM_V81_20260813">
+<script id="LDH_PREP_PLETINA_MM_V82_20260813">
 (function(){
   'use strict';
-  if(window.__LDH_PREP_PLETINA_MM_V81__) return;
-  window.__LDH_PREP_PLETINA_MM_V81__=true;
+  if(window.__LDH_PREP_PLETINA_MM_V82__) return;
+  window.__LDH_PREP_PLETINA_MM_V82__=true;
 
-  const BUILD='PREPARACION-V81-PLETINA-MM-20260813';
+  const BUILD='PREPARACION-V82-PLETINA-MM-UNIDADES-BLINDADAS-20260813';
   const STOCK_KEY='ldh_v2_company_stock_v1';
   const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
   const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
@@ -24391,6 +24426,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       return sum;
     },0);
   };
+  window.LDH_asignadoPropioStockParaLinea.__ldhPletinaMmV82=true;
 
   const baseStockCompra=typeof window._getStockInfoForCompra==='function'?window._getStockInfoForCompra:null;
   window._getStockInfoForCompra=function(line){
@@ -24527,12 +24563,13 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   }
 
   try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
-  document.documentElement.dataset.ldhPrepPletina='v81';
+  document.documentElement.dataset.ldhPrepPletina='v82';
   window.__LDH_PREP_CANONICAL_BUILD=BUILD;
   function refresh(){try{installReceivedOverride();if(typeof renderTabla==='function'&&currentRef()) renderTabla();}catch(_){ }}
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true}); else [80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
   setInterval(installReceivedOverride,2500);
-  console.info('[Preparación V81] PLETINA/MM activa');
+  console.info('[Preparación V82] PLETINA/MM · barras empresa y mm blindados');
 })();
 </script>
+<!-- LDH_PREP_PLETINA_MM_V82_UNIDADES_BLINDADAS_20260813 -->
 </body></html>
