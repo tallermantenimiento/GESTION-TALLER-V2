@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V87-ASIGNAR-LIBRE-MISMA-FUENTE-V68-20260813" />
+<meta name="ldh-build" content="PREPARACION-V88-LIBERAR-RESERVA-LINEA-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -6550,6 +6550,21 @@ function renderTabla() {
           : `<button class="btn-mini unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">Asignar de otra empresa</button>`;
       }
     }
+
+    // V88 · Liberar una reserva propia sin consumirla ni tocar el stock físico.
+    // Solo se ofrece mientras la línea sigue a cero para evitar liberar material ya aplicado.
+    try{
+      const reservaPropiaV88 = (typeof window.LDH_reservaPropiaActivaLineaV88 === "function")
+        ? Number(window.LDH_reservaPropiaActivaLineaV88(index, linea) || 0)
+        : 0;
+      if(reservaPropiaV88 > 0 && recibida <= 0 && yaAplicada <= 0 && !linea.ok){
+        const unidadReservaV88 = isPletinaMm ? " mm" : (reservaPropiaV88 === 1 ? " barra" : " barras");
+        const cantidadReservaV88 = isPletinaMm
+          ? Math.round(reservaPropiaV88).toLocaleString("es-ES")
+          : reservaPropiaV88;
+        btnHtml += `<button class="btn-mini btn-danger" style="border-color:#eab308;color:#fde68a" onclick="LDH_liberarReservaLineaV88(${index})">Liberar reserva (${cantidadReservaV88}${unidadReservaV88})</button>`;
+      }
+    }catch(e){}
 
     // Botón de limpieza para pruebas: solo limpia la línea de Preparación.
     if (recibida > 0 || yaAplicada > 0 || linea.ok) {
@@ -23036,6 +23051,156 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     }
   }
 
+  // V88 · Reserva propia de la línea: consulta y liberación autoritativa en Firebase.
+  // No modifica stock físico, movimientos, asignaciones ni reservas de otros trabajos.
+  function companyTargetsV88(remote){
+    const meta=metaNow();
+    const wanted=norm(meta?.empresa ?? meta?.company ?? meta?.empresaNombre ?? meta?.companyName ?? '');
+    if(!wanted) return new Set();
+    const companies=Array.isArray(remote?.companies)?remote.companies:[];
+    const company=companies.find(row=>{
+      const vals=[row?.id,row?.companyId,row?.empresaId,row?.name,row?.nombre,row?.empresa,row?.company]
+        .map(norm).filter(Boolean);
+      return vals.includes(wanted);
+    });
+    const out=new Set([wanted]);
+    if(company){
+      [company?.id,company?.companyId,company?.empresaId,company?.name,company?.nombre,company?.empresa,company?.company]
+        .map(norm).filter(Boolean).forEach(value=>out.add(value));
+    }
+    return out;
+  }
+  function rowCompanyMatchesV88(row,targets){
+    if(!targets || !targets.size) return false;
+    const vals=[row?.companyId,row?.empresaId,row?.empresa,row?.company,row?.companyName,row?.empresaNombre]
+      .map(norm).filter(Boolean);
+    return vals.some(value=>targets.has(value));
+  }
+  function localStockDbV88(){
+    try{
+      const direct=window.__LDH_PREP_STOCK_CLOUD_DB || window.__LDH_STOCK_MEMORY_DB;
+      if(direct && typeof direct==='object') return direct;
+    }catch(_){ }
+    try{
+      if(typeof _v2LoadCompanyStockDB==='function'){
+        const pack=_v2LoadCompanyStockDB();
+        const db=pack && (pack.db || pack);
+        if(db && typeof db==='object') return db;
+      }
+    }catch(_){ }
+    try{
+      const raw=localStorage.getItem(STOCK_KEY) || sessionStorage.getItem(STOCK_KEY);
+      if(raw){ const db=JSON.parse(raw); if(db && typeof db==='object') return db; }
+    }catch(_){ }
+    return null;
+  }
+  function reservationQtyForLineV88(line,reference,remote){
+    if(!line || !reference || !remote) return 0;
+    remote.materials=Array.isArray(remote.materials)?remote.materials:[];
+    remote.reservations=Array.isArray(remote.reservations)?remote.reservations:[];
+    const knownAliases=aliases(reference);
+    const ids=materialIds(line,remote);
+    const wantedName=norm(lineName(line));
+    const companies=companyTargetsV88(remote);
+    return remote.reservations
+      .filter(active)
+      .filter(row=>rowCompanyMatchesV88(row,companies))
+      .filter(row=>referenceMatches(row,knownAliases))
+      .filter(row=>rowMaterialMatches(row,ids,wantedName))
+      .reduce((sum,row)=>sum+Math.max(0,num(row?.qty ?? row?.cantidad ?? row?.reservado ?? row?.cantidadReservada)),0);
+  }
+  window.LDH_reservaPropiaActivaLineaV88=function(index,lineOverride){
+    try{
+      const line=lineOverride || linesNow()[Number(index)];
+      const reference=referenceNow();
+      return reservationQtyForLineV88(line,reference,localStockDbV88());
+    }catch(_){ return 0; }
+  };
+  function releaseReservationRowV88(row,now){
+    const original=Math.max(0,num(row?.qty ?? row?.cantidad ?? row?.reservado ?? row?.cantidadReservada));
+    row.status='liberada';
+    row.estado='liberada';
+    row.pendingQty=0;
+    row.qtyPending=0;
+    row.updatedAt=now;
+    row.releasedAt=now;
+    row.releasedReason='liberar_reserva_preparacion_v88';
+    row.releaseReason='liberar_reserva_preparacion_v88';
+    row.releaseOriginalQtyV88=original;
+    return original;
+  }
+  async function releaseReservationRestV88(line,reference){
+    for(let attempt=0;attempt<3;attempt+=1){
+      const authToken=await token();
+      const meta=await getDocument('taller_data/stock',authToken);
+      const total=Math.max(0,Number(firestoreValue(meta?.fields?.totalChunks)||0));
+      if(!total) throw new Error('Stock remoto no contiene bloques de datos.');
+      const chunkDocs=await Promise.all(Array.from({length:total},(_,index)=>getDocument(`taller_data/stock/chunks/${index}`,authToken)));
+      const packed=chunkDocs.map(doc=>String(firestoreValue(doc?.fields?.part)??'')).join('');
+      const remote=parseStock(packed);
+      const companies=companyTargetsV88(remote);
+      if(!companies.size) throw new Error('No se ha podido identificar con seguridad la empresa de este pedido.');
+      const knownAliases=aliases(reference);
+      const ids=materialIds(line,remote);
+      const wantedName=norm(lineName(line));
+      const matches=row=>active(row) && rowCompanyMatchesV88(row,companies) && referenceMatches(row,knownAliases) && rowMaterialMatches(row,ids,wantedName);
+      const now=new Date().toISOString();
+      let reservationsChanged=0,releasedQty=0;
+      remote.reservations.forEach(row=>{
+        if(!matches(row)) return;
+        releasedQty+=releaseReservationRowV88(row,now);
+        reservationsChanged+=1;
+      });
+      if(!reservationsChanged) return {remoteDB:remote,reservationsChanged:0,releasedQty:0};
+      try{
+        await commitStock(remote,{meta,chunks:chunkDocs},authToken,'preparacion_liberar_reserva_v88');
+        window.__LDH_PREP_STOCK_CLOUD_DB=remote;
+        window.__LDH_STOCK_MEMORY_DB=remote;
+        try{localStorage.setItem(STOCK_KEY,JSON.stringify(remote));}catch(_){ }
+        try{sessionStorage.setItem(STOCK_KEY,JSON.stringify(remote));}catch(_){ }
+        try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'liberar_reserva_v88'}}));}catch(_){ }
+        return {remoteDB:remote,reservationsChanged,releasedQty};
+      }catch(error){
+        const conflict=error?.status===409 || /aborted|precondition|conflict/i.test(String(error?.message||error));
+        if(!conflict || attempt===2) throw error;
+      }
+    }
+    throw new Error('No se pudo confirmar la liberación por concurrencia.');
+  }
+  const releaseLocksV88=new Set();
+  window.LDH_liberarReservaLineaV88=async function(index){
+    const lines=linesNow();
+    const line=lines[Number(index)];
+    if(!line) return;
+    const reference=referenceNow();
+    const material=lineName(line);
+    const qty=window.LDH_reservaPropiaActivaLineaV88(index,line);
+    if(qty<=0){ alert('Esta línea no tiene una reserva propia activa que liberar.'); return; }
+    const key=reference+'|'+index+'|'+material;
+    if(releaseLocksV88.has(key)) return;
+    const unit=(String(line?.unit ?? line?.unidad ?? '').toLowerCase()==='mm' || line?.pletina_mm===true || line?.gestion_mm===true) ? ' mm' : (qty===1?' barra':' barras');
+    const shown=unit===' mm' ? Math.round(qty).toLocaleString('es-ES') : qty;
+    if(!confirm('Liberar la reserva de "'+material+'" para este pedido?\n\nCantidad reservada: '+shown+unit+'\n\nSe liberará solamente ESTA reserva.\nNo cambia el stock físico, no consume material y no toca otros trabajos.')) return;
+    releaseLocksV88.add(key);
+    const button=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;
+    const oldText=button?.textContent || 'LIBERAR RESERVA';
+    if(button){button.disabled=true;button.textContent='LIBERANDO...';}
+    try{
+      const result=await releaseReservationRestV88(line,reference);
+      try{if(typeof window.renderTabla==='function') window.renderTabla();}catch(_){ }
+      try{if(typeof window.cargarLista==='function') window.cargarLista();}catch(_){ }
+      if(!result.reservationsChanged){ alert('No se encontró una reserva activa de esta línea en Firebase. No se ha modificado nada.'); return; }
+      const releasedShown=unit===' mm' ? Math.round(result.releasedQty).toLocaleString('es-ES') : result.releasedQty;
+      alert('✅ Reserva liberada.\n\nMaterial: '+material+'\nLiberado: '+releasedShown+unit+'\n\nEl stock físico no se ha modificado.');
+    }catch(error){
+      console.error('[Preparacion V88] Liberar reserva',error);
+      alert('No se ha podido liberar la reserva.\n\n'+String(error?.message||error||'Error desconocido.'));
+    }finally{
+      releaseLocksV88.delete(key);
+      if(button && button.isConnected){button.disabled=false;button.textContent=oldText;}
+    }
+  };
+
   window.LDH_limpiarConsumoLineaV74 = async function(index){
     const lines=linesNow(); const line=lines[index]; if(!line) return;
     const reference=referenceNow(); const material=lineName(line);
@@ -24645,7 +24810,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   };
 
   function installReceivedOverride(){const current=window.LDH_marcarRecibidoCompleto;if(typeof current!=="function"||current.__ldhPletinaMmV84)return;const base=current;const wrapped=function(index){const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(isPletinaMmLine(line))return window.LDH_pletinaRecibirBarra(index);return base.apply(this,arguments);};wrapped.__ldhPletinaMmV84=true;wrapped.__ldhPletinaMmV84Base=base;window.LDH_marcarRecibidoCompleto=wrapped;}
-  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V87-ASIGNAR-LIBRE-MISMA-FUENTE-V68-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v86';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V87';break;}}
+  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V88-LIBERAR-RESERVA-LINEA-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v86';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V88';break;}}
   try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
   function refresh(){try{installReceivedOverride();markBuild();if(typeof renderTabla==='function'&&currentRef())renderTabla();}catch(_){ }}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true});else[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
@@ -24660,14 +24825,14 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <script id="LDH_PREP_V85_PLETINA_MM_LEGACY_REPAIR_MARK_20260813">
 (function(){
   'use strict';
-  const BUILD='PREPARACION-V87-ASIGNAR-LIBRE-MISMA-FUENTE-V68-20260813';
+  const BUILD='PREPARACION-V88-LIBERAR-RESERVA-LINEA-20260813';
   function mark(){
     try{
       window.__LDH_PREP_CANONICAL_BUILD=BUILD;
       document.documentElement.dataset.ldhPrepBuild=BUILD;
       document.documentElement.dataset.ldhPrepPletina='v86';
       const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
-      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V87';break;}
+      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V88';break;}
     }catch(_){ }
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mark,{once:true});else mark();
@@ -24681,7 +24846,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <script id="LDH_PREP_V86_ARRANQUE_LIGERO_20260813">
 (function(){
   'use strict';
-  const BUILD='PREPARACION-V87-ASIGNAR-LIBRE-MISMA-FUENTE-V68-20260813';
+  const BUILD='PREPARACION-V88-LIBERAR-RESERVA-LINEA-20260813';
   function mark(){
     try{
       window.__LDH_PREP_CANONICAL_BUILD=BUILD;
@@ -24692,7 +24857,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
         const status=document.querySelector(selector);
         if(!status) continue;
         const base=String(status.textContent||'Preparacion').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent=(base||'Preparacion')+' · V87';
+        status.textContent=(base||'Preparacion')+' · V88';
         break;
       }
     }catch(_){ }
@@ -24719,5 +24884,36 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 })();
 </script>
 <!-- LDH_PREP_V87_ASIGNAR_LIBRE_MISMA_FUENTE_V68_20260813 -->
+
+
+<script id="LDH_PREP_V88_LIBERAR_RESERVA_LINEA_20260813">
+(function(){
+  'use strict';
+  const BUILD='PREPARACION-V88-LIBERAR-RESERVA-LINEA-20260813';
+  function mark(){
+    try{
+      window.__LDH_PREP_CANONICAL_BUILD=BUILD;
+      document.documentElement.dataset.ldhPrepBuild=BUILD;
+      const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
+      for(const selector of selectors){
+        const status=document.querySelector(selector);
+        if(!status) continue;
+        const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
+        status.textContent=(base||'Preparación')+' · V88';
+        break;
+      }
+    }catch(_){ }
+  }
+  function refresh(){
+    mark();
+    try{if(typeof window.renderTabla==='function' && String(window.refActual||'').trim()) window.renderTabla();}catch(_){ }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>setTimeout(refresh,80),{once:true});
+  else setTimeout(refresh,80);
+  [400,1400].forEach(delay=>setTimeout(refresh,delay));
+  console.info('[Preparacion V88] Liberación segura de reserva por línea activa');
+})();
+</script>
+<!-- LDH_PREP_V88_LIBERAR_RESERVA_LINEA_20260813 -->
 
 </body></html>
