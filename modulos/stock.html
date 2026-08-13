@@ -1330,7 +1330,7 @@ html, body{
 </style>
 
 <meta name="ldh-fix" content="STOCK-V56-PUBLICACION-FIRMA-WATCHDOG-20260805">
-<meta name="ldh-build" content="STOCK-V65-PLETINA-MM-LEGACY-REPAIR-20260813">
+<meta name="ldh-build" content="STOCK-V66-PLETINA-MM-AUTORITATIVO-20260813">
 </head>
 <body>
 <div class="app">
@@ -8759,6 +8759,121 @@ html.ldh-common-stock-mode #search{
 })();
 </script>
 <!-- LDH_STOCK_V65_PLETINA_MM_LEGACY_REPAIR_20260813 -->
+
+<script id="LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO_20260813">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO__) return;
+  window.__LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO__=true;
+  var BUILD='STOCK-V66-PLETINA-MM-AUTORITATIVO-20260813';
+  var DEFAULT_BAR_MM=6000;
+  var baseReservedStock=typeof reservedStock==='function'?reservedStock:null;
+  var baseAssignedStock=typeof assignedStock==='function'?assignedStock:null;
+  var running=false;
+
+  function norm(v){return String(v==null?'':v).trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();}
+  function num(v){var x=Number.parseFloat(String(v==null?'':v).replace(',','.'));return Number.isFinite(x)?Math.max(0,x):0;}
+  function first(){for(var i=0;i<arguments.length;i++){var v=arguments[i];if(v!==undefined&&v!==null&&String(v)!=='')return v;}return '';}
+  function matIdOf(r){return String(first(r&&r.materialId,r&&r.matId,r&&r.material_id,r&&r.idMaterial,r&&r.material));}
+  function compIdOf(r){return String(first(r&&r.companyId,r&&r.empresaId,r&&r.company,r&&r.empresa));}
+  function matById(id){try{return (db.materials||[]).find(function(m){return String(first(m&&m.id,m&&m.materialId,m&&m.matId))===String(id||'');})||null;}catch(_){return null;}}
+  function isPletinaMat(id){var m=matById(id);if(!m)return false;var fam=norm(first(m.family,m.familia,m.grp,m.group));var name=norm(first(m.name,m.nombre,m.material));return fam.indexOf('pletina')>=0||name.indexOf('pletina')===0;}
+  function stockRow(companyId,materialId){try{return (db.stock||[]).find(function(s){return String(first(s&&s.companyId,s&&s.empresaId))===String(companyId||'')&&String(first(s&&s.materialId,s&&s.matId))===String(materialId||'');})||null;}catch(_){return null;}}
+  function barMm(companyId,materialId,row){var sr=stockRow(companyId,materialId);return Math.max(1,Math.round(num(first(row&&row.barLengthMm,sr&&sr.barLengthMm,DEFAULT_BAR_MM))||DEFAULT_BAR_MM));}
+  function rawQty(r){return num(first(r&&r.qty,r&&r.cantidad,r&&r.reservado,r&&r.asignado,r&&r.pendingQty,r&&r.qtyPending,0));}
+  function explicitMm(r){return num(first(r&&r.mmAllocated,r&&r.lineMm,r&&r.mmAssigned,r&&r.mmReserved,r&&r.mmReceived,0));}
+  function sourceText(r){return norm([r&&r.source,r&&r.reason,r&&r.assignmentType,r&&r.createdFrom,r&&r.origin].join(' '));}
+  function hasMmMarker(r){var u=norm(first(r&&r.unitBasis,r&&r.lengthMode,r&&r.unit,r&&r.unidad));return !!(r&&(r.pletinaMm===true||r.lengthQtySchemaV64==='mm'||r.lengthQtySchemaV66==='mm'||u==='mm'||u==='milimetro'||u==='milimetros'));}
+  function isClearlyLegacyBarRecord(r){
+    if(!r||typeof r!=='object')return false;
+    var src=sourceText(r);
+    if(src.indexOf('v48')>=0||src.indexOf('reconciliado')>=0||src.indexOf('reserva desde stock')>=0)return true;
+    var u=norm(first(r.unitBasis,r.lengthMode,r.unit,r.unidad));
+    if(u==='barra'||u==='barras')return true;
+    if(!hasMmMarker(r)&&explicitMm(r)<=0&&rawQty(r)>0)return true;
+    return false;
+  }
+  function qtyMm(r,companyId,materialId){
+    var q=rawQty(r), ex=explicitMm(r), bar=barMm(companyId,materialId,r);
+    if(ex>0)return ex;
+    if(isClearlyLegacyBarRecord(r))return Math.max(0,Math.round(q*bar));
+    return q;
+  }
+  function active(r){return norm(first(r&&r.status,r&&r.estado,'activa'))==='activa';}
+  function phaseOk(r){var p=norm(first(r&&r.phase,r&&r.fase,'preparacion'));return p==='preparacion'||p==='fabricacion';}
+  function isLoan(r){var t=sourceText(r);return t.indexOf('otra empresa')>=0||t.indexOf('prestamo')>=0||!!(r&&(r.toCompanyId||r.toEmpresa||r.fromAssignmentId||r.originalAssignmentId));}
+  function isAutoReceived(r){try{return typeof isAutoReceivedPrepReservation==='function'&&isAutoReceivedPrepReservation(r);}catch(_){return false;}}
+
+  function normalizeRow(r){
+    if(!r||typeof r!=='object')return false;
+    var mid=matIdOf(r), cid=compIdOf(r);
+    if(!mid||!isPletinaMat(mid))return false;
+    var mm=qtyMm(r,cid,mid), old=rawQty(r), bar=barMm(cid,mid,r);
+    var needs=(Math.abs(old-mm)>0.000001)||!hasMmMarker(r)||r.lengthQtySchemaV66!=='mm';
+    if(!needs)return false;
+    r.qty=mm;r.cantidad=mm;
+    if(r.reservado!==undefined)r.reservado=mm;
+    if(r.asignado!==undefined)r.asignado=mm;
+    if(r.pendingQty!==undefined||r.qtyPending!==undefined){
+      var p=num(first(r.pendingQty,r.qtyPending));
+      if(isClearlyLegacyBarRecord(r)&&explicitMm(r)<=0)p=Math.round(p*bar);
+      r.pendingQty=p;r.qtyPending=p;
+    }
+    r.unit='mm';r.unidad='mm';r.unitBasis='mm';r.lengthMode='mm';r.pletinaMm=true;r.barLengthMm=bar;
+    r.mmAllocated=mm;r.lineMm=mm;r.lengthQtySchemaV64='mm';r.lengthQtySchemaV66='mm';
+    if(Math.abs(old-mm)>0.000001&&!r.lengthQtyMigrationV66){r.lengthQtyMigrationV66={at:new Date().toISOString(),fromQty:old,barLengthMm:bar,toMm:mm,reason:'normalizacion_autoritativa_pletina'};}
+    r.updatedAt=new Date().toISOString();
+    return true;
+  }
+  function normalizeAll(saveNow){
+    if(running)return false;running=true;var changed=false;
+    try{
+      ['reservations','assignments','reservationDebts'].forEach(function(k){(Array.isArray(db[k])?db[k]:[]).forEach(function(r){if(normalizeRow(r))changed=true;});});
+      if(changed&&saveNow!==false&&typeof save==='function')save();
+      return changed;
+    }catch(e){console.warn('[Stock V66] normalizacion PLETINA/mm',e);return false;}finally{running=false;}
+  }
+
+  reservedStock=function(companyId,materialId){
+    if(!isPletinaMat(materialId))return baseReservedStock?baseReservedStock(companyId,materialId):0;
+    try{
+      return (db.reservations||[])
+        .filter(function(r){return compIdOf(r)===String(companyId)&&matIdOf(r)===String(materialId)&&active(r)&&!isAutoReceived(r);})
+        .reduce(function(sum,r){return sum+qtyMm(r,companyId,materialId);},0);
+    }catch(_){return 0;}
+  };
+  assignedStock=function(companyId,materialId){
+    if(!isPletinaMat(materialId))return baseAssignedStock?baseAssignedStock(companyId,materialId):0;
+    try{
+      return (db.assignments||[])
+        .filter(function(r){return compIdOf(r)===String(companyId)&&matIdOf(r)===String(materialId)&&active(r)&&phaseOk(r)&&!isLoan(r);})
+        .reduce(function(sum,r){return sum+qtyMm(r,companyId,materialId);},0);
+    }catch(_){return 0;}
+  };
+  try{window.reservedStock=reservedStock;window.assignedStock=assignedStock;}catch(_){ }
+
+  function mark(){
+    try{
+      document.documentElement.dataset.ldhStockBuild='V66';
+      var badge=document.getElementById('ldhStockBuildV65')||document.getElementById('ldhStockBuildV64')||document.getElementById('ldhStockBuildV63')||document.getElementById('ldhStockBuildV62')||document.getElementById('ldhStockBuildV61')||document.getElementById('ldhStockBuildV60')||document.getElementById('ldhStockBuildV58');
+      if(badge){badge.id='ldhStockBuildV66';badge.textContent='Stock nube · V66 · Pletina/mm';}
+    }catch(_){ }
+  }
+  function refresh(){
+    try{normalizeAll(true);}catch(_){ }
+    mark();
+    try{if(typeof render==='function')render();}catch(_){ }
+  }
+  function install(){normalizeAll(true);mark();try{if(typeof render==='function')render();}catch(_){ }}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else setTimeout(install,0);
+  [500,1400,3200,6500].forEach(function(d){setTimeout(refresh,d);});
+  setInterval(function(){try{normalizeAll(true);mark();}catch(_){ }},4500);
+  window.addEventListener('storage',function(){setTimeout(refresh,180);});
+  window.LDH_normalizarPletinasV66=function(){normalizeAll(true);try{render();}catch(_){ }};
+  console.info('[Stock V66] PLETINA autoritativa en mm: reservado/asignado siempre se interpreta y muestra en mm');
+})();
+</script>
+<!-- LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO_20260813 -->
 
 </body>
 </html>
