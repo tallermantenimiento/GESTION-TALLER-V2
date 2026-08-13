@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806" />
+<meta name="ldh-build" content="PREPARACION-V81-PLETINA-MM-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -494,7 +494,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V80-RETIRADA-FAB-AUTORITATIVA-20260806-FERRETERIA-FISICO-MOVIMIENTOS-20260811">
+<meta name="ldh-fix" content="PREPARACION-V81-PLETINA-MM-20260813">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -2209,32 +2209,38 @@ function LDH_collectionRowsV45(value, depth=0){
 }
 
 function LDH_readFerreteriaDBV45(){
-  /* LDH_PREP_FERRETERIA_LOCAL_AUTORITARIA_20260811
-     Preparacion NO debe sobreescribir ni preferir una copia remota vieja de
-     Ferreteria. La pantalla de Ferreteria PC es la autoridad visual; por eso
-     leemos primero la clave local compartida que usa ese modulo. */
-  const orderedSources = [];
-  /* LDH_PREP_FERRETERIA_CLOUD_READONLY_PRIORITY_20260811
-     La fuente correcta para accesorios es la nube propia de Ferretería V2.
-     Se lee en memoria, SOLO lectura, con una app Firebase separada. No se publica
-     nada desde Preparación y no se fusiona con copias locales viejas. */
-  try{ if(window.__LDH_FERRETERIA_CLOUD_DB_RO) orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:window.__LDH_FERRETERIA_CLOUD_DB_RO}); }catch(_){}
-  try{ if(window.__LDH_FERRETERIA_MEMORY_DB) orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:window.__LDH_FERRETERIA_MEMORY_DB}); }catch(_){}
-  try{ if(window.__LDH_HARDWARE_MEMORY_DB) orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:window.__LDH_HARDWARE_MEMORY_DB}); }catch(_){}
-  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:localStorage.getItem(LDH_FERRETERIA_KEYS_V45[0])}); }catch(_){}
-  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[0], value:sessionStorage.getItem(LDH_FERRETERIA_KEYS_V45[0])}); }catch(_){}
-  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[1], value:localStorage.getItem(LDH_FERRETERIA_KEYS_V45[1])}); }catch(_){}
-  try{ orderedSources.push({key:LDH_FERRETERIA_KEYS_V45[1], value:sessionStorage.getItem(LDH_FERRETERIA_KEYS_V45[1])}); }catch(_){}
+  const memoryCandidates = [
+    window.__LDH_FERRETERIA_MEMORY_DB,
+    window.__LDH_HARDWARE_MEMORY_DB,
+    window.__LDH_TERMINAL_FERRETERIA_DB
+  ].filter(Boolean);
 
-  for(const source of orderedSources){
-    const db = LDH_parseObjectV45(source.value, source.key);
-    if(!db) continue;
-    const collections = [
-      db.materials,db.items,db.catalog,db.catalogo,db.stockItems,
-      db.ferreteria,db.hardware,db.articulos,db.productos,db.stock,db.stocks
-    ];
-    const count = collections.reduce((sum,value)=>sum+LDH_collectionRowsV45(value).length,0);
-    if(count > 0) return db;
+  for(const key of LDH_FERRETERIA_KEYS_V45){
+    const values = [];
+    if(key === LDH_FERRETERIA_KEYS_V45[0]) values.push(...memoryCandidates);
+    try{ values.push(localStorage.getItem(key)); }catch(_){}
+    try{ values.push(sessionStorage.getItem(key)); }catch(_){}
+
+    const candidates = values
+      .map(value => LDH_parseObjectV45(value,key))
+      .filter(Boolean)
+      .map(db => {
+        const collections = [
+          db.materials,db.items,db.catalog,db.catalogo,db.stockItems,
+          db.ferreteria,db.hardware,db.articulos,db.productos,db.stock,db.stocks
+        ];
+        const count = collections.reduce(
+          (sum,value)=>sum+LDH_collectionRowsV45(value).length,0
+        );
+        const updated = Date.parse(String(
+          db.updatedAt || db.actualizadoEn || db.fechaActualizacion || ""
+        )) || 0;
+        return {db,count,updated};
+      })
+      .filter(item => item.count > 0)
+      .sort((a,b)=>b.updated-a.updated || b.count-a.count);
+
+    if(candidates.length) return candidates[0].db;
   }
   return null;
 }
@@ -2392,17 +2398,12 @@ function LDH_buildFerreteriaCatalogV45(){
       return sum + LDH_movementSignV45(row) * qty;
     },0);
 
-    /* LDH_PREP_FERRETERIA_FISICO_MOVIMIENTOS_20260811
-       Ferretería PC calcula el físico desde db.movements. Algunas filas
-       antiguas de db.stock conservan cantidades obsoletas (162/63) y no
-       deben mandar sobre los movimientos reales. Si hay movimientos del
-       material, Preparación usa SIEMPRE esos movimientos como físico. */
-    let physical = matchingMovements.length
-      ? movementPhysical
-      : explicitPhysicalRows.length
-        ? explicitPhysicalRows.reduce((sum,value)=>sum+value,0)
-        : directPhysical !== null
-          ? directPhysical
+    let physical = explicitPhysicalRows.length
+      ? explicitPhysicalRows.reduce((sum,value)=>sum+value,0)
+      : directPhysical !== null
+        ? directPhysical
+        : matchingMovements.length
+          ? movementPhysical
           : 0;
 
     const explicitFreeRows = matchingStock
@@ -6014,6 +6015,7 @@ function renderTabla() {
 
   estadoMateriales.forEach((linea, index) => {
     const pedida = toNum(linea.qty_pedida);
+    const isPletinaMm = (typeof window.LDH_isPletinaMmLine === "function") && window.LDH_isPletinaMmLine(linea);
     let recibida = toNum(linea.qty_recibida);
 
     // Si Stock ya tiene una asignación propia para esta referencia/material,
@@ -6196,7 +6198,9 @@ function renderTabla() {
     const companyStockPill = _v2CompanyStockPill(linea, linkedMat, pedida);
     const stockComunInfo = (typeof LDH_stockComunInfoParaLinea === "function") ? LDH_stockComunInfoParaLinea(linea) : {ok:false,free:0};
     const stockComunPill = stockComunInfo.ok
-      ? `<span class="link-pill stock-common-pill ${stockComunInfo.free > 0 ? "" : "danger"}">STOCK COMÚN · libre <b>${stockComunInfo.free}</b></span>`
+      ? (isPletinaMm
+          ? `<span class="link-pill stock-common-pill ${stockComunInfo.free > 0 ? "" : "danger"}">STOCK COMÚN · físico <b>${Math.round(toNum(stockComunInfo.physical)).toLocaleString("es-ES")}</b> mm · reservado <b>${Math.round(toNum(stockComunInfo.reserved)+toNum(stockComunInfo.assigned)).toLocaleString("es-ES")}</b> mm · libre <b>${Math.round(toNum(stockComunInfo.free)).toLocaleString("es-ES")}</b> mm</span>`
+          : `<span class="link-pill stock-common-pill ${stockComunInfo.free > 0 ? "" : "danger"}">STOCK COMÚN · libre <b>${stockComunInfo.free}</b></span>`)
       : "";
 
     if(linkedMat){
@@ -6255,6 +6259,9 @@ function renderTabla() {
     } else {
       stockPill = `<span class="link-pill">Sin vínculo</span>`;
     }
+    // PLETINA/MM tiene dos fuentes explícitas: empresa (barras) y STOCK COMÚN (mm).
+    // Ocultamos la pill genérica para no mezclar unidades.
+    if(isPletinaMm) stockPill = "";
 
     // Reconciliación directa:
     // - Si Stock v2 dice que este material está asignado a este trabajo, reflejarlo como recibido.
@@ -6317,7 +6324,11 @@ function renderTabla() {
     const falta = Math.max(0, pedida - recibida);
 
     let btnHtml = "";
-    if (diff > 0) {
+    if(isPletinaMm){
+      if(isComplete) btnHtml += `<button class="btn-mini disabled">✅ ${Math.round(pedida).toLocaleString("es-ES")} mm asignados</button>`;
+      else if(yaAplicada > 0) btnHtml += `<button class="btn-mini disabled" style="opacity:.75">Asignados ${Math.round(yaAplicada).toLocaleString("es-ES")} mm</button>`;
+      else btnHtml += `<span style="opacity:0.2">-</span>`;
+    }else if (diff > 0) {
       btnHtml += `<button class="btn-mini" onclick="guardarLinea(${index})">Añadir a stock (+${diff})</button>`;
     } else if (isComplete && yaAplicada > 0) {
       btnHtml += `<button class="btn-mini disabled">✅ OK</button>`;
@@ -6328,14 +6339,32 @@ function renderTabla() {
     }
 
     if (falta > 0) {
-      btnHtml += `<button class="btn-mini" onclick="LDH_consumirReservado(${index})">Consumir reservado (-${falta})</button>`;
-      btnHtml += `<button class="btn-mini" onclick="LDH_asignarLibreSeguro(${index})">Asignar libre (-${falta})</button>`;
-      if(stockComunInfo.ok && stockComunInfo.free > 0){
-        btnHtml += `<button class="btn-mini stock-comun" onclick="LDH_asignarStockComunSeguro(${index})">Usar STOCK COMÚN (-${Math.min(falta,stockComunInfo.free)})</button>`;
+      if(isPletinaMm){
+        const pSrc = (typeof window.LDH_pletinaSourceInfo === "function") ? window.LDH_pletinaSourceInfo(linea) : null;
+        const pBuy = (typeof window.LDH_pletinaCompraInfo === "function") ? window.LDH_pletinaCompraInfo(linea) : null;
+        if(pSrc && pSrc.company && pSrc.company.ownReservedBars > 0){
+          btnHtml += `<button class="btn-mini" onclick="LDH_pletinaUsarReservaEmpresa(${index})">Usar reserva empresa (${Math.floor(pSrc.company.ownReservedBars)} barra)</button>`;
+        }
+        if(pSrc && pSrc.company && pSrc.company.freeBars > 0){
+          btnHtml += `<button class="btn-mini" onclick="LDH_pletinaUsarEmpresa(${index})">Usar empresa (${Math.floor(pSrc.company.freeBars)} barra libre)</button>`;
+        }
+        if(stockComunInfo.ok && stockComunInfo.free > 0){
+          btnHtml += `<button class="btn-mini stock-comun" onclick="LDH_asignarStockComunSeguro(${index})">Usar STOCK COMÚN (-${Math.round(Math.min(falta,stockComunInfo.free)).toLocaleString("es-ES")} mm)</button>`;
+        }
+        btnHtml += `<button class="btn-mini unassigned" onclick="LDH_pletinaUsarOtraEmpresa(${index})">Otra empresa (barras)</button>`;
+        if(pBuy && pBuy.barsToBuy > 0){
+          btnHtml += `<button class="btn-mini disabled" style="border-color:#f59e0b;color:#fde68a">🛒 Falta ${Math.round(pBuy.deficitMm).toLocaleString("es-ES")} mm · pedir ${pBuy.barsToBuy} ${pBuy.barsToBuy===1?'barra':'barras'}</button>`;
+        }
+      }else{
+        btnHtml += `<button class="btn-mini" onclick="LDH_consumirReservado(${index})">Consumir reservado (-${falta})</button>`;
+        btnHtml += `<button class="btn-mini" onclick="LDH_asignarLibreSeguro(${index})">Asignar libre (-${falta})</button>`;
+        if(stockComunInfo.ok && stockComunInfo.free > 0){
+          btnHtml += `<button class="btn-mini stock-comun" onclick="LDH_asignarStockComunSeguro(${index})">Usar STOCK COMÚN (-${Math.min(falta,stockComunInfo.free)})</button>`;
+        }
+        btnHtml += isPaintLine(linea)
+          ? `<button class="btn-mini btn-paint-borrow unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">PINTURA: otra empresa</button>`
+          : `<button class="btn-mini unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">Asignar de otra empresa</button>`;
       }
-      btnHtml += isPaintLine(linea)
-        ? `<button class="btn-mini btn-paint-borrow unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">PINTURA: otra empresa</button>`
-        : `<button class="btn-mini unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">Asignar de otra empresa</button>`;
     }
 
     // Botón de limpieza para pruebas: solo limpia la línea de Preparación.
@@ -6385,17 +6414,17 @@ function renderTabla() {
       <td>${pedida} <span style="font-size:10px;opacity:0.5">${linea.unit || 'ud'}</span></td>
       <td>
         <div class="ldh-recibida-cell">
-          <input type="number" value="${recibida}" oninput="updateQty(${index}, this)">
+          <input type="number" value="${recibida}" ${isPletinaMm ? "readonly" : `oninput="updateQty(${index}, this)"`}>
           <button type="button" class="btn-mini ldh-recibido-btn${isComplete ? " disabled" : ""}"
             onclick="LDH_marcarRecibidoCompleto(${index})" ${isComplete ? "disabled" : ""}
-            title="Completar automáticamente la cantidad recibida de esta fila">Recibido</button>
+            title="${isPletinaMm ? "Registrar la recepción física de 1 barra completa y sumar su longitud a STOCK COMÚN" : "Completar automáticamente la cantidad recibida de esta fila"}">${isPletinaMm ? "Recibir 1 barra" : "Recibido"}</button>
         </div>
       </td>
       <td>${btnHtml}${btnComprasInfo}${btnVincular}</td>
       <td><input type="text" value="${linea.note || ''}" onchange="updateNote(${index}, this.value)" style="width:100%"></td>
     `;
 
-    if ((linea.unit || "").toLowerCase() === 'barra') { hasBarras = true; tbodyBarras.appendChild(tr); }
+    if (isPletinaMm || (linea.unit || "").toLowerCase() === 'barra') { hasBarras = true; tbodyBarras.appendChild(tr); }
     else { hasUnidades = true; tbodyUnidades.appendChild(tr); }
   });
 
@@ -7136,6 +7165,14 @@ async function LDH_stockComunAplicar(index, qty){
     concept:(metaActual && (metaActual.concepto || metaActual.concept)) || "",
     source:"preparacion_pedidos_stock_comun"
   });
+  if((typeof window.LDH_isPletinaMmLine === "function") && window.LDH_isPletinaMmLine(line)){
+    assignment.unit = "mm"; assignment.unidad = "mm"; assignment.unitBasis = "mm";
+    assignment.lengthMode = "mm"; assignment.pletinaMm = true;
+    assignment.mmAllocated = qty; assignment.lineMm = qty;
+    assignment.barLengthMm = Math.max(1,Math.round(toNum(info.barLengthMm || line.commercial_bar_mm || 6000)));
+    assignment.assignmentType = "stock_comun_pletina_mm";
+    assignment.reason = "asignado_desde_stock_comun_pletina_mm";
+  }
   if(!_v2SaveCompanyStockDB(info.pack)){
     const arr = info.pack.db && info.pack.db.assignments;
     if(Array.isArray(arr)){
@@ -7209,6 +7246,8 @@ function LDH_asignarStockComunSeguro(index){
   if(falta <= 0){ alert("Esta línea ya está completa."); return; }
   if(info.free <= 0){ alert("No hay unidades libres de este material en STOCK COMÚN."); return; }
   const max = Math.min(falta, info.free);
+  const pletinaMm = (typeof window.LDH_isPletinaMmLine === "function") && window.LDH_isPletinaMmLine(line);
+  const unitLabel = pletinaMm ? " mm" : "";
   LDH_stockComunCerrarModal();
   const modal = document.createElement("div");
   modal.id = "ldhStockComunModal";
@@ -7219,11 +7258,11 @@ function LDH_asignarStockComunSeguro(index){
       <div style="padding:18px;display:grid;gap:12px">
         <div><b>Pedido:</b> ${LDH_stockComunEscape(refActual || "")} · ${LDH_stockComunEscape(_v2GetPedidoEmpresa())}</div>
         <div><b>Material:</b> ${LDH_stockComunEscape(_v2MaterialLabel(info.material))}</div>
-        <div><b>Disponible:</b> ${info.free} &nbsp; <b>Falta en el pedido:</b> ${falta}</div>
-        <label style="display:grid;gap:6px;font-weight:800">Cantidad a utilizar
+        <div><b>Disponible:</b> ${info.free}${unitLabel} &nbsp; <b>Falta en el pedido:</b> ${falta}${unitLabel}</div>
+        <label style="display:grid;gap:6px;font-weight:800">Cantidad a utilizar${pletinaMm ? " (mm reales)" : ""}
           <input id="ldhStockComunQty" type="number" min="0.0001" max="${max}" step="any" value="${max}" style="width:100%;box-sizing:border-box;padding:10px;font-size:16px">
         </label>
-        <div style="color:#a7f3d0;font-size:12px">Se descontará de la disponibilidad común. No se sumará al stock particular y no creará deuda ni devolución.</div>
+        <div style="color:#a7f3d0;font-size:12px">${pletinaMm ? "Se reservarán exactamente esos mm en STOCK COMÚN. " : ""}No se sumará al stock particular y no creará deuda ni devolución.</div>
       </div>
       <div style="padding:14px 18px;border-top:1px solid rgba(255,255,255,.10);display:flex;justify-content:flex-end;gap:10px">
         <button class="btn" type="button" onclick="LDH_stockComunCerrarModal()">Cancelar</button>
@@ -8576,7 +8615,7 @@ function togglePedidoComprasGeneral(){
 function togglePedirAll(group, isChecked){
   const wantBar = String(group||"").toLowerCase()==="barra";
   estadoMateriales.forEach(l=>{
-    const isBar = _unitIsBarra(l.unit);
+    const isBar = _unitIsBarra(l.unit) || (typeof window.LDH_isPletinaMmLine === "function" && window.LDH_isPletinaMmLine(l));
     if(wantBar ? isBar : !isBar){
       l.toBuy = !!isChecked;
     }
@@ -8587,8 +8626,8 @@ function togglePedirAll(group, isChecked){
 }
 
 function updateBuyHeaderChecks(){
-  const bars = (estadoMateriales||[]).filter(l => _unitIsBarra(l.unit));
-  const units = (estadoMateriales||[]).filter(l => !_unitIsBarra(l.unit));
+  const bars = (estadoMateriales||[]).filter(l => _unitIsBarra(l.unit) || (typeof window.LDH_isPletinaMmLine === "function" && window.LDH_isPletinaMmLine(l)));
+  const units = (estadoMateriales||[]).filter(l => !_unitIsBarra(l.unit) && !(typeof window.LDH_isPletinaMmLine === "function" && window.LDH_isPletinaMmLine(l)));
 
   const set = (id, arr)=>{
     const el = document.getElementById(id);
@@ -8744,8 +8783,8 @@ async function copiarListaCompras(){
     return;
   }
 
-  const barras = selected.filter(l => _unitIsBarra(l.unit));
-  const unidades = selected.filter(l => !_unitIsBarra(l.unit));
+  const barras = selected.filter(l => _unitIsBarra(l.unit) || (typeof window.LDH_isPletinaMmLine === "function" && window.LDH_isPletinaMmLine(l)));
+  const unidades = selected.filter(l => !_unitIsBarra(l.unit) && !(typeof window.LDH_isPletinaMmLine === "function" && window.LDH_isPletinaMmLine(l)));
 
   // Texto PLANO (siempre)
   const outLines = [];
@@ -17035,6 +17074,17 @@ function LDH_prepIsLoanV45(row) {
 }
 
 function LDH_prepPhysicalRemoteV45(remoteDB, companyId, materialId) {
+  // V81 · PLETINA en STOCK COMÚN: la fuente física autoritativa es el saldo
+  // explícito en milímetros, no la suma histórica de movimientos.
+  const lengthRowV81 = (Array.isArray(remoteDB.stock) ? remoteDB.stock : []).find((row) =>
+    String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? "") === String(companyId)
+    && String(row?.materialId ?? row?.matId ?? row?.material_id ?? "") === String(materialId)
+    && String(row?.lengthMode ?? "").toLowerCase() === "mm"
+  );
+  if (lengthRowV81) {
+    return Math.max(0, Number(lengthRowV81.lengthPhysicalMm ?? 0) || 0);
+  }
+
   const movements = remoteDB.movements.filter((movement) =>
     String(movement?.companyId ?? movement?.empresaId ?? "") === String(companyId)
     && String(movement?.materialId ?? movement?.matId ?? "") === String(materialId)
@@ -17625,6 +17675,30 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
         assignmentId.replace(/[^a-zA-Z0-9_-]+/g, "_");
 
       if (!movementIds.has(movementId)) {
+        // V81 · Si la asignación procede de una PLETINA/MM de STOCK COMÚN,
+        // además del movimiento de auditoría hay que reducir el saldo físico
+        // explícito en mm. Así, al liberar la asignación al pasar a Fabricación,
+        // esos milímetros no vuelven a aparecer como libres.
+        if (isCommonStock) {
+          const assignmentCompanyIdV81 = String(assignment.companyId ?? assignment.empresaId ?? "");
+          const assignmentMaterialIdV81 = String(assignment.materialId ?? assignment.matId ?? "");
+          const lengthRowV81 = (Array.isArray(remoteDB.stock) ? remoteDB.stock : []).find((row) =>
+            String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? "") === assignmentCompanyIdV81
+            && String(row?.materialId ?? row?.matId ?? row?.material_id ?? "") === assignmentMaterialIdV81
+            && String(row?.lengthMode ?? "").toLowerCase() === "mm"
+          );
+          if (lengthRowV81) {
+            const beforeMmV81 = Math.max(0, Number(lengthRowV81.lengthPhysicalMm ?? 0) || 0);
+            if (qty > beforeMmV81 + 0.000001) {
+              throw new Error(`STOCK COMÚN insuficiente para consumir la pletina: ${beforeMmV81} mm físicos, ${qty} mm asignados.`);
+            }
+            lengthRowV81.lengthPhysicalMm = Math.max(0, beforeMmV81 - qty);
+            lengthRowV81.lengthMode = "mm";
+            lengthRowV81.lengthSource = "stock_comun_pletina";
+            lengthRowV81.updatedAt = now;
+          }
+        }
+
         movements.push({
           id: movementId,
           companyId: assignment.companyId ?? assignment.empresaId ?? "",
@@ -19573,6 +19647,308 @@ window.LDH_marcarRecibidoCompleto = async function LDH_marcarRecibidoCompletoV66
 window.LDH_PREP_V66_RECEIVED_ATOMIC = true;
 
 window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
+
+/* === LDH_PREP_PLETINA_MM_CLOUD_V81_20260813 ===
+ * Operaciones atómicas específicas de PLETINA/MM.
+ * - Recepción: una pulsación = una barra completa recibida en STOCK COMÚN.
+ * - Asignación desde empresa: la empresa sigue gestionada por barras, mientras
+ *   la línea del pedido conserva los mm reales usados.
+ */
+function LDH_prepPletinaNormV81(value) {
+  return String(value ?? "").trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+}
+function LDH_prepIsPletinaMmLineV81(line) {
+  if (!line) return false;
+  const name = LDH_prepPletinaNormV81(
+    line.mat ?? line.material ?? line.name ?? line.linked_matName ?? line.stockLinkLabel ?? ""
+  );
+  const unit = LDH_prepPletinaNormV81(line.unit ?? line.unidad ?? "");
+  const mode = LDH_prepPletinaNormV81(line.measureMode ?? line.lengthMode ?? line.tipo ?? line.type ?? "");
+  return line.pletina_mm === true || line.gestion_mm === true
+    || mode.includes("pletina mm") || mode.includes("mm real")
+    || (unit === "mm" && name.includes("pletina"));
+}
+function LDH_prepIsCommonCompanyV81(company) {
+  if (!company) return false;
+  if (company.sharedStock === true || company.sharedPool === true || company.isSharedStock === true) return true;
+  return [
+    company.id, company.companyId, company.empresaId, company.name, company.nombre,
+    company.empresa, company.company, company.code, company.codigo, company.label
+  ].map(LDH_prepPletinaNormV81).some((value) =>
+    value === "stock comun" || value === "stock comun global" || value === "almacen comun"
+  );
+}
+function LDH_prepResolveCommonPletinaV81(remoteDB, line) {
+  remoteDB.companies = Array.isArray(remoteDB.companies) ? remoteDB.companies : [];
+  remoteDB.materials = Array.isArray(remoteDB.materials) ? remoteDB.materials : [];
+  remoteDB.stock = Array.isArray(remoteDB.stock) ? remoteDB.stock : [];
+  const company = remoteDB.companies.find(LDH_prepIsCommonCompanyV81);
+  if (!company) throw new Error("STOCK COMÚN no existe en Stock.");
+  const companyId = String(company.id ?? company.companyId ?? company.empresaId ?? company.name ?? "");
+  const candidateIds = new Set([
+    line?.linked_matId, line?.stockMatId, line?.matId, line?.materialId, line?.v2MaterialId
+  ].map((value) => String(value ?? "").trim()).filter(Boolean));
+  const targetName = LDH_prepPletinaNormV81(
+    line?.mat ?? line?.material ?? line?.name ?? line?.linked_matName ?? line?.stockLinkLabel ?? ""
+  );
+  const materialNameById = (id) => {
+    const material = remoteDB.materials.find((row) =>
+      String(row?.id ?? row?.materialId ?? row?.matId ?? "") === String(id ?? "")
+    );
+    return LDH_prepPletinaNormV81(material?.name ?? material?.nombre ?? material?.material ?? "");
+  };
+  const commonRows = remoteDB.stock.filter((row) => {
+    const rowCompany = String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? "");
+    return rowCompany === companyId || LDH_prepPletinaNormV81(rowCompany) === LDH_prepPletinaNormV81(companyId)
+      || LDH_prepPletinaNormV81(rowCompany) === LDH_prepPletinaNormV81(company.name ?? company.nombre ?? "");
+  });
+  let stockRow = commonRows.find((row) => {
+    const id = String(row?.materialId ?? row?.matId ?? row?.material_id ?? "").trim();
+    if (id && candidateIds.has(id)) return true;
+    const rowName = LDH_prepPletinaNormV81(
+      row?.materialName ?? row?.name ?? row?.nombre ?? row?.material ?? row?.mat ?? ""
+    ) || materialNameById(id);
+    return !!targetName && rowName === targetName;
+  }) || null;
+  if (!stockRow) {
+    stockRow = commonRows.find((row) => {
+      const id = String(row?.materialId ?? row?.matId ?? row?.material_id ?? "").trim();
+      const rowName = materialNameById(id);
+      return !!targetName && rowName === targetName;
+    }) || null;
+  }
+  if (!stockRow) throw new Error("La pletina no existe en STOCK COMÚN.");
+  const materialId = String(stockRow.materialId ?? stockRow.matId ?? stockRow.material_id ?? "").trim();
+  const material = remoteDB.materials.find((row) =>
+    String(row?.id ?? row?.materialId ?? row?.matId ?? "") === materialId
+  ) || null;
+  const materialName = String(
+    material?.name ?? material?.nombre ?? stockRow.materialName ?? stockRow.name
+    ?? line?.mat ?? line?.material ?? materialId
+  );
+  if (String(stockRow.lengthMode ?? "").toLowerCase() !== "mm") {
+    throw new Error(`${materialName} todavía no está activada como PLETINA/MM en STOCK COMÚN.`);
+  }
+  const barLengthMm = Math.max(1, Math.round(Number(
+    stockRow.barLengthMm ?? line?.commercial_bar_mm ?? 6000
+  ) || 6000));
+  return { company, companyId, material, materialId, materialName, stockRow, barLengthMm };
+}
+function LDH_prepSyncPletinaRemoteV81(remoteDB, source) {
+  const rawText = JSON.stringify(remoteDB);
+  try { setAny(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {
+    try { localStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+    try { sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+  }
+  window.__LDH_STOCK_MEMORY_DB = remoteDB;
+  window.__LDH_PREP_STOCK_CLOUD_DB = remoteDB;
+  window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(remoteDB);
+  window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+    connected: true,
+    projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+    lastReadAt: new Date().toISOString(),
+    lastWriteAt: new Date().toISOString(),
+    error: ""
+  };
+  try {
+    window.dispatchEvent(new CustomEvent("ldh:stock-cloud-updated", {
+      detail: { source: source || "pletina_mm_v81" }
+    }));
+  } catch (_) {}
+}
+async function LDH_prepReceivePletinaBarV81(line, index) {
+  if (!LDH_prepIsPletinaMmLineV81(line)) {
+    throw new Error("La línea no es una PLETINA/MM.");
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    await signInAnonymously(LDH_PREP_STOCK_AUTH_V28);
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    throw new Error("Stock nube todavía no está autenticado.");
+  }
+  const reference = String(window.refActual ?? refActual ?? "").trim();
+  if (!reference) throw new Error("El pedido no tiene referencia.");
+  const requestedMm = Math.max(0, Number(line?.qty_pedida ?? line?.qty ?? 0) || 0);
+  const receivedMm = Math.max(0, Number(line?.qty_recibida ?? line?.recibida ?? 0) || 0);
+  const missingMm = Math.max(0, requestedMm - receivedMm);
+  if (!missingMm) throw new Error("Esta pletina ya está completa.");
+  const operationId = "mov_pletina_barra_v81_" + Date.now().toString(36)
+    + "_" + Math.random().toString(36).slice(2, 9);
+
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction, metaRef);
+    const ctx = LDH_prepResolveCommonPletinaV81(remoteDB, line);
+    remoteDB.movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
+    remoteDB.reservations = Array.isArray(remoteDB.reservations) ? remoteDB.reservations : [];
+    remoteDB.assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
+
+    const physicalBefore = Math.max(0, Number(ctx.stockRow.lengthPhysicalMm ?? 0) || 0);
+    const physicalAfter = physicalBefore + ctx.barLengthMm;
+    const reserved = remoteDB.reservations
+      .filter(LDH_prepActiveOperationalV45)
+      .filter((row) => String(row?.companyId ?? row?.empresaId ?? "") === ctx.companyId)
+      .filter((row) => String(row?.materialId ?? row?.matId ?? "") === ctx.materialId)
+      .reduce((sum, row) => sum + Math.max(0, Number(row?.qty ?? row?.cantidad ?? 0) || 0), 0);
+    const assigned = remoteDB.assignments
+      .filter(LDH_prepActiveOperationalV45)
+      .filter((row) => String(row?.companyId ?? row?.empresaId ?? "") === ctx.companyId)
+      .filter((row) => String(row?.materialId ?? row?.matId ?? "") === ctx.materialId)
+      .reduce((sum, row) => sum + Math.max(0, Number(row?.qty ?? row?.cantidad ?? 0) || 0), 0);
+    const freeAfterReceipt = Math.max(0, physicalAfter - reserved - assigned);
+    const allocatedMm = Math.min(missingMm, freeAfterReceipt);
+    const now = new Date().toISOString();
+
+    ctx.stockRow.lengthPhysicalMm = physicalAfter;
+    ctx.stockRow.lengthMode = "mm";
+    ctx.stockRow.lengthSource = "stock_comun_pletina";
+    ctx.stockRow.barLengthMm = ctx.barLengthMm;
+    ctx.stockRow.updatedAt = now;
+
+    remoteDB.movements.push({
+      id: operationId, movementId: operationId,
+      companyId: ctx.companyId, empresaId: ctx.companyId,
+      empresa: String(ctx.company.name ?? ctx.company.nombre ?? "STOCK COMÚN"),
+      company: String(ctx.company.name ?? ctx.company.nombre ?? "STOCK COMÚN"),
+      materialId: ctx.materialId, matId: ctx.materialId,
+      material: ctx.materialName, mat: ctx.materialName, materialName: ctx.materialName,
+      unit: "mm", unidad: "mm", unitBasis: "mm", lengthMode: "mm",
+      type: "entrada", tipo: "entrada",
+      qty: ctx.barLengthMm, cantidad: ctx.barLengthMm, amount: ctx.barLengthMm,
+      barsReceived: 1, mmReceived: ctx.barLengthMm, barLengthMm: ctx.barLengthMm,
+      date: now, createdAt: now, updatedAt: now,
+      ref: reference, jobRef: reference, lineIndex: Number(index),
+      source: "pletina_mm_barra_recibida_preparacion_v81",
+      reason: "recepcion_barra_completa_pletina_mm", idempotencyKey: operationId
+    });
+
+    let assignment = null;
+    if (allocatedMm > 0) {
+      const assignmentId = "asg_pletina_comun_v81_" + operationId.replace(/^mov_/, "");
+      assignment = {
+        id: assignmentId, assignmentId,
+        companyId: ctx.companyId, empresaId: ctx.companyId,
+        materialId: ctx.materialId, matId: ctx.materialId, materialName: ctx.materialName,
+        qty: allocatedMm, cantidad: allocatedMm, pendingQty: allocatedMm, qtyPending: allocatedMm,
+        unit: "mm", unidad: "mm", unitBasis: "mm", lengthMode: "mm",
+        mmAllocated: allocatedMm, lineMm: allocatedMm, barLengthMm: ctx.barLengthMm,
+        ref: reference, jobRef: reference, consumerRef: reference, lineIndex: Number(index),
+        assignmentType: "stock_comun_pletina_mm", reason: "asignado_stock_comun_pletina_mm",
+        source: "preparacion_pedidos_pletina_mm_v81", sharedStock: true,
+        debtExempt: true, returnRequired: false,
+        phase: "preparacion", fase: "preparacion", status: "activa", estado: "activa",
+        createdAt: now, updatedAt: now
+      };
+      remoteDB.assignments.push(assignment);
+    }
+
+    LDH_prepWriteRemoteStockTransactionV45(
+      transaction, metaRef, remoteDB, "preparacion_pletina_barra_recibida_v81"
+    );
+    return {
+      remoteDB, operationId, assignmentId: assignment?.id ?? "",
+      companyId: ctx.companyId, materialId: ctx.materialId, materialName: ctx.materialName,
+      barLengthMm: ctx.barLengthMm, physicalBefore, physicalAfter, reserved, assigned,
+      allocatedMm, freeAfter: Math.max(0, physicalAfter - reserved - assigned - allocatedMm)
+    };
+  });
+  LDH_prepSyncPletinaRemoteV81(result.remoteDB, "pletina_barra_recibida_v81");
+  return result;
+}
+
+async function LDH_prepAssignPletinaCompanyV81(payload) {
+  if (!payload || !(Number(payload.bars) > 0) || !(Number(payload.mmAllocated) > 0)) {
+    throw new Error("Asignación de pletina incompleta.");
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    await signInAnonymously(LDH_PREP_STOCK_AUTH_V28);
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    throw new Error("Stock nube todavía no está autenticado.");
+  }
+  const operationId = String(payload.operationId || (
+    "asg_pletina_empresa_v81_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 9)
+  ));
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction, metaRef);
+    const company = remoteDB.companies.find((row) =>
+      LDH_prepCompanyMatchesV45(row, payload.companyId)
+      || LDH_prepCompanyMatchesV45(row, payload.companyName)
+    );
+    if (!company) throw new Error("No se encuentra la empresa del pedido en Stock.");
+    const companyId = String(company.id ?? company.companyId ?? company.empresaId ?? payload.companyId);
+    let material = remoteDB.materials.find((row) =>
+      String(row?.id ?? row?.materialId ?? row?.matId ?? "") === String(payload.materialId ?? "")
+    );
+    if (!material) {
+      material = remoteDB.materials.find((row) =>
+        LDH_prepPletinaNormV81(row?.name ?? row?.nombre ?? row?.material ?? "")
+          === LDH_prepPletinaNormV81(payload.materialName ?? "")
+      );
+    }
+    if (!material) throw new Error("No se encuentra la pletina en el Stock de la empresa.");
+    const materialId = String(material.id ?? material.materialId ?? material.matId ?? "");
+    const materialName = String(material.name ?? material.nombre ?? payload.materialName ?? materialId);
+    const bars = Math.max(1, Math.round(Number(payload.bars) || 0));
+    const now = new Date().toISOString();
+
+    let reservation = null;
+    if (payload.reservationId) {
+      reservation = remoteDB.reservations.find((row) =>
+        String(row?.id ?? row?.reservationId ?? "") === String(payload.reservationId)
+      ) || null;
+      if (!reservation || !LDH_prepActiveOperationalV45(reservation)) {
+        throw new Error("La reserva seleccionada ya no está activa.");
+      }
+      const available = Math.max(0, Number(reservation.qty ?? reservation.cantidad ?? 0) || 0);
+      if (bars > available) throw new Error(`La reserva solo contiene ${available} barra(s).`);
+      const remaining = available - bars;
+      reservation.qty = remaining; reservation.cantidad = remaining; reservation.updatedAt = now;
+      if (remaining <= 0) {
+        reservation.status = "consumida"; reservation.estado = "consumida"; reservation.consumedAt = now;
+      }
+    } else {
+      const free = LDH_prepFreeRemoteV45(remoteDB, companyId, materialId);
+      if (bars > free) throw new Error(`Solo hay ${Math.max(0, free)} barra(s) libres en ${payload.companyName || companyId}.`);
+    }
+
+    const assignment = {
+      id: operationId, assignmentId: operationId,
+      companyId, empresaId: companyId,
+      company: String(company.name ?? company.nombre ?? payload.companyName ?? companyId),
+      empresa: String(company.name ?? company.nombre ?? payload.companyName ?? companyId),
+      materialId, matId: materialId, material: materialName, mat: materialName, materialName,
+      qty: bars, cantidad: bars, pendingQty: bars, qtyPending: bars,
+      unit: "barra", unidad: "barra", unitBasis: "barra",
+      pletinaMm: true, mmAllocated: Number(payload.mmAllocated), lineMm: Number(payload.mmAllocated),
+      barLengthMm: Math.max(1, Math.round(Number(payload.barLengthMm) || 6000)),
+      ref: String(payload.ref || ""), jobRef: String(payload.ref || ""), consumerRef: String(payload.ref || ""),
+      lineIndex: Number(payload.lineIndex ?? -1),
+      assignmentType: payload.reservationId ? "pletina_reserva_empresa" : "pletina_libre_empresa",
+      reason: payload.reservationId ? "pletina_desde_reserva_empresa" : "pletina_desde_stock_libre_empresa",
+      source: "preparacion_pedidos_pletina_mm_v81",
+      debtExempt: true, returnRequired: false,
+      phase: "preparacion", fase: "preparacion", status: "activa", estado: "activa",
+      createdAt: now, updatedAt: now
+    };
+    remoteDB.assignments.push(assignment);
+    LDH_prepWriteRemoteStockTransactionV45(
+      transaction, metaRef, remoteDB, "preparacion_pletina_empresa_v81"
+    );
+    return { remoteDB, assignment, companyId, materialId, materialName };
+  });
+  LDH_prepSyncPletinaRemoteV81(result.remoteDB, "pletina_empresa_v81");
+  return result;
+}
+
+window.LDH_prepReceivePletinaBarV81 = LDH_prepReceivePletinaBarV81;
+window.LDH_prepAssignPletinaCompanyV81 = LDH_prepAssignPletinaCompanyV81;
+window.LDH_prepIsPletinaMmLineV81 = LDH_prepIsPletinaMmLineV81;
+window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
+/* === /LDH_PREP_PLETINA_MM_CLOUD_V81_20260813 === */
 </script>
 
 
@@ -23837,764 +24213,326 @@ window.LDH_PREP_V59_STOCK_SESSION_AUTORITATIVO = true;
 </script>
 
 
-<!-- LDH_PREP_FERRETERIA_FIRESTORE_DIRECT_SYNC_20260811 -->
-<script id="LDH_PREP_FERRETERIA_FIRESTORE_DIRECT_SYNC_20260811">
+<script id="LDH_PREP_PLETINA_MM_V81_20260813">
 (function(){
   'use strict';
-  /* LDH_PREP_DISABLE_FER_DIRECT_CLOUD_20260811
-     Desactivado: esta rutina podia bajar una nube vieja de Ferreteria y pisar
-     la copia local correcta que ve Ferreteria PC. Preparacion debe leer la
-     clave local compartida, no publicar ni imponer Ferreteria. */
-  if(true) return;
-  if(window.__LDH_PREP_FERRETERIA_DIRECT_SYNC_20260811__) return;
-  window.__LDH_PREP_FERRETERIA_DIRECT_SYNC_20260811__ = true;
+  if(window.__LDH_PREP_PLETINA_MM_V81__) return;
+  window.__LDH_PREP_PLETINA_MM_V81__=true;
 
-  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
-  const CHANNEL_NAME = 'ldh_ferreteria_v69';
-  const APP_NAME = 'ldh-prep-ferreteria-sync-20260811';
-  const DOC_COL = 'taller_ferreteria_v2';
-  const DOC_ID = 'main';
-  const CLIENT_KEY = 'LDH_PREP_FER_SYNC_CLIENT_ID';
-  const BUILD = 'PREP-FER-DIRECT-SYNC-20260811';
-  const firebaseConfig = {
-    apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
-    authDomain: 'gestion-taller-2a439.firebaseapp.com',
-    projectId: 'gestion-taller-2a439',
-    storageBucket: 'gestion-taller-2a439.firebasestorage.app',
-    messagingSenderId: '498579673950',
-    appId: '1:498579673950:web:eb626781a5b509957db5cf'
+  const BUILD='PREPARACION-V81-PLETINA-MM-20260813';
+  const STOCK_KEY='ldh_v2_company_stock_v1';
+  const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmt=v=>{const x=n(v);return Math.abs(x-Math.round(x))<1e-9?Math.round(x).toLocaleString('es-ES'):x.toLocaleString('es-ES',{maximumFractionDigits:2});};
+  const currentRef=()=>String((window.refActual??(typeof refActual!=='undefined'?refActual:''))||'').trim();
+  const lineName=line=>String(line&&(line.mat||line.material||line.name||line.linked_matName||line.stockLinkLabel)||'').trim();
+  const lineIds=line=>[line&&line.linked_matId,line&&line.stockMatId,line&&line.matId,line&&line.materialId,line&&line.v2MaterialId].map(v=>String(v||'').trim()).filter(Boolean);
+  const isCommonCompany=c=>{
+    if(!c) return false;
+    if(c.sharedStock===true||c.sharedPool===true||c.isSharedStock===true) return true;
+    return [c.id,c.companyId,c.empresaId,c.name,c.nombre,c.empresa,c.company,c.code,c.codigo,c.label].map(norm).some(v=>v==='stock comun'||v==='stock comun global'||v==='almacen comun');
   };
+  const isActive=row=>{
+    const st=norm(row&&(row.status||row.estado)||'activa');
+    const ph=norm(row&&(row.phase||row.fase)||'preparacion');
+    return st==='activa'&&(ph==='preparacion'||ph==='fabricacion'||!ph);
+  };
+  const rowCompanyId=row=>String(row&&(row.companyId||row.empresaId||row.company||row.empresa)||'').trim();
+  const rowMaterialId=row=>String(row&&(row.materialId||row.matId||row.material_id||row.idMaterial)||'').trim();
 
-  let app=null, auth=null, fs=null, unsub=null;
-  let applyingRemote=false;
-  let saveTimer=null;
-  let lastRemoteRev='';
-  let lastPublishedHash='';
-
-  function log(){ try{ console.log.apply(console, ['[Prep Fer Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
-  function warn(){ try{ console.warn.apply(console, ['[Prep Fer Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
-  function now(){ return new Date().toISOString(); }
-  function clientId(){
-    try{
-      let id = localStorage.getItem(CLIENT_KEY);
-      if(!id){ id = 'prep_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,8); localStorage.setItem(CLIENT_KEY,id); }
-      return id;
-    }catch(_){ return 'prep_' + Math.random().toString(36).slice(2,8); }
+  function isPletinaMmLine(line){
+    if(!line) return false;
+    const name=norm(lineName(line));
+    const unit=norm(line.unit||line.unidad||'');
+    const mode=norm(line.measureMode||line.lengthMode||line.tipo||line.type||'');
+    return line.pletina_mm===true||line.gestion_mm===true||mode.includes('pletina mm')||mode.includes('mm real')||(unit==='mm'&&name.includes('pletina'));
   }
-  const CLIENT_ID = clientId();
+  window.LDH_isPletinaMmLine=isPletinaMmLine;
 
-  function loadScript(src){
-    return new Promise((resolve,reject)=>{
-      if(document.querySelector('script[src="'+src+'"]')) return resolve();
-      const el=document.createElement('script');
-      el.src=src; el.async=true;
-      el.onload=resolve;
-      el.onerror=()=>reject(new Error('No se pudo cargar '+src));
-      document.head.appendChild(el);
+  function stockPack(){
+    try{if(typeof _v2LoadCompanyStockDB==='function') return _v2LoadCompanyStockDB();}catch(_){ }
+    try{
+      const raw=localStorage.getItem(STOCK_KEY)||sessionStorage.getItem(STOCK_KEY);
+      const db=raw?JSON.parse(raw):null;
+      if(!db) return null;
+      return {key:STOCK_KEY,db,companies:db.companies||[],materials:db.materials||[],lots:db.stock||[],reservations:db.reservations||[],movements:db.movements||[],assignments:db.assignments||[]};
+    }catch(_){return null;}
+  }
+  function materialLabel(pack,id){
+    const m=(pack&&pack.materials||[]).find(x=>String(x&&(x.id||x.materialId||x.matId)||'')===String(id||''));
+    return String(m&&(m.name||m.nombre||m.material)||'').trim();
+  }
+  function resolveMaterialForCompany(pack,line,company){
+    if(!pack||!company) return null;
+    const cid=String((typeof _v2IdOfCompany==='function'?_v2IdOfCompany(company):(company.id||company.companyId||company.empresaId||company.name))||'');
+    const ids=new Set(lineIds(line));
+    const target=norm(lineName(line));
+    const rows=(pack.lots||pack.db?.stock||[]).filter(r=>{
+      const rc=rowCompanyId(r);
+      return rc===cid||norm(rc)===norm(cid)||norm(rc)===norm(company.name||company.nombre||'');
     });
-  }
-  async function ensureFirebase(){
-    if(!window.firebase || !firebase.apps){
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
-    }else{
-      if(!firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
-      if(!firebase.firestore) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+    let row=rows.find(r=>ids.has(rowMaterialId(r)))||null;
+    if(!row){
+      row=rows.find(r=>{
+        const mid=rowMaterialId(r);
+        const rn=norm(r.materialName||r.name||r.nombre||r.material||r.mat||materialLabel(pack,mid));
+        return !!target&&rn===target;
+      })||null;
     }
-    try{ app = firebase.app(APP_NAME); }
-    catch(_){ app = firebase.initializeApp(firebaseConfig, APP_NAME); }
-    auth = firebase.auth(app);
-    fs = firebase.firestore(app);
-    if(!auth.currentUser){
-      try{ await auth.signInAnonymously(); }
-      catch(e){ warn('Auth anonima no disponible para Ferreteria', e); throw e; }
+    let mid=row?rowMaterialId(row):'';
+    let mat=mid?(pack.materials||[]).find(m=>String(m&&(m.id||m.materialId||m.matId)||'')===mid):null;
+    if(!mat){
+      mat=(pack.materials||[]).find(m=>{
+        const id=String(m&&(m.id||m.materialId||m.matId)||'');
+        if(ids.has(id)) return true;
+        return norm(m&&(m.name||m.nombre||m.material)||'')===target;
+      })||null;
+      if(mat) mid=String(mat.id||mat.materialId||mat.matId||'');
     }
+    return mid?{company,companyId:cid,material:mat,materialId:mid,row}:null;
   }
-  function docRef(){ return fs.collection(DOC_COL).doc(DOC_ID); }
-  function emptyDB(){ return {version:'2.0-ferreteria-comun',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],assignments:[],reservationDebts:[]}; }
-  function normalize(db){
-    const out = Object.assign(emptyDB(), (db && typeof db === 'object') ? db : {});
-    ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
-    return out;
-  }
-  function hash(obj){
-    const s = JSON.stringify(obj || {});
-    let h=2166136261;
-    for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h,16777619); }
-    return String(h>>>0)+':'+s.length;
-  }
-  function norm(v){ return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
-  function arrayMerge(remoteArr, localArr, keyFn){
-    const out=[]; const pos=new Map();
-    function put(x){
-      if(!x || typeof x !== 'object') return;
-      const k = keyFn(x) || ('anon_' + out.length + '_' + Math.random().toString(36).slice(2));
-      if(pos.has(k)) out[pos.get(k)] = Object.assign({}, out[pos.get(k)], x);
-      else{ pos.set(k,out.length); out.push(x); }
-    }
-    (Array.isArray(remoteArr)?remoteArr:[]).forEach(put);
-    (Array.isArray(localArr)?localArr:[]).forEach(put);
-    return out;
-  }
-  function mergeDB(remote, local){
-    const r=normalize(remote), l=normalize(local);
-    const out = Object.assign({}, r, l);
-    out.companies = arrayMerge(r.companies,l.companies,x=>x.id||x.companyId||x.code||x.nombre||x.name);
-    out.materials = arrayMerge(r.materials,l.materials,x=>x.id||x.materialId||(norm(x.type||x.tipo)+'|'+norm(x.family||x.familia||x.grp)+'|'+norm(x.name||x.nombre)));
-    out.stock = arrayMerge(r.stock,l.stock,x=>x.id||[x.companyId,x.empresaId,x.materialId,x.matId].map(v=>String(v||'')).join('|'));
-    out.movements = arrayMerge(r.movements,l.movements,x=>x.id||x.movementId||[x.companyId,x.materialId,x.matId,x.type,x.tipo,x.qty,x.cantidad,x.date,x.fecha,x.source,x.origen].map(v=>String(v||'')).join('|'));
-    out.jobs = arrayMerge(r.jobs,l.jobs,x=>x.id||x.ref||x.reference||x.referencia);
-    out.reservations = arrayMerge(r.reservations,l.reservations,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status,x.phase].map(v=>String(v||'')).join('|'));
-    out.assignments = arrayMerge(r.assignments,l.assignments,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status,x.phase,x.source].map(v=>String(v||'')).join('|'));
-    out.reservationDebts = arrayMerge(r.reservationDebts,l.reservationDebts,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status].map(v=>String(v||'')).join('|'));
-    out.updatedAt = now();
-    out.lastSyncBuild = BUILD;
-    return normalize(out);
-  }
-  function readLocal(){
-    try{ const raw = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY); return raw ? normalize(JSON.parse(raw)) : null; }
-    catch(_){ return null; }
-  }
-  function writeLocal(db){
-    const clean = normalize(db);
-    clean.updatedAt = clean.updatedAt || now();
-    const raw = JSON.stringify(clean);
-    applyingRemote = true;
-    try{ window.__LDH_FERRETERIA_MEMORY_DB = clean; }catch(_){ }
-    try{ localStorage.setItem(STORAGE_KEY, raw); }catch(e){ warn('localStorage no acepta Ferreteria', e); }
-    try{ sessionStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
-    try{
-      const ch = new BroadcastChannel(CHANNEL_NAME);
-      ch.postMessage({type:'ferreteria-updated', source:'prep-direct-sync', updatedAt:clean.updatedAt});
-      ch.close();
-    }catch(_){ }
-    try{ window.dispatchEvent(new StorageEvent('storage',{key:STORAGE_KEY,newValue:raw})); }catch(_){ }
-    setTimeout(()=>{ applyingRemote=false; }, 80);
-    try{ if(typeof window.renderTabla === 'function' && String(window.refActual || '').trim()) window.renderTabla(); }catch(_){ }
-    return clean;
-  }
-  async function readRemote(){
-    const snap = await docRef().get();
-    if(!snap.exists) return null;
-    const data = snap.data() || {};
-    return normalize(data.payload && typeof data.payload === 'object' ? data.payload : data);
-  }
-  async function publishDB(localDB, reason){
-    if(!fs || !localDB || applyingRemote) return false;
-    const remote = await readRemote();
-    const merged = remote ? mergeDB(remote, localDB) : normalize(localDB);
-    merged.updatedAt = now();
-    merged.lastWriter = CLIENT_ID;
-    merged.lastReason = reason || 'preparacion';
-    const h = hash(merged);
-    if(h === lastPublishedHash) return true;
-    await docRef().set({
-      payload: merged,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      updatedAtIso: merged.updatedAt,
-      clientId: CLIENT_ID,
-      revision: Date.now().toString(36)+'_'+CLIENT_ID,
-      build: BUILD,
-      materialsCount: merged.materials.length,
-      movementsCount: merged.movements.length,
-      assignmentsCount: merged.assignments.length,
-      reservationsCount: merged.reservations.length
-    }, {merge:false});
-    lastPublishedHash = h;
-    writeLocal(merged);
-    return true;
-  }
-  window.LDH_publishFerreteriaDirectFromMemory = function(db){
-    return publishDB(db || window.__LDH_FERRETERIA_MEMORY_DB || readLocal(), 'preparacion_direct_publish')
-      .catch(e=>{ warn('No se pudo publicar Ferreteria desde Preparacion', e); return false; });
-  };
-  window.LDH_scheduleFerreteriaCloudPublish = function(){
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(()=>{
-      window.LDH_publishFerreteriaDirectFromMemory(window.__LDH_FERRETERIA_MEMORY_DB || readLocal());
-    }, 700);
-  };
-  async function start(){
-    try{
-      await ensureFirebase();
-      const remote = await readRemote();
-      if(remote) writeLocal(remote); // prioridad absoluta a la nube de Ferreteria; NO subimos la copia local antigua al abrir Preparacion.
-      if(unsub) unsub();
-      unsub = docRef().onSnapshot(snap=>{
-        if(!snap.exists) return;
-        const data = snap.data() || {};
-        const rev = String(data.revision || data.updatedAtIso || '');
-        if(rev && rev === lastRemoteRev) return;
-        lastRemoteRev = rev;
-        const payload = data.payload && typeof data.payload === 'object' ? data.payload : data;
-        writeLocal(payload);
-      }, e=>warn('onSnapshot Ferreteria error', e));
-      log('Activo', BUILD);
-    }catch(e){ warn('Sync Ferreteria no iniciado en Preparacion', e); }
-  }
-  setTimeout(start, 250);
-})();
-</script>
 
-
-
-<!-- LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811 -->
-<script id="LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811">
-(function(){
-  'use strict';
-  if(window.__LDH_PREP_FER_CLOUD_RO_20260811__) return;
-  window.__LDH_PREP_FER_CLOUD_RO_20260811__ = true;
-
-  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
-  const APP_NAME = 'ldh-prep-ferreteria-readonly-20260811';
-  const DOC_COL = 'taller_ferreteria_v2';
-  const DOC_ID = 'main';
-  const firebaseConfig = {
-    apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
-    authDomain: 'gestion-taller-2a439.firebaseapp.com',
-    projectId: 'gestion-taller-2a439',
-    storageBucket: 'gestion-taller-2a439.firebasestorage.app',
-    messagingSenderId: '498579673950',
-    appId: '1:498579673950:web:eb626781a5b509957db5cf'
-  };
-
-  let fs=null, auth=null, lastRevision='';
-
-  function warn(){ try{ console.warn.apply(console, ['[Prep Fer ReadOnly]'].concat([].slice.call(arguments))); }catch(_){ } }
-  function loadScript(src){
-    return new Promise((resolve,reject)=>{
-      if(document.querySelector('script[src="'+src+'"]')) return resolve();
-      const el=document.createElement('script');
-      el.src=src; el.async=true;
-      el.onload=resolve;
-      el.onerror=()=>reject(new Error('No se pudo cargar '+src));
-      document.head.appendChild(el);
-    });
-  }
-  async function ensureFirebase(){
-    if(!window.firebase || !firebase.apps){
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
-    }else{
-      if(!firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
-      if(!firebase.firestore) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
-    }
-    let app;
-    try{ app = firebase.app(APP_NAME); }
-    catch(_){ app = firebase.initializeApp(firebaseConfig, APP_NAME); }
-    auth = firebase.auth(app);
-    fs = firebase.firestore(app);
-    if(!auth.currentUser){
-      try{ await auth.signInAnonymously(); }catch(e){ warn('No se pudo iniciar sesión anónima', e); throw e; }
-    }
-  }
-  function normalize(db){
-    const out = Object.assign({
-      version:'2.0-ferreteria-comun', companies:[], materials:[], stock:[],
-      movements:[], jobs:[], reservations:[], assignments:[], reservationDebts:[]
-    }, (db && typeof db === 'object') ? db : {});
-    ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
-    return out;
-  }
-  function applyPayload(payload, revision){
-    const clean = normalize(payload && payload.payload ? payload.payload : payload);
-    if(!clean.materials.length) return;
-    window.__LDH_FERRETERIA_CLOUD_DB_RO = clean;
-    window.__LDH_FERRETERIA_MEMORY_DB = clean;
-    try{ sessionStorage.setItem(STORAGE_KEY, JSON.stringify(clean)); }catch(_){ }
-    try{
-      const raw = JSON.stringify(clean);
-      localStorage.setItem(STORAGE_KEY, raw);
-      window.dispatchEvent(new StorageEvent('storage',{key:STORAGE_KEY,newValue:raw}));
-    }catch(_){ }
-    try{
-      if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla();
-    }catch(_){ }
-    try{
-      let badge=document.getElementById('ldhPrepFerCloudBadge');
-      if(!badge){
-        badge=document.createElement('span');
-        badge.id='ldhPrepFerCloudBadge';
-        badge.style.cssText='position:fixed;left:8px;bottom:34px;z-index:99999;padding:3px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.55);background:rgba(6,78,59,.75);color:#bbf7d0;font-size:10px;font-weight:900;';
-        document.body.appendChild(badge);
+  const baseCommonInfo=typeof window.LDH_stockComunInfoParaLinea==='function'?window.LDH_stockComunInfoParaLinea:null;
+  function findLengthRow(info,line){
+    if(!info||!info.pack) return null;
+    const rows=info.pack.db&&Array.isArray(info.pack.db.stock)?info.pack.db.stock:(info.pack.lots||[]);
+    const target=norm(lineName(line));
+    return rows.find(r=>{
+      if(!isCommonCompany({id:rowCompanyId(r),name:rowCompanyId(r),sharedStock:rowCompanyId(r)===String(info.companyId)})){
+        if(String(rowCompanyId(r))!==String(info.companyId)) return false;
       }
-      badge.textContent='Ferretería V2 lectura directa OK';
-    }catch(_){ }
+      if(String(rowMaterialId(r))===String(info.materialId)) return String(r.lengthMode||'').toLowerCase()==='mm';
+      const rn=norm(r.materialName||r.name||r.nombre||r.material||r.mat||materialLabel(info.pack,rowMaterialId(r)));
+      return rn===target&&String(r.lengthMode||'').toLowerCase()==='mm';
+    })||null;
   }
-  async function start(){
+  if(baseCommonInfo){
+    window.LDH_stockComunInfoParaLinea=function(line){
+      const info=baseCommonInfo(line);
+      if(!isPletinaMmLine(line)||!info||!info.ok) return info;
+      const row=findLengthRow(info,line);
+      if(!row) return Object.assign({},info,{pletinaMm:true,unit:'mm',barLengthMm:Math.max(1,Math.round(n(line&&line.commercial_bar_mm)||6000))});
+      const physical=Math.max(0,n(row.lengthPhysicalMm));
+      const reserved=Math.max(0,n(info.reserved));
+      const assigned=Math.max(0,n(info.assigned));
+      const barLengthMm=Math.max(1,Math.round(n(row.barLengthMm)||n(line&&line.commercial_bar_mm)||6000));
+      return Object.assign({},info,{physical,reserved,assigned,free:Math.max(0,physical-reserved-assigned),barLengthMm,lengthMode:'mm',unit:'mm',pletinaMm:true,lengthRow:row});
+    };
+  }
+
+  function companyInfo(line,forcedCompany){
+    const pack=stockPack();
+    if(!pack) return {ok:false,freeBars:0,physicalBars:0,reservedBars:0,assignedBars:0,ownReservedBars:0};
+    const company=forcedCompany||(typeof _v2FindCompany==='function'?_v2FindCompany(pack,typeof _v2GetPedidoEmpresa==='function'?_v2GetPedidoEmpresa():''):null);
+    if(!company||isCommonCompany(company)) return {ok:false,pack,company,freeBars:0,physicalBars:0,reservedBars:0,assignedBars:0,ownReservedBars:0};
+    const ctx=resolveMaterialForCompany(pack,line,company);
+    if(!ctx) return {ok:true,pack,company,companyId:String(company.id||company.companyId||company.name||''),materialId:'',freeBars:0,physicalBars:0,reservedBars:0,assignedBars:0,ownReservedBars:0,barLengthMm:barLength(line)};
+    let physical=0,reserved=0,assigned=0;
+    try{physical=n(_v2MovementReal(pack,ctx.companyId,ctx.materialId));}catch(_){ }
+    try{reserved=n(_v2Reserved(pack,ctx.companyId,ctx.materialId));}catch(_){ }
+    try{assigned=n(_v2Assigned(pack,ctx.companyId,ctx.materialId));}catch(_){ }
+    const ref=currentRef();
+    const ownReservations=(pack.reservations||[]).filter(r=>isActive(r)&&rowCompanyId(r)===ctx.companyId&&rowMaterialId(r)===ctx.materialId&&String(r.ref||r.jobRef||r.trabajoRef||'').trim()===ref);
+    const ownReservedBars=ownReservations.reduce((s,r)=>s+n(r.qty??r.cantidad??r.reservado),0);
+    return Object.assign(ctx,{ok:true,pack,physicalBars:physical,reservedBars:reserved,assignedBars:assigned,freeBars:Math.max(0,physical-reserved-assigned),ownReservedBars,ownReservations,barLengthMm:barLength(line)});
+  }
+  function barLength(line){
     try{
-      await ensureFirebase();
-      const ref = fs.collection(DOC_COL).doc(DOC_ID);
-      const snap = await ref.get();
-      if(snap.exists){
-        const data=snap.data() || {};
-        lastRevision = String(data.revision || data.updatedAtIso || data.updatedAt || '');
-        applyPayload(data,lastRevision);
-      }
-      ref.onSnapshot(s=>{
-        if(!s.exists) return;
-        const data=s.data() || {};
-        const rev=String(data.revision || data.updatedAtIso || data.updatedAt || Date.now());
-        if(rev && rev === lastRevision) return;
-        lastRevision = rev;
-        applyPayload(data,rev);
-      }, e=>warn('onSnapshot', e));
-    }catch(e){ warn('No se pudo activar lectura directa de Ferretería', e); }
-  }
-  setTimeout(start, 300);
-})();
-</script>
-<!-- /LDH_PREP_FERRETERIA_CLOUD_READONLY_20260811 -->
-
-
-
-<!-- LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812 -->
-<script id="LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812">
-(function(){
-  'use strict';
-  if(window.__LDH_PREP_FER_DIRECT_FINAL_20260812__) return;
-  window.__LDH_PREP_FER_DIRECT_FINAL_20260812__ = true;
-
-  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
-  const COMMON_ID = 'fer_common';
-
-  function norm(v){
-    return String(v||'').toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/[^a-z0-9]+/g,' ').trim();
-  }
-  function num(v){
-    const n = Number(String(v ?? 0).replace(',', '.'));
-    return Number.isFinite(n) ? n : 0;
-  }
-  function first(){
-    for(let i=0;i<arguments.length;i++){
-      const v=arguments[i];
-      if(v!==undefined && v!==null && String(v).trim()!=='') return v;
-    }
-    return '';
-  }
-  function readDirectDB(){
-    /* Prioridad absoluta: payload leído directamente de Firestore por el bloque RO.
-       No se usa una copia local vieja si la nube directa ya está disponible. */
-    if(window.__LDH_FERRETERIA_CLOUD_DB_RO && Array.isArray(window.__LDH_FERRETERIA_CLOUD_DB_RO.materials)){
-      return window.__LDH_FERRETERIA_CLOUD_DB_RO;
-    }
-    if(window.__LDH_FERRETERIA_MEMORY_DB && Array.isArray(window.__LDH_FERRETERIA_MEMORY_DB.materials)){
-      return window.__LDH_FERRETERIA_MEMORY_DB;
-    }
-    try{
-      const raw = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY);
-      const db = raw ? JSON.parse(raw) : null;
-      if(db && Array.isArray(db.materials)) return db;
+      const c=window.LDH_stockComunInfoParaLinea?window.LDH_stockComunInfoParaLinea(line):null;
+      if(c&&c.ok&&n(c.barLengthMm)>0) return Math.max(1,Math.round(n(c.barLengthMm)));
     }catch(_){ }
-    return null;
+    return Math.max(1,Math.round(n(line&&line.commercial_bar_mm)||6000));
   }
-  function materialId(m){ return String(first(m && m.id, m && m.materialId, m && m.matId, m && m.material_id)).trim(); }
-  function materialName(m){ return String(first(m && m.name, m && m.nombre, m && m.materialName, m && m.material, m && m.mat, m && m.label)).trim(); }
-  function unitOf(m){ return String(first(m && m.unit, m && m.unidad, 'und')).trim(); }
-  function familyOf(m){ return String(first(m && m.family, m && m.familia, m && m.grp, m && m.grupo, 'Ferretería')).trim(); }
-  function isHardware(m){
-    const t = norm(first(m && m.type, m && m.tipo, m && m.cat, m && m.categoria));
-    const f = norm(familyOf(m));
-    return t.includes('ferreteria') || f.includes('contera') || f.includes('torn') || f.includes('broca') || f.includes('disco') || f.includes('consum') || f.includes('arand') || f.includes('tuerc');
+  function sourceInfo(line){
+    const common=window.LDH_stockComunInfoParaLinea?window.LDH_stockComunInfoParaLinea(line):{ok:false,free:0,physical:0,reserved:0,assigned:0};
+    const company=companyInfo(line);
+    const barMm=Math.max(1,Math.round(n(common&&common.barLengthMm)||n(company&&company.barLengthMm)||n(line&&line.commercial_bar_mm)||6000));
+    return {common,company,barMm};
   }
-  function rowMaterialId(r){ return String(first(r && r.materialId, r && r.matId, r && r.stockMaterialId, r && r.v2MaterialId, r && r.toMaterialId, r && r.idMaterial)).trim(); }
-  function rowMaterialName(r){ return String(first(r && r.materialName, r && r.material, r && r.mat, r && r.name, r && r.nombre, r && r.descripcion)).trim(); }
-  function sameMaterial(row, id, name){
-    const rid = rowMaterialId(row);
-    if(rid && id && String(rid) === String(id)) return true;
-    const rn = norm(rowMaterialName(row));
-    const mn = norm(name || id);
-    return !!(rn && mn && (rn === mn || rn.includes(mn) || mn.includes(rn)));
-  }
-  function signedMovementQty(m){
-    const q = num(first(m && m.qty, m && m.cantidad, m && m.quantity, m && m.amount, m && m.units, m && m.unidades));
-    const t = norm(first(m && m.type, m && m.tipo, m && m.movementType, m && m.movimiento, 'entrada')).replace(/\s+/g,'_');
-    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion','reserva','reservado','asignacion','asignado'].includes(t)) return 0;
-    if(['salida','out','ajuste_neg','consumo','consumo_terminal','prestamo','baja','retirada'].includes(t)) return -q;
-    return q;
-  }
-  function isCommonMovement(m){
-    const cid = String(first(m && m.companyId, m && m.empresaId, m && m.company, m && m.empresa, COMMON_ID)).trim();
-    return !cid || cid === COMMON_ID || norm(cid).includes('ferreteria') || norm(cid).includes('stock comun');
-  }
-  function physicalFromMovements(db, id, name){
-    const movs = Array.isArray(db.movements) ? db.movements : [];
-    const hits = movs.filter(m => isCommonMovement(m) && sameMaterial(m, id, name));
-    return hits.reduce((sum,m)=>sum + signedMovementQty(m), 0);
-  }
-  function activeStatus(v){
-    const s = norm(v || 'activa');
-    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','recibida','recibido','anulada','anulado'].includes(s);
-  }
-  function phaseOk(v){
-    const ph = norm(v || 'preparacion');
-    return !ph || ph === 'preparacion' || ph === 'fabricacion';
-  }
-  function loanReserve(a){
-    const txt = norm(first(a && a.assignmentType, a && a.reason, a && a.origen, a && a.source));
-    return txt.includes('otra empresa') || txt.includes('prestamo') || txt.includes('deuda') || !!(a && a.toCompanyId);
-  }
-  function reservedFromDB(db, id, name){
-    let total = 0;
-    (Array.isArray(db.assignments) ? db.assignments : []).forEach(a=>{
-      if(!sameMaterial(a,id,name)) return;
-      if(!activeStatus(first(a.status,a.estado))) return;
-      if(!phaseOk(first(a.phase,a.fase))) return;
-      if(loanReserve(a)) return;
-      total += Math.max(0, num(first(a.pendingQty,a.qtyPending,a.pendiente,a.qty,a.cantidad,a.units,a.unidades)));
-    });
-    (Array.isArray(db.reservations) ? db.reservations : []).forEach(r=>{
-      if(!sameMaterial(r,id,name)) return;
-      if(!activeStatus(first(r.status,r.estado))) return;
-      total += Math.max(0, num(first(r.pendingQty,r.qtyPending,r.pendiente,r.qty,r.cantidad,r.units,r.unidades)));
-    });
-    return total;
-  }
-  function rowPhysicalFallback(db, id, name){
-    const rows = []
-      .concat(Array.isArray(db.stock) ? db.stock : [])
-      .concat(Array.isArray(db.stocks) ? db.stocks : [])
-      .concat(Array.isArray(db.stockRows) ? db.stockRows : [])
-      .concat(Array.isArray(db.existencias) ? db.existencias : []);
-    return rows.filter(r=>sameMaterial(r,id,name)).reduce((sum,r)=>sum + num(first(
-      r.physicalQty, r.physical, r.fisico, r['físico'], r.stockFisico,
-      r.stockReal, r.stockActual, r.existencias, r.onHand, r.currentQty,
-      r.current, r.totalQty, r.total, r.qty, r.cantidad, r.stock
-    )),0);
-  }
+  window.LDH_pletinaSourceInfo=sourceInfo;
 
-  window.LDH_readFerreteriaDBV45 = function(){
-    return readDirectDB();
+  function purchaseInfo(line,neededOverride){
+    const src=sourceInfo(line);
+    const need=neededOverride===undefined?Math.max(0,n(line&&line.qty_pedida)-n(line&&line.qty_recibida)):Math.max(0,n(neededOverride));
+    const commonFree=src.common&&src.common.ok?Math.max(0,n(src.common.free)):0;
+    const companyFreeBars=src.company&&src.company.ok?Math.max(0,Math.floor(n(src.company.freeBars))):0;
+    const ownReservedBars=src.company&&src.company.ok?Math.max(0,Math.floor(n(src.company.ownReservedBars))):0;
+    const availableMm=commonFree+(companyFreeBars+ownReservedBars)*src.barMm;
+    const deficitMm=Math.max(0,need-availableMm);
+    const barsToBuy=deficitMm>0?Math.ceil(deficitMm/src.barMm):0;
+    return {need,commonFree,companyFreeBars,ownReservedBars,availableMm,deficitMm,barsToBuy,barMm:src.barMm,common:src.common,company:src.company};
+  }
+  window.LDH_pletinaCompraInfo=purchaseInfo;
+
+  const baseCompanyPill=typeof window._v2CompanyStockPill==='function'?window._v2CompanyStockPill:null;
+  window._v2CompanyStockPill=function(line,linkedMat,pedida){
+    if(!isPletinaMmLine(line)) return baseCompanyPill?baseCompanyPill(line,linkedMat,pedida):'';
+    const info=companyInfo(line);
+    if(!info.ok) return '<span class="link-pill stock-company-pill warn">Stock empresa: sin datos</span>';
+    const label=String(info.company&&(info.company.name||info.company.nombre||info.company.empresa)||'Empresa');
+    const cls=info.freeBars<=0?' danger':(info.freeBars<1?' warn':'');
+    return `<span class="link-pill stock-company-pill${cls}">${esc(label)}: físico <b>${fmt(info.physicalBars)}</b> barra(s) · reservado <b>${fmt(info.reservedBars+info.assignedBars)}</b> · libre <b>${fmt(info.freeBars)}</b> barra(s)</span>`;
   };
 
-  window.LDH_buildFerreteriaCatalogV45 = function(){
-    const db = readDirectDB();
-    if(!db) return [];
-    const materials = (Array.isArray(db.materials) ? db.materials : [])
-      .filter(m => materialId(m) && materialName(m) && isHardware(m));
-    return materials.map(m=>{
-      const id = materialId(m);
-      const name = materialName(m);
-      const movementPhysical = physicalFromMovements(db,id,name);
-      const hasMovement = (Array.isArray(db.movements) ? db.movements : []).some(x=>isCommonMovement(x) && sameMaterial(x,id,name));
-      const physical = Math.max(0, hasMovement ? movementPhysical : rowPhysicalFallback(db,id,name));
-      const reserved = Math.max(0, reservedFromDB(db,id,name));
-      const assigned = 0;
-      const free = Math.max(0, physical - reserved - assigned);
-      return Object.assign({}, m, {
-        id, materialId:id, matId:id,
-        name, nombre:name,
-        unit:unitOf(m), unidad:unitOf(m),
-        cat:'Ferretería', grp:familyOf(m),
-        qty:free, physical, reserved, assigned, free,
-        __v2:true,
-        __ferreteriaActualV45:true,
-        __ferreteriaNubeDirectaFinal:true
-      });
+  const baseAssignedOwn=typeof window.LDH_asignadoPropioStockParaLinea==='function'?window.LDH_asignadoPropioStockParaLinea:null;
+  window.LDH_asignadoPropioStockParaLinea=function(line){
+    if(!isPletinaMmLine(line)) return baseAssignedOwn?baseAssignedOwn(line):0;
+    const pack=stockPack(); if(!pack) return 0;
+    const ref=currentRef(); const ids=new Set(lineIds(line)); const target=norm(lineName(line)); const barMm=barLength(line);
+    return (pack.assignments||pack.db?.assignments||[]).filter(a=>isActive(a)&&String(a.ref||a.jobRef||a.consumerRef||'').trim()===ref).filter(a=>{
+      const mid=rowMaterialId(a); if(ids.has(mid)) return true;
+      const nm=norm(a.materialName||a.material||a.mat||materialLabel(pack,mid)); return !!target&&nm===target;
+    }).reduce((sum,a)=>{
+      const mm=n(a.mmAllocated??a.lineMm);
+      if(mm>0) return sum+mm;
+      if(norm(a.unitBasis||a.unit||a.unidad)==='mm') return sum+n(a.qty??a.cantidad);
+      if(a.pletinaMm===true||norm(a.assignmentType||'').includes('pletina')) return sum+n(a.qty??a.cantidad)*Math.max(1,n(a.barLengthMm)||barMm);
+      return sum;
+    },0);
+  };
+
+  const baseStockCompra=typeof window._getStockInfoForCompra==='function'?window._getStockInfoForCompra:null;
+  window._getStockInfoForCompra=function(line){
+    if(!isPletinaMmLine(line)) return baseStockCompra?baseStockCompra(line):{stockKnown:false,stock:0};
+    const p=purchaseInfo(line);
+    return {stockKnown:true,stock:p.availableMm,physical:p.availableMm,reserved:0,assigned:0,source:'pletina_mm_fuentes_v81',unit:'mm',barLengthMm:p.barMm,barsToBuy:p.barsToBuy,deficitMm:p.deficitMm};
+  };
+
+  const baseBuildCompra=typeof window._buildCompraLines==='function'?window._buildCompraLines:null;
+  window._buildCompraLines=function(lines){
+    const arr=Array.isArray(lines)?lines:[];
+    const normal=arr.filter(l=>!isPletinaMmLine(l));
+    const special=arr.filter(isPletinaMmLine);
+    const out=baseBuildCompra&&normal.length?baseBuildCompra(normal):[];
+    const groups=new Map();
+    special.forEach(line=>{
+      const key=lineIds(line)[0]||norm(lineName(line));
+      if(!groups.has(key)) groups.set(key,{line,need:0});
+      groups.get(key).need+=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida));
     });
-  };
-
-  function refreshBadge(){
-    try{
-      const cat = window.LDH_buildFerreteriaCatalogV45 ? window.LDH_buildFerreteriaCatalogV45() : [];
-      const c20 = cat.find(m=>norm(m.name)==='contera 40x20 blanca');
-      const c40 = cat.find(m=>norm(m.name)==='contera 40x40 blanca');
-      let badge=document.getElementById('ldhPrepFerDirectFinalBadge');
-      if(!badge){
-        badge=document.createElement('span');
-        badge.id='ldhPrepFerDirectFinalBadge';
-        badge.style.cssText='position:fixed;left:8px;bottom:56px;z-index:99999;padding:3px 8px;border-radius:999px;border:1px solid rgba(52,211,153,.65);background:rgba(6,78,59,.82);color:#d1fae5;font-size:10px;font-weight:900;';
-        document.body.appendChild(badge);
-      }
-      const parts=[];
-      if(c20) parts.push('40x20 '+c20.physical+'/'+c20.reserved+'/'+c20.free);
-      if(c40) parts.push('40x40 '+c40.physical+'/'+c40.reserved+'/'+c40.free);
-      badge.textContent = parts.length ? ('Ferretería nube directa · '+parts.join(' · ')) : 'Ferretería nube directa · esperando datos';
-    }catch(_){ }
-  }
-  setInterval(refreshBadge, 1500);
-  setTimeout(function(){
-    refreshBadge();
-    try{ if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla(); }catch(_){ }
-  }, 1200);
-  setTimeout(function(){
-    refreshBadge();
-    try{ if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla(); }catch(_){ }
-  }, 3200);
-})();
-</script>
-<!-- /LDH_PREP_FERRETERIA_USA_NUBE_DIRECTA_FINAL_20260812 -->
-
-
-
-<!-- LDH_PREP_CONSUME_FERRETERIA_ON_FAB_20260812 -->
-<script id="LDH_PREP_CONSUME_FERRETERIA_ON_FAB_20260812">
-(function(){
-  'use strict';
-  if(window.__LDH_PREP_CONSUME_FER_ON_FAB_20260812__) return;
-  window.__LDH_PREP_CONSUME_FER_ON_FAB_20260812__ = true;
-
-  const APP_NAME = 'ldh-prep-ferreteria-consume-20260812';
-  const DOC_COL = 'taller_ferreteria_v2';
-  const DOC_ID = 'main';
-  const STORAGE_KEY = 'ldh_v2_ferreteria_stock_v1';
-  const COMMON_ID = 'fer_common';
-  const firebaseConfig = {
-    apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
-    authDomain: 'gestion-taller-2a439.firebaseapp.com',
-    projectId: 'gestion-taller-2a439',
-    storageBucket: 'gestion-taller-2a439.firebasestorage.app',
-    messagingSenderId: '498579673950',
-    appId: '1:498579673950:web:eb626781a5b509957db5cf'
-  };
-
-  let app=null, auth=null, fs=null;
-
-  function norm(v){
-    return String(v||'').toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/[^a-z0-9]+/g,' ').trim();
-  }
-  function num(v){
-    const n = Number(String(v ?? 0).replace(',', '.'));
-    return Number.isFinite(n) ? n : 0;
-  }
-  function first(){
-    for(let i=0;i<arguments.length;i++){
-      const v=arguments[i];
-      if(v!==undefined && v!==null && String(v).trim()!=='') return v;
-    }
-    return '';
-  }
-  function sameRef(a,b){ return norm(a) === norm(b); }
-  function activeStatus(row){
-    const s = norm(first(row && row.status, row && row.estado, 'activa'));
-    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','anulada','anulado','inactiva','inactivo'].includes(s);
-  }
-  function phaseOk(row){
-    const ph = norm(first(row && row.phase, row && row.fase, 'preparacion'));
-    return !ph || ph === 'preparacion' || ph === 'fabricacion';
-  }
-  function isFerAssignment(row){
-    const txt = norm(first(row && row.assignmentType, row && row.reason, row && row.source, row && row.origen));
-    return txt.includes('ferreteria');
-  }
-  function assignmentRef(row){
-    return String(first(row && row.consumerRef, row && row.jobRef, row && row.ref, row && row.reference, row && row.referencia)).trim();
-  }
-  function assignmentQty(row){
-    return Math.max(0, num(first(row && row.pendingQty, row && row.qtyPending, row && row.pendiente, row && row.qty, row && row.cantidad, row && row.units, row && row.unidades)));
-  }
-  function normalizeDB(db){
-    const out = Object.assign({
-      version:'2.0-ferreteria-comun', companies:[], materials:[], stock:[], movements:[], jobs:[], reservations:[], assignments:[], reservationDebts:[]
-    }, (db && typeof db === 'object') ? db : {});
-    ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
+    groups.forEach(g=>{
+      const p=purchaseInfo(g.line,g.need);
+      const comp=p.company&&p.company.ok?String(p.company.company&&(p.company.company.name||p.company.company.nombre)||'Empresa'):'Empresa';
+      out.push(`${lineName(g.line)} - necesarias ${fmt(g.need)} mm / ${comp} libre ${fmt(p.companyFreeBars)} barra(s) / STOCK COMÚN libre ${fmt(p.commonFree)} mm / pedir ${p.barsToBuy} ${p.barsToBuy===1?'barra':'barras'} de ${fmt(p.barMm)} mm`);
+    });
     return out;
-  }
-  function materialLabel(db, id){
-    const m = (db.materials||[]).find(x => String(first(x.id,x.materialId,x.matId,x.material_id)) === String(id));
-    return m ? String(first(m.name,m.nombre,m.materialName,m.material,m.mat,id)) : String(id||'');
-  }
-  function writeLocal(db){
-    const clean = normalizeDB(db);
-    const raw = JSON.stringify(clean);
-    try{ window.__LDH_FERRETERIA_CLOUD_DB_RO = clean; }catch(_){ }
-    try{ window.__LDH_FERRETERIA_MEMORY_DB = clean; }catch(_){ }
-    try{ localStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
-    try{ sessionStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
-    try{ window.dispatchEvent(new StorageEvent('storage',{key:STORAGE_KEY,newValue:raw})); }catch(_){ }
-    try{ if(typeof renderTabla === 'function' && String(window.refActual || refActual || '').trim()) renderTabla(); }catch(_){ }
-  }
-  function loadScript(src){
-    return new Promise((resolve,reject)=>{
-      if(document.querySelector('script[src="'+src+'"]')) return resolve();
-      const el=document.createElement('script');
-      el.src=src; el.async=true;
-      el.onload=resolve;
-      el.onerror=()=>reject(new Error('No se pudo cargar '+src));
-      document.head.appendChild(el);
-    });
-  }
-  async function ensureFirebase(){
-    if(!window.firebase || !firebase.apps){
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
-      await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
-    }else{
-      if(!firebase.auth) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js');
-      if(!firebase.firestore) await loadScript('https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js');
+  };
+
+  function completeMm(index,mm,source,extra){
+    const lines=window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]);
+    const line=lines[index]; if(!line) return;
+    const ped=Math.max(0,n(line.qty_pedida)); const before=Math.max(0,n(line.qty_recibida)); const add=Math.max(0,Math.min(n(mm),Math.max(0,ped-before)));
+    if(add>0){
+      line.qty_recibida=before+add; line.recibida=line.qty_recibida;
+      line.aplicado_qty=Math.min(ped,n(line.aplicado_qty)+add);
+      line.stock_consumed_qty=Math.min(ped,n(line.stock_consumed_qty)+add);
+      if(!Array.isArray(line.trace)) line.trace=[];
+      line.trace.push(Object.assign({at:new Date().toISOString(),qty:add,unit:'mm',source:source||'pletina_mm_v81'},extra||{}));
     }
-    try{ app = firebase.app(APP_NAME); }
-    catch(_){ app = firebase.initializeApp(firebaseConfig, APP_NAME); }
-    auth = firebase.auth(app);
-    fs = firebase.firestore(app);
-    if(!auth.currentUser){ await auth.signInAnonymously(); }
+    line.ok=ped>0&&n(line.qty_recibida)>=ped; line.completo=line.ok; line.done=line.ok; line.isDone=line.ok; line.isCompleted=line.ok;
+    try{guardarEstadoLocal();}catch(_){ }
+    try{renderTabla();}catch(_){ }
+    try{cargarLista();}catch(_){ }
+    try{if(window.__ldhPrepSyncNow) Promise.resolve(window.__ldhPrepSyncNow('pletina_mm_v81:'+currentRef())).catch(()=>{});}catch(_){ }
   }
 
-  async function consumeFerreteriaForRef(workRef){
-    const refText = String(workRef || '').trim();
-    if(!refText) return {consumedQty:0, consumedAssignments:0};
-    await ensureFirebase();
-    const docRef = fs.collection(DOC_COL).doc(DOC_ID);
-    const result = await fs.runTransaction(async (tx)=>{
-      const snap = await tx.get(docRef);
-      if(!snap.exists) throw new Error('No existe la nube de Ferretería.');
-      const data = snap.data() || {};
-      const db = normalizeDB(data.payload && typeof data.payload === 'object' ? data.payload : data);
-      const assignments = db.assignments;
-      const movements = db.movements;
-      const movementIds = new Set(movements.map(m=>String(m && m.id || '')));
-      const now = new Date().toISOString();
-      let consumedQty = 0;
-      let consumedAssignments = 0;
+  window.LDH_pletinaUsarEmpresa=async function(index){
+    const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]; if(!line||!isPletinaMmLine(line)) return;
+    const info=companyInfo(line); if(!info.ok||!info.materialId) return alert('Esta empresa no tiene ficha de esta pletina.');
+    const falta=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida)); if(!falta) return alert('La línea ya está completa.');
+    const libres=Math.max(0,Math.floor(n(info.freeBars))); if(libres<=0) return alert('No hay barras libres de esta pletina en la empresa del pedido.');
+    const needed=Math.ceil(falta/info.barLengthMm); const def=Math.min(needed,libres);
+    const raw=prompt(`Usar pletina de ${info.company.name||info.company.nombre||'la empresa'}\n\nNecesario: ${fmt(falta)} mm\nBarra: ${fmt(info.barLengthMm)} mm\nBarras libres: ${libres}\n\nBarras a asignar:`,String(def));
+    if(raw===null) return; const bars=Math.max(0,Math.round(n(raw))); if(!bars||bars>libres) return alert('Cantidad de barras incorrecta.');
+    const mm=Math.min(falta,bars*info.barLengthMm);
+    try{
+      if(typeof window.LDH_prepAssignPletinaCompanyV81!=='function') throw new Error('El conector PLETINA/MM todavía no está listo.');
+      const res=await window.LDH_prepAssignPletinaCompanyV81({bars,mmAllocated:mm,barLengthMm:info.barLengthMm,companyId:info.companyId,companyName:info.company.name||info.company.nombre||'',materialId:info.materialId,materialName:lineName(line),ref:currentRef(),lineIndex:index});
+      completeMm(index,mm,'pletina_empresa_barra',{barsUsed:bars,barLengthMm:info.barLengthMm,assignmentId:res.assignment&&res.assignment.id});
+      alert(`✅ Asignado desde ${info.company.name||info.company.nombre||'empresa'}.\n${bars} ${bars===1?'barra':'barras'} · ${fmt(mm)} mm aplicados al trabajo.`);
+    }catch(e){console.error(e);alert('No se ha asignado la pletina.\n\n'+String(e&&e.message||e));}
+  };
 
-      assignments.forEach((a)=>{
-        if(!a || typeof a !== 'object') return;
-        if(!isFerAssignment(a)) return;
-        if(!sameRef(assignmentRef(a), refText)) return;
-        if(!activeStatus(a) || !phaseOk(a)) return;
-        const qty = assignmentQty(a);
-        if(qty <= 0) return;
-        const materialId = String(first(a.materialId,a.matId,a.stockMaterialId,a.v2MaterialId,a.toMaterialId)).trim();
-        if(!materialId) return;
-        const assignmentId = String(first(a.id,a.assignmentId, materialId + '_' + refText + '_' + qty)).replace(/[^a-zA-Z0-9_-]+/g,'_');
-        const movementId = 'mov_ferreteria_fabricacion_' + assignmentId;
-        if(!movementIds.has(movementId)){
-          movements.push({
-            id: movementId,
-            companyId: COMMON_ID,
-            empresaId: COMMON_ID,
-            materialId: materialId,
-            matId: materialId,
-            materialName: first(a.materialName,a.material,a.name,materialLabel(db,materialId)),
-            type: 'salida',
-            tipo: 'salida',
-            qty: qty,
-            cantidad: qty,
-            date: now,
-            createdAt: now,
-            ref: refText,
-            jobRef: refText,
-            concept: first(a.concept,a.concepto,''),
-            reason: 'consumo_ferreteria_al_mandar_fabricacion',
-            source: 'preparacion_pedidos_consumo_ferreteria_fabricacion_20260812',
-            assignmentId: assignmentId,
-            debtExempt: true,
-            returnRequired: false
-          });
-          movementIds.add(movementId);
-          consumedQty += qty;
-        }
-        a.status = 'consumida';
-        a.estado = 'consumida';
-        a.phase = 'fabricacion';
-        a.fase = 'fabricacion';
-        a.consumedQty = qty;
-        a.consumedAt = now;
-        a.updatedAt = now;
-        a.movementId = movementId;
-        consumedAssignments += 1;
-      });
+  window.LDH_pletinaUsarReservaEmpresa=async function(index){
+    const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]; if(!line||!isPletinaMmLine(line)) return;
+    const info=companyInfo(line); const falta=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida));
+    if(!info.ok||!falta) return;
+    const rows=(info.ownReservations||[]).filter(r=>n(r.qty??r.cantidad)>0);
+    if(!rows.length) return alert('No hay una reserva activa de esta pletina para este trabajo.');
+    const r=rows[0]; const avail=Math.floor(n(r.qty??r.cantidad)); const bars=Math.min(avail,Math.ceil(falta/info.barLengthMm)); const mm=Math.min(falta,bars*info.barLengthMm);
+    if(!confirm(`Usar reserva de ${info.company.name||info.company.nombre||'la empresa'}\n\n${bars} ${bars===1?'barra':'barras'} para cubrir ${fmt(mm)} mm del trabajo?`)) return;
+    try{
+      const res=await window.LDH_prepAssignPletinaCompanyV81({bars,mmAllocated:mm,barLengthMm:info.barLengthMm,companyId:info.companyId,companyName:info.company.name||info.company.nombre||'',materialId:info.materialId,materialName:lineName(line),ref:currentRef(),lineIndex:index,reservationId:String(r.id||r.reservationId||'')});
+      completeMm(index,mm,'pletina_reserva_empresa',{barsUsed:bars,barLengthMm:info.barLengthMm,assignmentId:res.assignment&&res.assignment.id,reservationId:String(r.id||r.reservationId||'')});
+    }catch(e){console.error(e);alert('No se ha podido usar la reserva.\n\n'+String(e&&e.message||e));}
+  };
 
-      if(consumedAssignments > 0){
-        db.assignments = assignments;
-        db.movements = movements;
-        db.updatedAt = now;
-        db.lastWriter = 'preparacion_pedidos';
-        db.lastReason = 'consumo_ferreteria_fabricacion';
-        tx.set(docRef, {
-          payload: db,
-          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-          updatedAtIso: now,
-          revision: Date.now().toString(36) + '_prep_fer_consume',
-          build: 'PREP-CONSUME-FERRETERIA-FAB-20260812',
-          materialsCount: db.materials.length,
-          movementsCount: db.movements.length,
-          assignmentsCount: db.assignments.length,
-          reservationsCount: db.reservations.length
-        }, {merge:false});
-      }
-      return {db, consumedQty, consumedAssignments};
-    });
-    if(result && result.db) writeLocal(result.db);
-    return {consumedQty: result.consumedQty || 0, consumedAssignments: result.consumedAssignments || 0};
-  }
-
-  window.LDH_consumirFerreteriaAlMandarFabricacion = consumeFerreteriaForRef;
-
-  const previousConfirm = window.confirmarTodoRecepcion;
-  window.confirmarTodoRecepcion = async function(){
-    const reference = String(window.refActual ?? refActual ?? '').trim();
-    const stage = typeof window.LDH_getTrabajoStage === 'function'
-      ? window.LDH_getTrabajoStage(reference)
-      : 'preparacion';
-
-    /* Si el trabajo ya estaba enviado y solo queda Ferretería reservada, regularizamos
-       sin reenviar ni volver a descontar hierro. */
-    if(stage && stage !== 'preparacion'){
-      if(!confirm('Este trabajo ya está en Fabricación o en una fase posterior.\n\n¿Quieres regularizar solo la Ferretería pendiente de este pedido?')) return;
+  window.LDH_pletinaUsarOtraEmpresa=async function(index){
+    const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]; if(!line||!isPletinaMmLine(line)) return;
+    const pack=stockPack(); const own=companyInfo(line); if(!pack||!own.ok) return alert('Stock no disponible.');
+    const candidates=(pack.companies||[]).filter(c=>!isCommonCompany(c)&&String((typeof _v2IdOfCompany==='function'?_v2IdOfCompany(c):(c.id||c.companyId||c.name))||'')!==String(own.companyId)).map(c=>companyInfo(line,c)).filter(x=>x.ok&&x.materialId&&x.freeBars>0);
+    if(!candidates.length) return alert('No hay otra empresa con barras libres de esta pletina.');
+    const menu=candidates.map((x,i)=>`${i+1}. ${x.company.name||x.company.nombre} · libre ${fmt(x.freeBars)} barra(s)`).join('\n');
+    const rawPick=prompt(`Elegir empresa de origen:\n\n${menu}`, '1'); if(rawPick===null) return;
+    const pick=candidates[Math.max(0,Math.min(candidates.length-1,Math.round(n(rawPick))-1))]; if(!pick) return;
+    const falta=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida)); const need=Math.ceil(falta/pick.barLengthMm); const max=Math.floor(pick.freeBars); const def=Math.min(need,max);
+    const raw=prompt(`Barras a tomar de ${pick.company.name||pick.company.nombre}:`,String(def)); if(raw===null) return; const bars=Math.round(n(raw)); if(bars<=0||bars>max) return alert('Cantidad incorrecta.');
+    const mm=Math.min(falta,bars*pick.barLengthMm); const operationId='asg_pletina_otra_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
+    if(typeof window.LDH_publicarPrestamoODonacionEnFirebase!=='function') return alert('La conexión segura con Stock todavía no está lista.');
+    const loanAssignment={id:operationId,companyId:pick.companyId,materialId:pick.materialId,qty:bars,cantidad:bars,phase:'preparacion',fase:'preparacion',status:'activa',estado:'activa',ref:currentRef(),jobRef:currentRef(),assignmentType:'otra_empresa_pletina_barra',reason:'pletina_desde_otra_empresa',fromEmpresa:pick.company.name||pick.company.nombre||'',fromCompanyId:pick.companyId,toCompanyId:own.companyId,toEmpresa:own.company.name||own.company.nombre||'',toMaterialId:own.materialId,unit:'barra',unidad:'barra',pletinaMm:true,mmAllocated:mm,lineMm:mm,barLengthMm:pick.barLengthMm,createdAt:new Date().toISOString(),source:'preparacion_pedidos_pletina_mm_v81',debtExempt:false,returnRequired:true};
+    try{
+      const result=await window.LDH_publicarPrestamoODonacionEnFirebase({operation:'prestamo',sourceMode:'libre',operationId,qty:bars,ref:currentRef(),concept:(window.metaActual||metaActual||{}).concepto||'',sourceCompanyId:pick.companyId,sourceCompanyName:pick.company.name||pick.company.nombre||'',destinationCompanyId:own.companyId,destinationCompanyName:own.company.name||own.company.nombre||'',sourceMaterialId:pick.materialId,destinationMaterialId:own.materialId,materialName:lineName(line),unit:'barra',loanAssignment});
+      if(result&&result.remoteDB){try{setAny(STOCK_KEY,JSON.stringify(result.remoteDB));}catch(_){ }}
       try{
-        const fer = await consumeFerreteriaForRef(reference);
-        alert(fer.consumedQty > 0
-          ? ('✅ Ferretería regularizada.\n\nConsumido físicamente en Ferretería: ' + fer.consumedQty)
-          : 'No había Ferretería pendiente para este pedido.');
-      }catch(e){
-        console.error(e);
-        alert('No se pudo regularizar Ferretería.\n\n' + String(e && (e.code || e.message) || e));
-      }
-      return;
-    }
-
-    const ironLines = Array.isArray(window.estadoMateriales ?? estadoMateriales)
-      ? (window.estadoMateriales ?? estadoMateriales)
-      : [];
-    if (ironLines.some((line) => String(line && line.unit || '').toLowerCase() === 'barra')
-        && !(window.metaActual ?? metaActual).tipo_hierro) {
-      (window.metaActual ?? metaActual).tipo_hierro = 'Negro';
-      try { setAny(KM(reference), JSON.stringify(window.metaActual ?? metaActual)); } catch (_) {}
-    }
-
-    const input = document.getElementById('inputUnidades');
-    const currentMeta = window.metaActual ?? metaActual;
-    const units = parseFloat(input && input.value) || currentMeta.unidades || 0;
-    if(units <= 0){
-      alert('⛔ Indica las UNIDADES.');
-      if(input) input.focus();
-      return;
-    }
-    if(!confirm(
-      'Mandar a FABRICACIÓN:\nUnidades: ' + units + '\n\n' +
-      'El hierro reservado/asignado y la Ferretería reservada se descontarán ahora del stock físico.'
-    )) return;
-
-    const button = document.getElementById('btnFaseTrabajo');
-    const oldText = button && button.textContent || '';
-    if(button){ button.disabled = true; button.textContent = 'Actualizando Stock…'; }
-    try{
-      const main = await window.LDH_consumirStockAsignadoAlMandarFabricacion(reference);
-      const fer = await consumeFerreteriaForRef(reference);
-      mandarAFabricacion(units, false);
-      let msg = '✅ Enviado a Fabricación.';
-      msg += '\n\nStock principal consumido físicamente: ' + (main && main.consumedQty || 0);
-      msg += '\nFerretería consumida físicamente: ' + (fer && fer.consumedQty || 0);
-      alert(msg);
-    }catch(e){
-      console.error('No se pudo consolidar el stock al mandar a Fabricación', e);
-      alert('No se ha enviado el trabajo a Fabricación.\n\nNo se ha descontado material físico porque no se pudo confirmar la actualización en la nube.\n\n' + String(e && (e.code || e.message) || e || 'Error de sincronización'));
-    }finally{
-      if(button && !currentMeta.en_fabricacion){
-        button.disabled = false;
-        button.textContent = oldText || '💾 Mandar a fabricación';
-      }
-    }
+        const meta=window.metaActual||(typeof metaActual!=='undefined'?metaActual:null); if(meta&&typeof ensureUnassigned==='function'){
+          const ub=ensureUnassigned(meta); ub.items.push({key:typeof _uaMatchKey==='function'?_uaMatchKey(line):'',matId:own.materialId,name:lineName(line),unit:'barra',qtyPending:bars,pendingQty:bars,fromEmpresa:pick.company.name||pick.company.nombre||'',fromCompanyId:pick.companyId,v2MaterialId:own.materialId,toEmpresa:own.company.name||own.company.nombre||'',toCompanyId:own.companyId,ref:currentRef(),reason:'pletina_otra_empresa_usada',assignmentId:operationId,cloudConfirmed:true,createdAt:Date.now(),lastActionAt:Date.now()}); meta.unassignedBorrow=ub; if(typeof saveMetaActual==='function') saveMetaActual();
+        }
+      }catch(_){ }
+      completeMm(index,mm,'pletina_otra_empresa',{barsUsed:bars,barLengthMm:pick.barLengthMm,assignmentId:operationId,fromEmpresa:pick.company.name||pick.company.nombre||''});
+      alert(`✅ Prestada por ${pick.company.name||pick.company.nombre}.\n${bars} ${bars===1?'barra':'barras'} · ${fmt(mm)} mm aplicados.\nQueda pendiente devolver ${bars} ${bars===1?'barra':'barras'}.`);
+    }catch(e){console.error(e);alert('No se ha realizado el préstamo.\n\n'+String(e&&e.message||e));}
   };
+
+  const receiveLock=new Set();
+  window.LDH_pletinaRecibirBarra=async function(index){
+    const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]; if(!line||!isPletinaMmLine(line)) return;
+    const key=currentRef()+'|'+index; if(receiveLock.has(key)) return;
+    const src=sourceInfo(line); const barMm=src.barMm;
+    if(!confirm(`Confirmar recepción física\n\n${lineName(line)}\n1 barra completa = ${fmt(barMm)} mm\n\nLa barra se sumará a STOCK COMÚN y el trabajo tomará solo los mm que necesite. El sobrante quedará disponible.`)) return;
+    receiveLock.add(key); const btn=document.activeElement instanceof HTMLButtonElement?document.activeElement:null; const old=btn&&btn.textContent;
+    if(btn){btn.disabled=true;btn.textContent='Guardando barra…';}
+    try{
+      if(typeof window.LDH_prepReceivePletinaBarV81!=='function') throw new Error('El conector PLETINA/MM todavía no está listo.');
+      const res=await window.LDH_prepReceivePletinaBarV81(line,index);
+      if(res.allocatedMm>0) completeMm(index,res.allocatedMm,'stock_comun_barra_recibida',{barsReceived:1,barLengthMm:res.barLengthMm,assignmentId:res.assignmentId,operationId:res.operationId}); else {try{renderTabla();cargarLista();}catch(_){ }}
+      const current=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]||line; const rem=Math.max(0,n(current.qty_pedida)-n(current.qty_recibida));
+      alert(`✅ Barra recibida en STOCK COMÚN.\n+${fmt(res.barLengthMm)} mm físicos\nAplicados al trabajo: ${fmt(res.allocatedMm)} mm\nSobrante libre: ${fmt(res.freeAfter)} mm${rem>0?`\n\nAún faltan ${fmt(rem)} mm para este trabajo.`:''}`);
+    }catch(e){console.error(e);alert('No se ha registrado la barra.\n\n'+String(e&&e.message||e));}
+    finally{receiveLock.delete(key);if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=old||'Recibir 1 barra';}}
+  };
+
+  function installReceivedOverride(){
+    const current=window.LDH_marcarRecibidoCompleto;
+    if(typeof current!=="function" || current.__ldhPletinaMmV81) return;
+    const base=current;
+    const wrapped=function(index){
+      const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];
+      if(isPletinaMmLine(line)) return window.LDH_pletinaRecibirBarra(index);
+      return base.apply(this,arguments);
+    };
+    wrapped.__ldhPletinaMmV81=true;
+    wrapped.__ldhPletinaMmV81Base=base;
+    window.LDH_marcarRecibidoCompleto=wrapped;
+  }
+
+  try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
+  document.documentElement.dataset.ldhPrepPletina='v81';
+  window.__LDH_PREP_CANONICAL_BUILD=BUILD;
+  function refresh(){try{installReceivedOverride();if(typeof renderTabla==='function'&&currentRef()) renderTabla();}catch(_){ }}
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true}); else [80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
+  setInterval(installReceivedOverride,2500);
+  console.info('[Preparación V81] PLETINA/MM activa');
 })();
 </script>
-<!-- /LDH_PREP_CONSUME_FERRETERIA_ON_FAB_20260812 -->
-
 </body></html>
