@@ -4471,7 +4471,7 @@ function openDetail(materialId){
   if(!m) return alert('No se encuentra el material.');
 
   const moves=(db.movements||[])
-    .filter(x=>x.companyId===activeCompany&&x.materialId===materialId)
+    .filter(x=>x.companyId===activeCompany&&x.materialId===materialId&&!x.ldhHistoryAnchor)
     .slice()
     .sort((a,b)=>moveDate(b)-moveDate(a));
 
@@ -5551,6 +5551,7 @@ window.LDH_applyRemoteStockWithoutReload = function(){
   function getVisibleMovements(){
     const db = getDB();
     return allMovements(db).filter(x => {
+      if(x && x.m && x.m.ldhHistoryAnchor) return false;
       const parts = String(x.path || "").split(".");
       const routeCompany = parts.length > 1 ? parts.slice(1).join(".") : "";
       return belongsToActiveCompany(x.m, routeCompany);
@@ -8066,6 +8067,316 @@ html.ldh-common-stock-mode #search{
   setTimeout(install,1700);
   setTimeout(install,3600);
   console.info('[Stock V61] Buscador global de materiales por empresa activo');
+})();
+</script>
+
+
+<script id="LDH_STOCK_V62_HISTORICO_SEGURO_20260813">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V62_HISTORY_SAFE__) return;
+  window.__LDH_STOCK_V62_HISTORY_SAFE__ = true;
+
+  var EPS = 0.000001;
+
+  function n(v){
+    var x = Number(v || 0);
+    return Number.isFinite(x) ? x : 0;
+  }
+  function isAnchor(m){ return !!(m && m.ldhHistoryAnchor); }
+  function moveTime(m){
+    var raw = m && (m.date || m.fecha || m.createdAt || m.ts || m.time || m.timestamp || m.created) || 0;
+    var d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+  function moveContribution(m){
+    if(!m) return 0;
+    var t = String(m.type || m.tipo || 'entrada').toLowerCase();
+    var q = n(m.qty != null ? m.qty : (m.cantidad != null ? m.cantidad : m.quantity));
+    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].indexOf(t) >= 0) return 0;
+    if(['salida','ajuste_neg','consumo','out'].indexOf(t) >= 0) return -q;
+    if(['entrada','ajuste_pos','devolucion','in'].indexOf(t) >= 0) return q;
+    return q;
+  }
+  function pairKey(companyId, materialId){ return String(companyId || '') + '|' + String(materialId || ''); }
+  function pairOf(m){
+    return {
+      companyId:String(m && (m.companyId || m.empresaId) || ''),
+      materialId:String(m && (m.materialId || m.matId) || '')
+    };
+  }
+  function newId(prefix){
+    try{ if(typeof uid === 'function') return uid(prefix); }catch(_){ }
+    return prefix + '_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+  }
+  function currentISO(){
+    try{ if(typeof now === 'function') return now(); }catch(_){ }
+    return new Date().toISOString();
+  }
+  function addAnchor(companyId, materialId, delta, reason, extra){
+    if(!db || !Array.isArray(db.movements) || Math.abs(delta) < EPS) return null;
+    var row = {
+      id:newId('mov_saldo_hist'),
+      companyId:String(companyId || ''),
+      materialId:String(materialId || ''),
+      type:delta >= 0 ? 'entrada' : 'salida',
+      qty:Math.abs(delta),
+      date:'2000-01-01T00:00:00.000Z',
+      note:'Saldo técnico para conservar el stock físico al limpiar histórico',
+      source:'ldh_history_balance',
+      reason:String(reason || 'history_cleanup'),
+      ldhHistoryAnchor:true,
+      hiddenFromHistory:true,
+      compacted:true,
+      createdAtTechnical:currentISO()
+    };
+    if(extra && typeof extra === 'object') Object.assign(row, extra);
+    db.movements.push(row);
+    return row;
+  }
+  function physical(companyId, materialId){
+    try{ if(typeof realStock === 'function') return n(realStock(companyId, materialId)); }catch(_){ }
+    return (db && Array.isArray(db.movements) ? db.movements : [])
+      .filter(function(m){return String(m.companyId||'')===String(companyId||'') && String(m.materialId||'')===String(materialId||'');})
+      .reduce(function(a,m){return a+moveContribution(m);},0);
+  }
+  function preserveDelete(predicate, reason){
+    if(!db || !Array.isArray(db.movements)) return 0;
+    var before = new Map();
+    var deleted = 0;
+
+    db.movements.forEach(function(m){
+      if(!m || isAnchor(m) || !predicate(m)) return;
+      var pair = pairOf(m);
+      if(!pair.companyId || !pair.materialId) return;
+      var key = pairKey(pair.companyId,pair.materialId);
+      if(!before.has(key)) before.set(key,{companyId:pair.companyId,materialId:pair.materialId,value:physical(pair.companyId,pair.materialId)});
+    });
+
+    db.movements = db.movements.filter(function(m){
+      if(!m || isAnchor(m)) return true;
+      if(predicate(m)){ deleted++; return false; }
+      return true;
+    });
+
+    before.forEach(function(info){
+      var after = physical(info.companyId,info.materialId);
+      var delta = info.value - after;
+      if(Math.abs(delta) >= EPS) addAnchor(info.companyId,info.materialId,delta,reason,{historyPreserved:true});
+    });
+    return deleted;
+  }
+  function dateMatches(m, year, month){
+    var d = new Date(moveTime(m));
+    if(Number.isNaN(d.getTime())) return false;
+    if(d.getFullYear() !== Number(year)) return false;
+    return month === undefined || month === null ? true : d.getMonth() === Number(month);
+  }
+  function belongsActive(m){
+    var cid='';
+    try{ cid=String(activeCompany||''); }catch(_){ }
+    if(!cid) return false;
+    return String(m && (m.companyId || m.empresaId) || '') === cid;
+  }
+  function safeSaveAndRender(){
+    try{ if(typeof save === 'function') save(); }catch(e){ console.error('[Stock V62] Error guardando',e); }
+    try{ if(typeof render === 'function') render(); }catch(_){ }
+  }
+
+  window.LDH_borrarMovimientosDetalleMes = function(materialId, year, month){
+    var m = null;
+    try{ m = typeof materialById === 'function' ? materialById(materialId) : null; }catch(_){ }
+    var nombre = m ? m.name : materialId;
+    if(!confirm('¿Borrar los movimientos de '+nombre+' del mes '+(['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][month]||'')+' '+year+'?\n\nSe borrará el histórico, pero el stock físico actual se conservará exactamente.')) return;
+    var cid=''; try{cid=String(activeCompany||'');}catch(_){ }
+    var deleted = preserveDelete(function(x){
+      return String(x.companyId||'')===cid && String(x.materialId||'')===String(materialId||'') && dateMatches(x,year,month);
+    },'delete_material_month');
+    safeSaveAndRender();
+    try{ if(typeof openDetail === 'function') openDetail(materialId); }catch(_){ }
+    alert('Movimientos borrados: '+deleted+'. El stock físico se ha conservado.');
+  };
+
+  window.LDH_borrarMovimientosDetalleAnio = function(materialId, year){
+    var m = null;
+    try{ m = typeof materialById === 'function' ? materialById(materialId) : null; }catch(_){ }
+    var nombre = m ? m.name : materialId;
+    if(!confirm('¿Borrar los movimientos de '+nombre+' del año '+year+'?\n\nSe borrará el histórico, pero el stock físico actual se conservará exactamente.')) return;
+    var cid=''; try{cid=String(activeCompany||'');}catch(_){ }
+    var deleted = preserveDelete(function(x){
+      return String(x.companyId||'')===cid && String(x.materialId||'')===String(materialId||'') && dateMatches(x,year,null);
+    },'delete_material_year');
+    safeSaveAndRender();
+    try{ if(typeof openDetail === 'function') openDetail(materialId); }catch(_){ }
+    alert('Movimientos borrados: '+deleted+'. El stock físico se ha conservado.');
+  };
+
+  window.LDH_borrarMovimientosMes = function(year, month){
+    var monthName = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][month] || '';
+    if(!confirm('¿Borrar todos los movimientos de '+monthName+' '+year+' de la empresa activa?\n\nSe borrará el histórico, pero el stock físico actual se conservará exactamente.')) return;
+    var deleted = preserveDelete(function(m){ return belongsActive(m) && dateMatches(m,year,month); },'delete_company_month');
+    safeSaveAndRender();
+    alert('Histórico borrado: '+monthName+' '+year+' · '+deleted+' movimientos. El stock físico se ha conservado.');
+  };
+
+  window.LDH_borrarMovimientosAnio = function(year){
+    if(!confirm('¿Borrar todos los movimientos del año '+year+' de la empresa activa?\n\nSe borrará el histórico, pero el stock físico actual se conservará exactamente.')) return;
+    var deleted = preserveDelete(function(m){ return belongsActive(m) && dateMatches(m,year,null); },'delete_company_year');
+    safeSaveAndRender();
+    alert('Histórico borrado: '+year+' · '+deleted+' movimientos. El stock físico se ha conservado.');
+  };
+
+  window.LDH_borrarMovimientosTodos = function(){
+    var empresa='empresa activa';
+    try{ if(typeof companyById==='function'){var c=companyById(activeCompany); if(c) empresa=c.name||c.nombre||empresa;} }catch(_){ }
+    if(!confirm('¿Borrar TODO el histórico de movimientos de '+empresa+'?\n\nSe borrará el histórico, pero el stock físico actual se conservará exactamente.')) return;
+    var deleted = preserveDelete(function(m){ return belongsActive(m); },'delete_company_all');
+    safeSaveAndRender();
+    alert('Histórico borrado para '+empresa+' · '+deleted+' movimientos. El stock físico se ha conservado.');
+  };
+
+  /* Corrige la compactación anterior: el saldo compacto se calcula solo con los
+     movimientos que se eliminan. Los 80 recientes conservados ya no se cuentan dos veces. */
+  try{
+    LDH_compactMovementsForQuota = function(forceFull){
+      try{
+        if(!db) return false;
+        forceFull = !!forceFull;
+        var all = Array.isArray(db.movements) ? db.movements.slice() : [];
+        var originalMovements = all.length;
+        var originalReservations = Array.isArray(db.reservations) ? db.reservations.length : 0;
+        var originalAssignments = Array.isArray(db.assignments) ? db.assignments.length : 0;
+
+        var recent=[];
+        if(!forceFull && originalMovements>120){
+          recent = all.filter(function(m){return m && !isAnchor(m);})
+            .sort(function(a,b){return moveTime(b)-moveTime(a);})
+            .slice(0,80);
+        }
+        var recentSet = new Set(recent);
+        var toCompact = forceFull ? all : all.filter(function(m){return !recentSet.has(m);});
+        var acc = new Map();
+        toCompact.forEach(function(m){
+          if(!m) return;
+          var pair=pairOf(m);
+          if(!pair.companyId || !pair.materialId) return;
+          var delta=moveContribution(m);
+          if(Math.abs(delta)<EPS) return;
+          var key=pairKey(pair.companyId,pair.materialId);
+          acc.set(key,(acc.get(key)||0)+delta);
+        });
+
+        var compacted=[];
+        acc.forEach(function(net,key){
+          if(Math.abs(net)<EPS) return;
+          var parts=key.split('|');
+          compacted.push({
+            id:newId('mov_compact'), companyId:parts[0], materialId:parts[1],
+            type:net>=0?'entrada':'salida', qty:Math.abs(net),
+            date:'2000-01-01T00:00:00.000Z',
+            note:'Saldo técnico de histórico compactado', compacted:true,
+            ldhHistoryAnchor:true, hiddenFromHistory:true, source:'quota_compaction_v62'
+          });
+        });
+        db.movements=compacted.concat(recent);
+
+        if(Array.isArray(db.reservations)) db.reservations=db.reservations.filter(function(r){
+          var st=String(r.status||r.estado||'').toLowerCase();
+          return !st || ['activa','activo','open','abierta'].indexOf(st)>=0;
+        });
+        if(Array.isArray(db.assignments)) db.assignments=db.assignments.filter(function(a){
+          var st=String(a.status||a.estado||'').toLowerCase();
+          return !st || ['activa','activo','open','abierta'].indexOf(st)>=0;
+        });
+        if(Array.isArray(db.reservationDebts)) db.reservationDebts=db.reservationDebts.filter(function(d){
+          var st=String(d.status||d.estado||'').toLowerCase();
+          return !st || ['activa','activo','open','abierta','pendiente'].indexOf(st)>=0;
+        });
+
+        db._quotaCompactedAt=currentISO();
+        db._quotaCompactedForceFull=forceFull;
+        db._quotaOriginalMovements=originalMovements;
+        db._quotaCurrentMovements=db.movements.length;
+        db._quotaOriginalReservations=originalReservations;
+        db._quotaCurrentReservations=Array.isArray(db.reservations)?db.reservations.length:0;
+        db._quotaOriginalAssignments=originalAssignments;
+        db._quotaCurrentAssignments=Array.isArray(db.assignments)?db.assignments.length:0;
+        db._quotaCompactionVersion='V62';
+        return true;
+      }catch(e){
+        console.warn('[Stock V62] No se pudo compactar histórico',e);
+        return false;
+      }
+    };
+  }catch(_){ }
+
+  function repairLegacyNegatives(){
+    try{
+      if(!db || db._historyNegativeRepairV62) return 0;
+      if(!Array.isArray(db.stock)) return 0;
+      var seen=new Set(), repaired=0, details=[];
+      db.stock.forEach(function(s){
+        if(!s) return;
+        var companyId=String(s.companyId||s.empresaId||'');
+        var materialId=String(s.materialId||s.matId||'');
+        if(!companyId || !materialId) return;
+        var key=pairKey(companyId,materialId);
+        if(seen.has(key)) return;
+        seen.add(key);
+        var value=physical(companyId,materialId);
+        if(value < -EPS){
+          addAnchor(companyId,materialId,-value,'repair_negative_after_history_delete',{
+            historyRepair:true,
+            note:'Regularización conservadora de saldo negativo heredado tras borrado de histórico'
+          });
+          repaired++;
+          details.push({companyId:companyId,materialId:materialId,from:value,to:0});
+        }
+      });
+      db._historyNegativeRepairV62={at:currentISO(),count:repaired,mode:'negative_to_zero',details:details};
+      if(repaired){
+        safeSaveAndRender();
+        console.warn('[Stock V62] Saldos negativos heredados regularizados a 0:',repaired,details);
+      }else{
+        try{ if(typeof save==='function') save(); }catch(_){ }
+      }
+      return repaired;
+    }catch(e){
+      console.warn('[Stock V62] No se pudo revisar negativos heredados',e);
+      return 0;
+    }
+  }
+
+  function wrapRemoteApply(){
+    try{
+      var fn=window.LDH_applyRemoteStockWithoutReload;
+      if(typeof fn!=='function' || fn.__ldhV62NegativeRepair) return;
+      var wrapped=function(){
+        var result=fn.apply(this,arguments);
+        setTimeout(repairLegacyNegatives,120);
+        return result;
+      };
+      wrapped.__ldhV62NegativeRepair=true;
+      window.LDH_applyRemoteStockWithoutReload=wrapped;
+    }catch(_){ }
+  }
+  function markBuild(){
+    try{
+      document.documentElement.dataset.ldhStockBuild='V62';
+      var badge=document.getElementById('ldhStockBuildV61') || document.getElementById('ldhStockBuildV60') || document.getElementById('ldhStockBuildV59');
+      if(badge){badge.id='ldhStockBuildV62';badge.textContent='Stock nube · V62';}
+    }catch(_){ }
+  }
+  function install(){
+    wrapRemoteApply();
+    repairLegacyNegatives();
+    markBuild();
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',install,{once:true});
+  else install();
+  setTimeout(install,1800);
+  setTimeout(install,4200);
+  console.info('[Stock V62] Histórico seguro: borrar/compactar ya no altera el físico; negativos heredados -> 0 una sola vez');
 })();
 </script>
 
