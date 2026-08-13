@@ -76,7 +76,7 @@
     </section>
 
     <div class="toolbar">
-      <input id="q" class="search" placeholder="Buscar referencia, concepto o empresa..." oninput="App.render()">
+      <input id="q" class="search" placeholder="Buscar cualquier palabra del pedido (ej. parking)..." oninput="App.render()">
       <select id="companyFilter" onchange="App.render()"><option value="">Todas las empresas</option></select>
       <select id="stageFilter" onchange="App.render()">
         <option value="">Fabricación y pintura</option>
@@ -164,6 +164,36 @@
   function n(v){ const x = Number(String(v ?? 0).replace(",", ".")); return Number.isFinite(x) ? x : 0; }
   function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  function searchTextDeep(value, out, seen, depth){
+    out = out || [];
+    seen = seen || new WeakSet();
+    depth = depth || 0;
+    if(value === null || value === undefined || depth > 5 || out.length > 1200) return out;
+    const type = typeof value;
+    if(type === "string" || type === "number"){
+      const text = String(value);
+      if(text && text.length <= 4000 && !/^data:/i.test(text)) out.push(text);
+      return out;
+    }
+    if(type !== "object") return out;
+    if(seen.has(value)) return out;
+    seen.add(value);
+    if(Array.isArray(value)){
+      value.slice(0,300).forEach(v => searchTextDeep(v,out,seen,depth+1));
+      return out;
+    }
+    Object.keys(value).slice(0,300).forEach(key => {
+      if(/^(foto|photo|image|imagen|base64|blob|html)$/i.test(key)) return;
+      searchTextDeep(value[key],out,seen,depth+1);
+    });
+    return out;
+  }
+  function matchesWordSearch(item, query){
+    const terms = norm(query).split(/\s+/).filter(Boolean);
+    if(!terms.length) return true;
+    const hay = norm(searchTextDeep(item,[],new WeakSet(),0).join(" "));
+    return terms.every(term => hay.includes(term));
+  }
   function isCloudDeleted(refOrItem){
     const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
     try{ return !!(ref && window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(e){ return false; }
@@ -516,14 +546,12 @@
           return activeWorkshop > 0;
         })
         .filter(it => !companyFilter || String(it.company || it.empresa || "") === companyFilter)
-        .filter(it => {
-          if(!q) return true;
-          const hay = [it.ref,it.referencia,it.concept,it.concepto,it.company,it.empresa,it.notes].join(" ");
-          return norm(hay).includes(q);
-        });
+        .filter(it => !q || matchesWordSearch(it,q));
     },
 
     render(){
+      const rawQuery = String(document.getElementById("q").value || "").trim();
+      const searching = !!norm(rawQuery);
       const items = this.visibleItems();
       const all = this.allItems();
       const totals = this.counters(all);
@@ -531,7 +559,7 @@
       document.getElementById("kPint").textContent = totals.pintura;
       document.getElementById("kAlm").textContent = totals.almacen;
       document.getElementById("kEnt").textContent = totals.entregado;
-      document.getElementById("status").textContent = `${items.length} trabajos visibles`;
+      document.getElementById("status").textContent = searching ? `${items.length} coincidencias` : `${items.length} trabajos visibles`;
 
       const list = document.getElementById("list");
       list.querySelectorAll("details.company[data-company]").forEach(detail=>{
@@ -541,7 +569,9 @@
         else this.openCompanies.delete(company);
       });
       if(!items.length){
-        list.innerHTML = `<div class="empty">No hay trabajos activos en Fabricación.</div>`;
+        list.innerHTML = searching
+          ? `<div class="empty">No hay trabajos que contengan "${esc(rawQuery)}".</div>`
+          : `<div class="empty">No hay trabajos activos en Fabricación.</div>`;
         return;
       }
 
@@ -554,7 +584,7 @@
 
       list.innerHTML = Array.from(groups.entries())
         .sort((a,b)=>a[0].localeCompare(b[0],"es",{sensitivity:"base"}))
-        .map(([company, arr]) => this.companyHTML(company, arr))
+        .map(([company, arr]) => this.companyHTML(company, arr, searching))
         .join("");
 
       list.querySelectorAll("details.company[data-company]").forEach(detail=>{
@@ -567,14 +597,14 @@
       });
     },
 
-    companyHTML(company, arr){
+    companyHTML(company, arr, forceOpen=false){
       const totals = this.counters(arr);
       const rows = arr
         .sort((a,b)=>String(a.ref||"").localeCompare(String(b.ref||""),"es",{sensitivity:"base"}))
         .map(it=>this.rowHTML(it))
         .join("");
       return `
-        <details class="company" data-company="${esc(company)}"${this.openCompanies.has(company) ? " open" : ""}>
+        <details class="company" data-company="${esc(company)}"${(forceOpen || this.openCompanies.has(company)) ? " open" : ""}>
           <summary>
             <span class="fold"></span>
             <span class="company-name">${esc(company)}</span>
