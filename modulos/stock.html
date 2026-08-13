@@ -1330,7 +1330,7 @@ html, body{
 </style>
 
 <meta name="ldh-fix" content="STOCK-V56-PUBLICACION-FIRMA-WATCHDOG-20260805">
-<meta name="ldh-build" content="STOCK-V66-PLETINA-MM-AUTORITATIVO-20260813">
+<meta name="ldh-build" content="STOCK-V67-LIBERAR-RESERVA-INDIVIDUAL-20260813">
 </head>
 <body>
 <div class="app">
@@ -4447,23 +4447,43 @@ function _deudasDetalleMaterial(materialId){
   return {borrowed, reserveDebts};
 }
 
-function liberarReservaDesdeDetalle(reservationId, materialId){
-  const r = (db.reservations||[]).find(x=>x.id===reservationId);
+function liberarReservaDesdeDetalle(reservationId, materialId, volverAReservas=false){
+  const r = (db.reservations||[]).find(x=>String(x.id||'')===String(reservationId||''));
   if(!r) return alert('No se encuentra la reserva.');
 
-  const ref = r.ref || r.jobRef || r.trabajoRef || '';
-  const qty = Number(r.qty || r.cantidad || 0);
+  // V67: desde Stock solo se puede liberar una reserva que siga en Preparación.
+  // Una reserva que ya esté en Fabricación puede representar material físicamente comprometido.
+  const phase = String(r.phase || r.fase || 'preparacion').toLowerCase();
+  const status = String(r.status || r.estado || 'activa').toLowerCase();
+  if(status !== 'activa') return alert('Esta reserva ya no está activa.');
+  if(phase !== 'preparacion'){
+    return alert(`Esta reserva está en fase ${phase || 'desconocida'} y no puede liberarse directamente desde Stock.`);
+  }
+  if(String(r.companyId||r.empresaId||'') !== String(activeCompany||'')){
+    return alert('La reserva no pertenece a la empresa activa.');
+  }
 
-  if(!confirm(`¿Liberar esta reserva?\n\nTrabajo: ${ref || 'sin referencia'}\nCantidad: ${fmt(qty)}\n\nEl material volverá a quedar libre en stock.`)) return;
+  const m = materialById(materialId || r.materialId || r.matId);
+  const ref = r.ref || r.jobRef || r.trabajoRef || r.workRef || '';
+  const qty = Number(r.qty || r.cantidad || r.reservado || r.cantidadReservada || 0);
+  const unit = (m && (m.unit || m.unidad)) || '';
 
+  if(!confirm(`¿Liberar SOLO esta reserva?\n\nMaterial: ${(m&&m.name)||materialId||'material'}\nTrabajo: ${ref || 'sin referencia'}\nCantidad: ${fmt(qty)} ${unit}\n\nEl stock físico NO cambia. Esta cantidad volverá a quedar libre.`)) return;
+
+  const now = new Date().toISOString();
   r.status = 'liberada';
   r.estado = 'liberada';
-  r.releasedAt = new Date().toISOString();
-  r.updatedAt = new Date().toISOString();
+  r.pendingQty = 0;
+  r.qtyPending = 0;
+  r.releasedAt = now;
+  r.updatedAt = now;
+  r.releasedReason = 'liberada_individual_desde_stock_v67';
+  r.releaseReason = 'liberada_individual_desde_stock_v67';
 
   save();
-  openDetail(materialId);
   render();
+  if(volverAReservas) LDH_verReservasActivas();
+  else openDetail(materialId || r.materialId || r.matId);
 }
 
 function openDetail(materialId){
@@ -4835,15 +4855,20 @@ function LDH_verReservasActivas(){
     return;
   }
 
-  const body = `<div class="ldh-kpi-list">${items.map(({r,m,ref})=>`
-    <div class="ldh-kpi-row">
+  const body = `<div class="ldh-kpi-list">${items.map(({r,m,ref,kind})=>{
+    const phase=String(r.phase||r.fase||'preparacion').toLowerCase();
+    const canRelease = kind==='reserva' && phase==='preparacion';
+    const action = canRelease
+      ? `<button class="btn small danger" onclick="liberarReservaDesdeDetalle('${r.id}','${m.id}',true)">Liberar</button>`
+      : `<button class="btn small disabled" disabled>${kind==='asignacion'?'Asignado':(phase==='fabricacion'?'En fabricación':'Bloqueada')}</button>`;
+    return `<div class="ldh-kpi-row">
       <div><b>${esc(m.name)}</b><div class="sub">${esc(m.family||'Sin familia')}</div></div>
-      <div><span class="pill ${String(r.phase||r.fase)==='pintura'?'bad':(String(r.phase||r.fase)==='fabricacion'?'warn':'ok')}">${String(r.phase||r.fase)==='pintura'?'BLOQ. PINTURA':esc(r.phase||r.fase||'preparacion')}</span></div>
+      <div><span class="pill ${phase==='pintura'?'bad':(phase==='fabricacion'?'warn':'ok')}">${phase==='pintura'?'BLOQ. PINTURA':esc(phase||'preparacion')}</span></div>
       <div class="qty">${fmt(r.qty||r.cantidad||0)} ${esc(m.unit||'')}</div>
       <div>${esc(ref)}</div>
-      <button class="btn small" onclick="openDetail('${m.id}')">Ver</button>
-    </div>
-  `).join('')}</div>`;
+      <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button class="btn small" onclick="openDetail('${m.id}')">Ver</button>${action}</div>
+    </div>`;
+  }).join('')}</div>`;
 
   openModal('Reservado activo', body, '');
 }
@@ -8765,7 +8790,7 @@ html.ldh-common-stock-mode #search{
   'use strict';
   if(window.__LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO__) return;
   window.__LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO__=true;
-  var BUILD='STOCK-V66-PLETINA-MM-AUTORITATIVO-20260813';
+  var BUILD='STOCK-V67-LIBERAR-RESERVA-INDIVIDUAL-20260813';
   var DEFAULT_BAR_MM=6000;
   var baseReservedStock=typeof reservedStock==='function'?reservedStock:null;
   var baseAssignedStock=typeof assignedStock==='function'?assignedStock:null;
@@ -8854,9 +8879,9 @@ html.ldh-common-stock-mode #search{
 
   function mark(){
     try{
-      document.documentElement.dataset.ldhStockBuild='V66';
+      document.documentElement.dataset.ldhStockBuild='V67';
       var badge=document.getElementById('ldhStockBuildV65')||document.getElementById('ldhStockBuildV64')||document.getElementById('ldhStockBuildV63')||document.getElementById('ldhStockBuildV62')||document.getElementById('ldhStockBuildV61')||document.getElementById('ldhStockBuildV60')||document.getElementById('ldhStockBuildV58');
-      if(badge){badge.id='ldhStockBuildV66';badge.textContent='Stock nube · V66 · Pletina/mm';}
+      if(badge){badge.id='ldhStockBuildV67';badge.textContent='Stock nube · V67 · Reserva individual';}
     }catch(_){ }
   }
   function refresh(){
@@ -8875,5 +8900,22 @@ html.ldh-common-stock-mode #search{
 </script>
 <!-- LDH_STOCK_V66_PLETINA_MM_AUTORITATIVO_20260813 -->
 
+
+<script id="LDH_STOCK_V67_LIBERAR_RESERVA_INDIVIDUAL_20260813">
+(function(){
+  'use strict';
+  const BUILD='STOCK-V67-LIBERAR-RESERVA-INDIVIDUAL-20260813';
+  function mark(){
+    try{
+      document.documentElement.dataset.ldhStockBuild='V67';
+      const badge=document.getElementById('ldhStockBuildV67')||document.querySelector('[id^="ldhStockBuildV"]');
+      if(badge){badge.id='ldhStockBuildV67';badge.textContent='Stock nube · V67 · Reserva individual';}
+    }catch(_){}
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mark,{once:true});else mark();
+  [300,1200,3500].forEach(d=>setTimeout(mark,d));
+  console.info('[Stock V67] Liberación individual de reservas de Preparación activa');
+})();
+</script>
 </body>
 </html>
