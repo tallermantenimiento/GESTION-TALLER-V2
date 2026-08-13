@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V82-PLETINA-MM-UNIDADES-BLINDADAS-20260813" />
+<meta name="ldh-build" content="PREPARACION-V83-RECIBIDA-SOLO-ACCION-EXPLICITA-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -494,7 +494,7 @@
   }
 </style>
 
-<meta name="ldh-fix" content="PREPARACION-V82-PLETINA-MM-UNIDADES-BLINDADAS-20260813">
+<meta name="ldh-fix" content="PREPARACION-V83-RECIBIDA-SOLO-ACCION-EXPLICITA-20260813">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -3027,6 +3027,13 @@ try{
       }
       metaParaGuardar.unidades = qty;
       metaParaGuardar.fecha = Date.now();
+      // V83: en pedidos que entran desde Cálculo, "Recibida" nunca se deriva de
+      // reservas/asignaciones existentes. Solo cambia por una acción explícita.
+      if(snap.source !== 'fabricacion_deudor'){
+        metaParaGuardar.receipt_policy_explicit_v83 = true;
+        metaParaGuardar.receipt_policy_migrated_v83 = true;
+        metaParaGuardar.receipt_policy_v83_at = new Date().toISOString();
+      }
       if (!metaParaGuardar.tipo_hierro) metaParaGuardar.tipo_hierro = "";
       // Importante: pedido nuevo/reimportado desde Cálculo SIEMPRE queda en Preparación.
       // No debe heredar estados antiguos de la misma referencia.
@@ -3134,6 +3141,11 @@ try{
           l.aplicado_qty = 0;
           l.aplicado = 0;
           l.stock_consumed_qty = 0;
+          l.receipt_policy_explicit_v83 = true;
+          l.receipt_manual_v83 = false;
+          if(Array.isArray(l.trace)){
+            l.trace = l.trace.filter(t=>String(t && t.source || "") !== "stock_asignado_propio_sync");
+          }
           l.ok = false;
           l.completo = false;
           l.done = false;
@@ -5995,7 +6007,131 @@ function LDH_trazabilidadPrestamosStockLinea(line){
   }
 }
 
+function LDH_isPletinaMmPolicyV83(line){
+  try{
+    if(typeof window.LDH_isPletinaMmLine === "function" && window.LDH_isPletinaMmLine(line)) return true;
+  }catch(e){}
+  const unit = String((line && (line.unit || line.unidad)) || "").trim().toLowerCase();
+  const name = String((line && (line.mat || line.material || line.name || line.linked_matName || line.stockLinkLabel)) || "").toLowerCase();
+  return (unit === "mm" || (line && (line.pletina_mm === true || line.gestion_mm === true))) && name.includes("pletina");
+}
+
+function LDH_receiptTraceExplicitV83(trace){
+  const s = String(trace && trace.source || "").trim().toLowerCase();
+  if(!s || s === "stock_asignado_propio_sync") return false;
+  if(s.startsWith("devolucion") || s.startsWith("compensacion") || s.startsWith("prestado_a_")) return false;
+  return s.startsWith("reserva") ||
+    s.startsWith("libre") ||
+    s.startsWith("stock_comun") ||
+    s.includes("otra_empresa") ||
+    s.startsWith("entrada_stock") ||
+    s.startsWith("entrada_desde") ||
+    s.startsWith("stock_recibido_ok") ||
+    s.startsWith("recibido_") ||
+    s.startsWith("pletina_") ||
+    s.startsWith("donacion_") ||
+    s === "pintura" ||
+    s === "stock_v2" ||
+    s.startsWith("libre_exacto_stock") ||
+    s.startsWith("manual_recibida_v83") ||
+    s.startsWith("manual_ok_v83") ||
+    s.startsWith("stock_asignado_propio_confirmado_v83");
+}
+
+function LDH_receiptPolicyExplicitV83Active(){
+  try{
+    if(metaActual && metaActual.receipt_policy_explicit_v83) return true;
+  }catch(e){}
+  // Migración segura de la prueba V81/V82: las líneas PLETINA/MM solo existen
+  // en el flujo nuevo. Si el pedido contiene una, activamos la política para
+  // todo el pedido para que las reservas antiguas no marquen nada como recibido.
+  try{
+    if(Array.isArray(estadoMateriales) && estadoMateriales.some(LDH_isPletinaMmPolicyV83)){
+      if(metaActual && typeof metaActual === "object"){
+        metaActual.receipt_policy_explicit_v83 = true;
+      }
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+
+function LDH_cleanupAutoReceivedV83(){
+  if(!LDH_receiptPolicyExplicitV83Active()) return false;
+  let changed = false;
+  const firstMigration = !(metaActual && metaActual.receipt_policy_migrated_v83);
+  const lines = Array.isArray(estadoMateriales) ? estadoMateriales : [];
+
+  lines.forEach(line=>{
+    if(!line || typeof line !== "object") return;
+    const ped = Math.max(0,toNum(line.qty_pedida));
+    const traces = Array.isArray(line.trace) ? line.trace : [];
+    const autoTraces = traces.filter(t=>String(t && t.source || "") === "stock_asignado_propio_sync");
+    const explicitTraces = traces.filter(LDH_receiptTraceExplicitV83);
+    const isPletina = LDH_isPletinaMmPolicyV83(line);
+    const manual = line.receipt_manual_v83 === true;
+
+    // Los rastros creados por la antigua reconciliación automática nunca son
+    // una acción del usuario y se eliminan.
+    if(autoTraces.length){
+      line.trace = traces.filter(t=>String(t && t.source || "") !== "stock_asignado_propio_sync");
+      changed = true;
+    }
+
+    // En la primera migración del pedido, o si vuelve un snapshot antiguo con
+    // un rastro automático, reconstruimos únicamente desde acciones explícitas.
+    // Para PLETINA/MM además se blinda siempre el falso 1/2 mm de V81/V82:
+    // si no existe ninguna acción explícita, Recibida debe ser cero.
+    const mustRebuild = !manual && (firstMigration || autoTraces.length > 0 || (isPletina && explicitTraces.length === 0));
+    if(!mustRebuild) return;
+
+    let target = 0;
+    if(explicitTraces.length){
+      target = explicitTraces.reduce((sum,t)=>sum + Math.max(0,toNum(t && (t.qty ?? t.cantidad ?? 0))),0);
+      if(ped > 0) target = Math.min(ped,target);
+    }
+
+    if(Math.abs(toNum(line.qty_recibida)-target) > 0.000001 ||
+       Math.abs(toNum(line.recibida)-target) > 0.000001 ||
+       Math.abs(toNum(line.aplicado_qty)-target) > 0.000001){
+      line.qty_recibida = target;
+      line.recibida = target;
+      line.aplicado_qty = target;
+      line.aplicado = target;
+      line.stock_consumed_qty = Math.min(target,Math.max(0,toNum(line.stock_consumed_qty)));
+      line.ok = ped > 0 && target >= ped;
+      line.completo = line.ok;
+      line.done = line.ok;
+      line.isDone = line.ok;
+      line.isCompleted = line.ok;
+      changed = true;
+    }
+  });
+
+  if(metaActual && typeof metaActual === "object"){
+    if(!metaActual.receipt_policy_explicit_v83 || !metaActual.receipt_policy_migrated_v83){
+      metaActual.receipt_policy_explicit_v83 = true;
+      metaActual.receipt_policy_migrated_v83 = true;
+      metaActual.receipt_policy_v83_at = metaActual.receipt_policy_v83_at || new Date().toISOString();
+      changed = true;
+    }
+  }
+
+  if(changed){
+    try{ if(typeof saveMetaActual === "function") saveMetaActual(); }catch(e){}
+    try{ if(typeof guardarEstadoLocal === "function") guardarEstadoLocal(); }catch(e){}
+    try{
+      if(window.__ldhPrepSyncNow){
+        setTimeout(()=>Promise.resolve(window.__ldhPrepSyncNow("receipt_policy_v83:" + String(refActual||""))).catch(()=>{}),120);
+      }
+    }catch(e){}
+  }
+  return changed;
+}
+
 function renderTabla() {
+  const explicitReceiptPolicyV83 = LDH_receiptPolicyExplicitV83Active();
+  try{ if(explicitReceiptPolicyV83) LDH_cleanupAutoReceivedV83(); }catch(e){}
   // Blindaje final: ninguna recarga o sincronización debe volver a mostrar
   // dos filas para el mismo material/unidad.
   try{ LDH_consolidarEstadoActual(); }catch(e){}
@@ -6029,7 +6165,7 @@ function renderTabla() {
       const fnPletina = window.LDH_asignadoPropioStockParaLinea;
       const srcPletina = (typeof window.LDH_pletinaSourceInfo === "function") ? window.LDH_pletinaSourceInfo(linea) : null;
       const stockPletinaConocido = !!(srcPletina && ((srcPletina.common && srcPletina.common.pack) || (srcPletina.company && srcPletina.company.pack)));
-      if(isPletinaMm && fnPletina && fnPletina.__ldhPletinaMmV82 && stockPletinaConocido){
+      if(!explicitReceiptPolicyV83 && isPletinaMm && fnPletina && fnPletina.__ldhPletinaMmV82 && stockPletinaConocido){
         const mmAsignados = Math.max(0, toNum(fnPletina(linea)));
         const mmAutoritativos = pedida > 0 ? Math.min(pedida, mmAsignados) : mmAsignados;
         const hayRastroGenerico = Array.isArray(linea.trace) && linea.trace.some(t=>String(t && t.source || "") === "stock_asignado_propio_sync");
@@ -6052,7 +6188,7 @@ function renderTabla() {
     // se asignan barras desde "Asignar libre" pero la columna Recibida queda a 0.
     try{
       const asigPropia = (typeof LDH_asignadoPropioStockParaLinea === "function") ? LDH_asignadoPropioStockParaLinea(linea) : 0;
-      if(!isPletinaMm && asigPropia > recibida){
+      if(!explicitReceiptPolicyV83 && !isPletinaMm && asigPropia > recibida){
         const targetRec = pedida > 0 ? Math.min(pedida, asigPropia) : asigPropia;
         linea.qty_recibida = targetRec;
         linea.recibida = targetRec;
@@ -6296,7 +6432,7 @@ function renderTabla() {
     // - Si Stock v2 dice que este material está asignado a este trabajo, reflejarlo como recibido.
     // - Si parte de lo asignado se ha prestado a otro trabajo/empresa, BAJAR la recibida neta.
     try{
-      if(!isPletinaMm && typeof _v2CompanyStockInfo === "function"){
+      if(!explicitReceiptPolicyV83 && !isPletinaMm && typeof _v2CompanyStockInfo === "function"){
         const infAsig = _v2CompanyStockInfo(linea, linkedMat);
         const qAsig = toNum(infAsig && infAsig.asignado);
         const qPrestadoFuera = (typeof LDH_prestadoFueraStockLineaQty === "function") ? toNum(LDH_prestadoFueraStockLineaQty(linea)) : 0;
@@ -8875,10 +9011,16 @@ function toggleOk(index, isChecked) {
   const pedida = toNum(linea.qty_pedida);
   if (isChecked) {
     if (pedida > 0) linea.qty_recibida = pedida;
+    linea.receipt_manual_v83 = true;
+    if(!Array.isArray(linea.trace)) linea.trace = [];
+    linea.trace = linea.trace.filter(t=>String(t && t.source || "") !== "manual_ok_v83");
+    linea.trace.push({at:new Date().toISOString(),qty:pedida,source:"manual_ok_v83"});
   } else {
     linea.qty_recibida = 0;
     linea.aplicado_qty = 0;
     linea.stock_consumed_qty = 0;
+    linea.receipt_manual_v83 = false;
+    if(Array.isArray(linea.trace)) linea.trace = linea.trace.filter(t=>String(t && t.source || "") !== "manual_ok_v83");
   }
   guardarEstadoLocal();
   renderTabla();
@@ -8961,6 +9103,11 @@ function updateQty(index, inputEl) {
   if (val < 0) { val = 0; inputEl.value = 0; }
 
   linea.qty_recibida = val;
+  linea.recibida = val;
+  linea.receipt_manual_v83 = val > 0;
+  if(!Array.isArray(linea.trace)) linea.trace = [];
+  linea.trace = linea.trace.filter(t=>String(t && t.source || "") !== "manual_recibida_v83");
+  if(val > 0) linea.trace.push({at:new Date().toISOString(),qty:val,source:"manual_recibida_v83"});
   linea.ok = (pedida > 0 && val >= pedida);
 
   // Si el usuario baja la cantidad recibida, el OK debe desaparecer y las marcas
@@ -10710,8 +10857,8 @@ init();
       ctx.line.isCompleted = ctx.line.ok;
 
       if(!Array.isArray(ctx.line.trace)) ctx.line.trace = [];
-      const exists = ctx.line.trace.some(t=>String(t && t.source || "") === "stock_asignado_propio_sync" && n(t && t.qty) === target);
-      if(!exists) ctx.line.trace.push({at:new Date().toISOString(), qty:target, source:"stock_asignado_propio_sync"});
+      const exists = ctx.line.trace.some(t=>String(t && t.source || "") === "stock_asignado_propio_confirmado_v83" && n(t && t.qty) === target);
+      if(!exists) ctx.line.trace.push({at:new Date().toISOString(), qty:target, source:"stock_asignado_propio_confirmado_v83"});
 
       if(typeof guardarEstadoLocal === "function") guardarEstadoLocal();
       if(typeof renderTabla === "function") renderTabla();
@@ -22887,7 +23034,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       if(status){
         const current = String(status.textContent || '').trim();
         const base = current.replace(/(?:\s*·\s*V\d+)+\s*$/i, '').trim();
-        const target = (base || 'Preparación') + ' · V80';
+        const target = (base || 'Preparación') + ' · V83';
         if(current !== target) status.textContent = target;
         status.dataset.ldhBuild = BUILD;
       }
@@ -23252,7 +23399,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V80';
+        status.textContent = (base || 'Preparación') + ' · V83';
         break;
       }
     }
@@ -23671,7 +23818,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V80';
+        status.textContent = (base || 'Preparación') + ' · V83';
         break;
       }
     }
@@ -23968,7 +24115,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       const status = document.querySelector(selector);
       if(status){
         const base = String(status.textContent || 'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-        status.textContent = (base || 'Preparación') + ' · V80';
+        status.textContent = (base || 'Preparación') + ' · V83';
         break;
       }
     }
@@ -24229,7 +24376,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       const status=document.querySelector(selector);
       if(!status) continue;
       const base=String(status.textContent || 'Preparacion').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
-      status.textContent=(base || 'Preparacion')+' · V80';
+      status.textContent=(base || 'Preparacion')+' · V83';
       break;
     }
   }
@@ -24254,7 +24401,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   if(window.__LDH_PREP_PLETINA_MM_V82__) return;
   window.__LDH_PREP_PLETINA_MM_V82__=true;
 
-  const BUILD='PREPARACION-V82-PLETINA-MM-UNIDADES-BLINDADAS-20260813';
+  const BUILD='PREPARACION-V83-RECIBIDA-SOLO-ACCION-EXPLICITA-20260813';
   const STOCK_KEY='ldh_v2_company_stock_v1';
   const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
   const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
@@ -24572,4 +24719,6 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 })();
 </script>
 <!-- LDH_PREP_PLETINA_MM_V82_UNIDADES_BLINDADAS_20260813 -->
+
+<!-- LDH_PREP_V83_RECIBIDA_SOLO_ACCION_EXPLICITA_20260813 -->
 </body></html>
