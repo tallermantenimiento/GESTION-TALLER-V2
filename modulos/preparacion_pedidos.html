@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V84-PLETINA-MM-GLOBAL-20260813" />
+<meta name="ldh-build" content="PREPARACION-V85-PLETINA-MM-LEGACY-REPAIR-20260813" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -19945,6 +19945,27 @@ function LDH_prepPletinaQtyIsMmV84(row) {
 function LDH_prepMigratePletinaQtyRowV84(row, barLengthMm) {
   if (!row || typeof row !== "object") return false;
   if (LDH_prepPletinaQtyIsMmV84(row)) {
+    const explicitTaggedMm = Math.max(0, Number(row.mmAllocated ?? row.lineMm ?? row.mmAssigned ?? 0) || 0);
+    const migrated = !!(row.lengthQtyMigrationV64 || row.lengthQtyMigrationV84 || row.lengthQtyMigrationV65Repair || row.lengthQtyMigrationV85Repair || row.lengthQtyCreatedV65);
+    const src = LDH_prepPletinaNormV81([row.source,row.reason,row.assignmentType,row.createdFrom,row.origin].join(" "));
+    const modernMm = src.includes("pletina mm") || src.includes("stock comun") || src.includes("mm global");
+    const rawDate = row.createdAt ?? row.date ?? row.fecha ?? row.updatedAt ?? "";
+    const ms = Date.parse(rawDate);
+    const old = Number.isFinite(ms) && ms < Date.parse("2026-08-13T00:00:00Z");
+    const legacySrc = src.includes("v48") || src.includes("reconciliado") || src === "stock" || src.includes("reserva desde stock");
+    if (!(explicitTaggedMm > 0) && !migrated && !modernMm && (old || legacySrc)) {
+      const legacyQty = Math.max(0, Number(row.qty ?? row.cantidad ?? row.reservado ?? row.pendingQty ?? row.qtyPending ?? 0) || 0);
+      if (legacyQty > 0) {
+        const repairedMm = Math.max(0, Math.round(legacyQty * barLengthMm));
+        row.qty = repairedMm; row.cantidad = repairedMm;
+        if (row.reservado !== undefined) row.reservado = repairedMm;
+        row.mmAllocated = repairedMm; row.lineMm = repairedMm; row.barLengthMm = barLengthMm;
+        row.unit = "mm"; row.unidad = "mm"; row.unitBasis = "mm"; row.lengthMode = "mm"; row.lengthQtySchemaV64 = "mm";
+        row.lengthQtyMigrationV85Repair = { at:new Date().toISOString(), fromQty:legacyQty, fromUnit:"barra_legacy_mistag_mm", barLengthMm, toMm:repairedMm };
+        row.updatedAt = new Date().toISOString();
+        return true;
+      }
+    }
     if (row.lengthQtySchemaV64 !== "mm") { row.lengthQtySchemaV64 = "mm"; return true; }
     return false;
   }
@@ -24450,11 +24471,24 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     return mid?{company,companyId:cid,material:mat,materialId:mid,row}:null;
   }
   function qtyMm(row,barMm){
-    const unit=norm(row&&(row.unitBasis||row.lengthMode||row.unit||row.unidad)||'');
-    if(unit==='mm'||row?.lengthQtySchemaV64==='mm') return Math.max(0,n(row.qty??row.cantidad??row.reservado??row.pendingQty??row.qtyPending));
     const explicit=Math.max(0,n(row&& (row.mmAllocated??row.lineMm??row.mmAssigned)));
     if(explicit>0) return explicit;
-    return Math.max(0,n(row&&(row.qty??row.cantidad??row.reservado??row.pendingQty??row.qtyPending))*barMm);
+    const q=Math.max(0,n(row&&(row.qty??row.cantidad??row.reservado??row.pendingQty??row.qtyPending)));
+    const unit=norm(row&&(row.unitBasis||row.lengthMode||row.unit||row.unidad)||'');
+    const claimsMm=(unit==='mm'||row?.lengthQtySchemaV64==='mm');
+    const migrated=!!(row&&(row.lengthQtyMigrationV64||row.lengthQtyMigrationV84||row.lengthQtyMigrationV65Repair||row.lengthQtyMigrationV85Repair||row.lengthQtyCreatedV65));
+    const source=norm([row&&row.source,row&&row.reason,row&&row.assignmentType,row&&row.createdFrom,row&&row.origin].join(' '));
+    const modernMm=source.includes('pletina mm')||source.includes('pletina_mm')||source.includes('stock comun')||source.includes('stock_comun')||source.includes('mm global');
+    const rawDate=row&&(row.createdAt||row.date||row.fecha||row.updatedAt||'');const ms=Date.parse(rawDate);
+    const old=Number.isFinite(ms)&&ms<Date.parse('2026-08-13T00:00:00Z');
+    const legacySource=source.includes('v48')||source.includes('reconciliado')||source==='stock'||source.includes('reserva desde stock');
+    if(claimsMm&&!migrated&&!modernMm&&q>0&&(old||legacySource)){
+      const mm=Math.max(0,Math.round(q*barMm));
+      try{row.qty=mm;row.cantidad=mm;if(row.reservado!==undefined)row.reservado=mm;row.mmAllocated=mm;row.lineMm=mm;row.lengthQtySchemaV64='mm';row.unit='mm';row.unidad='mm';row.unitBasis='mm';row.lengthMode='mm';row.barLengthMm=barMm;row.lengthQtyMigrationV85Repair={at:new Date().toISOString(),fromQty:q,fromUnit:'barra_legacy_mistag_mm',barLengthMm,toMm:mm};}catch(_){ }
+      return mm;
+    }
+    if(claimsMm) return q;
+    return Math.max(0,q*barMm);
   }
   function barLengthFromRow(row,line){return Math.max(1,Math.round(n(row&&row.barLengthMm)||n(line&&line.commercial_bar_mm)||6000));}
   function activeOwnAssigned(pack,cid,mid,barMm){return (pack.assignments||pack.db?.assignments||[]).filter(a=>isActive(a)&&rowCompanyId(a)===cid&&rowMaterialId(a)===mid).filter(a=>{try{return typeof LDH_stockEsAsignacionPrestamo==='function'?!LDH_stockEsAsignacionPrestamo(a):!(norm(a.assignmentType||a.reason).includes('otra empresa')||a.toCompanyId);}catch(_){return !a.toCompanyId;}}).reduce((s,a)=>s+qtyMm(a,barMm),0);}
@@ -24567,7 +24601,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   };
 
   function installReceivedOverride(){const current=window.LDH_marcarRecibidoCompleto;if(typeof current!=="function"||current.__ldhPletinaMmV84)return;const base=current;const wrapped=function(index){const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(isPletinaMmLine(line))return window.LDH_pletinaRecibirBarra(index);return base.apply(this,arguments);};wrapped.__ldhPletinaMmV84=true;wrapped.__ldhPletinaMmV84Base=base;window.LDH_marcarRecibidoCompleto=wrapped;}
-  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD=BUILD;document.documentElement.dataset.ldhPrepBuild=BUILD;document.documentElement.dataset.ldhPrepPletina='v84';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V84';break;}}
+  function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V85-PLETINA-MM-LEGACY-REPAIR-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v85';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V85';break;}}
   try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
   function refresh(){try{installReceivedOverride();markBuild();if(typeof renderTabla==='function'&&currentRef())renderTabla();}catch(_){ }}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true});else[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
@@ -24578,4 +24612,25 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 <!-- LDH_PREP_PLETINA_MM_V84_GLOBAL_20260813 -->
 
 <!-- LDH_PREP_V83_RECIBIDA_SOLO_ACCION_EXPLICITA_20260813 · CONSERVADO EN V84 -->
+
+<script id="LDH_PREP_V85_PLETINA_MM_LEGACY_REPAIR_MARK_20260813">
+(function(){
+  'use strict';
+  const BUILD='PREPARACION-V85-PLETINA-MM-LEGACY-REPAIR-20260813';
+  function mark(){
+    try{
+      window.__LDH_PREP_CANONICAL_BUILD=BUILD;
+      document.documentElement.dataset.ldhPrepBuild=BUILD;
+      document.documentElement.dataset.ldhPrepPletina='v85';
+      const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
+      for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V85';break;}
+    }catch(_){ }
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mark,{once:true});else mark();
+  [500,1600,4200].forEach(d=>setTimeout(mark,d));setInterval(mark,900);
+  console.info('[Preparación V85] Reparación de reservas PLETINA legacy barras->mm activa');
+})();
+</script>
+<!-- LDH_PREP_V85_PLETINA_MM_LEGACY_REPAIR_20260813 -->
+
 </body></html>
