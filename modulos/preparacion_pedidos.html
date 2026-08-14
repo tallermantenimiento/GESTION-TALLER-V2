@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813" />
+<meta name="ldh-build" content="PREPARACION-V95-PLETINA-COMMON-DUP-CLEAN-20260814" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -23284,8 +23284,12 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     );
   }
   function phasePrepV93(row){
-    const ph = norm(row?.phase ?? row?.fase ?? 'preparacion');
-    return !ph || ph === 'preparacion';
+    const ph = norm(row?.phase ?? row?.fase ?? 'preparacion').replace(/\s+/g,'');
+    return !ph || ph === 'preparacion' || ph === 'fabricacion';
+  }
+  function activePletinaDuplicateV95(row){
+    const st = norm(row?.status ?? row?.estado ?? 'activa').replace(/\s+/g,'');
+    return (st === 'activa' || st === 'activo' || st === 'active' || !st) && phasePrepV93(row);
   }
   function rowQtyMmV93(row){
     return Math.max(0,num(
@@ -23352,15 +23356,15 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       txt.includes('pletinaotraempresamm');
   }
   function legacyCandidateV93(row){
-    if(!active(row) || !phasePrepV93(row) || rowQtyMmV93(row) <= 0) return false;
+    if(!activePletinaDuplicateV95(row) || rowQtyMmV93(row) <= 0) return false;
     if(loanAssignment(row)) return false;
-    if(modernCompanyPletinaRowV93(row)) return false;
     const txt = norm([row?.source,row?.reason,row?.assignmentType,row?.createdFrom,row?.origin].join(' '));
     const migrated = !!(row?.lengthQtyMigrationV64 || row?.lengthQtyMigrationV84 || row?.lengthQtyMigrationV85Repair || row?.lengthQtyMigrationV65Repair || row?.lengthQtyCreatedV65);
     const unit = norm(row?.unitBasis ?? row?.lengthMode ?? row?.unit ?? row?.unidad ?? '');
-    // Acepta residuos antiguos por barras y sus migraciones a mm. Una fila moderna
-    // sin marca legacy queda protegida y no se cancela automaticamente.
-    return migrated || unit.includes('barra') || txt.includes('legacy') || txt.includes('reconcili') || txt.includes('reserva') || !txt;
+    // V95: si la empresa no tiene fisico y la misma OT/pletina esta respaldada por
+    // STOCK COMUN, cualquier compromiso propio no-prestamo es incompatible con el
+    // origen real. Aceptamos tambien filas modernas residuales, no solo legacy.
+    return migrated || modernCompanyPletinaRowV93(row) || unit.includes('barra') || unit === 'mm' || txt.includes('legacy') || txt.includes('reconcili') || txt.includes('reserva') || !txt || rowQtyMmV93(row) > 0;
   }
   function cancelAssignmentGhostV93(row,now){
     const original = rowQtyMmV93(row);
@@ -23415,9 +23419,19 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
           if(companyPhysicalMm > 0.000001) continue;
 
           // Debe existir un compromiso activo del MISMO pedido/material en STOCK COMUN.
-          const commonReservations = remote.reservations.filter(row=>active(row)&&phasePrepV93(row)&&rowCompanyMatchesTargetsV93(row,commonTargets)&&refMatch(row)&&materialMatch(row));
-          const commonAssignments = remote.assignments.filter(row=>active(row)&&phasePrepV93(row)&&!loanAssignment(row)&&rowCompanyMatchesTargetsV93(row,commonTargets)&&refMatch(row)&&materialMatch(row));
-          const commonQty = [...commonReservations,...commonAssignments].reduce((sum,row)=>sum+rowQtyMmV93(row),0);
+          const commonReservations = remote.reservations.filter(row=>activePletinaDuplicateV95(row)&&rowCompanyMatchesTargetsV93(row,commonTargets)&&refMatch(row)&&materialMatch(row));
+          const commonAssignments = remote.assignments.filter(row=>activePletinaDuplicateV95(row)&&!loanAssignment(row)&&rowCompanyMatchesTargetsV93(row,commonTargets)&&refMatch(row)&&materialMatch(row));
+          let commonQty = [...commonReservations,...commonAssignments].reduce((sum,row)=>sum+rowQtyMmV93(row),0);
+          // V95: la pill de STOCK COMUN ya usa el lector autoritativo que ve el usuario.
+          // Si el formato historico del registro remoto no conserva el companyId origen,
+          // usamos esa lectura como respaldo para confirmar que el compromiso comun existe.
+          try{
+            const liveCommon = (typeof window.LDH_stockComunInfoParaLinea === 'function') ? window.LDH_stockComunInfoParaLinea(line) : null;
+            if(liveCommon && liveCommon.ok){
+              const liveQty = Math.max(0,num(liveCommon.reserved)) + Math.max(0,num(liveCommon.assigned));
+              commonQty = Math.max(commonQty,liveQty);
+            }
+          }catch(_){ }
           if(commonQty <= 0) continue;
 
           remote.reservations.forEach(row=>{
@@ -23467,7 +23481,8 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   }
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V93=true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V94=true;
-  window.__LDH_PREP_PLETINA_LEGACY_CLEAN_BUILD='V94-STOCK-COMUN-DETECT-20260814';
+  window.LDH_PREP_PLETINA_LEGACY_CLEAN_V95=true;
+  window.__LDH_PREP_PLETINA_LEGACY_CLEAN_BUILD='V95-LIVE-COMMON-COMMITMENT-20260814';
   window.LDH_limpiarPletinaLegacyDuplicadaV93=cleanupLegacyPletinaOrderV93;
   // Revisa la ficha actual y vuelve a comprobar al cambiar de trabajo sin recargar.
   setTimeout(cleanupLegacyPletinaOrderV93,1800);
