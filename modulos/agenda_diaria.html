@@ -7810,7 +7810,26 @@ window.ejecutarDevolucion = function(matId, maxQty){
   function phaseFlow(order){
     const f=order&&order.phaseFlowV2&&typeof order.phaseFlowV2==='object'?order.phaseFlowV2:{};
     const num=v=>{const x=Number(v);return Number.isFinite(x)?Math.max(0,x):0;};
-    return {fabricacion:num(f.fabricacion??f.fab),pintura:num(f.pintura),almacen:num(f.almacen),entregado:num(f.entregado??f.delivered)};
+    const out={fabricacion:num(f.fabricacion??f.fab),pintura:num(f.pintura),almacen:num(f.almacen),entregado:num(f.entregado??f.delivered)};
+
+    // V20/V52: una OT nunca puede mostrar más unidades repartidas que las que realmente contiene.
+    // En pedidos compuestos, el total real es la suma de sus partidas técnicas.
+    let total=num(order&&(order.quantity??order.cantidad??order.unidades??order.uds));
+    const comp=order&&order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:null;
+    if(comp&&comp.enabled!==false&&Array.isArray(comp.parts)&&comp.parts.length){
+      const partsTotal=comp.parts.reduce((sum,p)=>sum+num(p&&(p.quantity??p.cantidad??p.unidades??p.uds)),0);
+      if(partsTotal>total) total=partsTotal;
+    }
+    let overflow=(out.fabricacion+out.pintura+out.almacen+out.entregado)-total;
+    if(total>0&&overflow>0){
+      // Conservamos primero las fases más avanzadas y recortamos el exceso desde Fabricación.
+      for(const key of ['fabricacion','pintura','almacen','entregado']){
+        if(overflow<=0) break;
+        const cut=Math.min(out[key],overflow);
+        out[key]-=cut; overflow-=cut;
+      }
+    }
+    return out;
   }
   function phasePills(order){
     const f=phaseFlow(order), parts=[];
@@ -9841,7 +9860,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 <!-- LDH_WORKFLOW_V2_FIX_RENDER_LOOP_20260730 -->
 
 
-<!-- LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V3_20260730 -->
+<!-- LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V4_DEDUP_OT_20260814 -->
 <script type="module" id="LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V3_20260730">
 (async function(){
   'use strict';
@@ -9873,7 +9892,8 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
   }
   function refKey(value){
     const raw = text(value).toUpperCase();
-    const match = raw.match(/OT-\d{6}-\d{3}/i);
+    // V4: conservar sufijos técnicos A/B/C. OT-xxxxxx-xxx-A NO es la misma partida que -B.
+    const match = raw.match(/OT-\d{6}-\d{3}(?:-[A-Z]{1,3})?/i);
     if(match) return match[0].toUpperCase();
     return raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
   }
@@ -9889,9 +9909,12 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
   function itemTime(item){
     let out = Math.max(
       toMs(item && item.localFlowUpdatedAt),
+      toMs(item && item.workflowUpdatedAtMs),
+      toMs(item && item.updatedAtMs),
       toMs(item && item.updatedAt),
       toMs(item && item.updatedAtISO),
-      toMs(item && item.lastUpdate)
+      toMs(item && item.lastUpdate),
+      toMs(item && item.createdAtMs)
     );
     const history = Array.isArray(item && item.history) ? item.history : [];
     history.forEach(row=>{ out = Math.max(out, toMs(row && (row.date || row.at || row.atMs || row.createdAt))); });
@@ -9922,16 +9945,24 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       flow:{...((previous && previous.flow) || {}), ...((incoming && incoming.flow) || {})}
     };
   }
-  function addAggregate(map, key, flow, atMs){
+  function addAggregate(map, key, flow, atMs, priority=0){
     key = text(key);
     if(!key) return;
-    const current = map.get(key) || {fabricacion:0,pintura:0,almacen:0,entregado:0,atMs:0};
-    current.fabricacion += number(flow.fabricacion);
-    current.pintura += number(flow.pintura);
-    current.almacen += number(flow.almacen);
-    current.entregado += number(flow.entregado);
-    current.atMs = Math.max(number(current.atMs), number(atMs));
-    map.set(key, current);
+    const candidate={
+      fabricacion:number(flow.fabricacion),
+      pintura:number(flow.pintura),
+      almacen:number(flow.almacen),
+      entregado:number(flow.entregado),
+      atMs:number(atMs),
+      priority:number(priority)
+    };
+    const current=map.get(key);
+    // V4: varias copias/alias de una misma OT son la MISMA unidad lógica.
+    // No se suman. Preferimos la referencia oficial corta y, a igualdad, la más reciente.
+    if(!current || candidate.priority>number(current.priority) ||
+       (candidate.priority===number(current.priority) && candidate.atMs>=number(current.atMs))){
+      map.set(key,candidate);
+    }
   }
   function extractFlows(payload){
     const dbRaw = payload && payload.ldh_db;
@@ -9941,7 +9972,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       const rows = Array.isArray(db && db[pool]) ? db[pool] : [];
       rows.forEach(raw=>{
         const item = raw && typeof raw === 'object' ? raw : {};
-        if(item.deleted) return;
+        if(item.deleted || item.archived) return;
         const reference = text(item.ref || item.referencia || item.jobRef);
         if(!reference) return;
         const orderId = text(item.agendaOrderId || item.orderId || item.workOrderId || item.pedido_uid || item.pedido_id);
@@ -9960,8 +9991,12 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       const flow = flowOf(item);
       if(flow.fabricacion + flow.pintura + flow.almacen + flow.entregado <= 0) return;
       const atMs = itemTime(item);
-      if(orderId) addAggregate(nextById, orderId, flow, atMs);
-      addAggregate(nextByRef, refKey(reference), flow, atMs);
+      const canonical=refKey(reference);
+      const official=text(reference).toUpperCase()===canonical;
+      const priority=official?20:0;
+      // La clave por ID incluye también la partida para no mezclar A/B/C de un pedido compuesto.
+      if(orderId) addAggregate(nextById, orderId+'|'+canonical, flow, atMs, priority);
+      addAggregate(nextByRef, canonical, flow, atMs, priority);
     });
     return {nextById, nextByRef};
   }
@@ -9977,9 +10012,37 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       && number(a && a.almacen) === number(b && b.almacen)
       && number(a && a.entregado) === number(b && b.entregado);
   }
+  function effectiveOrderTotal(order){
+    let total=number(order&&(order.quantity??order.cantidad??order.unidades??order.uds));
+    const comp=order&&order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:null;
+    if(comp&&comp.enabled!==false&&Array.isArray(comp.parts)&&comp.parts.length){
+      const partsTotal=comp.parts.reduce((sum,p)=>sum+number(p&&(p.quantity??p.cantidad??p.unidades??p.uds)),0);
+      if(partsTotal>total) total=partsTotal;
+    }
+    return total;
+  }
+  function capFlowToOrder(flow,order){
+    const out={
+      fabricacion:number(flow&&flow.fabricacion),
+      pintura:number(flow&&flow.pintura),
+      almacen:number(flow&&flow.almacen),
+      entregado:number(flow&&flow.entregado)
+    };
+    const total=effectiveOrderTotal(order);
+    let overflow=(out.fabricacion+out.pintura+out.almacen+out.entregado)-total;
+    if(total>0&&overflow>0){
+      for(const key of ['fabricacion','pintura','almacen','entregado']){
+        if(overflow<=0) break;
+        const cut=Math.min(out[key],overflow);
+        out[key]-=cut; overflow-=cut;
+      }
+    }
+    return out;
+  }
   function liveForOrder(order){
     if(!order) return null;
-    return byId.get(text(order.id)) || byRef.get(refKey(order.reference));
+    const canonical=refKey(order.reference);
+    return byId.get(text(order.id)+'|'+canonical) || byRef.get(canonical);
   }
   function applyLiveFlows(orders){
     let changed = false;
@@ -9989,12 +10052,12 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       if(['cancelled','canceled','anulado','cancelado'].includes(currentState)) return;
       const live = liveForOrder(order);
       if(!live) return;
-      const liveFlow = {
+      const liveFlow = capFlowToOrder({
         fabricacion:number(live.fabricacion),
         pintura:number(live.pintura),
         almacen:number(live.almacen),
         entregado:number(live.entregado)
-      };
+      },order);
       if(liveFlow.fabricacion + liveFlow.pintura + liveFlow.almacen + liveFlow.entregado <= 0) return;
       const currentFlow = order.phaseFlowV2 && typeof order.phaseFlowV2 === 'object' ? order.phaseFlowV2 : {};
 
@@ -10737,4 +10800,5 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 })();
 </script>
 
+<!-- LDH_AGENDA_FASES_DEDUP_Y_TOPE_V20_20260814 -->
 </body></html>
