@@ -4325,6 +4325,33 @@ function collectAssignments(db){
     const s = norm(name);
     return s.includes("chapa") || s.includes("malla") || s.includes("panel") || s.includes("plancha");
   }
+  function isPletinaMaterialName(name){
+    const s = norm(name);
+    return s.includes("pletina") || s.includes("planchuela") || s.includes("llanta");
+  }
+  function isPletinaMmStatsLine(line){
+    if(!line || !isPletinaMaterialName(String(line.material || line.mat || line.name || line.materialName || ""))) return false;
+    const unit = norm(line.unitBasis || line.lengthMode || line.unit || line.unidad || "");
+    const schema = norm(line.lengthQtySchemaV64 || line.lengthQtySchema || "");
+    const source = norm([line.source,line.reason,line.assignmentType,line.createdFrom,line.origin].join(" "));
+    return line.pletinaMm === true || line.pletina_mm === true || line.gestion_mm === true ||
+      schema === "mm" || unit === "mm" || unit === "milimetro" || unit === "milimetros" ||
+      source.includes("pletina_mm") || source.includes("pletina mm");
+  }
+  function statsBarLengthMm(line){
+    const v = Math.round(num(line && (line.barLengthMm || line.commercial_bar_mm || line.longitudBarraMm || 6000)));
+    return v > 0 ? v : 6000;
+  }
+  function quantityInfoForLine(line){
+    const qty = num(line && line.qty);
+    if(isPletinaMmStatsLine(line)) return fmt(qty) + " mm";
+    return fmt(qty) + (isSheetMaterialName(line && line.material) ? " uds" : " barras");
+  }
+  function quantityInfoForGroup(group){
+    const rows = group && Array.isArray(group.rows) ? group.rows : [];
+    if(rows.some(isPletinaMmStatsLine)) return fmt(group && group.qty) + " mm";
+    return fmt(group && group.qty) + (isSheetMaterialName(group && group.material) ? " uds" : " barras");
+  }
   function isSandwichPanelName(name){
     const s = norm(name);
     return isSheetMaterialName(name) && (
@@ -4356,6 +4383,14 @@ function collectAssignments(db){
     const unit = norm((line && (line.unit || line.unidad)) || "");
     const material = String((line && line.material) || "");
     const manual = manualWeightForLine(line);
+
+    // PLETINA/MM: qty son milímetros reales, nunca número de barras.
+    if(isPletinaMmStatsLine(line)){
+      const kgmMm = manual && manual.basis !== "kg/ud" ? num(manual.value) : num(line && line.kgm);
+      if(manual && manual.basis === "kg/ud") return qty * manual.value;
+      return (qty / 1000) * kgmMm;
+    }
+
     if(manual){
       if(manual.basis === "kg/ud") return qty * manual.value;
       if(unit.includes("barra") || unit.includes("bar") || !unit) return qty * manual.value * BAR_LENGTH_M;
@@ -4533,6 +4568,10 @@ function collectAssignments(db){
     return null;
   }
   function advLineQty(line){
+    if(isPletinaMmStatsLine(line)){
+      const mmVals = [line&&line.mmAllocated,line&&line.lineMm,line&&line.mmAssigned,line&&line.total_mm,line&&line.totalMm,line&&line.mm,line&&line.qty_pedida,line&&line.pedida,line&&line.qty,line&&line.cantidad];
+      for(const v of mmVals){ const q = num(v); if(q>0) return q; }
+    }
     const vals = [line&&line.qty_pedida,line&&line.pedida,line&&line.qty,line&&line.cantidad,line&&line.barras,line&&line.unidades,line&&line.total];
     for(const v of vals){ const q = num(v); if(q>0) return q; }
     return 0;
@@ -4588,7 +4627,13 @@ function collectAssignments(db){
       company:comp.company,
       materialId,
       material,
-      unit:String(m.unit || m.unidad || line.unit || line.unidad || "barra"),
+      unit:String(line.unit || line.unidad || line.unitBasis || m.unit || m.unidad || "barra"),
+      unitBasis:String(line.unitBasis || ""),
+      lengthMode:String(line.lengthMode || ""),
+      lengthQtySchemaV64:String(line.lengthQtySchemaV64 || ""),
+      pletinaMm:line.pletinaMm === true || line.pletina_mm === true || line.gestion_mm === true,
+      barLengthMm:num(line.barLengthMm || line.commercial_bar_mm || 6000),
+      mmAllocated:num(line.mmAllocated || line.lineMm || line.mmAssigned || 0),
       qty,
       kgm:kgPerMeterFromName(material),
       ref,
@@ -4789,7 +4834,15 @@ function collectAssignments(db){
         originCompany:commonStock ? "STOCK COMÚN" : "",
         materialId,
         material:String(m.name || m.nombre || materialId),
-        unit:String(m.unit || m.unidad || m.units || ""),
+        unit:String(a.unit || a.unidad || a.unitBasis || m.unit || m.unidad || m.units || ""),
+        unitBasis:String(a.unitBasis || ""),
+        lengthMode:String(a.lengthMode || ""),
+        lengthQtySchemaV64:String(a.lengthQtySchemaV64 || ""),
+        pletinaMm:a.pletinaMm === true || a.pletina_mm === true || a.gestion_mm === true,
+        barLengthMm:num(a.barLengthMm || 6000),
+        mmAllocated:num(a.mmAllocated || a.lineMm || a.mmAssigned || 0),
+        reason:String(a.reason || ""),
+        assignmentType:String(a.assignmentType || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
         ref:String(a.consumerRef || a.ref || a.jobRef || a.jobId || ""),
@@ -4822,7 +4875,15 @@ function collectAssignments(db){
         company:compName,
         materialId,
         material:String(m.name || m.nombre || materialId),
-        unit:String(m.unit || m.unidad || m.units || ""),
+        unit:String(r.unit || r.unidad || r.unitBasis || m.unit || m.unidad || m.units || ""),
+        unitBasis:String(r.unitBasis || ""),
+        lengthMode:String(r.lengthMode || ""),
+        lengthQtySchemaV64:String(r.lengthQtySchemaV64 || ""),
+        pletinaMm:r.pletinaMm === true || r.pletina_mm === true || r.gestion_mm === true,
+        barLengthMm:num(r.barLengthMm || 6000),
+        mmAllocated:num(r.mmAllocated || r.lineMm || r.mmAssigned || 0),
+        reason:String(r.reason || ""),
+        assignmentType:String(r.assignmentType || ""),
         qty,
         kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
         ref:String(r.ref || r.jobRef || r.jobId || ""),
@@ -4846,7 +4907,14 @@ function collectAssignments(db){
           const materialId = line.stockLinkId || line.materialId || line.matId;
           const m = materialById(db, materialId);
           if(!m || !isIronMaterial(m)) return;
-          const q = Math.max(num(line.recibida || line.qty_recibida || line.received || 0), num(line.pedida || line.qty || line.cantidad || 0));
+          const lineForStats = {
+            ...line,
+            material:String(m.name || m.nombre || materialId),
+            unit:String(line.unit || line.unidad || line.unitBasis || m.unit || m.unidad || m.units || "")
+          };
+          const q = isPletinaMmStatsLine(lineForStats)
+            ? advLineQty(lineForStats)
+            : Math.max(num(line.recibida || line.qty_recibida || line.received || 0), num(line.pedida || line.qty || line.cantidad || 0));
           if(q <= 0) return;
           const dt = new Date(meta.date || meta.fecha || line.date || line.fecha || now());
           rows.push({
@@ -4858,7 +4926,15 @@ function collectAssignments(db){
             company:c ? companyName(db, companyId) : companyText,
             materialId,
             material:String(m.name || m.nombre || materialId),
-            unit:String(m.unit || m.unidad || m.units || ""),
+            unit:String(line.unit || line.unidad || line.unitBasis || m.unit || m.unidad || m.units || ""),
+            unitBasis:String(line.unitBasis || ""),
+            lengthMode:String(line.lengthMode || ""),
+            lengthQtySchemaV64:String(line.lengthQtySchemaV64 || ""),
+            pletinaMm:line.pletinaMm === true || line.pletina_mm === true || line.gestion_mm === true,
+            barLengthMm:num(line.barLengthMm || line.commercial_bar_mm || 6000),
+            mmAllocated:num(line.mmAllocated || line.lineMm || line.mmAssigned || line.total_mm || line.totalMm || line.mm || 0),
+            reason:String(line.reason || ""),
+            assignmentType:String(line.assignmentType || ""),
             qty:q,
             kgm:kgPerMeterFromName(m.name || m.nombre || materialId),
             ref,
@@ -4890,7 +4966,9 @@ function collectAssignments(db){
       const kg = kgForLine(r);
       const cur = map.get(key) || {companyId:key, company:compName, kg:0, bars:0, refs:new Set(), lines:[]};
       cur.kg += kg;
-      if(!isSheetMaterialName(r.material)) cur.bars += r.qty;
+      if(!isSheetMaterialName(r.material)){
+        cur.bars += isPletinaMmStatsLine(r) ? (num(r.qty) / statsBarLengthMm(r)) : num(r.qty);
+      }
       if(r.ref) cur.refs.add(r.ref);
       cur.lines.push({...r, companyId:key, company:compName, kg});
       map.set(key, cur);
@@ -5015,7 +5093,7 @@ function collectAssignments(db){
           <td>${esc(comp.company)}</td>
           <td>${esc(l.ref || "—")}</td>
           <td>${esc(l.material)}</td>
-          <td>${fmt(l.qty)}</td>
+          <td>${quantityInfoForLine(l)}</td>
           <td>${weightInfoForLine(l)}</td>
           <td>${fmt(l.kg)} kg</td>
           <td>${esc(l.source)}</td>
@@ -5089,7 +5167,7 @@ function collectAssignments(db){
         <tr>
           <td>${esc(l.ref || "—")}</td>
           <td>${esc(l.source || "—")}</td>
-          <td class="num">${fmt(l.qty)}</td>
+          <td class="num">${quantityInfoForLine(l)}</td>
           <td class="num">${weightInfoForLine(l)}</td>
           <td class="num">${fmt(l.kg)} kg</td>
           <td class="action">${statsDeleteButton(l)}</td>
@@ -5097,7 +5175,7 @@ function collectAssignments(db){
       return `<div class="ldh-iron-material-group">
         <div class="ldh-iron-material-summary">
           <div><div class="ldh-iron-material-name">${esc(g.material)}</div><div class="ldh-iron-material-sub">${fmt(g.refs.size)} trabajos donde aparece este material</div></div>
-          <div class="ldh-iron-material-kpi">${quantityInfoForMaterial(g.material, g.qty)}</div>
+          <div class="ldh-iron-material-kpi">${quantityInfoForGroup(g)}</div>
           <div class="ldh-iron-material-kpi">${weightEditorForGroup(g)}</div>
           <div class="ldh-iron-material-kpi">${fmt(g.kg)} kg est.</div>
         </div>
@@ -5490,6 +5568,8 @@ function collectAssignments(db){
   }
 
   window.LDH_IRON_STATS_DEDUP_V3 = true;
+  window.LDH_IRON_STATS_PLETINA_MM_V4 = true;
+  try{ document.documentElement.dataset.ldhIronStatsPletinaMm = "V4-20260814"; }catch(e){}
   window.LDH_IronStats_dedupeCrossSources = LDH_IronStats_dedupeCrossSources;
   window.LDH_IronStats_render = render;
   window.LDH_IronStats_toggleDetalle = toggleDetalle;
