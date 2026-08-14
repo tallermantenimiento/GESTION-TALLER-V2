@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V96-PLETINA-LEGACY-REF-MATCH-20260814" />
+<meta name="ldh-build" content="PREPARACION-V97-PLETINA-ORIGEN-AUTORITATIVO-20260814" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -23505,12 +23505,13 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V94=true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V95=true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V96=true;
-  window.__LDH_PREP_PLETINA_LEGACY_CLEAN_BUILD='V96-LEGACY-REF-MATCH-RETRY-20260814';
+  window.__LDH_PREP_PLETINA_LEGACY_CLEAN_BUILD='V97-ORIGEN-AUTORITATIVO-NO-DESTRUCTIVO-20260814';
+  window.LDH_PREP_PLETINA_ORIGEN_AUTORITATIVO_V97=true;
   window.LDH_limpiarPletinaLegacyDuplicadaV93=cleanupLegacyPletinaOrderV93;
   // Revisa la ficha actual y vuelve a comprobar al cambiar de trabajo sin recargar.
-  setTimeout(cleanupLegacyPletinaOrderV93,1800);
-  setTimeout(cleanupLegacyPletinaOrderV93,5000);
-  setInterval(cleanupLegacyPletinaOrderV93,5000);
+  // V97: desactivada la limpieza remota automatica V93-V96.
+  // La correccion se aplica de forma no destructiva en la lectura autoritativa de PLETINA/MM.
+  window.LDH_PREP_PLETINA_LEGACY_AUTOCLEAN_DISABLED_V97=true;
   // Si la copia autoritativa de Stock llega despues del primer render, volvemos a
   // comprobar la OT. La propia actualizacion generada por esta limpieza se ignora.
   window.addEventListener('ldh:stock-cloud-updated', function(event){
@@ -25051,11 +25052,29 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     let physicalMm=0;
     if(row&&norm(row.lengthMode)==='mm') physicalMm=Math.max(0,n(row.lengthPhysicalMm));
     else {try{physicalMm=Math.max(0,n(_v2MovementReal(pack,ctx.companyId,ctx.materialId))*barMm);}catch(_){physicalMm=0;}}
-    const reservedMm=activeReserved(pack,ctx.companyId,ctx.materialId,barMm); const assignedMm=activeOwnAssigned(pack,ctx.companyId,ctx.materialId,barMm); const lentMm=activeLent(pack,ctx.companyId,ctx.materialId,barMm);
-    const rawFree=physicalMm-reservedMm-assignedMm-lentMm; const freeMm=Math.max(0,rawFree); const ref=currentRef();
-    const ownReservations=(pack.reservations||[]).filter(r=>isActive(r)&&rowCompanyId(r)===ctx.companyId&&rowMaterialId(r)===ctx.materialId&&String(r.ref||r.jobRef||r.trabajoRef||'').trim()===ref);
+    let reservedMm=activeReserved(pack,ctx.companyId,ctx.materialId,barMm); let assignedMm=activeOwnAssigned(pack,ctx.companyId,ctx.materialId,barMm); let lentMm=activeLent(pack,ctx.companyId,ctx.materialId,barMm);
+    const ref=currentRef();
+    let ownReservations=(pack.reservations||[]).filter(r=>isActive(r)&&rowCompanyId(r)===ctx.companyId&&rowMaterialId(r)===ctx.materialId&&String(r.ref||r.jobRef||r.trabajoRef||r.jobId||r.refKey||'').trim()===ref);
+
+    // V97 · ORIGEN AUTORITATIVO PLETINA/MM.
+    // Si la empresa del pedido no tiene ni 1 mm fisico de esta pletina y STOCK COMUN
+    // mantiene un compromiso activo del mismo material, las reservas/asignaciones que
+    // aparezcan en la empresa son residuos de la antigua logica por barras. No se
+    // cuentan como stock propio: el compromiso valido pertenece exclusivamente al comun.
+    let suppressedCompanyGhost=false;
+    if(physicalMm<=0.000001){
+      try{
+        const commonInfo=(typeof window.LDH_stockComunInfoParaLinea==='function')?window.LDH_stockComunInfoParaLinea(line):null;
+        const commonCommit=commonInfo&&commonInfo.ok&&(Math.max(0,n(commonInfo.reserved))+Math.max(0,n(commonInfo.assigned))+Math.max(0,n(commonInfo.lent||0))>0);
+        if(commonCommit){
+          reservedMm=0; assignedMm=0; lentMm=0; ownReservations=[]; suppressedCompanyGhost=true;
+        }
+      }catch(_){ }
+    }
+
+    const rawFree=physicalMm-reservedMm-assignedMm-lentMm; const freeMm=Math.max(0,rawFree);
     const ownReservedMm=ownReservations.reduce((s,r)=>s+qtyMm(r,barMm),0); const ownReservedUsableMm=Math.min(ownReservedMm,Math.max(0,rawFree+ownReservedMm));
-    return Object.assign(ctx,{ok:true,pack,row,physicalMm,reservedMm,assignedMm,lentMm,freeMm,ownReservedMm,ownReservedUsableMm,ownReservations,barLengthMm:barMm});
+    return Object.assign(ctx,{ok:true,pack,row,physicalMm,reservedMm,assignedMm,lentMm,freeMm,ownReservedMm,ownReservedUsableMm,ownReservations,barLengthMm:barMm,suppressedCompanyGhostV97:suppressedCompanyGhost});
   }
   function sourceInfo(line){const common=window.LDH_stockComunInfoParaLinea?window.LDH_stockComunInfoParaLinea(line):{ok:false,free:0,physical:0,reserved:0,assigned:0};const company=companyInfo(line);const barMm=Math.max(1,Math.round(n(company&&company.barLengthMm)||n(common&&common.barLengthMm)||n(line&&line.commercial_bar_mm)||6000));return {common,company,barMm};}
   window.LDH_pletinaSourceInfo=sourceInfo;
