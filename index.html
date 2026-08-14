@@ -4692,27 +4692,35 @@ function collectAssignments(db){
   }
 
 
-  /* V3 · Evita contabilizar la misma necesidad en varias capas del flujo.
-     Solo deduplica cuando empresa, referencia, material y cantidad coinciden.
-     Prioridad: Fabricación nube > Asignación > Reserva > Preparación. */
+  /* V4 · Evita contabilizar la misma necesidad en varias capas del flujo.
+     Regla general: deduplica cuando empresa, referencia, material y cantidad coinciden.
+     PLETINA/MM: la cantidad cambia entre Reserva/Asignación/Stock común/Preparación
+     a medida que se asignan mm reales, por lo que se deduplica por empresa + OT + material
+     sin usar qty. Para PLETINA/MM la necesidad exacta de Preparación prevalece sobre
+     reservas/asignaciones; Fabricación nube sigue siendo autoritativa si ya existe. */
   function LDH_IronStats_sourcePriority(row){
     const type = String((row && row.sourceType) || "").toLowerCase();
     const source = norm(row && row.source);
-    if(type === "fabrication_cloud" || source.includes("fabricacionnube")) return 400;
-    if(type === "assignment" || source === "asignacion") return 300;
+    const pletinaMm = isPletinaMmStatsLine(row);
+    if(type === "fabrication_cloud" || source.includes("fabricacionnube")) return 500;
+    if(pletinaMm && (type === "preparation" || source === "preparacion")) return 450;
+    if(type === "assignment" || source === "asignacion" || source.includes("stock comun")) return 300;
     if(type === "reservation" || source === "reserva") return 250;
     if(type === "preparation" || source === "preparacion") return 200;
     return 100;
   }
   function LDH_IronStats_crossSourceKey(row){
-    const qty = num(row && row.qty);
-    const qtyKey = Number.isFinite(qty) ? qty.toFixed(6) : "0.000000";
-    return [
+    const base = [
       norm((row && (row.company || row.companyId)) || ""),
       norm((row && row.ref) || ""),
-      norm((row && (row.material || row.materialId)) || ""),
-      qtyKey
-    ].join("|");
+      norm((row && (row.material || row.materialId)) || "")
+    ];
+    // PLETINA/MM: 12.000 asignados, 11.520 necesarios y 11.040 desde Stock común
+    // son capas del MISMO consumo, no tres consumos distintos.
+    if(isPletinaMmStatsLine(row)) return base.concat("pletina_mm").join("|");
+    const qty = num(row && row.qty);
+    const qtyKey = Number.isFinite(qty) ? qty.toFixed(6) : "0.000000";
+    return base.concat(qtyKey).join("|");
   }
   function LDH_IronStats_dedupeCrossSources(rows){
     const input = Array.isArray(rows) ? rows : [];
@@ -5568,6 +5576,7 @@ function collectAssignments(db){
   }
 
   window.LDH_IRON_STATS_DEDUP_V3 = true;
+  window.__LDH_IRON_STATS_PLETINA_DEDUP_V4 = true;
   window.LDH_IRON_STATS_PLETINA_MM_V4 = true;
   try{ document.documentElement.dataset.ldhIronStatsPletinaMm = "V4-20260814"; }catch(e){}
   window.LDH_IronStats_dedupeCrossSources = LDH_IronStats_dedupeCrossSources;
