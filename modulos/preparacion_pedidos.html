@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V95-PLETINA-COMMON-DUP-CLEAN-20260814" />
+<meta name="ldh-build" content="PREPARACION-V96-PLETINA-LEGACY-REF-MATCH-20260814" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -22927,9 +22927,25 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     return out;
   }
   function referenceMatches(row, known){
-    const values = [row?.ref,row?.jobRef,row?.consumerRef,row?.reference,row?.usedByRef,row?.refConsumidor,row?.workRef,row?.assignedRef,row?.reservationRef]
-      .map(value => norm(value)).filter(Boolean);
-    return values.some(value => known.some(alias => value === alias.norm || (alias.prefix && value.startsWith(alias.norm + ' '))));
+    // V96: las reservas/asignaciones legacy no siempre guardan la OT en `ref`.
+    // Algunas versiones usaban jobId/refKey/pedidoRef/trabajoRef. Todos ellos son
+    // solo identificadores de referencia: no se usa ningun campo de material/empresa.
+    const rawValues = [
+      row?.ref,row?.jobRef,row?.consumerRef,row?.reference,row?.usedByRef,
+      row?.refConsumidor,row?.workRef,row?.assignedRef,row?.reservationRef,
+      row?.jobId,row?.refKey,row?.orderRef,row?.orderId,row?.pedidoRef,row?.pedido_id,
+      row?.pedidoId,row?.trabajoRef,row?.workId,row?.sourceRef,row?.originRef,
+      row?.fromRef,row?.toRef,row?.originalRef
+    ].map(value => String(value ?? '').trim()).filter(Boolean);
+    const otRe = /\bOT[-_\s]*(\d{5,8})[-_\s]*(\d{2,4})(?:[-_\s]*([A-Z]{1,3}))?\b/i;
+    return rawValues.some(raw=>{
+      const value = norm(raw);
+      if(known.some(alias => value === alias.norm || (alias.prefix && value.startsWith(alias.norm + ' ')))) return true;
+      const m = raw.match(otRe);
+      if(!m) return false;
+      const code = norm(`OT-${m[1]}-${m[2]}${m[3] ? '-' + String(m[3]).toUpperCase() : ''}`);
+      return known.some(alias => code === alias.norm || (alias.prefix && code.startsWith(alias.norm + ' ')) || (alias.prefix && code === alias.norm));
+    });
   }
   function materialIds(line, remote){
     const set = new Set([
@@ -23272,6 +23288,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   // No toca fisico, prestamos, Fabricacion ni filas modernas PLETINA/MM de empresa.
   const legacyPletinaCleanupDoneV93 = new Set();
   const legacyPletinaCleanupRunningV93 = new Set();
+  const legacyPletinaNoChangeTriesV96 = new Map();
 
   function isPletinaMmLineV93(line){
     if(!line || typeof line !== 'object') return false;
@@ -23452,20 +23469,25 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
         }
 
         if(!reservationsChanged && !assignmentsChanged){
-          legacyPletinaCleanupDoneV93.add(orderKey);
+          // V96: no damos la ficha por revisada en el primer intento. La nube y las
+          // pills de Stock pueden llegar despues del primer render. Reintentamos un
+          // numero acotado de veces para no dejar consultas permanentes innecesarias.
+          const tries = (legacyPletinaNoChangeTriesV96.get(orderKey) || 0) + 1;
+          legacyPletinaNoChangeTriesV96.set(orderKey, tries);
+          if(tries >= 6) legacyPletinaCleanupDoneV93.add(orderKey);
           return;
         }
         try{
-          await commitStock(remote,{meta,chunks:chunkDocs},authToken,'preparacion_limpieza_pletina_legacy_v93');
+          await commitStock(remote,{meta,chunks:chunkDocs},authToken,'preparacion_limpieza_pletina_legacy_v96');
           window.__LDH_PREP_STOCK_CLOUD_DB=remote;
           window.__LDH_STOCK_MEMORY_DB=remote;
           try{localStorage.setItem(STOCK_KEY,JSON.stringify(remote));}catch(_){ }
           try{sessionStorage.setItem(STOCK_KEY,JSON.stringify(remote));}catch(_){ }
-          try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'limpieza_pletina_legacy_v93'}}));}catch(_){ }
+          try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'limpieza_pletina_legacy_v96'}}));}catch(_){ }
           try{if(typeof window.renderTabla==='function') window.renderTabla();}catch(_){ }
           try{if(typeof window.cargarLista==='function') window.cargarLista();}catch(_){ }
           window.__LDH_PREP_PLETINA_LEGACY_CLEAN_V93_LAST={reference,reservationsChanged,assignmentsChanged,releasedQty,at:now};
-          console.info('[Preparacion V93] PLETINA legacy duplicada limpiada',window.__LDH_PREP_PLETINA_LEGACY_CLEAN_V93_LAST);
+          console.info('[Preparacion V96] PLETINA legacy duplicada limpiada',window.__LDH_PREP_PLETINA_LEGACY_CLEAN_V93_LAST);
           legacyPletinaCleanupDoneV93.add(orderKey);
           return;
         }catch(error){
@@ -23474,7 +23496,7 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
         }
       }
     }catch(error){
-      console.warn('[Preparacion V93] No se pudo limpiar PLETINA legacy duplicada',error);
+      console.warn('[Preparacion V96] No se pudo limpiar PLETINA legacy duplicada',error);
     }finally{
       legacyPletinaCleanupRunningV93.delete(orderKey);
     }
@@ -23482,12 +23504,25 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V93=true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V94=true;
   window.LDH_PREP_PLETINA_LEGACY_CLEAN_V95=true;
-  window.__LDH_PREP_PLETINA_LEGACY_CLEAN_BUILD='V95-LIVE-COMMON-COMMITMENT-20260814';
+  window.LDH_PREP_PLETINA_LEGACY_CLEAN_V96=true;
+  window.__LDH_PREP_PLETINA_LEGACY_CLEAN_BUILD='V96-LEGACY-REF-MATCH-RETRY-20260814';
   window.LDH_limpiarPletinaLegacyDuplicadaV93=cleanupLegacyPletinaOrderV93;
   // Revisa la ficha actual y vuelve a comprobar al cambiar de trabajo sin recargar.
   setTimeout(cleanupLegacyPletinaOrderV93,1800);
   setTimeout(cleanupLegacyPletinaOrderV93,5000);
   setInterval(cleanupLegacyPletinaOrderV93,5000);
+  // Si la copia autoritativa de Stock llega despues del primer render, volvemos a
+  // comprobar la OT. La propia actualizacion generada por esta limpieza se ignora.
+  window.addEventListener('ldh:stock-cloud-updated', function(event){
+    const source = String(event?.detail?.source || '');
+    if(source.includes('limpieza_pletina_legacy')) return;
+    const key = norm(referenceNow());
+    if(key){
+      legacyPletinaCleanupDoneV93.delete(key);
+      legacyPletinaNoChangeTriesV96.delete(key);
+    }
+    setTimeout(cleanupLegacyPletinaOrderV93,500);
+  });
 
   window.LDH_limpiarConsumoLineaV74 = async function(index){
     const lines=linesNow(); const line=lines[index]; if(!line) return;
