@@ -291,6 +291,13 @@
       ch.postMessage({type:'ferreteria-updated', updatedAt:clean.updatedAt});
       ch.close();
     }catch(_){ }
+    // No dependemos del parche de Storage (en algunas tablets no dispara de forma fiable).
+    // Encolamos UNA sincronizacion real; el debounce evita escrituras duplicadas.
+    try{
+      if(typeof window.LDH_FerreteriaV2QueueSync === 'function'){
+        window.LDH_FerreteriaV2QueueSync('terminal_save_v2', 220);
+      }
+    }catch(_){ }
   }
   const FER_V2_RECOVERY_BUILD = 'FER-V2-RECUPERA-STOCK-TABLET-20260817';
   function legacySignedQty(m){
@@ -600,9 +607,18 @@
         operator: state.operator || ''
       });
       saveV2DB(currentDB);
+      // Un consumo/entrada desde tablet debe quedar confirmado en nube antes de darlo por cerrado.
+      // SyncNow cancela el debounce pendiente, asi que esto NO duplica escrituras ni lecturas.
+      let syncPending = false;
+      try{
+        if(typeof window.LDH_FerreteriaV2SyncNow === 'function'){
+          const sr = await window.LDH_FerreteriaV2SyncNow('terminal_movimiento_stock');
+          syncPending = !!(sr && sr.ok === false && !sr.queued);
+        }
+      }catch(_){ syncPending = true; }
       const stockAfter = type === 'in' ? realBefore + qty : realBefore - qty;
       const freeAfter = Math.max(0, stockAfter - reserved);
-      return {ok:true, stockAfter, freeAfter, reserved, movementId};
+      return {ok:true, stockAfter, freeAfter, reserved, movementId, syncPending};
     }
     return await applyMovementToStockFirestore(matId, qty, type);
   }
@@ -1774,7 +1790,7 @@
   const DOC_COL = 'taller_ferreteria_v2';
   const DOC_ID = 'main';
   const CLIENT_KEY = 'LDH_FER_V2_SYNC_CLIENT_ID';
-  const BUILD = 'FER-V2-LOWQUOTA-REALTIME-20260817';
+  const BUILD = 'FER-V2-LOWQUOTA-REALTIME-ACK-20260817';
   const firebaseConfig = {
     apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
     authDomain: 'gestion-taller-2a439.firebaseapp.com',
@@ -1785,7 +1801,7 @@
   };
 
   let app=null, auth=null, fs=null, unsub=null;
-  let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null;
+  let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null, pendingSnapshot=null;
   let lastUploadedHash='', lastRemoteRev='', lastRemoteHash='';
   let lastRemoteAt=0, lastFallbackPullAt=0;
   const FALLBACK_PULL_MIN_MS = 5 * 60 * 1000;
@@ -1986,12 +2002,23 @@
       log('Subido cambio real', reason, {materials:merged.materials.length, movements:merged.movements.length});
       return {ok:true};
     }catch(e){ warn('No se pudo subir cambio', e); return {ok:false,error:e}; }
-    finally{ saving=false; }
+    finally{
+      saving=false;
+      // Si llego un snapshot mientras estabamos escribiendo, no se pierde: se aplica sin otra lectura.
+      if(pendingSnapshot){
+        const p=pendingSnapshot; pendingSnapshot=null;
+        setTimeout(()=>applyRemote(p.data,p.rev,p.clientId,'snapshot_pendiente').catch(e=>warn('Error aplicando snapshot pendiente',e)),0);
+      }
+    }
   }
-  function scheduleUpload(reason, delay){
-    if(applyingRemote) return;
+  function scheduleUpload(reason, delay, force){
+    if(applyingRemote && !force) return;
     clearTimeout(saveTimer);
-    saveTimer=setTimeout(()=>uploadMerged(reason), Number(delay||700));
+    const run = ()=>{
+      if(saving || applyingRemote){ saveTimer=setTimeout(run,180); return; }
+      uploadMerged(reason);
+    };
+    saveTimer=setTimeout(run, Number(delay||700));
   }
   async function applyRemote(data, rev, remoteClientId, reason){
     if(!data) return;
@@ -2051,9 +2078,11 @@
       }
       if(unsub) unsub();
       unsub=docRef().onSnapshot(snap=>{
-        if(!snap.exists || saving) return;
+        if(!snap.exists) return;
         const d=snap.data()||{};
-        applyRemote(d.payload||d,d.revision||d.updatedAtIso||'',d.clientId||'','onSnapshot').catch(e=>warn('Error aplicando remoto',e));
+        const packet={data:d.payload||d,rev:d.revision||d.updatedAtIso||'',clientId:d.clientId||''};
+        if(saving){ pendingSnapshot=packet; return; }
+        applyRemote(packet.data,packet.rev,packet.clientId,'onSnapshot').catch(e=>warn('Error aplicando remoto',e));
       },e=>warn('onSnapshot error',e));
       if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
       // Sin polling periodico: onSnapshot es la via principal y evita lecturas cada 30 s.
@@ -2071,7 +2100,18 @@
       return r;
     };
   }
-  window.LDH_FerreteriaV2SyncNow=function(){ return uploadMerged('manual'); };
+  window.LDH_FerreteriaV2QueueSync=function(reason,delay){
+    scheduleUpload(reason||'cambio_local', Number(delay||250), true);
+    return {ok:true,queued:true};
+  };
+  window.LDH_FerreteriaV2SyncNow=function(reason){
+    clearTimeout(saveTimer);
+    if(saving || applyingRemote){
+      scheduleUpload(reason||'manual_pendiente', 160, true);
+      return Promise.resolve({ok:true,queued:true});
+    }
+    return uploadMerged(reason||'manual');
+  };
   window.LDH_FerreteriaV2PullNow=function(){ return pullRemote('manual_pull'); };
   window.LDH_FerreteriaV2SyncStatus=function(){ return {started,saving,clientId:CLIENT_ID,build:BUILD,doc:DOC_COL+'/'+DOC_ID,mode:'realtime_listener_lowquota'}; };
   // Al volver de offline se reintenta una posible escritura pendiente; focus/visible solo hacen pull de rescate con limite de 5 min.

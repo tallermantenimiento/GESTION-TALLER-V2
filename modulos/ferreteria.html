@@ -6905,6 +6905,13 @@ window.LDH_borrarMovimientosTodos = function(){
       idbPut(IDB_KEY, db)
         .then(() => announce(db.updatedAt))
         .catch(error => console.warn('[Ferreteria V2] Guardado IndexedDB pendiente fallo.', error));
+      // Enviar cada cambio de usuario a Firebase de forma explicita. El debounce del sync
+      // evita duplicados y no depende de interceptar Storage.setItem.
+      try{
+        if(typeof window.LDH_FerreteriaV2QueueSync === 'function'){
+          window.LDH_FerreteriaV2QueueSync('ferreteria_save', 260);
+        }
+      }catch(_){ }
       return true;
     }catch(error){
       console.error('[Ferreteria V2] No se pudo guardar.', error);
@@ -7250,7 +7257,7 @@ window.LDH_borrarMovimientosTodos = function(){
   const DOC_COL = 'taller_ferreteria_v2';
   const DOC_ID = 'main';
   const CLIENT_KEY = 'LDH_FER_V2_SYNC_CLIENT_ID';
-  const BUILD = 'FER-V2-LOWQUOTA-REALTIME-20260817';
+  const BUILD = 'FER-V2-LOWQUOTA-REALTIME-ACK-20260817';
   const firebaseConfig = {
     apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
     authDomain: 'gestion-taller-2a439.firebaseapp.com',
@@ -7261,7 +7268,7 @@ window.LDH_borrarMovimientosTodos = function(){
   };
 
   let app=null, auth=null, fs=null, unsub=null;
-  let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null;
+  let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null, pendingSnapshot=null;
   let lastUploadedHash='', lastRemoteRev='', lastRemoteHash='';
   let lastRemoteAt=0, lastFallbackPullAt=0;
   const FALLBACK_PULL_MIN_MS = 5 * 60 * 1000;
@@ -7462,12 +7469,22 @@ window.LDH_borrarMovimientosTodos = function(){
       log('Subido cambio real', reason, {materials:merged.materials.length, movements:merged.movements.length});
       return {ok:true};
     }catch(e){ warn('No se pudo subir cambio', e); return {ok:false,error:e}; }
-    finally{ saving=false; }
+    finally{
+      saving=false;
+      if(pendingSnapshot){
+        const p=pendingSnapshot; pendingSnapshot=null;
+        setTimeout(()=>applyRemote(p.data,p.rev,p.clientId,'snapshot_pendiente').catch(e=>warn('Error aplicando snapshot pendiente',e)),0);
+      }
+    }
   }
-  function scheduleUpload(reason, delay){
-    if(applyingRemote) return;
+  function scheduleUpload(reason, delay, force){
+    if(applyingRemote && !force) return;
     clearTimeout(saveTimer);
-    saveTimer=setTimeout(()=>uploadMerged(reason), Number(delay||700));
+    const run = ()=>{
+      if(saving || applyingRemote){ saveTimer=setTimeout(run,180); return; }
+      uploadMerged(reason);
+    };
+    saveTimer=setTimeout(run, Number(delay||700));
   }
   async function applyRemote(data, rev, remoteClientId, reason){
     if(!data) return;
@@ -7484,7 +7501,16 @@ window.LDH_borrarMovimientosTodos = function(){
     // Si solo cambia revision/timestamp, no tocar DOM ni scroll.
     if(beforeHash && beforeHash === afterHash) return;
 
-    writeLocal(merged);
+    const applied = writeLocal(merged);
+    // Aplicar el snapshot directamente a la DB que usa el render del PC. Asi no dependemos
+    // de que IndexedDB/localStorage gane una carrera de timestamps antes de refrescar la tabla.
+    try{
+      if(typeof db !== 'undefined'){
+        db = normalize(applied);
+        window.db = db;
+        window.__LDH_FERRETERIA_MEMORY_DB = db;
+      }
+    }catch(_){ }
     log('Remoto aplicado', reason || '', {materials:merged.materials.length, movements:merged.movements.length});
     setTimeout(()=>{
       try{ if(typeof window.LDH_FerreteriaReloadV2 === 'function') window.LDH_FerreteriaReloadV2(); }catch(_){ }
@@ -7525,9 +7551,11 @@ window.LDH_borrarMovimientosTodos = function(){
       }
       if(unsub) unsub();
       unsub=docRef().onSnapshot(snap=>{
-        if(!snap.exists || saving) return;
+        if(!snap.exists) return;
         const d=snap.data()||{};
-        applyRemote(d.payload||d,d.revision||d.updatedAtIso||'',d.clientId||'','onSnapshot').catch(e=>warn('Error aplicando remoto',e));
+        const packet={data:d.payload||d,rev:d.revision||d.updatedAtIso||'',clientId:d.clientId||''};
+        if(saving){ pendingSnapshot=packet; return; }
+        applyRemote(packet.data,packet.rev,packet.clientId,'onSnapshot').catch(e=>warn('Error aplicando remoto',e));
       },e=>warn('onSnapshot error',e));
       if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
       // Sin polling periodico: onSnapshot es la via principal y evita lecturas cada 30 s.
@@ -7545,7 +7573,18 @@ window.LDH_borrarMovimientosTodos = function(){
       return r;
     };
   }
-  window.LDH_FerreteriaV2SyncNow=function(){ return uploadMerged('manual'); };
+  window.LDH_FerreteriaV2QueueSync=function(reason,delay){
+    scheduleUpload(reason||'cambio_local', Number(delay||250), true);
+    return {ok:true,queued:true};
+  };
+  window.LDH_FerreteriaV2SyncNow=function(reason){
+    clearTimeout(saveTimer);
+    if(saving || applyingRemote){
+      scheduleUpload(reason||'manual_pendiente', 160, true);
+      return Promise.resolve({ok:true,queued:true});
+    }
+    return uploadMerged(reason||'manual');
+  };
   window.LDH_FerreteriaV2PullNow=function(){ return pullRemote('manual_pull'); };
   window.LDH_FerreteriaV2SyncStatus=function(){ return {started,saving,clientId:CLIENT_ID,build:BUILD,doc:DOC_COL+'/'+DOC_ID,mode:'realtime_listener_lowquota'}; };
   // Al volver de offline se reintenta una posible escritura pendiente; focus/visible solo hacen pull de rescate con limite de 5 min.
