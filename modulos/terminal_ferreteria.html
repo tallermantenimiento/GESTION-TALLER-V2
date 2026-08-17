@@ -1,8 +1,11 @@
 <!doctype html>
 <html lang="es">
 <head>
-<meta name="ldh-build" content="TERMINAL-FERRETERIA-SYNC-AUTH-20260817">
+<meta name="ldh-build" content="TERMINAL-FERRETERIA-RECUPERA-TABLET-SYNC-20260817">
   <meta charset="utf-8"/>
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <title>Terminal Ferretería</title>
   <!-- PATCH_VERSION: 2026-01-08 OPS+STOCK FIRESTORE_SYNC + ADD_MATERIAL + NEW_GROUP_SELECTOR + EDIT_DELETE -->
@@ -288,27 +291,79 @@
       ch.close();
     }catch(_){ }
   }
-  function loadStockDB(){
+  const FER_V2_RECOVERY_BUILD = 'FER-V2-RECUPERA-STOCK-TABLET-20260817';
+  function legacySignedQty(m){
+    const q = nQty(m && (m.qty ?? m.cantidad ?? m.units ?? m.unidades ?? 0));
+    const typ = normTxt(m && (m.type || m.tipo || '') || '');
+    if(['in','entrada','ajuste pos','devolucion'].includes(typ)) return q;
+    if(['out','salida','ajuste neg','consumo'].includes(typ)) return -q;
+    return 0;
+  }
+  function legacyStockQty(oldDB, matId){
+    try{return (oldDB.movements||[]).filter(m=>String(m && (m.matId || m.materialId) || '')===String(matId||'')).reduce((sum,m)=>sum+legacySignedQty(m),0);}
+    catch(_){return 0;}
+  }
+  function v2StockQtyRaw(v2, matId){
     try{
-      const rawV2 = localStorage.getItem(FER_V2_DB_KEY) || sessionStorage.getItem(FER_V2_DB_KEY);
-      if(rawV2){
-        const dbV2 = JSON.parse(rawV2);
-        if(dbV2 && Array.isArray(dbV2.materials) && Array.isArray(dbV2.movements)){
-          dbV2.__source = 'fer_v2';
-          dbV2.assignments = Array.isArray(dbV2.assignments) ? dbV2.assignments : [];
-          dbV2.reservations = Array.isArray(dbV2.reservations) ? dbV2.reservations : [];
-          return dbV2;
-        }
+      const fake=Object.assign({},v2,{__source:'fer_v2'});
+      return (v2.movements||[]).filter(m=>String(m && (m.materialId || m.matId) || '')===String(matId||'')).reduce((sum,m)=>sum+movementSignedQty(fake,m),0);
+    }catch(_){return 0;}
+  }
+  function recoverLegacyFerreteriaIntoV2(v2){
+    try{
+      const rawOld=localStorage.getItem(STOCK_DB_KEY);
+      if(!rawOld) return v2;
+      const oldDB=JSON.parse(rawOld)||{};
+      if(!Array.isArray(oldDB.materials)||!Array.isArray(oldDB.movements)) return v2;
+      const oldMats=oldDB.materials.filter(m=>isFerreteria(m));
+      if(!oldMats.length) return v2;
+      const current=v2&&typeof v2==='object'?v2:{version:'2.0-ferreteria-comun',companies:[{id:FER_COMMON_COMPANY_ID,name:'FERRETERIA COMUN',code:'FER'}],materials:[],stock:[],movements:[],jobs:[],reservations:[],assignments:[],reservationDebts:[]};
+      current.materials=Array.isArray(current.materials)?current.materials:[];
+      current.stock=Array.isArray(current.stock)?current.stock:[];
+      current.movements=Array.isArray(current.movements)?current.movements:[];
+      current.assignments=Array.isArray(current.assignments)?current.assignments:[];
+      current.reservations=Array.isArray(current.reservations)?current.reservations:[];
+      if(current.recoveryFromLegacy&&current.recoveryFromLegacy.build===FER_V2_RECOVERY_BUILD) return current;
+      const legacyRows=oldMats.map(m=>({m,qty:legacyStockQty(oldDB,m.id)}));
+      if(!legacyRows.some(x=>Math.abs(Number(x.qty||0))>0.000001)) return current;
+      const v2HasNonZero=current.materials.some(m=>normTxt(m.type||m.tipo||'')==='ferreteria'&&Math.abs(v2StockQtyRaw(current,m.id))>0.000001);
+      if(v2HasNonZero){
+        current.recoveryFromLegacy={build:FER_V2_RECOVERY_BUILD,at:new Date().toISOString(),mode:'v2_ya_tenia_stock_fisico'};
+        saveV2DB(current); return current;
       }
-    }catch(e){ console.warn('No se pudo leer Ferretería V2:', e); }
+      const safeId=s=>String(s||'').replace(/[^a-zA-Z0-9_-]+/g,'_');
+      const imported=[];
+      legacyRows.forEach(({m,qty})=>{
+        const name=String(m.name||m.nombre||'Material').trim();
+        const family=String(m.grp||m.group||m.family||m.familia||'Ferreteria').trim();
+        let target=current.materials.find(x=>String(x&&x.id||'')===String(m.id||''));
+        if(!target){const nn=normTxt(name),nf=normTxt(family);target=current.materials.find(x=>normTxt(x&&(x.name||x.nombre)||'')===nn&&normTxt(x&&(x.family||x.familia||x.grp)||'')===nf);}
+        if(!target){let id='fer_'+safeId(m.id||('legacy_'+Math.random().toString(36).slice(2,8)));if(current.materials.some(x=>String(x&&x.id||'')===id))id+='_'+Math.random().toString(36).slice(2,6);target={id,name,family,type:'ferreteria',unit:String(m.unit||m.unidad||'ud'),createdFrom:'recuperacion_tablet_legacy'};current.materials.push(target);}
+        else{target.type='ferreteria';if(!target.name)target.name=name;if(!target.family)target.family=family;if(!target.unit)target.unit=String(m.unit||m.unidad||'ud');}
+        let sr=current.stock.find(s=>String(s&&s.materialId||'')===String(target.id));
+        if(!sr){sr={id:'st_rec_'+safeId(target.id),companyId:FER_COMMON_COMPANY_ID,materialId:target.id,min:Number(m.min||m.minimum||m.minimo||0),location:String(m.location||m.ubicacion||'Ferreteria'),createdFrom:'recuperacion_tablet_legacy'};current.stock.push(sr);}
+        const desired=Number(qty||0),before=v2StockQtyRaw(current,target.id),delta=desired-before;
+        if(Math.abs(delta)>0.000001){
+          const mid='mov_recupera_tablet_'+safeId(target.id);let mv=current.movements.find(x=>String(x&&(x.id||x.movementId)||'')===mid);const ts=new Date().toISOString();
+          const data={id:mid,movementId:mid,companyId:FER_COMMON_COMPANY_ID,materialId:target.id,matId:target.id,type:delta>=0?'ajuste_pos':'ajuste_neg',tipo:delta>=0?'ajuste_pos':'ajuste_neg',qty:Math.abs(delta),cantidad:Math.abs(delta),date:ts,fecha:ts,source:'recuperacion_stock_tablet_legacy_v2',origen:'recuperacion_stock_tablet_legacy_v2',note:'Recuperacion automatica del stock visible que existia en esta tablet antes de la sincronizacion V2.'};
+          if(mv)Object.assign(mv,data);else current.movements.push(data);
+        }
+        imported.push({legacyId:String(m.id||''),materialId:String(target.id||''),name,qty:desired});
+      });
+      current.recoveryFromLegacy={build:FER_V2_RECOVERY_BUILD,at:new Date().toISOString(),mode:'tablet_legacy_a_v2',items:imported};
+      saveV2DB(current);console.info('[Terminal Ferreteria] Stock local de tablet recuperado a V2',imported);return current;
+    }catch(e){console.warn('[Terminal Ferreteria] No se pudo recuperar stock legacy a V2',e);return v2;}
+  }
+  function loadStockDB(){
+    let dbV2=null;
     try{
-      const raw = localStorage.getItem(STOCK_DB_KEY);
-      if(!raw) return null;
-      const db = JSON.parse(raw);
-      if(!db || !Array.isArray(db.materials) || !Array.isArray(db.movements)) return null;
-      db.__source = 'old_stock';
-      return db;
-    }catch(e){ return null; }
+      const rawV2=localStorage.getItem(FER_V2_DB_KEY)||sessionStorage.getItem(FER_V2_DB_KEY);
+      if(rawV2){dbV2=JSON.parse(rawV2);if(dbV2&&Array.isArray(dbV2.materials)&&Array.isArray(dbV2.movements)){dbV2.assignments=Array.isArray(dbV2.assignments)?dbV2.assignments:[];dbV2.reservations=Array.isArray(dbV2.reservations)?dbV2.reservations:[];dbV2.stock=Array.isArray(dbV2.stock)?dbV2.stock:[];dbV2=recoverLegacyFerreteriaIntoV2(dbV2)||dbV2;dbV2.__source='fer_v2';return dbV2;}}
+    }catch(e){console.warn('No se pudo leer Ferreteria V2:',e);}
+    try{
+      const recovered=recoverLegacyFerreteriaIntoV2(null);if(recovered&&Array.isArray(recovered.materials)&&recovered.materials.length){recovered.__source='fer_v2';return recovered;}
+      const raw=localStorage.getItem(STOCK_DB_KEY);if(!raw)return null;const db=JSON.parse(raw);if(!db||!Array.isArray(db.materials)||!Array.isArray(db.movements))return null;db.__source='old_stock';return db;
+    }catch(e){return null;}
   }
   function movementSignedQty(db, m){
     const q = nQty(m.qty ?? m.cantidad ?? m.units ?? m.unidades);
@@ -1675,7 +1730,7 @@
   const DOC_COL = 'taller_ferreteria_v2';
   const DOC_ID = 'main';
   const CLIENT_KEY = 'LDH_FER_V2_SYNC_CLIENT_ID';
-  const BUILD = 'FER-V2-AUTH-MERGE-POLL-TOMBSTONES-20260817';
+  const BUILD = 'FER-V2-AUTHOPTIONAL-RECOVERY-POLL-20260817';
   const firebaseConfig = {
     apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
     authDomain: 'gestion-taller-2a439.firebaseapp.com',
@@ -1725,7 +1780,7 @@
     fs = firebase.firestore();
     if(!auth.currentUser){
       try{ await auth.signInAnonymously(); }
-      catch(e){ warn('No se pudo iniciar sesión anónima. Sync desactivado.', e); throw e; }
+      catch(e){ warn('Auth anonimo no disponible; se intenta Firestore con las reglas actuales.',e); }
     }
   }
   function docRef(){ return fs.collection(DOC_COL).doc(DOC_ID); }
@@ -1940,5 +1995,6 @@
 </script>
 <!-- /LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260817 -->
 
+<!-- LDH_TERMINAL_FERRETERIA_RECUPERA_STOCK_TABLET_V2_20260817 -->
 </body>
 </html>
