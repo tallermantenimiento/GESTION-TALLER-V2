@@ -714,7 +714,7 @@
       return qty;
     },
 
-    move(refEnc, from, to){
+    async move(refEnc, from, to){
       const item = this.itemByRef(refEnc);
       if(!item){
         alert("No encuentro el trabajo para mover.");
@@ -726,6 +726,33 @@
       const labels = {fab:"Fabricación", pintura:"Pintura", almacen:"Almacén", entregado:"Entregado"};
       const qty = this.askQty(`${labels[from] || from} → ${labels[to] || to}`, max);
       if(qty === null) return;
+
+      /*
+       * V8 · Cierre autoritativo de Stock antes de avanzar FAB → PINTURA.
+       * El hierro reservado/asignado debe haber quedado consumido al entrar en
+       * Fabricación. Para trabajos antiguos que aún conservan una asignación viva,
+       * regularizamos primero Stock en Firebase y solo después cambiamos la fase.
+       */
+      if(from === "fab" && to === "pintura"){
+        if(typeof window.LDH_fabricacionCerrarStockAlPasarAPintura !== "function"){
+          alert("Stock nube todavía no está preparado. Espera unos segundos y vuelve a pulsar A pintura.");
+          return;
+        }
+        try{
+          await window.LDH_fabricacionCerrarStockAlPasarAPintura(
+            String(item.ref || item.referencia || ""),
+            {phase:"pintura"}
+          );
+        }catch(error){
+          console.error("No se pudo cerrar el Stock antes de pasar a Pintura", error);
+          alert(
+            "No se ha pasado el trabajo a Pintura.\n\n" +
+            "No se pudo confirmar el cierre del material reservado en Stock.\n\n" +
+            String(error && (error.code || error.message) || error || "Error de sincronización")
+          );
+          return;
+        }
+      }
 
       if(from === "fab"){
         f.fab = Math.max(0, n(f.fab ?? f.fabricacion) - qty);
@@ -1996,5 +2023,333 @@ setTimeout(hookApp, 1500);
 </script>
 <!-- LDH_FAB_COMPANY_FILTER_NO_COMMON_V3_20260813 -->
 <!-- LDH_FAB_RECUPERA_AGENDA_ACTIVA_V6_20260813 -->
+
+
+<script type="module" id="LDH_FAB_STOCK_CLOSE_ON_PAINT_V8_20260817">
+(async function(){
+  'use strict';
+  const BUILD = 'FAB-STOCK-CLOSE-ON-PAINT-V8-20260817';
+  const STOCK_KEY = 'ldh_v2_company_stock_v1';
+  const CHUNK_SIZE = 350000;
+  const firebaseConfig = {
+    apiKey: 'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',
+    authDomain: 'gestion-taller-stock.firebaseapp.com',
+    projectId: 'gestion-taller-stock',
+    storageBucket: 'gestion-taller-stock.firebasestorage.app',
+    messagingSenderId: '164944519480',
+    appId: '1:164944519480:web:bfa9173d22f88a3b56e1cd'
+  };
+
+  const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+  const {getAuth,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
+  const {getFirestore,doc,runTransaction,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+
+  const APP_NAME = 'ldh-fabricacion-stock-close-v8';
+  let app = getApps().find(candidate => candidate && candidate.name === APP_NAME);
+  if(!app) app = initializeApp(firebaseConfig, APP_NAME);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  function norm(value){
+    return String(value ?? '')
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/ø/g,'o')
+      .replace(/[^\w]+/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+  function num(value){
+    const n = Number.parseFloat(String(value ?? 0).replace(',','.'));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function parseStock(raw){
+    let value = raw;
+    for(let pass=0; pass<4; pass+=1){
+      if(typeof value === 'string'){
+        const s = value.trim();
+        if(!s) return null;
+        try{ value = JSON.parse(s); }catch(_){ return null; }
+        continue;
+      }
+      if(value && typeof value === 'object' && value[STOCK_KEY] != null){
+        value = value[STOCK_KEY];
+        continue;
+      }
+      break;
+    }
+    return value && typeof value === 'object' ? value : null;
+  }
+  function chunks(text){
+    const out=[];
+    for(let i=0;i<text.length;i+=CHUNK_SIZE) out.push(text.slice(i,i+CHUNK_SIZE));
+    return out.length ? out : [''];
+  }
+  function assignmentRef(row){
+    return String(row?.consumerRef ?? row?.jobRef ?? row?.ref ?? row?.reference ?? '').trim();
+  }
+  function sameRef(a,b){ return !!norm(a) && norm(a) === norm(b); }
+  function isLoan(row){
+    const type = norm(row?.assignmentType ?? row?.reason ?? row?.source ?? '');
+    if(row?.debtExempt === true || row?.returnRequired === false || type.includes('donacion')) return false;
+    return type.includes('otra empresa') || !!row?.toCompanyId;
+  }
+  function isCommon(row){
+    if(row?.sharedStock === true) return true;
+    const type = norm(row?.assignmentType ?? row?.reason ?? row?.source ?? '');
+    return type === 'stock comun' || type.includes('asignado desde stock comun') || type.includes('preparacion pedidos stock comun');
+  }
+  function isHardware(row){
+    return norm(row?.assignmentType ?? row?.reason ?? row?.source ?? '').includes('ferreteria');
+  }
+  function isActiveOperational(row){
+    if(!row || typeof row !== 'object') return false;
+    const status = norm(row.status ?? row.estado ?? 'activa');
+    const phase = norm(row.phase ?? row.fase ?? 'preparacion');
+    const closed = [
+      'consumida','consumido','liberada','liberado','cancelada','cancelado',
+      'anulada','anulado','cerrada','cerrado','devuelta','devuelto',
+      'consolidada','consolidado','cancelada prueba','cancelada_prueba'
+    ].includes(status);
+    return !closed && (phase === 'preparacion' || phase === 'fabricacion' || !phase);
+  }
+  function safeId(value){ return String(value ?? '').replace(/[^a-zA-Z0-9_-]+/g,'_'); }
+  function assignmentId(row, reference){
+    return String(row?.id ?? row?.assignmentId ?? `${row?.companyId ?? row?.empresaId ?? ''}_${row?.materialId ?? row?.matId ?? ''}_${reference}`);
+  }
+  function movementIsPhysicalOut(row){
+    const type = norm(row?.type ?? row?.tipo ?? '');
+    return ['salida','out','consumo','consumo terminal','prestamo','baja','retirada'].includes(type);
+  }
+  function alreadyConsumedByMovement(movements, row, reference, expectedMovementId){
+    const aId = assignmentId(row, reference);
+    const storedMovementId = String(row?.movementId ?? '').trim();
+    return (movements || []).some(m => {
+      const mid = String(m?.id ?? m?.movementId ?? '').trim();
+      if(expectedMovementId && mid === expectedMovementId) return true;
+      if(storedMovementId && mid === storedMovementId) return true;
+      const linkedAssignment = String(m?.assignmentId ?? '').trim();
+      if(linkedAssignment && linkedAssignment === aId && movementIsPhysicalOut(m)) return true;
+      return false;
+    });
+  }
+
+  async function ensureAuth(){
+    if(!auth.currentUser) await signInAnonymously(auth);
+    if(!auth.currentUser) throw new Error('Stock nube todavía no está autenticado.');
+    return true;
+  }
+
+  async function readRemoteStock(transaction, metaRef){
+    const metaSnap = await transaction.get(metaRef);
+    if(!metaSnap.exists()) throw new Error('No existe taller_data/stock.');
+    const meta = metaSnap.data() || {};
+    const total = Math.max(0, Number(meta.totalChunks || 0) || 0);
+    let packed = '';
+    if(total > 0){
+      for(let index=0; index<total; index+=1){
+        const chunkRef = doc(db,'taller_data','stock','chunks',String(index));
+        const chunkSnap = await transaction.get(chunkRef);
+        if(!chunkSnap.exists()) throw new Error(`Falta chunk remoto ${index}.`);
+        const chunk = chunkSnap.data() || {};
+        packed += String(chunk.part ?? chunk.data ?? chunk.payload ?? chunk.content ?? '');
+      }
+    }else{
+      const direct = meta[STOCK_KEY] ?? meta.payload ?? meta.data ?? meta.stock;
+      if(direct != null) packed = typeof direct === 'string' ? direct : JSON.stringify({[STOCK_KEY]:direct});
+    }
+    if(!packed) throw new Error('El paquete remoto de Stock está vacío.');
+    const outer = JSON.parse(packed);
+    const raw = outer?.[STOCK_KEY] ?? outer?.payload ?? outer?.data ?? outer?.stock ?? outer;
+    const stockDB = parseStock(raw);
+    if(!stockDB) throw new Error('El Stock remoto no tiene un formato válido.');
+    return stockDB;
+  }
+
+  async function closeAssignments(reference, options={}){
+    reference = String(reference ?? '').trim();
+    if(!reference) throw new Error('El trabajo no tiene referencia.');
+    await ensureAuth();
+    const targetPhase = options.phase === 'pintura' ? 'pintura' : 'fabricacion';
+
+    const result = await runTransaction(db, async transaction => {
+      const metaRef = doc(db,'taller_data','stock');
+      const remoteDB = await readRemoteStock(transaction, metaRef);
+      remoteDB.assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
+      remoteDB.movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
+      remoteDB.stock = Array.isArray(remoteDB.stock) ? remoteDB.stock : [];
+
+      const now = new Date().toISOString();
+      let consumedAssignments = 0;
+      let consumedQty = 0;
+      let movementsAdded = 0;
+
+      remoteDB.assignments.forEach(assignment => {
+        if(!sameRef(assignmentRef(assignment), reference)) return;
+        if(!isActiveOperational(assignment)) return;
+        if(isLoan(assignment) || isHardware(assignment)) return;
+
+        const qty = Math.max(0, num(assignment.qty ?? assignment.cantidad ?? assignment.asignado ?? 0));
+        if(qty <= 0) return;
+        const aId = assignmentId(assignment, reference);
+        const common = isCommon(assignment);
+        const expectedMovementId = (common ? 'mov_stock_comun_fabricacion_' : 'mov_stock_propio_fabricacion_') + safeId(aId);
+        const hasPhysicalMovement = alreadyConsumedByMovement(remoteDB.movements, assignment, reference, expectedMovementId);
+
+        if(!hasPhysicalMovement){
+          const companyId = String(assignment.companyId ?? assignment.empresaId ?? assignment.company ?? assignment.empresa ?? '');
+          const materialId = String(assignment.materialId ?? assignment.matId ?? assignment.material_id ?? '');
+
+          /* Pletina por milímetros: además del movimiento, se reduce el saldo físico explícito. */
+          const lengthRow = remoteDB.stock.find(row =>
+            String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? '') === companyId &&
+            String(row?.materialId ?? row?.matId ?? row?.material_id ?? '') === materialId &&
+            String(row?.lengthMode ?? '').toLowerCase() === 'mm'
+          );
+          if(lengthRow){
+            const before = Math.max(0, num(lengthRow.lengthPhysicalMm));
+            if(qty > before + 0.000001){
+              throw new Error(`Stock insuficiente para cerrar la pletina de ${reference}: ${before} mm físicos, ${qty} mm asignados.`);
+            }
+            lengthRow.lengthPhysicalMm = Math.max(0, before - qty);
+            lengthRow.lengthMode = 'mm';
+            lengthRow.lengthSource = 'pletina_mm_global';
+            lengthRow.lengthSchemaVersion = 64;
+            lengthRow.updatedAt = now;
+          }
+
+          remoteDB.movements.push({
+            id: expectedMovementId,
+            companyId,
+            materialId,
+            type:'salida',
+            tipo:'salida',
+            qty,
+            cantidad:qty,
+            date:now,
+            createdAt:now,
+            ref:reference,
+            jobRef:reference,
+            concept:assignment.concept ?? '',
+            reason:common ? 'consumo_stock_comun_al_mandar_fabricacion' : 'consumo_stock_propio_al_mandar_fabricacion',
+            source:'fabricacion_regulariza_stock_v8',
+            assignmentId:aId,
+            debtExempt:true,
+            returnRequired:false
+          });
+          movementsAdded += 1;
+          consumedQty += qty;
+        }
+
+        assignment.status = 'consumida';
+        assignment.estado = 'consumida';
+        assignment.phase = targetPhase;
+        assignment.fase = targetPhase;
+        assignment.consumedQty = qty;
+        assignment.consumedAt = assignment.consumedAt || now;
+        assignment.closedAt = now;
+        assignment.updatedAt = now;
+        assignment.movementId = expectedMovementId;
+        assignment.closedReason = targetPhase === 'pintura'
+          ? 'cierre_hierro_al_pasar_a_pintura_v8'
+          : 'regularizacion_hierro_en_fabricacion_v8';
+        consumedAssignments += 1;
+      });
+
+      if(!consumedAssignments){
+        return {remoteDB, consumedAssignments:0, consumedQty:0, movementsAdded:0};
+      }
+
+      remoteDB.updatedAt = now;
+      const packageObj = {
+        [STOCK_KEY]: JSON.stringify(remoteDB),
+        updatedAt: now,
+        schema:'ldh_stock_chunked_v2_full'
+      };
+      const parts = chunks(JSON.stringify(packageObj));
+      for(let index=0; index<parts.length; index+=1){
+        transaction.set(doc(db,'taller_data','stock','chunks',String(index)),{
+          part:parts[index],
+          index,
+          updatedAt:serverTimestamp()
+        });
+      }
+      transaction.set(metaRef,{
+        totalChunks:parts.length,
+        chunkSize:CHUNK_SIZE,
+        updatedAt:serverTimestamp(),
+        updatedAtISO:now,
+        key:STOCK_KEY,
+        rawCompanies:Array.isArray(remoteDB.companies) ? remoteDB.companies.length : 0,
+        rawMaterials:Array.isArray(remoteDB.materials) ? remoteDB.materials.length : 0,
+        rawStock:Array.isArray(remoteDB.stock) ? remoteDB.stock.length : 0,
+        rawMovements:remoteDB.movements.length,
+        rawReservations:Array.isArray(remoteDB.reservations) ? remoteDB.reservations.length : 0,
+        rawAssignments:remoteDB.assignments.length,
+        source:'fabricacion_regulariza_stock_v8'
+      },{merge:true});
+
+      return {remoteDB, consumedAssignments, consumedQty, movementsAdded};
+    });
+
+    if(result.consumedAssignments > 0){
+      const raw = JSON.stringify(result.remoteDB);
+      try{ localStorage.setItem(STOCK_KEY, raw); }catch(_){ }
+      try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(_){ }
+      try{ window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated')); }catch(_){ }
+      console.info('[Fabricación]', BUILD, reference, result);
+    }
+    return result;
+  }
+
+  window.LDH_fabricacionCerrarStockAlPasarAPintura = closeAssignments;
+
+  /*
+   * Regularización idempotente de trabajos que ya estaban en Fabricación/Pintura
+   * antes de instalar V8. Corrige reservas huérfanas como OT-260731-001 sin
+   * necesidad de volver a mover manualmente el pedido.
+   */
+  async function reconcileExisting(){
+    try{
+      await ensureAuth();
+      if(!window.App || typeof window.App.allItems !== 'function') return;
+      const refs = [];
+      const phases = new Map();
+      (window.App.allItems() || []).forEach(item => {
+        if(!item || item.deleted || item.archived) return;
+        const ref = String(item.ref || item.referencia || '').trim();
+        if(!ref || refs.includes(ref)) return;
+        const f = window.App.ensureFlow ? window.App.ensureFlow(item) : (item.flow || {});
+        const fab = num(f?.fab ?? f?.fabricacion);
+        const pint = num(f?.pintura);
+        if(fab + pint <= 0) return;
+        refs.push(ref);
+        phases.set(ref, pint > 0 && fab <= 0 ? 'pintura' : 'fabricacion');
+      });
+      let repaired = 0;
+      for(const ref of refs){
+        try{
+          const r = await closeAssignments(ref,{phase:phases.get(ref)});
+          repaired += Number(r?.consumedAssignments || 0);
+        }catch(error){
+          console.warn('[Fabricación] No se pudo regularizar Stock de', ref, error);
+        }
+      }
+      if(repaired > 0) console.info('[Fabricación]', BUILD, 'asignaciones regularizadas:', repaired);
+    }catch(error){
+      console.warn('[Fabricación] Regularización inicial de Stock no disponible', error);
+    }
+  }
+
+  document.documentElement.dataset.ldhFabStockCloseBuild = BUILD;
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded',()=>setTimeout(reconcileExisting,1800),{once:true});
+  }else{
+    setTimeout(reconcileExisting,1800);
+  }
+})();
+</script>
+<!-- LDH_FAB_STOCK_CLOSE_ON_PAINT_V8_20260817 -->
+
 </body>
 </html>
