@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="es">
 <head>
-<meta name="ldh-build" content="TERMINAL-FERRETERIA-RECUPERA-TABLET-SYNC-20260817">
+<meta name="ldh-build" content="TERMINAL-FERRETERIA-LOWQUOTA-SCROLL-20260817">
   <meta charset="utf-8"/>
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
 <meta http-equiv="Pragma" content="no-cache" />
@@ -19,6 +19,7 @@
       --accent:#35b6ff; --ok:#2bd671; --warn:#ffcc66; --bad:#ff5a7a;
     }
     *{box-sizing:border-box}
+    html,body{touch-action:pan-y;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch}
     body{
       margin:0; font-family:var(--font); color:var(--txt); min-height:100vh;
       background:
@@ -70,7 +71,7 @@
     .tag{display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.4px}
     .tag.zero{background:#4a0f23;border:1px solid #ff5a7a66}
     .tag.low{background:#4a3a0f;border:1px solid #ffcc6666}
-    .list{display:flex;flex-direction:column;gap:12px;max-height:52vh;overflow:auto;padding-right:6px}
+    .list{display:flex;flex-direction:column;gap:12px;max-height:52vh;overflow:auto;padding-right:6px;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior:contain}
     .groupHdr{
       background:linear-gradient(90deg, #102a52, #0d1b38);
       border:1px solid #ffffff33; border-radius:16px; padding:16px;
@@ -227,7 +228,7 @@
   const STOCK_DB_KEY = "taller_stock_v3_data";
   const FER_V2_DB_KEY = "ldh_v2_ferreteria_stock_v1";
   const FER_COMMON_COMPANY_ID = "fer_common";
-  const USE_FIRESTORE_STOCK = true;
+  const USE_FIRESTORE_STOCK = false; // V2 es autoritativo; evita listener/lecturas del stock legacy.
   const FIRESTORE_STOCK_DOC = { col: "taller_stock", doc: "main" };
   const FER_V2_FIRESTORE_DOC = { col: "taller_ferreteria_v2", doc: "main" };
   const USE_FIRESTORE_OPS = true;
@@ -1661,14 +1662,57 @@
   window.screenItems = screenItems;
   window.screenConsume = screenConsume;
   window.goBackMain = goBackMain;
+
+  // En tablet no se reconstruye la vista mientras el usuario esta desplazando.
+  let __ldhTouchActive=false, __ldhPendingRefresh=false, __ldhTouchTimer=null;
+  function __ldhTouchOn(){
+    __ldhTouchActive=true;
+    clearTimeout(__ldhTouchTimer);
+  }
+  function __ldhTouchOff(){
+    clearTimeout(__ldhTouchTimer);
+    __ldhTouchTimer=setTimeout(()=>{
+      __ldhTouchActive=false;
+      if(__ldhPendingRefresh){ __ldhPendingRefresh=false; window.LDH_FerreteriaRefreshView(); }
+    },700);
+  }
+  document.addEventListener('touchstart',__ldhTouchOn,{passive:true});
+  document.addEventListener('touchmove',__ldhTouchOn,{passive:true});
+  document.addEventListener('touchend',__ldhTouchOff,{passive:true});
+  document.addEventListener('touchcancel',__ldhTouchOff,{passive:true});
+
   window.LDH_FerreteriaRefreshView = function(){
     try{
+      if(__ldhTouchActive){ __ldhPendingRefresh=true; return; }
+      const oldList=document.getElementById('itemsList');
+      const snap={
+        winY:window.scrollY||0,
+        listY:oldList ? oldList.scrollTop : 0,
+        fam:(document.getElementById('fFam')||{}).value || '',
+        txt:(document.getElementById('fTxt')||{}).value || '',
+        step:(document.getElementById('fStep')||{}).value || '1'
+      };
       refreshItemsFromStock();
-      if(state.view==='ops') return screenOps();
-      if(state.view==='hist') return screenHist();
-      if(!state.operator) return screenOperator();
-      if(state.activeItemId) return screenConsume();
-      return screenItems();
+      if(state.view==='ops') screenOps();
+      else if(state.view==='hist') screenHist();
+      else if(!state.operator) screenOperator();
+      else if(state.activeItemId) screenConsume();
+      else screenItems();
+
+      requestAnimationFrame(()=>{
+        try{
+          const fam=document.getElementById('fFam'), txt=document.getElementById('fTxt'), step=document.getElementById('fStep');
+          if(fam) fam.value=snap.fam;
+          if(txt) txt.value=snap.txt;
+          if(step) step.value=snap.step;
+          if(txt && (snap.txt || snap.fam || snap.step!=='1')) txt.dispatchEvent(new Event('input',{bubbles:true}));
+          requestAnimationFrame(()=>{
+            const list=document.getElementById('itemsList');
+            if(list) list.scrollTop=snap.listY;
+            window.scrollTo(0,snap.winY);
+          });
+        }catch(_){ }
+      });
     }catch(e){ console.warn('No se pudo refrescar la vista de Terminal Ferretería', e); }
   };
 
@@ -1730,7 +1774,7 @@
   const DOC_COL = 'taller_ferreteria_v2';
   const DOC_ID = 'main';
   const CLIENT_KEY = 'LDH_FER_V2_SYNC_CLIENT_ID';
-  const BUILD = 'FER-V2-AUTHOPTIONAL-RECOVERY-POLL-20260817';
+  const BUILD = 'FER-V2-LOWQUOTA-REALTIME-20260817';
   const firebaseConfig = {
     apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
     authDomain: 'gestion-taller-2a439.firebaseapp.com',
@@ -1743,6 +1787,8 @@
   let app=null, auth=null, fs=null, unsub=null;
   let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null;
   let lastUploadedHash='', lastRemoteRev='', lastRemoteHash='';
+  let lastRemoteAt=0, lastFallbackPullAt=0;
+  const FALLBACK_PULL_MIN_MS = 5 * 60 * 1000;
 
   function log(){ try{ console.log.apply(console, ['[Fer V2 Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
   function warn(){ try{ console.warn.apply(console, ['[Fer V2 Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
@@ -1824,6 +1870,16 @@
     for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h,16777619); }
     return String(h>>>0)+':'+s.length;
   }
+  function dataHash(db){
+    if(!db) return '';
+    const stable = normalize(db);
+    const clone = JSON.parse(JSON.stringify(stable));
+    delete clone.updatedAt;
+    delete clone.lastWriter;
+    delete clone.lastReason;
+    delete clone.lastSyncBuild;
+    return hash(clone);
+  }
   function timeOf(x){
     if(!x || typeof x !== 'object') return 0;
     const vals=[x.updatedAt,x.releasedAt,x.consumedAt,x.cancelledAt,x.closedAt,x.resolvedAt,x.returnedAt,x.fecha,x.date,x.createdAt];
@@ -1899,11 +1955,20 @@
     try{
       const remote = await readRemote();
       const merged = remote ? mergeDB(remote, local) : normalize(local);
+      const mergedHash = dataHash(merged);
+      const remoteHash = remote ? dataHash(remote) : '';
+
+      // No escribir por timestamps/metadatos. Solo si cambio algun dato real.
+      if(remote && mergedHash === remoteHash){
+        lastUploadedHash = mergedHash;
+        writeLocal(merged);
+        return {ok:true, unchanged:true};
+      }
+      if(mergedHash && mergedHash === lastUploadedHash) return {ok:true, unchanged:true};
+
       merged.updatedAt = new Date().toISOString();
       merged.lastWriter = CLIENT_ID;
       merged.lastReason = reason || 'manual';
-      const h=hash(merged);
-      if(h === lastUploadedHash) return {ok:true, unchanged:true};
       await docRef().set({
         payload: merged,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -1916,11 +1981,11 @@
         assignmentsCount: merged.assignments.length,
         reservationsCount: merged.reservations.length
       }, {merge:false});
-      lastUploadedHash=h;
+      lastUploadedHash = dataHash(merged);
       writeLocal(merged);
-      log('Subido merge autoritativo', reason, {materials:merged.materials.length, movements:merged.movements.length});
+      log('Subido cambio real', reason, {materials:merged.materials.length, movements:merged.movements.length});
       return {ok:true};
-    }catch(e){ warn('No se pudo subir merge autoritativo', e); return {ok:false,error:e}; }
+    }catch(e){ warn('No se pudo subir cambio', e); return {ok:false,error:e}; }
     finally{ saving=false; }
   }
   function scheduleUpload(reason, delay){
@@ -1931,11 +1996,18 @@
   async function applyRemote(data, rev, remoteClientId, reason){
     if(!data) return;
     const remoteHash = hash(data);
+    lastRemoteAt = Date.now();
     if(rev && rev === lastRemoteRev && remoteHash === lastRemoteHash) return;
     lastRemoteRev = rev || '';
     lastRemoteHash = remoteHash;
     const local = readLocal();
+    const beforeHash = local ? dataHash(local) : '';
     const merged = local ? mergeDB(data, local) : normalize(data);
+    const afterHash = dataHash(merged);
+
+    // Si solo cambia revision/timestamp, no tocar DOM ni scroll.
+    if(beforeHash && beforeHash === afterHash) return;
+
     writeLocal(merged);
     log('Remoto aplicado', reason || '', {materials:merged.materials.length, movements:merged.movements.length});
     setTimeout(()=>{
@@ -1956,22 +2028,37 @@
       return {ok:true};
     }catch(e){ warn('Error en pull remoto', reason, e); return {ok:false,error:e}; }
   }
+  function maybePullRemote(reason){
+    const now = Date.now();
+    if(now - lastFallbackPullAt < FALLBACK_PULL_MIN_MS) return Promise.resolve({ok:true, skipped:true, reason:'throttle'});
+    // Si el listener ha recibido actividad recientemente, no gastar una lectura extra.
+    if(lastRemoteAt && now - lastRemoteAt < 15000) return Promise.resolve({ok:true, skipped:true, reason:'listener_activo'});
+    lastFallbackPullAt = now;
+    return pullRemote(reason || 'fallback');
+  }
   async function start(){
     try{
       await ensureFirebase();
       started=true;
+      // Fuerza una lectura local para migrar una unica vez el stock antiguo de la tablet a V2.
+      try{ if(typeof window.refreshItemsFromStock === 'function') window.refreshItemsFromStock(); }catch(_){ }
       const local=readLocal(), remote=await readRemote();
       const merged=remote&&local?mergeDB(remote,local):(local||remote);
-      if(merged){ writeLocal(merged); await uploadMerged('inicio_autoritativo'); }
+      if(merged){
+        writeLocal(merged);
+        // Solo publicar al iniciar si el contenido local aporta cambios reales.
+        if(!remote || (local && dataHash(merged) !== dataHash(remote))) await uploadMerged('inicio_cambio_local');
+      }
       if(unsub) unsub();
       unsub=docRef().onSnapshot(snap=>{
         if(!snap.exists || saving) return;
         const d=snap.data()||{};
         applyRemote(d.payload||d,d.revision||d.updatedAtIso||'',d.clientId||'','onSnapshot').catch(e=>warn('Error aplicando remoto',e));
       },e=>warn('onSnapshot error',e));
-      if(pollTimer) clearInterval(pollTimer);
-      pollTimer=setInterval(()=>{ if(document.visibilityState!=='hidden') pullRemote('poll_30s_visible'); },30000);
-      log('Activo',BUILD);
+      if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
+      // Sin polling periodico: onSnapshot es la via principal y evita lecturas cada 30 s.
+      lastRemoteAt = Date.now();
+      log('Activo',BUILD,'SIN_POLLING');
     }catch(e){ warn('Sync no iniciado',e); }
   }
 
@@ -1986,10 +2073,11 @@
   }
   window.LDH_FerreteriaV2SyncNow=function(){ return uploadMerged('manual'); };
   window.LDH_FerreteriaV2PullNow=function(){ return pullRemote('manual_pull'); };
-  window.LDH_FerreteriaV2SyncStatus=function(){ return {started,saving,clientId:CLIENT_ID,build:BUILD,doc:DOC_COL+'/'+DOC_ID}; };
-  window.addEventListener('online',()=>{ pullRemote('online_pull').then(()=>scheduleUpload('online_after_pull',500)); });
-  window.addEventListener('focus',()=>{ pullRemote('focus_pull').then(()=>scheduleUpload('focus_after_pull',500)); });
-  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') pullRemote('visible_pull').then(()=>scheduleUpload('visible_after_pull',500)); });
+  window.LDH_FerreteriaV2SyncStatus=function(){ return {started,saving,clientId:CLIENT_ID,build:BUILD,doc:DOC_COL+'/'+DOC_ID,mode:'realtime_listener_lowquota'}; };
+  // Al volver de offline se reintenta una posible escritura pendiente; focus/visible solo hacen pull de rescate con limite de 5 min.
+  window.addEventListener('online',()=>{ maybePullRemote('online_pull').then(()=>scheduleUpload('online_reintento',1200)); });
+  window.addEventListener('focus',()=>{ maybePullRemote('focus_fallback'); });
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') maybePullRemote('visible_fallback'); });
   setTimeout(start,300);
 })();
 </script>
