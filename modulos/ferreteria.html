@@ -5941,53 +5941,95 @@ window.LDH_borrarMovimientosTodos = function(){
     }catch(e){return '';}
   };
 
-  window.saveMaterial = function(){
+  function existingFamiliesForType(type){
+    type = String(type || 'ferreteria').toLowerCase();
+    const rows = Array.isArray(db && db.materials) ? db.materials : [];
+    const names = rows
+      .filter(m => {
+        const mt = String((m && m.type) || '').toLowerCase();
+        return type === 'ferreteria' ? (mt === 'ferreteria' || mt === '') : mt === type;
+      })
+      .map(m => String((m && (m.family || m.familia)) || '').trim())
+      .filter(Boolean);
+    const out = Array.from(new Set(names)).sort((a,b)=>a.localeCompare(b,'es',{sensitivity:'base'}));
+    return out;
+  }
+
+  window.saveMaterial = async function(){
     const name=$('matName') ? $('matName').value.trim() : '';
-    if(!name)return alert('Pon nombre');
+    if(!name) return alert('Pon nombre');
+    const type = apType();
+    const family = $('matFamily') ? String($('matFamily').value || '').trim() : '';
+    const allowedFamilies = existingFamiliesForType(type);
+    if(!family || !allowedFamilies.some(f=>String(f).toLowerCase()===family.toLowerCase())){
+      return alert('Selecciona una familia existente. Nuevo material no crea familias nuevas.');
+    }
+    const unit = ($('matUnit') ? $('matUnit').value.trim() : '') || 'ud';
+    const min = Number(($('matMin') && $('matMin').value) || 0);
+    const initial = Number(($('matInitial') && $('matInitial').value) || 0);
+    if(!Number.isFinite(min) || !Number.isFinite(initial) || min < 0 || initial < 0){
+      return alert('Stock inicial y mínimo deben ser 0 o más.');
+    }
+    const duplicate = (db.materials||[]).find(m=>{
+      const mt=String(m.type||'').toLowerCase();
+      const typeOk = type === 'ferreteria' ? (mt === 'ferreteria' || mt === '') : mt === type;
+      return typeOk && String(m.family||'').trim().toLowerCase()===family.toLowerCase() && String(m.name||'').trim().toLowerCase()===name.toLowerCase();
+    });
+    if(duplicate) return alert('Ya existe un material con ese nombre en esa familia.');
+
     const id=uid('mat');
     if(!Array.isArray(db.materials)) db.materials=[];
     if(!Array.isArray(db.stock)) db.stock=[];
     if(!Array.isArray(db.movements)) db.movements=[];
-    const type = apType();
     const stamp = new Date().toISOString();
-    db.materials.push({
-      id,
-      name,
-      type,
-      family:($('matFamily') ? $('matFamily').value.trim() : '') || apLabel(type),
-      unit:($('matUnit') ? $('matUnit').value.trim() : '') || 'ud',
-      createdAt:stamp,
-      updatedAt:stamp
-    });
+    db.materials.push({id,name,type,family,unit,createdAt:stamp,updatedAt:stamp});
     db.stock.push({
       id:uid('st'),
       companyId:commonId(),
       materialId:id,
-      min:Number(($('matMin') && $('matMin').value) || 0),
+      min,
       location:($('matLocation') ? $('matLocation').value.trim() : '') || apLabel(type),
       createdAt:stamp,
       updatedAt:stamp
     });
-    const initial=Number(($('matInitial') && $('matInitial').value) || 0);
-    if(initial){
-      db.movements.push({id:uid('mov'),companyId:commonId(),materialId:id,type:'entrada',qty:initial,date:new Date().toISOString(),note:'Stock inicial',origen:'entrada_manual'});
+    if(initial>0){
+      db.movements.push({id:uid('mov'),companyId:commonId(),materialId:id,type:'entrada',qty:initial,date:stamp,updatedAt:stamp,note:'Stock inicial',origen:'entrada_manual'});
     }
     try{ save(); }catch(e){}
     try{ closeModal(); }catch(e){}
-    window.render();
+    try{ window.render(); }catch(e){}
+
+    try{
+      if(typeof window.LDH_FerreteriaV2SyncNow === 'function'){
+        const sr = await window.LDH_FerreteriaV2SyncNow('pc_nuevo_material');
+        if(sr && sr.ok === false && !sr.queued){
+          alert('Material creado en este PC. La sincronización con la tablet queda pendiente de conexión.');
+        }
+      }
+    }catch(e){
+      alert('Material creado en este PC. La sincronización con la tablet queda pendiente de conexión.');
+    }
   };
 
-  // Si abre crear material, adaptar placeholder/familia al apartado actual.
-  const oldOpenMaterial = window.openMaterialModal;
   window.openMaterialModal = function(){
-    if(typeof oldOpenMaterial === 'function') oldOpenMaterial();
-    setTimeout(function(){
-      try{
-        if($('modalTitle')) $('modalTitle').textContent = 'Crear material de ' + apLabel().toLowerCase();
-        if($('matFamily') && !$('matFamily').value) $('matFamily').placeholder = apType()==='prefabricados' ? 'Paneles / piezas / prefabricados' : 'Tornillería / Brocas / Consumibles';
-        if($('matLocation') && !$('matLocation').value) $('matLocation').placeholder = apType()==='prefabricados' ? 'Zona prefabricados' : 'Ferretería';
-      }catch(e){}
-    },0);
+    const type = apType();
+    const families = existingFamiliesForType(type);
+    if(!families.length) return alert('No hay familias existentes en este apartado. Crea la familia desde la gestion correspondiente antes de crear materiales.');
+    const familyOptions = '<option value="">Selecciona familia...</option>' + families.map(f=>`<option value="${escA(f)}">${escA(f)}</option>`).join('');
+    openModal(
+      'Crear material de ' + apLabel(type).toLowerCase(),
+      `<div class="field"><label>Nombre material</label><input id="matName" placeholder="Nombre del material"></div>
+       <div class="grid3">
+         <div class="field"><label>Familia</label><select id="matFamily">${familyOptions}</select><div class="muted">Solo familias existentes.</div></div>
+         <div class="field"><label>Unidad</label><input id="matUnit" placeholder="ud / caja / paquete" value="ud"></div>
+         <div class="field"><label>Mínimo</label><input id="matMin" type="number" min="0" value="0"></div>
+       </div>
+       <div class="grid2">
+         <div class="field"><label>Stock inicial</label><input id="matInitial" type="number" min="0" value="0"></div>
+         <div class="field"><label>Ubicación</label><input id="matLocation" placeholder="${escA(type==='prefabricados' ? 'Zona prefabricados' : 'Ferretería')}"></div>
+       </div>`,
+      `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ok" onclick="saveMaterial()">Crear</button>`
+    );
   };
 
   window.openMaterialDetail = function(materialId){
