@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="ldh-build" content="FERRETERIA-V2-IDB-RECEPCIONES-PREPARACION-20260806">
+<meta name="ldh-build" content="FERRETERIA-SYNC-AUTH-20260817">
 <title>LDH v2 · Ferretería</title>
 <style>
 :root{
@@ -5101,6 +5101,18 @@ window.LDH_borrarMovimientosTodos = function(){
     const mat=$('moveMat') ? $('moveMat').value : '';
     const qty=Number(($('moveQty') && $('moveQty').value) || 0);
     if(!mat||qty<=0)return alert('Cantidad incorrecta');
+    if(type==='salida'){
+      const real = Number(typeof realStock==='function' ? realStock(commonId(), mat) : 0);
+      let reservado = 0;
+      try{
+        if(typeof window.LDH_ferReservadoDominante==='function') reservado = Number(window.LDH_ferReservadoDominante(mat)||0);
+        else if(typeof reservedStock==='function') reservado = Number(reservedStock(commonId(),mat)||0);
+      }catch(e){ reservado = 0; }
+      const libre = Math.max(0, real - reservado);
+      if(qty > libre){
+        return alert('SIN STOCK LIBRE: hay '+libre+' disponibles de '+real+' físicos porque '+reservado+' están reservados.');
+      }
+    }
     if(!Array.isArray(db.movements)) db.movements=[];
 
     const mov = {
@@ -5110,6 +5122,7 @@ window.LDH_borrarMovimientosTodos = function(){
       type:type,
       qty:qty,
       date:new Date().toISOString(),
+      updatedAt:new Date().toISOString(),
       note:($('moveNote') ? $('moveNote').value.trim() : ''),
       origen:type==='salida' ? 'salida_manual' : 'entrada_manual'
     };
@@ -5933,19 +5946,24 @@ window.LDH_borrarMovimientosTodos = function(){
     if(!Array.isArray(db.stock)) db.stock=[];
     if(!Array.isArray(db.movements)) db.movements=[];
     const type = apType();
+    const stamp = new Date().toISOString();
     db.materials.push({
       id,
       name,
       type,
       family:($('matFamily') ? $('matFamily').value.trim() : '') || apLabel(type),
-      unit:($('matUnit') ? $('matUnit').value.trim() : '') || 'ud'
+      unit:($('matUnit') ? $('matUnit').value.trim() : '') || 'ud',
+      createdAt:stamp,
+      updatedAt:stamp
     });
     db.stock.push({
       id:uid('st'),
       companyId:commonId(),
       materialId:id,
       min:Number(($('matMin') && $('matMin').value) || 0),
-      location:($('matLocation') ? $('matLocation').value.trim() : '') || apLabel(type)
+      location:($('matLocation') ? $('matLocation').value.trim() : '') || apLabel(type),
+      createdAt:stamp,
+      updatedAt:stamp
     });
     const initial=Number(($('matInitial') && $('matInitial').value) || 0);
     if(initial){
@@ -6010,11 +6028,13 @@ window.LDH_borrarMovimientosTodos = function(){
       if($('detFamily')) m.family=$('detFamily').value.trim()||apLabel(m.type);
       if($('detUnit')) m.unit=$('detUnit').value.trim()||'ud';
       if(!m.type) m.type=apType();
+      m.updatedAt=new Date().toISOString();
     }
     if(s){
       if($('detMin')) s.min=Number($('detMin').value||0);
       if($('detLoc')) s.location=$('detLoc').value.trim();
       s.companyId = commonId();
+      s.updatedAt=new Date().toISOString();
     }
     try{ save(); }catch(e){}
     try{ closeModal(); }catch(e){}
@@ -6024,15 +6044,24 @@ window.LDH_borrarMovimientosTodos = function(){
   window.deleteFerMaterial = function(materialId){
     const m = materialById(materialId);
     if(!m) return;
-    const movs = (db.movements||[]).filter(x=>String(x.materialId||'')===String(materialId||''));
+    const movs = (db.movements||[]).filter(x=>String(x.materialId||x.matId||'')===String(materialId||''));
+    const stockRows = (db.stock||[]).filter(x=>String(x.materialId||x.matId||'')===String(materialId||''));
     const msg = movs.length
       ? `Este material tiene ${movs.length} movimientos. Si lo borras, también se borrará su histórico. ¿Continuar?`
       : `¿Borrar el material "${m.name}"?`;
     if(!confirm(msg)) return;
+    db.tombstones = db.tombstones && typeof db.tombstones==='object' ? db.tombstones : {};
+    db.tombstones.materials = Array.from(new Set([].concat(db.tombstones.materials||[], [String(materialId)])));
+    db.tombstones.stock = Array.from(new Set([].concat(db.tombstones.stock||[], stockRows.map(x=>String(x.id||'')).filter(Boolean))));
+    db.tombstones.movements = Array.from(new Set([].concat(db.tombstones.movements||[], movs.map(x=>String(x.id||x.movementId||'')).filter(Boolean))));
     db.materials=(db.materials||[]).filter(x=>String(x.id||'')!==String(materialId||''));
-    db.stock=(db.stock||[]).filter(x=>String(x.materialId||'')!==String(materialId||''));
-    db.movements=(db.movements||[]).filter(x=>String(x.materialId||'')!==String(materialId||''));
+    db.stock=(db.stock||[]).filter(x=>String(x.materialId||x.matId||'')!==String(materialId||''));
+    db.movements=(db.movements||[]).filter(x=>String(x.materialId||x.matId||'')!==String(materialId||''));
+    db.reservations=(db.reservations||[]).filter(x=>String(x.materialId||x.matId||x.toMaterialId||'')!==String(materialId||''));
+    db.assignments=(db.assignments||[]).filter(x=>String(x.materialId||x.matId||x.toMaterialId||'')!==String(materialId||''));
+    db.reservationDebts=(db.reservationDebts||[]).filter(x=>String(x.materialId||x.matId||'')!==String(materialId||''));
     try{ save(); }catch(e){}
+    try{ if(typeof window.LDH_FerreteriaV2SyncNow==='function') window.LDH_FerreteriaV2SyncNow(); }catch(e){}
     window.render();
   };
 
@@ -6970,7 +6999,7 @@ window.LDH_borrarMovimientosTodos = function(){
     return Number.isFinite(n) ? Math.max(0,n) : 0;
   }
   function _ferActive(st){
-    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','cancelada_prueba'].includes(_ferNorm(st||'activa'));
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','recibida','recibido','cancelada_prueba'].includes(_ferNorm(st||'activa'));
   }
   function _ferSameMaterial(obj, materialId){
     if(!obj) return false;
@@ -7122,7 +7151,7 @@ window.LDH_borrarMovimientosTodos = function(){
   function labelR(){return apR()==='prefabricados'?'Prefabricados':'Ferretería común';}
   function matR(id){try{return typeof materialById==='function'?materialById(id):null;}catch(e){return null;}}
   function typeOkR(m){return !!m && String(m.type||'').toLowerCase()===apR();}
-  function activeR(x){const st=normR((x&& (x.status||x.estado)) || 'activa');return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','cancelada prueba','cancelada_prueba'].includes(st);}
+  function activeR(x){const st=normR((x&& (x.status||x.estado)) || 'activa');return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','recibida','recibido','cancelada prueba','cancelada_prueba'].includes(st);}
   function qtyR(x){const v=x&&(x.pendingQty??x.qtyPending??x.pendiente??x.qty??x.cantidad??x.units??x.unidades??0);const n=Number(String(v??0).replace(',','.'));return Number.isFinite(n)?Math.max(0,n):0;}
   function sameMatR(x, materialId){
     if(!x) return false;
@@ -7206,8 +7235,8 @@ window.LDH_borrarMovimientosTodos = function(){
 </script>
 
 
-<!-- LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260811 -->
-<script id="LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260811">
+<!-- LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260817 -->
+<script id="LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260817">
 (function(){
   'use strict';
   if(window.__LDH_FER_V2_FIRESTORE_SAFE_SYNC__) return;
@@ -7218,7 +7247,7 @@ window.LDH_borrarMovimientosTodos = function(){
   const DOC_COL = 'taller_ferreteria_v2';
   const DOC_ID = 'main';
   const CLIENT_KEY = 'LDH_FER_V2_SYNC_CLIENT_ID';
-  const BUILD = 'FER-V2-FIRESTORE-SAFE-MERGE-20260811';
+  const BUILD = 'FER-V2-AUTH-MERGE-POLL-TOMBSTONES-20260817';
   const firebaseConfig = {
     apiKey: 'AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo',
     authDomain: 'gestion-taller-2a439.firebaseapp.com',
@@ -7229,12 +7258,13 @@ window.LDH_borrarMovimientosTodos = function(){
   };
 
   let app=null, auth=null, fs=null, unsub=null;
-  let started=false, applyingRemote=false, saving=false, saveTimer=null;
-  let lastUploadedHash='';
-  let lastRemoteRev='';
+  let started=false, applyingRemote=false, saving=false, saveTimer=null, pollTimer=null;
+  let lastUploadedHash='', lastRemoteRev='', lastRemoteHash='';
 
   function log(){ try{ console.log.apply(console, ['[Fer V2 Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
   function warn(){ try{ console.warn.apply(console, ['[Fer V2 Sync]'].concat([].slice.call(arguments))); }catch(_){ } }
+  function norm(v){ return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
+  function uniq(arr){ return Array.from(new Set((Array.isArray(arr)?arr:[]).map(v=>String(v||'')).filter(Boolean))); }
   function clientId(){
     try{
       let v = localStorage.getItem(CLIENT_KEY);
@@ -7248,8 +7278,7 @@ window.LDH_borrarMovimientosTodos = function(){
     return new Promise((resolve,reject)=>{
       if(document.querySelector('script[src="'+src+'"]')) return resolve();
       const s=document.createElement('script');
-      s.src=src; s.async=true;
-      s.onload=resolve;
+      s.src=src; s.async=true; s.onload=resolve;
       s.onerror=()=>reject(new Error('No se pudo cargar '+src));
       document.head.appendChild(s);
     });
@@ -7274,11 +7303,13 @@ window.LDH_borrarMovimientosTodos = function(){
   function docRef(){ return fs.collection(DOC_COL).doc(DOC_ID); }
 
   function emptyDB(){
-    return {version:'2.0-ferreteria-comun',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],assignments:[],reservationDebts:[]};
+    return {version:'2.0-ferreteria-comun',companies:[],materials:[],stock:[],movements:[],jobs:[],reservations:[],assignments:[],reservationDebts:[],tombstones:{materials:[],stock:[],movements:[]}};
   }
   function normalize(db){
     const out = Object.assign(emptyDB(), (db && typeof db === 'object') ? db : {});
     ['companies','materials','stock','movements','jobs','reservations','assignments','reservationDebts'].forEach(k=>{ if(!Array.isArray(out[k])) out[k]=[]; });
+    const t = (out.tombstones && typeof out.tombstones === 'object') ? out.tombstones : {};
+    out.tombstones = {materials:uniq(t.materials), stock:uniq(t.stock), movements:uniq(t.movements)};
     out.version = out.version || '2.0-ferreteria-comun';
     return out;
   }
@@ -7297,10 +7328,10 @@ window.LDH_borrarMovimientosTodos = function(){
     try{ sessionStorage.setItem(STORAGE_KEY, raw); }catch(_){ }
     try{
       const ch = new BroadcastChannel(CHANNEL_NAME);
-      ch.postMessage({type:'ferreteria-updated', updatedAt:clean.updatedAt, source:'firestore-safe-sync'});
+      ch.postMessage({type:'ferreteria-updated', updatedAt:clean.updatedAt, source:'firestore-auth-sync'});
       ch.close();
     }catch(_){ }
-    setTimeout(()=>{ applyingRemote=false; }, 50);
+    setTimeout(()=>{ applyingRemote=false; }, 70);
     try{ if(window.db && Array.isArray(clean.materials)){ window.db = Object.assign(window.db, clean); } }catch(_){ }
     return clean;
   }
@@ -7310,34 +7341,63 @@ window.LDH_borrarMovimientosTodos = function(){
     for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h,16777619); }
     return String(h>>>0)+':'+s.length;
   }
-  function norm(v){ return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
-  function arrayMerge(remoteArr, localArr, keyFn){
+  function timeOf(x){
+    if(!x || typeof x !== 'object') return 0;
+    const vals=[x.updatedAt,x.releasedAt,x.consumedAt,x.cancelledAt,x.closedAt,x.resolvedAt,x.returnedAt,x.fecha,x.date,x.createdAt];
+    for(const v of vals){ const n=Date.parse(v||''); if(Number.isFinite(n)) return n; }
+    return 0;
+  }
+  function statusClosed(x){
+    const st=norm(x && (x.status||x.estado) || 'activa');
+    return ['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','recibida','recibido','cancelada prueba'].includes(st);
+  }
+  function resolveMutable(remote, local){
+    if(!remote) return local;
+    if(!local) return remote;
+    const rc=statusClosed(remote), lc=statusClosed(local);
+    if(rc !== lc) return rc ? Object.assign({}, local, remote) : Object.assign({}, remote, local);
+    const rt=timeOf(remote), lt=timeOf(local);
+    if(rt && lt && rt !== lt) return rt > lt ? Object.assign({}, local, remote) : Object.assign({}, remote, local);
+    return Object.assign({}, remote, local);
+  }
+  function arrayMerge(remoteArr, localArr, keyFn, resolver){
     const out=[]; const pos=new Map();
-    function put(x){
+    function put(x, side){
       if(!x || typeof x !== 'object') return;
-      const k = keyFn(x) || ('anon_' + out.length + '_' + Math.random().toString(36).slice(2));
+      const k = keyFn(x) || ('anon_' + side + '_' + out.length + '_' + Math.random().toString(36).slice(2));
       if(pos.has(k)){
         const idx=pos.get(k);
-        out[idx] = Object.assign({}, out[idx], x);
-      }else{
-        pos.set(k,out.length); out.push(x);
-      }
+        out[idx] = resolver ? resolver(out[idx], x) : Object.assign({}, out[idx], x);
+      }else{ pos.set(k,out.length); out.push(x); }
     }
-    (Array.isArray(remoteArr)?remoteArr:[]).forEach(put);
-    (Array.isArray(localArr)?localArr:[]).forEach(put);
+    (Array.isArray(remoteArr)?remoteArr:[]).forEach(x=>put(x,'r'));
+    (Array.isArray(localArr)?localArr:[]).forEach(x=>put(x,'l'));
     return out;
   }
   function mergeDB(remote, local){
     const r=normalize(remote), l=normalize(local);
     const out = Object.assign({}, r, l);
-    out.companies = arrayMerge(r.companies,l.companies,x=>x.id||x.companyId||x.code||x.nombre||x.name);
-    out.materials = arrayMerge(r.materials,l.materials,x=>x.id||x.materialId||(norm(x.type||x.tipo)+'|'+norm(x.family||x.familia||x.grp)+'|'+norm(x.name||x.nombre)));
-    out.stock = arrayMerge(r.stock,l.stock,x=>x.id||[x.companyId,x.empresaId,x.materialId,x.matId].map(v=>String(v||'')).join('|'));
+    out.tombstones = {
+      materials: uniq([].concat(r.tombstones.materials,l.tombstones.materials)),
+      stock: uniq([].concat(r.tombstones.stock,l.tombstones.stock)),
+      movements: uniq([].concat(r.tombstones.movements,l.tombstones.movements))
+    };
+    out.companies = arrayMerge(r.companies,l.companies,x=>x.id||x.companyId||x.code||x.nombre||x.name,resolveMutable);
+    out.materials = arrayMerge(r.materials,l.materials,x=>x.id||x.materialId||(norm(x.type||x.tipo)+'|'+norm(x.family||x.familia||x.grp)+'|'+norm(x.name||x.nombre)),resolveMutable);
+    out.stock = arrayMerge(r.stock,l.stock,x=>x.id||[x.companyId,x.empresaId,x.materialId,x.matId].map(v=>String(v||'')).join('|'),resolveMutable);
     out.movements = arrayMerge(r.movements,l.movements,x=>x.id||x.movementId||[x.companyId,x.materialId,x.matId,x.type,x.tipo,x.qty,x.cantidad,x.date,x.fecha,x.source,x.origen].map(v=>String(v||'')).join('|'));
-    out.jobs = arrayMerge(r.jobs,l.jobs,x=>x.id||x.ref||x.reference||x.referencia);
-    out.reservations = arrayMerge(r.reservations,l.reservations,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status,x.phase].map(v=>String(v||'')).join('|'));
-    out.assignments = arrayMerge(r.assignments,l.assignments,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status,x.phase,x.source].map(v=>String(v||'')).join('|'));
-    out.reservationDebts = arrayMerge(r.reservationDebts,l.reservationDebts,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.status].map(v=>String(v||'')).join('|'));
+    out.jobs = arrayMerge(r.jobs,l.jobs,x=>x.id||x.ref||x.reference||x.referencia,resolveMutable);
+    out.reservations = arrayMerge(r.reservations,l.reservations,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad].map(v=>String(v||'')).join('|'),resolveMutable);
+    out.assignments = arrayMerge(r.assignments,l.assignments,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad,x.source].map(v=>String(v||'')).join('|'),resolveMutable);
+    out.reservationDebts = arrayMerge(r.reservationDebts,l.reservationDebts,x=>x.id||[x.companyId,x.materialId,x.matId,x.jobId,x.ref,x.qty,x.cantidad].map(v=>String(v||'')).join('|'),resolveMutable);
+
+    const delMat=new Set(out.tombstones.materials), delStock=new Set(out.tombstones.stock), delMov=new Set(out.tombstones.movements);
+    out.materials = out.materials.filter(x=>!delMat.has(String(x.id||x.materialId||'')));
+    out.stock = out.stock.filter(x=>!delStock.has(String(x.id||'')) && !delMat.has(String(x.materialId||x.matId||'')));
+    out.movements = out.movements.filter(x=>!delMov.has(String(x.id||x.movementId||'')) && !delMat.has(String(x.materialId||x.matId||'')));
+    out.reservations = out.reservations.filter(x=>!delMat.has(String(x.materialId||x.matId||x.toMaterialId||'')));
+    out.assignments = out.assignments.filter(x=>!delMat.has(String(x.materialId||x.matId||x.toMaterialId||'')));
+    out.reservationDebts = out.reservationDebts.filter(x=>!delMat.has(String(x.materialId||x.matId||'')));
     out.updatedAt = new Date().toISOString();
     out.lastSyncBuild = BUILD;
     return normalize(out);
@@ -7346,13 +7406,12 @@ window.LDH_borrarMovimientosTodos = function(){
     const snap = await docRef().get();
     if(!snap.exists) return null;
     const data = snap.data() || {};
-    if(data.payload && typeof data.payload === 'object') return normalize(data.payload);
-    return normalize(data);
+    return normalize(data.payload && typeof data.payload === 'object' ? data.payload : data);
   }
   async function uploadMerged(reason){
-    if(!started || saving || applyingRemote || !fs) return;
+    if(!started || saving || applyingRemote || !fs) return {ok:false, skipped:true};
     const local = readLocal();
-    if(!local || !Array.isArray(local.materials) || !local.materials.length) return;
+    if(!local || !Array.isArray(local.materials)) return {ok:false, skipped:true};
     saving=true;
     try{
       const remote = await readRemote();
@@ -7361,7 +7420,7 @@ window.LDH_borrarMovimientosTodos = function(){
       merged.lastWriter = CLIENT_ID;
       merged.lastReason = reason || 'manual';
       const h=hash(merged);
-      if(h === lastUploadedHash) return;
+      if(h === lastUploadedHash) return {ok:true, unchanged:true};
       await docRef().set({
         payload: merged,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -7376,67 +7435,82 @@ window.LDH_borrarMovimientosTodos = function(){
       }, {merge:false});
       lastUploadedHash=h;
       writeLocal(merged);
-      log('Subido merge seguro', reason, {materials:merged.materials.length, movements:merged.movements.length});
-    }catch(e){ warn('No se pudo subir merge seguro', e); }
+      log('Subido merge autoritativo', reason, {materials:merged.materials.length, movements:merged.movements.length});
+      return {ok:true};
+    }catch(e){ warn('No se pudo subir merge autoritativo', e); return {ok:false,error:e}; }
     finally{ saving=false; }
   }
-  function scheduleUpload(reason){
+  function scheduleUpload(reason, delay){
     if(applyingRemote) return;
     clearTimeout(saveTimer);
-    saveTimer=setTimeout(()=>uploadMerged(reason), 700);
+    saveTimer=setTimeout(()=>uploadMerged(reason), Number(delay||700));
   }
-  async function applyRemote(data, rev, remoteClientId){
-    if(!data || remoteClientId === CLIENT_ID || rev === lastRemoteRev) return;
+  async function applyRemote(data, rev, remoteClientId, reason){
+    if(!data) return;
+    const remoteHash = hash(data);
+    if(rev && rev === lastRemoteRev && remoteHash === lastRemoteHash) return;
     lastRemoteRev = rev || '';
+    lastRemoteHash = remoteHash;
     const local = readLocal();
     const merged = local ? mergeDB(data, local) : normalize(data);
     writeLocal(merged);
-    log('Remoto aplicado mediante merge seguro', {materials:merged.materials.length, movements:merged.movements.length});
+    log('Remoto aplicado', reason || '', {materials:merged.materials.length, movements:merged.movements.length});
     setTimeout(()=>{
       try{ if(typeof window.LDH_FerreteriaReloadV2 === 'function') window.LDH_FerreteriaReloadV2(); }catch(_){ }
       try{ if(typeof window.refreshItemsFromStock === 'function') window.refreshItemsFromStock(); }catch(_){ }
       try{ if(typeof window.render === 'function') window.render(); }catch(_){ }
-      try{ if(typeof window.screenItems === 'function') window.screenItems(); }catch(_){ }
-    }, 100);
+      try{ if(typeof window.LDH_FerreteriaRefreshView === 'function' && document.visibilityState !== 'hidden') window.LDH_FerreteriaRefreshView(); }catch(_){ }
+      try{ window.dispatchEvent(new CustomEvent('ldh-ferreteria-v2-remote-update',{detail:{reason:reason||'remote'}})); }catch(_){ }
+    }, 80);
+  }
+  async function pullRemote(reason){
+    if(!started || saving || applyingRemote || !fs) return {ok:false,skipped:true};
+    try{
+      const snap = await docRef().get();
+      if(!snap.exists) return {ok:false,missing:true};
+      const d=snap.data()||{};
+      await applyRemote(d.payload||d, d.revision||d.updatedAtIso||'', d.clientId||'', reason||'pull');
+      return {ok:true};
+    }catch(e){ warn('Error en pull remoto', reason, e); return {ok:false,error:e}; }
   }
   async function start(){
     try{
       await ensureFirebase();
       started=true;
-      const local = readLocal();
-      const remote = await readRemote();
-      const merged = remote && local ? mergeDB(remote, local) : (local || remote);
-      if(merged){ writeLocal(merged); await uploadMerged('inicio_merge_seguro'); }
-      else log('Sin datos locales/remotos todavía.');
+      const local=readLocal(), remote=await readRemote();
+      const merged=remote&&local?mergeDB(remote,local):(local||remote);
+      if(merged){ writeLocal(merged); await uploadMerged('inicio_autoritativo'); }
       if(unsub) unsub();
-      unsub = docRef().onSnapshot(snap=>{
+      unsub=docRef().onSnapshot(snap=>{
         if(!snap.exists || saving) return;
         const d=snap.data()||{};
-        const payload=d.payload || d;
-        applyRemote(payload, d.revision || d.updatedAtIso || '', d.clientId || '').catch(e=>warn('Error aplicando remoto', e));
-      }, e=>warn('onSnapshot error', e));
-      log('Activo', BUILD);
-    }catch(e){ warn('Sync no iniciado', e); }
+        applyRemote(d.payload||d,d.revision||d.updatedAtIso||'',d.clientId||'','onSnapshot').catch(e=>warn('Error aplicando remoto',e));
+      },e=>warn('onSnapshot error',e));
+      if(pollTimer) clearInterval(pollTimer);
+      pollTimer=setInterval(()=>{ if(document.visibilityState!=='hidden') pullRemote('poll_30s_visible'); },30000);
+      log('Activo',BUILD);
+    }catch(e){ warn('Sync no iniciado',e); }
   }
 
   if(!window.__LDH_FER_V2_STORAGE_PATCHED__){
-    window.__LDH_FER_V2_STORAGE_PATCHED__ = true;
-    const proto = Storage.prototype;
-    const oldSet = proto.setItem;
-    proto.setItem = function(k,v){
-      const r = oldSet.apply(this, arguments);
-      try{ if(this === localStorage && String(k) === STORAGE_KEY) scheduleUpload('localStorage_setItem'); }catch(_){ }
+    window.__LDH_FER_V2_STORAGE_PATCHED__=true;
+    const proto=Storage.prototype, oldSet=proto.setItem;
+    proto.setItem=function(k,v){
+      const r=oldSet.apply(this,arguments);
+      try{ if(this===localStorage && String(k)===STORAGE_KEY) scheduleUpload('localStorage_setItem'); }catch(_){ }
       return r;
     };
   }
-  window.LDH_FerreteriaV2SyncNow = function(){ return uploadMerged('manual'); };
-  window.LDH_FerreteriaV2SyncStatus = function(){ return {started, saving, clientId:CLIENT_ID, build:BUILD, doc:DOC_COL+'/'+DOC_ID}; };
-  window.addEventListener('online', ()=>scheduleUpload('online'));
-  window.addEventListener('focus', ()=>scheduleUpload('focus'));
-  setTimeout(start, 300);
+  window.LDH_FerreteriaV2SyncNow=function(){ return uploadMerged('manual'); };
+  window.LDH_FerreteriaV2PullNow=function(){ return pullRemote('manual_pull'); };
+  window.LDH_FerreteriaV2SyncStatus=function(){ return {started,saving,clientId:CLIENT_ID,build:BUILD,doc:DOC_COL+'/'+DOC_ID}; };
+  window.addEventListener('online',()=>{ pullRemote('online_pull').then(()=>scheduleUpload('online_after_pull',500)); });
+  window.addEventListener('focus',()=>{ pullRemote('focus_pull').then(()=>scheduleUpload('focus_after_pull',500)); });
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') pullRemote('visible_pull').then(()=>scheduleUpload('visible_after_pull',500)); });
+  setTimeout(start,300);
 })();
 </script>
-<!-- /LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260811 -->
+<!-- /LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260817 -->
 
 </body>
 </html>
