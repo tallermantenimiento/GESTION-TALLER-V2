@@ -7057,6 +7057,15 @@ setTimeout(()=>{
     return qty(row) > 0;
   }
 
+  function activeReservation(row){
+    if(!row || typeof row !== 'object') return false;
+    const status = norm(first(row.status,row.estado,'activa'));
+    if(status && !['activa','activo','active','abierta','open'].includes(status)) return false;
+    const phase = norm(first(row.phase,row.fase,'preparacion'));
+    if(phase && phase !== 'preparacion' && phase !== 'fabricacion') return false;
+    return qty(row) > 0;
+  }
+
   function isLegacyV48(row){
     if(!row) return false;
     const source = norm(row.source);
@@ -7101,7 +7110,10 @@ setTimeout(()=>{
   function materialKeys(row){
     const keys = new Set([
       row && row.materialId,row && row.matId,row && row.material_id,
-      row && row.materialName,row && row.material,row && row.mat,row && row.name,row && row.nombre
+      row && row.linked_matId,row && row.stockMatId,row && row.stockMaterialId,
+      row && row.v2MaterialId,row && row.stockLinkId,
+      row && row.materialName,row && row.material,row && row.mat,row && row.name,row && row.nombre,
+      row && row.linked_matName,row && row.stockLinkLabel
     ].map(norm).filter(Boolean));
     try{
       const id = String(first(row && row.materialId,row && row.matId,row && row.material_id,'')).trim();
@@ -7125,6 +7137,65 @@ setTimeout(()=>{
   function sameCompany(a,b){ return overlaps(companyKeys(a),companyKeys(b)); }
   function sameMaterial(a,b){ return overlaps(materialKeys(a),materialKeys(b)); }
 
+  function prepLinesForRef(ref){
+    const key = 'prep_recepcion_' + String(ref || '').trim();
+    if(key === 'prep_recepcion_') return [];
+    let raw = '';
+    try{
+      if(typeof getAny === 'function') raw = getAny(key) || '';
+    }catch(_){ raw = ''; }
+    if(!raw){
+      try{ raw = localStorage.getItem(key) || ''; }catch(_){ raw = ''; }
+    }
+    if(!raw){
+      try{ raw = sessionStorage.getItem(key) || ''; }catch(_){ raw = ''; }
+    }
+    if(!raw) return [];
+    try{
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }catch(_){
+      return [];
+    }
+  }
+
+  function lineReceivedQty(line){
+    try{
+      if(typeof _lineReceivedOwnQty === 'function'){
+        const value = Number(_lineReceivedOwnQty(line));
+        if(Number.isFinite(value)) return Math.max(0,value);
+      }
+    }catch(_){ }
+    const value = Number(String(first(
+      line && line.aplicado_qty,
+      line && line.stock_consumed_qty,
+      line && line.qty_recibida,
+      line && line.recibida,
+      line && line.received,
+      0
+    )).replace(',','.'));
+    return Number.isFinite(value) ? Math.max(0,value) : 0;
+  }
+
+  function reservationMirrorsCurrentPrep(reservation,legacy){
+    const ref = String(first(
+      reservation && reservation.ref,
+      reservation && reservation.jobRef,
+      reservation && reservation.reference,
+      reservation && reservation.referencia,
+      ''
+    )).trim();
+    if(!ref) return false;
+    const lines = prepLinesForRef(ref);
+    if(!lines.length) return false;
+    const currentReceived = lines
+      .filter(line => sameMaterial(legacy,line) || sameMaterial(reservation,line))
+      .reduce((sum,line) => sum + lineReceivedQty(line),0);
+    const reservationQty = qty(reservation);
+    return currentReceived > 0 && reservationQty > 0 &&
+      Math.abs(currentReceived - reservationQty) < 0.000001;
+  }
+
   function cleanup(publishNow){
     if(running) return 0;
     running = true;
@@ -7132,8 +7203,11 @@ setTimeout(()=>{
     try{
       if(typeof db === 'undefined' || !db || !Array.isArray(db.assignments)) return 0;
 
-      const current = db.assignments.filter(row => activeOwn(row) && !isLegacyV48(row));
-      if(!current.length) return 0;
+      const currentAssignments = db.assignments.filter(row => activeOwn(row) && !isLegacyV48(row));
+      const currentReservations = Array.isArray(db.reservations)
+        ? db.reservations.filter(activeReservation)
+        : [];
+      if(!currentAssignments.length && !currentReservations.length) return 0;
 
       const now = new Date().toISOString();
       db.assignments.forEach(row => {
@@ -7141,12 +7215,18 @@ setTimeout(()=>{
         const key = workKey(row);
         if(!key) return;
 
-        const replacements = current.filter(candidate =>
+        const replacementAssignments = currentAssignments.filter(candidate =>
           workKey(candidate) === key &&
           sameCompany(row,candidate) &&
           sameMaterial(row,candidate)
         );
-        if(!replacements.length) return;
+        const replacementReservations = currentReservations.filter(candidate =>
+          workKey(candidate) === key &&
+          sameCompany(row,candidate) &&
+          sameMaterial(row,candidate) &&
+          reservationMirrorsCurrentPrep(candidate,row)
+        );
+        if(!replacementAssignments.length && !replacementReservations.length) return;
 
         row.legacyV48QtyBeforeCancel = qty(row);
         row.status = 'cancelada';
@@ -7155,9 +7235,14 @@ setTimeout(()=>{
         row.qtyPending = 0;
         row.cancelledAt = now;
         row.updatedAt = now;
-        row.cancelledReason = 'duplicado_legacy_v48_sustituido_por_asignacion_actual';
+        row.cancelledReason = replacementAssignments.length
+          ? 'duplicado_legacy_v48_sustituido_por_asignacion_actual'
+          : 'duplicado_legacy_v48_sustituido_por_reserva_activa';
         row.cancelledBy = 'stock_v48_legacy_dedupe_safe_20260818';
-        row.supersededByAssignmentIds = replacements
+        row.supersededByAssignmentIds = replacementAssignments
+          .map(candidate => String(candidate && candidate.id || ''))
+          .filter(Boolean);
+        row.supersededByReservationIds = replacementReservations
           .map(candidate => String(candidate && candidate.id || ''))
           .filter(Boolean);
         changed += 1;
@@ -7207,7 +7292,7 @@ setTimeout(()=>{
   window.addEventListener('storage',function(){ setTimeout(run,220); });
 
   window.LDH_limpiarDuplicadosLegacyV48Seguros = run;
-  console.info('[Stock] Proteccion anti-duplicado V48 activa; stock fisico y reservas no se modifican.');
+  console.info('[Stock] Proteccion anti-duplicado V48 activa; detecta asignacion o reserva sustituta sin modificar fisico ni reservas.');
 })();
 </script>
 <!-- /LDH_STOCK_V48_LEGACY_DEDUPE_SAFE_20260818 -->
