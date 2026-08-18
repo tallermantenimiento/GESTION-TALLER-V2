@@ -8283,10 +8283,32 @@ function LDH_cfgStockDiagnostico(){
     let u;
     try{ u=new URL(value); }catch(e){ throw new Error("El enlace no es válido. Abre el archivo en Drive, pulsa Compartir y copia el enlace completo."); }
     if(u.protocol!=="https:" && u.protocol!=="http:") throw new Error("Solo se permiten enlaces http:// o https://");
+    const host=u.hostname.toLowerCase();
+    const isDrive=host.includes("drive.google.com") || host.includes("docs.google.com");
+    const isDriveFolder=isDrive && (/\/folders\//i.test(u.pathname) || /\/drive\/(?:u\/\d+\/)?folders\//i.test(u.pathname));
+    if(isDriveFolder){
+      throw new Error("Ese enlace es de una carpeta de Google Drive. Abre el PDF, pulsa Compartir → Copiar enlace y pega el enlace del archivo, no el de la carpeta.");
+    }
     return u.href;
   }
   function safeUrl(raw){
     try{ return validUrl(raw); }catch(e){ return ""; }
+  }
+  function normalizePlanOpenUrl(raw){
+    const url=safeUrl(raw);
+    if(!url) return "";
+    try{
+      const u=new URL(url);
+      const host=u.hostname.toLowerCase();
+      if(host.includes("drive.google.com")){
+        // Los enlaces compartidos de archivo de Drive se fuerzan a la vista previa del archivo.
+        // Así no se aterriza en la navegación de la carpeta contenedora.
+        const m=u.pathname.match(/\/file\/d\/([^/]+)/i);
+        const fileId=(m && m[1]) || u.searchParams.get("id") || "";
+        if(fileId) return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/preview`;
+      }
+      return u.href;
+    }catch(e){ return ""; }
   }
   function providerOf(raw){
     try{
@@ -8314,7 +8336,16 @@ function LDH_cfgStockDiagnostico(){
     if(code.includes("unavailable")) return "Firestore no está disponible en este momento. Revisa la conexión.";
     return String(e?.message || e || "Error desconocido");
   }
-  function planUrl(p){ return safeUrl(p.externalUrl || p.webUrl || p.downloadURL || ""); }
+  function planUrl(p){
+    // Compatibilidad con los planos antiguos: si existe el downloadURL directo del PDF,
+    // tiene prioridad sobre cualquier vínculo externo añadido posteriormente.
+    const candidates=[p && p.downloadURL, p && p.webUrl, p && p.externalUrl, p && p.previousExternalUrl];
+    for(const raw of candidates){
+      const url=normalizePlanOpenUrl(raw);
+      if(url) return url;
+    }
+    return "";
+  }
   function renderRows(rows, trash=false){
     const host=$(trash ? "conceptPlanTrashList" : "conceptPlanList");
     if(!host) return;
@@ -8393,7 +8424,8 @@ function LDH_cfgStockDiagnostico(){
     await updateDoc(doc(db,COLLECTION,p.id),{displayName:clean,updatedAt:serverTimestamp(),updatedAtMs:Date.now()});
   }
   async function replaceLink(p){
-    const current=planUrl(p);
+    // Para editar mostramos el vínculo guardado, no la URL transformada de vista previa.
+    const current=safeUrl(p.externalUrl || p.webUrl || p.downloadURL || "");
     const raw=prompt("Pega el nuevo enlace compartido:",current);
     if(raw===null) return;
     const url=validUrl(raw);
@@ -8488,4 +8520,5 @@ function LDH_cfgStockDiagnostico(){
 })();
 </script>
 
+<!-- LDH_PLANOS_ABRIR_PDF_DIRECTO_V3_20260817 -->
 </body></html>
