@@ -7142,5 +7142,187 @@ body{
 })();
 </script>
 
+
+<!-- LDH_STOCK_PLETINA_MM_ASIGNACIONES_REPAIR_20260818 -->
+<script id="LDH_STOCK_PLETINA_MM_ASIGNACIONES_REPAIR_20260818">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_PLETINA_MM_ASIGNACIONES_REPAIR_20260818__) return;
+  window.__LDH_STOCK_PLETINA_MM_ASIGNACIONES_REPAIR_20260818__ = true;
+
+  /*
+   * Reparación conservadora para asignaciones V48 de pletina que YA contienen
+   * la cantidad real en milímetros pero perdieron la metadata de unidad.
+   * IMPORTANTE: esta rutina nunca multiplica, divide ni modifica qty/cantidad.
+   * Solo añade metadata mm cuando el propio registro fue reconciliado desde
+   * Preparación y fue actualizado desde la implantación PLETINA/mm (13/08/2026).
+   */
+  const PLETINA_MM_CUTOFF = Date.parse('2026-08-13T00:00:00Z');
+  let repairing = false;
+
+  function norm(value){
+    return String(value == null ? '' : value).trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+  }
+
+  function first(){
+    for(let i=0;i<arguments.length;i+=1){
+      const value = arguments[i];
+      if(value !== undefined && value !== null && String(value) !== '') return value;
+    }
+    return '';
+  }
+
+  function materialFor(row){
+    try{
+      const id = String(first(row && row.materialId,row && row.matId,row && row.material_id));
+      if(id && typeof materialById === 'function') return materialById(id) || null;
+      if(id && typeof db !== 'undefined' && db && Array.isArray(db.materials)){
+        return db.materials.find(m=>String(first(m&&m.id,m&&m.materialId,m&&m.matId))===id) || null;
+      }
+    }catch(_){ }
+    return null;
+  }
+
+  function isPletina(row){
+    const material = materialFor(row) || {};
+    const text = norm([
+      material.family,material.familia,material.group,material.grupo,
+      material.name,material.nombre,material.material,
+      row && row.materialName,row && row.material,row && row.mat,row && row.name
+    ].filter(Boolean).join(' '));
+    return text.includes('pletina') || text.includes('planchuela') || text.includes('llanta');
+  }
+
+  function isPrepReconciledV48(row){
+    if(!row) return false;
+    if(row.reconciledFromPreparation === true) return true;
+    const text = norm([row.source,row.reason,row.assignmentType,row.createdFrom,row.origin].filter(Boolean).join(' '));
+    return text.includes('stock v48 reconciliacion preparacion') ||
+      text.includes('asignado desde preparacion reconciliado v48') ||
+      (text.includes('v48') && text.includes('preparacion') && text.includes('reconcili'));
+  }
+
+  function isActiveOwnAssignment(row){
+    if(!row) return false;
+    const status = norm(first(row.status,row.estado,'activa'));
+    if(status && status !== 'activa' && status !== 'activo' && status !== 'open' && status !== 'abierta') return false;
+    const phase = norm(first(row.phase,row.fase,'preparacion'));
+    if(phase && phase !== 'preparacion' && phase !== 'fabricacion') return false;
+    const loanText = norm([row.assignmentType,row.reason,row.source].filter(Boolean).join(' '));
+    if(loanText.includes('otra empresa') || loanText.includes('prestamo') || row.toCompanyId || row.toEmpresa) return false;
+    return true;
+  }
+
+  function updatedAfterPletinaMm(row){
+    const stamp = Date.parse(String(first(
+      row && row.updatedAt,
+      row && row.pletinaMmReconciledAt,
+      row && row.modifiedAt,
+      row && row.createdAt
+    ) || '')) || 0;
+    return stamp >= PLETINA_MM_CUTOFF;
+  }
+
+  function alreadyCorrect(row,qty){
+    const unit = norm(first(row&&row.unitBasis,row&&row.lengthMode,row&&row.unit,row&&row.unidad));
+    const schema = norm(first(row&&row.lengthQtySchemaV66,row&&row.lengthQtySchemaV64,row&&row.lengthQtySchema));
+    const mm = Number(first(row&&row.mmAllocated,row&&row.lineMm,0)) || 0;
+    return row && row.pletinaMm === true && unit === 'mm' && schema === 'mm' && Math.abs(mm-qty) < 0.000001;
+  }
+
+  function repair(publishNow){
+    if(repairing) return false;
+    repairing = true;
+    let changed = false;
+    try{
+      if(typeof db === 'undefined' || !db || !Array.isArray(db.assignments)) return false;
+
+      db.assignments.forEach(row=>{
+        if(!isActiveOwnAssignment(row)) return;
+        if(!isPrepReconciledV48(row)) return;
+        if(!isPletina(row)) return;
+        if(!updatedAfterPletinaMm(row)) return;
+
+        const qty = Math.max(0,Number(first(row.qty,row.cantidad,0)) || 0);
+        if(qty <= 0) return;
+        if(alreadyCorrect(row,qty)) return;
+
+        let barLengthMm = Math.max(1,Math.round(Number(row.barLengthMm || 0) || 0));
+        if(!barLengthMm || barLengthMm === 1){
+          try{
+            const cid = String(first(row.companyId,row.empresaId));
+            const mid = String(first(row.materialId,row.matId));
+            const sr = typeof stockRow === 'function' ? stockRow(cid,mid) : null;
+            barLengthMm = Math.max(1,Math.round(Number(sr && sr.barLengthMm || 6000) || 6000));
+          }catch(_){ barLengthMm = 6000; }
+        }
+
+        Object.assign(row,{
+          unit:'mm',
+          unidad:'mm',
+          unitBasis:'mm',
+          lengthMode:'mm',
+          lengthQtySchemaV64:'mm',
+          lengthQtySchemaV66:'mm',
+          pletinaMm:true,
+          mmAllocated:qty,
+          lineMm:qty,
+          barLengthMm:barLengthMm || 6000,
+          pletinaMmMetadataRepairAt:new Date().toISOString()
+        });
+        changed = true;
+      });
+
+      if(changed && publishNow !== false){
+        if(typeof save === 'function') save();
+        try{ if(typeof render === 'function') render(); }catch(_){ }
+        try{
+          if(window.LDH_scheduleStockCloudPublish){
+            window.LDH_scheduleStockCloudPublish(true);
+          }
+        }catch(_){ }
+      }
+      return changed;
+    }catch(error){
+      console.warn('[Stock] No se pudo reparar metadata PLETINA/mm de asignaciones',error);
+      return false;
+    }finally{
+      repairing = false;
+    }
+  }
+
+  /* Cada restauración remota se revisa inmediatamente, para que Firebase no
+     vuelva a dejar en memoria una asignación V48 sin metadata mm. */
+  try{
+    if(typeof window.LDH_applyRemoteStockWithoutReload === 'function' &&
+       !window.LDH_applyRemoteStockWithoutReload.__ldhPletinaMmRepair20260818){
+      const previousApplyRemote = window.LDH_applyRemoteStockWithoutReload;
+      const wrappedApplyRemote = function(){
+        const result = previousApplyRemote.apply(this,arguments);
+        setTimeout(function(){ repair(true); },40);
+        return result;
+      };
+      wrappedApplyRemote.__ldhPletinaMmRepair20260818 = true;
+      window.LDH_applyRemoteStockWithoutReload = wrappedApplyRemote;
+    }
+  }catch(_){ }
+
+  const run = function(){ repair(true); };
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded',run,{once:true});
+  }else{
+    setTimeout(run,0);
+  }
+  [700,1800,4200,8000].forEach(delay=>setTimeout(run,delay));
+  window.addEventListener('storage',function(){ setTimeout(run,180); });
+
+  window.LDH_repararMetadataPletinaAsignaciones = run;
+  console.info('[Stock] Reparación segura PLETINA/mm activa: solo metadata, qty intacta');
+})();
+</script>
+<!-- /LDH_STOCK_PLETINA_MM_ASIGNACIONES_REPAIR_20260818 -->
+
 </body>
 </html>
