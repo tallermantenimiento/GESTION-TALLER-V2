@@ -1733,6 +1733,42 @@ function isAutoReceivedPrepReservation(r){
     )
   );
 }
+// PLETINA/MM: si una reserva recibida ya viene marcada explícitamente en mm,
+// la asignación derivada conserva esa misma unidad. Nunca se infiere ni se multiplica.
+function LDH_applyExplicitPletinaMmMeta(target,source,companyId,materialId,qty){
+  try{
+    if(!target || !source) return false;
+    const m = typeof materialById === 'function' ? (materialById(materialId) || {}) : {};
+    const norm = value => String(value == null ? '' : value).trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+    const matText = norm([m.family,m.familia,m.group,m.grupo,m.name,m.nombre,m.material,
+      source.materialName,source.material,source.mat,source.name].filter(Boolean).join(' '));
+    const isPletina = matText.includes('pletina') || matText.includes('planchuela') || matText.includes('llanta');
+    if(!isPletina) return false;
+    const unit = norm(source.unitBasis || source.lengthMode || source.unit || source.unidad || '');
+    const schema = norm(source.lengthQtySchemaV66 || source.lengthQtySchemaV64 || source.lengthQtySchema || '');
+    const markedMm = source.pletinaMm === true || source.pletina_mm === true || source.gestion_mm === true
+      || unit === 'mm' || unit === 'milimetro' || unit === 'milimetros' || schema === 'mm';
+    if(!markedMm) return false;
+    let stockBar = 0;
+    try{
+      const sr = typeof stockRow === 'function' ? stockRow(companyId,materialId) : null;
+      stockBar = Number(sr && sr.barLengthMm || 0) || 0;
+    }catch(_){ stockBar = 0; }
+    const barLengthMm = Math.max(1,Math.round(Number(source.barLengthMm || source.commercial_bar_mm || stockBar || 6000) || 6000));
+    const mm = Math.max(0,Number(qty) || 0);
+    Object.assign(target,{
+      unit:'mm',unidad:'mm',unitBasis:'mm',lengthMode:'mm',
+      lengthQtySchemaV64:'mm',lengthQtySchemaV66:'mm',pletinaMm:true,
+      mmAllocated:mm,lineMm:mm,barLengthMm
+    });
+    return true;
+  }catch(_){
+    return false;
+  }
+}
+
 function upsertAssignmentFromPrepReservation(r){
   try{
     if(!r || !isAutoReceivedPrepReservation(r)) return false;
@@ -1785,6 +1821,12 @@ function upsertAssignmentFromPrepReservation(r){
       a.paintBlocked = !!r.paintBlocked;
       a.updatedAt = new Date().toISOString();
     }
+
+    try{
+      if(LDH_applyExplicitPletinaMmMeta(a,r,companyId,materialId,qty)){
+        a.pletinaMmReconciledAt = new Date().toISOString();
+      }
+    }catch(_){}
 
     // La reserva auto-recibida queda solo como traza, no como reserva pendiente.
     r.status = 'recibida';
@@ -6660,6 +6702,7 @@ setTimeout(()=>{
   No modifica el físico: únicamente materializa ASIGNADO para que Preparación,
   Stock informativo y las transacciones de préstamo calculen el mismo libre.
 -->
+<!-- LDH_STOCK_V48_PLETINA_MM_PRESERVE_20260818 -->
 <script id="LDH_STOCK_V48_PUBLICAR_ASIGNACIONES_PREPARACION">
 (function(){
   function txt(value){
@@ -6719,6 +6762,68 @@ setTimeout(()=>{
     return "";
   }
 
+  // 18/08/2026 · PLETINA/MM: conservar la unidad real que llega de Preparación.
+  // No convierte por heurística ni multiplica por 6000: solo actúa cuando la
+  // propia línea de Preparación identifica explícitamente que trabaja en mm.
+  function normPletinaMm(value){
+    return String(value == null ? "" : value).trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g," ").trim();
+  }
+
+  function pletinaMmMeta(line,companyId,materialId,qty){
+    try{
+      const material = typeof materialById === "function"
+        ? (materialById(materialId) || {})
+        : {};
+      const materialText = normPletinaMm([
+        material.family, material.familia, material.group, material.grupo,
+        material.name, material.nombre, material.material,
+        line && (line.mat || line.material || line.name || line.materialName || line.stockLinkLabel)
+      ].filter(Boolean).join(" "));
+      const isPletina = materialText.indexOf("pletina") >= 0
+        || materialText.indexOf("planchuela") >= 0
+        || materialText.indexOf("llanta") >= 0;
+      if(!isPletina) return null;
+
+      const unit = normPletinaMm(line && (line.unitBasis || line.lengthMode || line.unit || line.unidad || ""));
+      const mode = normPletinaMm(line && (line.measureMode || line.lengthMode || line.tipo || line.type || ""));
+      const schema = normPletinaMm(line && (line.lengthQtySchemaV66 || line.lengthQtySchemaV64 || line.lengthQtySchema || ""));
+      const source = normPletinaMm(line && [line.source,line.reason,line.assignmentType,line.createdFrom,line.origin].filter(Boolean).join(" "));
+      const markedMm = !!(line && (
+        line.pletinaMm === true || line.pletina_mm === true || line.gestion_mm === true ||
+        unit === "mm" || unit === "milimetro" || unit === "milimetros" ||
+        schema === "mm" || mode.indexOf("pletinamm") >= 0 || mode.indexOf("mmreal") >= 0 ||
+        source.indexOf("pletina mm") >= 0
+      ));
+      if(!markedMm) return null;
+
+      let stockBar = 0;
+      try{
+        const sr = typeof stockRow === "function" ? stockRow(companyId,materialId) : null;
+        stockBar = Number(sr && sr.barLengthMm || 0) || 0;
+      }catch(_){ stockBar = 0; }
+      const lineBar = Number(line && (line.barLengthMm || line.commercial_bar_mm || line.longitudBarraMm) || 0) || 0;
+      const barLengthMm = Math.max(1,Math.round(lineBar || stockBar || 6000));
+      const mm = Math.max(0,Number(qty) || 0);
+
+      return {
+        unit:"mm",
+        unidad:"mm",
+        unitBasis:"mm",
+        lengthMode:"mm",
+        lengthQtySchemaV64:"mm",
+        lengthQtySchemaV66:"mm",
+        pletinaMm:true,
+        mmAllocated:mm,
+        lineMm:mm,
+        barLengthMm:barLengthMm
+      };
+    }catch(_){
+      return null;
+    }
+  }
+
   function currentReferences(){
     const refs = [];
     try{
@@ -6772,6 +6877,7 @@ setTimeout(()=>{
 
             const materialId = resolveMaterialId(companyId,line);
             if(!materialId) return;
+            const pletinaMm = pletinaMmMeta(line,companyId,materialId,qty);
 
             try{
               if(typeof _activeBorrowDebtForRefMaterial === "function"
@@ -6800,6 +6906,26 @@ setTimeout(()=>{
               const currentQty = Math.max(0,Number(
                 existing.qty || existing.cantidad || 0
               ) || 0);
+
+              if(pletinaMm){
+                // Para pletina la línea viva de Preparación es autoritativa en mm.
+                // Se permite también corregir hacia abajo (p. ej. 12.000 -> 11.520 mm).
+                const markerMissing = existing.pletinaMm !== true
+                  || String(existing.unitBasis || existing.lengthMode || existing.unit || existing.unidad || "").toLowerCase() !== "mm"
+                  || String(existing.lengthQtySchemaV64 || "").toLowerCase() !== "mm"
+                  || Math.abs((Number(existing.mmAllocated || existing.lineMm || 0) || 0) - qty) > 0.000001;
+                if(Math.abs(currentQty - qty) > 0.000001 || markerMissing){
+                  existing.qty = qty;
+                  existing.cantidad = qty;
+                  Object.assign(existing,pletinaMm);
+                  existing.updatedAt = now;
+                  existing.reconciledFromPreparation = true;
+                  existing.pletinaMmReconciledAt = now;
+                  changed = true;
+                }
+                return;
+              }
+
               if(currentQty < qty){
                 existing.qty = qty;
                 existing.cantidad = qty;
@@ -6813,7 +6939,7 @@ setTimeout(()=>{
             const material = typeof materialById === "function"
               ? (materialById(materialId) || {})
               : {};
-            db.assignments.push({
+            const newAssignment = {
               id:"asg_prep_v48_" + safeId(ref) + "_"
                 + safeId(companyId) + "_" + safeId(materialId),
               companyId,
@@ -6838,7 +6964,12 @@ setTimeout(()=>{
               reconciledFromPreparation:true,
               createdAt:now,
               updatedAt:now
-            });
+            };
+            if(pletinaMm){
+              Object.assign(newAssignment,pletinaMm);
+              newAssignment.pletinaMmReconciledAt = now;
+            }
+            db.assignments.push(newAssignment);
             changed = true;
           });
         }catch(error){
