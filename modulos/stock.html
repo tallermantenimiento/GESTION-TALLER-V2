@@ -6996,19 +6996,221 @@ setTimeout(()=>{
     }
   }
 
+  /*
+   * 2026-08-18: V48 queda solo como herramienta manual.
+   * Preparacion actual ya publica sus asignaciones directamente en Stock.
+   * Ejecutar V48 automaticamente podia volver a materializar una asignacion
+   * legacy cuando la referencia descriptiva de una OT habia cambiado.
+   */
   window.LDH_reconciliarAsignacionesPreparacionV48 = reconcile;
-  const start = function(){
-    setTimeout(reconcile,700);
-    setTimeout(reconcile,2200);
-  };
-  if(document.readyState === "loading"){
-    document.addEventListener("DOMContentLoaded",start,{once:true});
-  }else{
-    start();
-  }
+  window.__LDH_STOCK_V48_AUTO_RECONCILE_DISABLED_20260818__ = true;
+  console.info("[Stock] Reconciliacion automatica V48 desactivada; no se crean asignaciones legacy al entrar.");
 })();
 </script>
 
+
+<!-- LDH_STOCK_V48_LEGACY_DEDUPE_SAFE_20260818 -->
+<script id="LDH_STOCK_V48_LEGACY_DEDUPE_SAFE_20260818">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V48_LEGACY_DEDUPE_SAFE_20260818__) return;
+  window.__LDH_STOCK_V48_LEGACY_DEDUPE_SAFE_20260818__ = true;
+
+  let running = false;
+
+  function first(){
+    for(let i=0;i<arguments.length;i+=1){
+      const value = arguments[i];
+      if(value !== undefined && value !== null && String(value).trim() !== '') return value;
+    }
+    return '';
+  }
+
+  function norm(value){
+    return String(value == null ? '' : value).trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/ø/g,'o')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+  }
+
+  function qty(row){
+    const value = Number(String(first(
+      row && row.qty,row && row.cantidad,row && row.asignado,0
+    )).replace(',','.'));
+    return Number.isFinite(value) ? Math.max(0,value) : 0;
+  }
+
+  function activeOwn(row){
+    if(!row || typeof row !== 'object') return false;
+    const status = norm(first(row.status,row.estado,'activa'));
+    if(status && !['activa','activo','active','abierta','open'].includes(status)) return false;
+    const phase = norm(first(row.phase,row.fase,'preparacion'));
+    if(phase && phase !== 'preparacion' && phase !== 'fabricacion') return false;
+    const loanText = norm([
+      row.assignmentType,row.reason,row.source,row.tipo
+    ].filter(Boolean).join(' '));
+    if(loanText.includes('otra empresa') || loanText.includes('prestamo') ||
+       row.toCompanyId || row.toEmpresa || row.fromCompanyId || row.fromEmpresa ||
+       row.fromAssignmentId || row.originalAssignmentId){
+      return false;
+    }
+    return qty(row) > 0;
+  }
+
+  function isLegacyV48(row){
+    if(!row) return false;
+    const source = norm(row.source);
+    const reason = norm(row.reason);
+    const id = norm(row.id);
+    /*
+     * No usamos reconciledFromPreparation como criterio por si solo: V48 tambien
+     * podia marcar con ese flag una asignacion moderna que ya existia.
+     */
+    return source === 'stock v48 reconciliacion preparacion' ||
+      reason === 'asignado desde preparacion reconciliado v48' ||
+      id.startsWith('asg prep v48 ');
+  }
+
+  function workKey(row){
+    const ref = String(first(
+      row && row.ref,row && row.jobRef,row && row.reference,row && row.referencia,''
+    )).toUpperCase();
+    const match = ref.match(/\bOT[-\s]?(\d{6})[-\s]?(\d{3})(?:[-\s]?([A-Z]))?\b/);
+    if(!match) return '';
+    return 'OT-' + match[1] + '-' + match[2] + (match[3] ? '-' + match[3] : '');
+  }
+
+  function companyKeys(row){
+    const keys = new Set([
+      row && row.companyId,row && row.empresaId,row && row.company,row && row.empresa,
+      row && row.companyName,row && row.empresaNombre
+    ].map(norm).filter(Boolean));
+    try{
+      const id = String(first(row && row.companyId,row && row.empresaId,'')).trim();
+      const company = id && typeof db !== 'undefined' && db && Array.isArray(db.companies)
+        ? db.companies.find(item => String(first(item && item.id,item && item.companyId,item && item.empresaId,'')) === id)
+        : null;
+      if(company){
+        [company.id,company.companyId,company.empresaId,company.name,company.nombre,company.company,company.empresa]
+          .map(norm).filter(Boolean).forEach(value => keys.add(value));
+      }
+    }catch(_){ }
+    return keys;
+  }
+
+  function materialKeys(row){
+    const keys = new Set([
+      row && row.materialId,row && row.matId,row && row.material_id,
+      row && row.materialName,row && row.material,row && row.mat,row && row.name,row && row.nombre
+    ].map(norm).filter(Boolean));
+    try{
+      const id = String(first(row && row.materialId,row && row.matId,row && row.material_id,'')).trim();
+      const material = id && typeof db !== 'undefined' && db && Array.isArray(db.materials)
+        ? db.materials.find(item => String(first(item && item.id,item && item.materialId,item && item.matId,'')) === id)
+        : null;
+      if(material){
+        [material.id,material.materialId,material.matId,material.name,material.nombre,material.material]
+          .map(norm).filter(Boolean).forEach(value => keys.add(value));
+      }
+    }catch(_){ }
+    return keys;
+  }
+
+  function overlaps(left,right){
+    if(!left.size || !right.size) return false;
+    for(const value of left){ if(right.has(value)) return true; }
+    return false;
+  }
+
+  function sameCompany(a,b){ return overlaps(companyKeys(a),companyKeys(b)); }
+  function sameMaterial(a,b){ return overlaps(materialKeys(a),materialKeys(b)); }
+
+  function cleanup(publishNow){
+    if(running) return 0;
+    running = true;
+    let changed = 0;
+    try{
+      if(typeof db === 'undefined' || !db || !Array.isArray(db.assignments)) return 0;
+
+      const current = db.assignments.filter(row => activeOwn(row) && !isLegacyV48(row));
+      if(!current.length) return 0;
+
+      const now = new Date().toISOString();
+      db.assignments.forEach(row => {
+        if(!activeOwn(row) || !isLegacyV48(row)) return;
+        const key = workKey(row);
+        if(!key) return;
+
+        const replacements = current.filter(candidate =>
+          workKey(candidate) === key &&
+          sameCompany(row,candidate) &&
+          sameMaterial(row,candidate)
+        );
+        if(!replacements.length) return;
+
+        row.legacyV48QtyBeforeCancel = qty(row);
+        row.status = 'cancelada';
+        row.estado = 'cancelada';
+        row.pendingQty = 0;
+        row.qtyPending = 0;
+        row.cancelledAt = now;
+        row.updatedAt = now;
+        row.cancelledReason = 'duplicado_legacy_v48_sustituido_por_asignacion_actual';
+        row.cancelledBy = 'stock_v48_legacy_dedupe_safe_20260818';
+        row.supersededByAssignmentIds = replacements
+          .map(candidate => String(candidate && candidate.id || ''))
+          .filter(Boolean);
+        changed += 1;
+      });
+
+      if(changed && publishNow !== false){
+        if(typeof save === 'function') save();
+        try{ if(typeof render === 'function') render(); }catch(_){ }
+        try{
+          if(window.LDH_scheduleStockCloudPublish){
+            window.LDH_scheduleStockCloudPublish(true);
+          }
+        }catch(_){ }
+        console.info('[Stock] Duplicados legacy V48 cancelados de forma segura:',changed);
+      }
+      return changed;
+    }catch(error){
+      console.warn('[Stock] No se pudo depurar duplicados legacy V48',error);
+      return 0;
+    }finally{
+      running = false;
+    }
+  }
+
+  /* Si Firebase reemplaza la copia local, depuramos despues de cargarla. */
+  try{
+    if(typeof window.LDH_applyRemoteStockWithoutReload === 'function' &&
+       !window.LDH_applyRemoteStockWithoutReload.__ldhV48LegacyDedupe20260818){
+      const previousApplyRemote = window.LDH_applyRemoteStockWithoutReload;
+      const wrappedApplyRemote = function(){
+        const result = previousApplyRemote.apply(this,arguments);
+        setTimeout(function(){ cleanup(true); },80);
+        return result;
+      };
+      wrappedApplyRemote.__ldhV48LegacyDedupe20260818 = true;
+      window.LDH_applyRemoteStockWithoutReload = wrappedApplyRemote;
+    }
+  }catch(_){ }
+
+  const run = function(){ cleanup(true); };
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded',function(){ setTimeout(run,250); },{once:true});
+  }else{
+    setTimeout(run,250);
+  }
+  [1200,3500,8000].forEach(delay => setTimeout(run,delay));
+  window.addEventListener('storage',function(){ setTimeout(run,220); });
+
+  window.LDH_limpiarDuplicadosLegacyV48Seguros = run;
+  console.info('[Stock] Proteccion anti-duplicado V48 activa; stock fisico y reservas no se modifican.');
+})();
+</script>
+<!-- /LDH_STOCK_V48_LEGACY_DEDUPE_SAFE_20260818 -->
 
 <!-- LDH_STOCK_COMMON_DEFAULT_RESTORED_20260818 -->
 <style id="LDH_STOCK_COMMON_DEFAULT_RESTORED_20260818">
