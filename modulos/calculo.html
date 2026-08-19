@@ -280,9 +280,70 @@
       type:String(m.type || m.tipo || m.cat || m.categoria || "")
     };
   }
-  function isPaintMaterial(m){
-    const s = norm([m.name,m.nombre,m.material,m.cat,m.categoria,m.grp,m.grupo,m.familia].join(" "));
-    return s.includes("pintura") || s.includes("bote") || s.includes("disolvente") || s.includes("solvente");
+  function stockMaterialId(m){
+    return String(m && (m.id || m.materialId || m.matId || m._id || m.key) || "").trim();
+  }
+  function stockMaterialName(m){
+    return String(m && (m.name || m.nombre || m.material || m.label) || "").trim();
+  }
+  function companyAliases(companyName){
+    const wanted = norm(companyName);
+    const aliases = new Set();
+    if(wanted) aliases.add(wanted);
+    try{
+      const row = readCompanyMaster().find(c=>[c.name,c.id,c.code].map(norm).filter(Boolean).includes(wanted));
+      if(row) [row.name,row.id,row.code].map(norm).filter(Boolean).forEach(v=>aliases.add(v));
+    }catch(e){}
+    return aliases;
+  }
+  function materialBelongsToCompany(m, companyName){
+    const aliases = companyAliases(companyName);
+    if(!aliases.size) return false;
+
+    const direct = [m && m.empresa,m && m.company,m && m.companyName,m && m.companyId,m && m.empresaId]
+      .map(norm).filter(Boolean);
+    if(direct.some(v=>aliases.has(v))) return true;
+
+    const groups = [m && m.grp,m && m.grupo,m && m.family,m && m.familia,m && m.group]
+      .map(norm).filter(Boolean);
+    return groups.some(g=>{
+      const stripped = g.replace(/^pintura\s+/, "").trim();
+      return aliases.has(stripped) || [...aliases].some(a=>g === `pintura ${a}`);
+    });
+  }
+  function isPaintColorMaterial(m){
+    if(!m) return false;
+    const name = norm(stockMaterialName(m));
+    const cat = norm(m.cat || m.categoria || m.type || m.tipo);
+    const grp = norm(m.grp || m.grupo || m.family || m.familia || m.group);
+
+    // El selector es solo de COLOR. Disolventes y auxiliares se gestionan como materiales separados.
+    if(/(^|\s)(disolvente|diluyente|thinner|catalizador|endurecedor|limpiador|limpieza)(\s|$)/.test(name)) return false;
+
+    return cat.includes("pintura") || grp.startsWith("pintura ") || name.includes("pintura");
+  }
+  function paintMaterialsForCompany(companyName){
+    if(!norm(companyName)) return [];
+    const source = allStockMaterials("")
+      .filter(m=>stockMaterialId(m))
+      .filter(m=>materialBelongsToCompany(m, companyName))
+      .filter(isPaintColorMaterial);
+
+    // La misma ficha puede aparecer en varias copias del paquete de Stock.
+    // Primero eliminamos IDs repetidos y después nombres repetidos para que el selector sea limpio.
+    const byId = new Map();
+    source.forEach(m=>{
+      const id = stockMaterialId(m);
+      if(id && !byId.has(id)) byId.set(id,m);
+    });
+    const byName = new Map();
+    [...byId.values()]
+      .sort((a,b)=>stockMaterialName(a).localeCompare(stockMaterialName(b),'es',{sensitivity:'base'}))
+      .forEach(m=>{
+        const key = norm(stockMaterialName(m));
+        if(key && !byName.has(key)) byName.set(key,m);
+      });
+    return [...byName.values()];
   }
   function isPletinaMaterial(name, m){
     const txt = norm([
@@ -587,13 +648,19 @@
       const sel = document.getElementById("paintSelect");
       const hint = document.getElementById("paintHint");
       const company = document.getElementById("companySelect").value;
-      const paints = allStockMaterials(company).filter(isPaintMaterial);
+      const paints = paintMaterialsForCompany(company);
       sel.innerHTML = '<option value="">— (Opcional) Selecciona pintura —</option>' + paints.map(m=>{
-        const name = String(m.name || m.nombre || m.material || m.id || "").trim();
-        const id = String(m.id || m.materialId || m.matId || "").trim();
+        const name = stockMaterialName(m);
+        const id = stockMaterialId(m);
         return `<option value="${esc(id)}">${esc(name)}</option>`;
       }).join("");
-      hint.textContent = company ? `${paints.length} pinturas/materiales compatibles encontrados para ${company}.` : "Selecciona empresa para filtrar pinturas.";
+      if(!company){
+        hint.textContent = "Selecciona empresa para filtrar pinturas.";
+      }else if(!paints.length){
+        hint.textContent = `⚠️ No hay pinturas de color vinculadas a ${company} en Stock.`;
+      }else{
+        hint.textContent = `${paints.length} pintura${paints.length===1?'':'s'} de ${company} encontrada${paints.length===1?'':'s'} en Stock.`;
+      }
     },
 
     sanitizeCantidad(el){
