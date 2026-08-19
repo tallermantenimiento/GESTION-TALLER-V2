@@ -6212,6 +6212,14 @@ function renderTabla() {
     const isPletinaMm = ((typeof window.LDH_isPletinaMmLine === "function") && window.LDH_isPletinaMmLine(linea)) ||
       (((String((linea && (linea.unit || linea.unidad)) || "").trim().toLowerCase() === "mm") || linea.pletina_mm === true || linea.gestion_mm === true) &&
        String((linea && (linea.mat || linea.material || linea.name || linea.linked_matName || linea.stockLinkLabel)) || "").toLowerCase().includes("pletina"));
+    const isChapaEscalonNoStock = (() => {
+      try{
+        const n = String((linea && (linea.mat || linea.material || linea.name || linea.title)) || "")
+          .trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, " ").trim();
+        return n === "chapa escalon";
+      }catch(_){ return false; }
+    })();
     let recibida = toNum(linea.qty_recibida);
 
     // V82 · PLETINA/MM: la cantidad recibida se expresa SIEMPRE en mm.
@@ -6395,13 +6403,16 @@ function renderTabla() {
     // ====== COMPRAS: selección para copiar ======
     // Necesario para comprar = lo que falta por recibir (pedida - recibida) y lo comparamos con stock.
     try{
-      const _need = Math.max(0, pedida - recibida);
-      const _sInfo = (typeof _getStockInfoForCompra==="function") ? _getStockInfoForCompra(linea) : { stockKnown:false, stock:0 };
-      const _stock = _sInfo.stockKnown ? toNum(_sInfo.stock) : 0;
-      const _toBuy = _sInfo.stockKnown ? Math.max(0, _need - _stock) : _need;
-      if(linea.toBuy === undefined){
-        linea.toBuy = (_toBuy > 0);
-        _dirtyBuyDefaults = true;
+      // CHAPA ESCALÓN es material propio del trabajo: no consulta Stock para decidir Compras.
+      if(!isChapaEscalonNoStock){
+        const _need = Math.max(0, pedida - recibida);
+        const _sInfo = (typeof _getStockInfoForCompra==="function") ? _getStockInfoForCompra(linea) : { stockKnown:false, stock:0 };
+        const _stock = _sInfo.stockKnown ? toNum(_sInfo.stock) : 0;
+        const _toBuy = _sInfo.stockKnown ? Math.max(0, _need - _stock) : _need;
+        if(linea.toBuy === undefined){
+          linea.toBuy = (_toBuy > 0);
+          _dirtyBuyDefaults = true;
+        }
       }
     }catch(e){}
 
@@ -6414,12 +6425,14 @@ function renderTabla() {
     }
     const rowClass = isComplete ? "ok" : "";
 
-    const linkedId = getLinkedMatIdForLine(linea);
+    const linkedId = isChapaEscalonNoStock ? "" : getLinkedMatIdForLine(linea);
     const linkedMat = linkedId ? getLinkedMatForLine(linea) : null;
 
     let stockPill = "";
-    const companyStockPill = _v2CompanyStockPill(linea, linkedMat, pedida);
-    const stockComunInfo = (typeof LDH_stockComunInfoParaLinea === "function") ? LDH_stockComunInfoParaLinea(linea) : {ok:false,free:0};
+    const companyStockPill = isChapaEscalonNoStock ? "" : _v2CompanyStockPill(linea, linkedMat, pedida);
+    const stockComunInfo = isChapaEscalonNoStock
+      ? {ok:false,free:0}
+      : ((typeof LDH_stockComunInfoParaLinea === "function") ? LDH_stockComunInfoParaLinea(linea) : {ok:false,free:0});
     const stockComunPill = stockComunInfo.ok
       ? (isPletinaMm
           ? `<span class="link-pill stock-common-pill ${stockComunInfo.free > 0 ? "" : "danger"}">STOCK COMÚN · físico <b>${Math.round(toNum(stockComunInfo.physical)).toLocaleString("es-ES")}</b> mm · reservado <b>${Math.round(toNum(stockComunInfo.reserved)+toNum(stockComunInfo.assigned)).toLocaleString("es-ES")}</b> mm · libre <b>${Math.round(toNum(stockComunInfo.free)).toLocaleString("es-ES")}</b> mm</span>`
@@ -6485,12 +6498,15 @@ function renderTabla() {
     // PLETINA/MM tiene dos fuentes explícitas: empresa (barras) y STOCK COMÚN (mm).
     // Ocultamos la pill genérica para no mezclar unidades.
     if(isPletinaMm) stockPill = "";
+    if(isChapaEscalonNoStock){
+      stockPill = `<span class="link-pill ok">Material del trabajo · fuera de Stock</span>`;
+    }
 
     // Reconciliación directa:
     // - Si Stock v2 dice que este material está asignado a este trabajo, reflejarlo como recibido.
     // - Si parte de lo asignado se ha prestado a otro trabajo/empresa, BAJAR la recibida neta.
     try{
-      if(!explicitReceiptPolicyV83 && !isPletinaMm && typeof _v2CompanyStockInfo === "function"){
+      if(!explicitReceiptPolicyV83 && !isPletinaMm && !isChapaEscalonNoStock && typeof _v2CompanyStockInfo === "function"){
         const infAsig = _v2CompanyStockInfo(linea, linkedMat);
         const qAsig = toNum(infAsig && infAsig.asignado);
         const qPrestadoFuera = (typeof LDH_prestadoFueraStockLineaQty === "function") ? toNum(LDH_prestadoFueraStockLineaQty(linea)) : 0;
@@ -6551,7 +6567,11 @@ function renderTabla() {
     const pletinaDebeComprar = !!(isPletinaMm && falta > 0 && pletinaBuyInfo && toNum(pletinaBuyInfo.barsToBuy) > 0);
 
     let btnHtml = "";
-    if(isPletinaMm){
+    if(isChapaEscalonNoStock){
+      btnHtml += isComplete
+        ? `<button class="btn-mini disabled">✅ OK</button>`
+        : `<span style="opacity:0.2">-</span>`;
+    }else if(isPletinaMm){
       if(isComplete) btnHtml += `<button class="btn-mini disabled">✅ ${Math.round(pedida).toLocaleString("es-ES")} mm asignados</button>`;
       else if(yaAplicada > 0) btnHtml += `<button class="btn-mini disabled" style="opacity:.75">Asignados ${Math.round(yaAplicada).toLocaleString("es-ES")} mm</button>`;
       else btnHtml += `<span style="opacity:0.2">-</span>`;
@@ -6565,7 +6585,7 @@ function renderTabla() {
       btnHtml += `<span style="opacity:0.2">-</span>`;
     }
 
-    if (falta > 0) {
+    if (falta > 0 && !isChapaEscalonNoStock) {
       if(isPletinaMm){
         const pSrc = (typeof window.LDH_pletinaSourceInfo === "function") ? window.LDH_pletinaSourceInfo(linea) : null;
         const pBuy = pletinaBuyInfo;
@@ -6600,7 +6620,7 @@ function renderTabla() {
       const reservaPropiaV88 = (typeof window.LDH_reservaPropiaActivaLineaV88 === "function")
         ? Number(window.LDH_reservaPropiaActivaLineaV88(index, linea) || 0)
         : 0;
-      if(reservaPropiaV88 > 0 && recibida <= 0 && yaAplicada <= 0 && !linea.ok){
+      if(!isChapaEscalonNoStock && reservaPropiaV88 > 0 && recibida <= 0 && yaAplicada <= 0 && !linea.ok){
         const unidadReservaV88 = isPletinaMm ? " mm" : (reservaPropiaV88 === 1 ? " barra" : " barras");
         const cantidadReservaV88 = isPletinaMm
           ? Math.round(reservaPropiaV88).toLocaleString("es-ES")
@@ -6615,7 +6635,7 @@ function renderTabla() {
     }
 
     // Si existe deuda no asignada para esta línea, ofrecer devolución desde Preparación
-    const uaRec = _uaFindForLineOrStock(linea) || LDH_debtForCurrentLine(linea);
+    const uaRec = isChapaEscalonNoStock ? null : (_uaFindForLineOrStock(linea) || LDH_debtForCurrentLine(linea));
     if(uaRec && uaRec.pending>0){
       const uaReason = String(uaRec.item && uaRec.item.reason || "");
       const uaIsReservaAjena = uaReason === "reserva_ajena_usada" || uaReason === "reserva_otra_empresa_usada";
@@ -6631,7 +6651,7 @@ function renderTabla() {
     const btnComprasInfo = linea.pedido_compras_info
       ? `<button class="btn-mini ok" title="Marcado como pedido a compras. Es solo informativo; no envía nada al módulo Compras." onclick="togglePedidoComprasInfo(${index})">🛒 Pedido compras</button>`
       : `<button class="btn-mini" title="Marcar que este material ya se ha pedido a compras. Es solo informativo." onclick="togglePedidoComprasInfo(${index})">🛒 Marcar pedido</button>`;
-    const btnVincular = isPaintLine(linea) ? `` : `<button class="btn-mini" onclick="abrirModalVincular(${index})">Vincular</button>`;
+    const btnVincular = (isPaintLine(linea) || isChapaEscalonNoStock) ? `` : `<button class="btn-mini" onclick="abrirModalVincular(${index})">Vincular</button>`;
     const trazaPrestamosStock = (typeof LDH_trazabilidadPrestamosStockLinea === "function") ? LDH_trazabilidadPrestamosStockLinea(linea) : "";
 
     const tr = document.createElement("tr");
@@ -6645,12 +6665,14 @@ function renderTabla() {
           ${stockPill}
           ${companyStockPill}
           ${stockComunPill}
-          ${linkedMat ? `<span class="small">Vinculado a: <b>${linkedMat.name}</b>${linkedMat.__v2 ? " · automático por nombre exacto" : ""}</span>` : `<span class="small">Pulsa “Vincular” para emparejar con Stock</span>`}
+          ${isChapaEscalonNoStock
+            ? `<span class="small">Material propio del trabajo · no usa Stock</span>`
+            : (linkedMat ? `<span class="small">Vinculado a: <b>${linkedMat.name}</b>${linkedMat.__v2 ? " · automático por nombre exacto" : ""}</span>` : `<span class="small">Pulsa “Vincular” para emparejar con Stock</span>`)}
           ${linea.pedido_compras_info ? `<span class="link-pill warn">🛒 Pedido a compras${linea.pedido_compras_fecha ? " · " + new Date(linea.pedido_compras_fecha).toLocaleDateString() : ""}</span>` : ``}
           ${yaAplicada > 0 ? `<span class="small">${asignacionLineaLabel(linea)} · total línea: <b>${yaAplicada}</b></span>` : ``}
           ${trazaPrestamosStock ? `<span class="link-pill danger">${trazaPrestamosStock}</span>` : ``}
-          ${LDH_debtForCurrentLine(linea) ? `<span class="link-pill danger">DEUDOR · debe devolver a ${(LDH_debtForCurrentLine(linea).item||{}).fromEmpresa || "origen"}</span>` : ``}
-          ${LDH_lentOutForLine(linea).qty > 0 ? `<span class="link-pill danger">PRESTADO · ${LDH_lentOutForLine(linea).qty} ${(LDH_lentOutForLine(linea).items[0]||{}).toEmpresa || "fuera"}</span>` : ``}
+          ${!isChapaEscalonNoStock && LDH_debtForCurrentLine(linea) ? `<span class="link-pill danger">DEUDOR · debe devolver a ${(LDH_debtForCurrentLine(linea).item||{}).fromEmpresa || "origen"}</span>` : ``}
+          ${!isChapaEscalonNoStock && LDH_lentOutForLine(linea).qty > 0 ? `<span class="link-pill danger">PRESTADO · ${LDH_lentOutForLine(linea).qty} ${(LDH_lentOutForLine(linea).items[0]||{}).toEmpresa || "fuera"}</span>` : ``}
         </div>
       </td>
       <td>${pedida} <span style="font-size:10px;opacity:0.5">${linea.unit || 'ud'}</span></td>
@@ -25391,6 +25413,8 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
       line.recibida = requested;
       line.receipt_manual_v83 = true;
       line.receipt_policy_explicit_v83 = true;
+      line.nonStockMaterial = true;
+      line.stockMode = 'none';
       line.ok = true;
       line.completo = true;
       line.done = true;
