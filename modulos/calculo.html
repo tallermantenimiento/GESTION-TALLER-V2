@@ -322,12 +322,80 @@
 
     return cat.includes("pintura") || grp.startsWith("pintura ") || name.includes("pintura");
   }
+  function stockCompanyAliases(db, companyName){
+    const aliases = companyAliases(companyName);
+    const wanted = norm(companyName);
+    if(wanted) aliases.add(wanted);
+    const companies = Array.isArray(db && db.companies) ? db.companies : [];
+    let expanded = true;
+    while(expanded){
+      expanded = false;
+      companies.forEach(c=>{
+        const vals = [c && c.id,c && c.companyId,c && c.empresaId,c && c.name,c && c.nombre,c && c.empresa,c && c.code,c && c.codigo]
+          .map(norm).filter(Boolean);
+        if(vals.some(v=>aliases.has(v))){
+          vals.forEach(v=>{ if(!aliases.has(v)){ aliases.add(v); expanded = true; } });
+        }
+      });
+    }
+    return aliases;
+  }
+  function stockRowCompanyMatches(row, aliases){
+    if(!row || !aliases || !aliases.size) return false;
+    return [row.companyId,row.empresaId,row.empresa,row.company,row.companyName,row.company_id]
+      .map(norm).filter(Boolean).some(v=>aliases.has(v));
+  }
+  function stockRowMaterialId(row){
+    return String(row && (row.materialId || row.matId || row.material_id || row.stockMatId || row.idMaterial) || "").trim();
+  }
+  function companyMaterialIdsFromStock(db, companyName){
+    const aliases = stockCompanyAliases(db, companyName);
+    const ids = new Set();
+    const addRow = row=>{
+      if(!stockRowCompanyMatches(row, aliases)) return;
+      const id = stockRowMaterialId(row);
+      if(id) ids.add(id);
+    };
+
+    const scanStock = stock=>{
+      if(Array.isArray(stock)){
+        stock.forEach(addRow);
+        return;
+      }
+      if(!stock || typeof stock !== "object") return;
+      Object.entries(stock).forEach(([key,pack])=>{
+        const keyMatches = aliases.has(norm(key));
+        if(Array.isArray(pack)){
+          pack.forEach(row=>{
+            if(keyMatches){
+              const id = stockRowMaterialId(row) || stockMaterialId(row);
+              if(id) ids.add(id);
+            }else addRow(row);
+          });
+          return;
+        }
+        if(!pack || typeof pack !== "object") return;
+        addRow(pack);
+        if(keyMatches && Array.isArray(pack.materials)){
+          pack.materials.forEach(m=>{ const id=stockMaterialId(m); if(id) ids.add(id); });
+        }
+        if(Array.isArray(pack.stock)) pack.stock.forEach(addRow);
+        if(Array.isArray(pack.rows)) pack.rows.forEach(addRow);
+      });
+    };
+
+    scanStock(db && db.stock);
+    if(db && db.db) scanStock(db.db.stock);
+    return ids;
+  }
   function paintMaterialsForCompany(companyName){
     if(!norm(companyName)) return [];
+    const db = readStock();
+    const companyIds = companyMaterialIdsFromStock(db, companyName);
     const source = allStockMaterials("")
       .filter(m=>stockMaterialId(m))
-      .filter(m=>materialBelongsToCompany(m, companyName))
-      .filter(isPaintColorMaterial);
+      .filter(isPaintColorMaterial)
+      .filter(m=>companyIds.has(stockMaterialId(m)) || materialBelongsToCompany(m, companyName));
 
     // La misma ficha puede aparecer en varias copias del paquete de Stock.
     // Primero eliminamos IDs repetidos y después nombres repetidos para que el selector sea limpio.
