@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V97-PLETINA-ORIGEN-AUTORITATIVO-20260814" />
+<meta name="ldh-build" content="PREPARACION-V106-CONSUMO-AL-SALIR-PREPARACION-20260819" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -3759,7 +3759,7 @@ function guardarTipoHierro(){
 }
 
 /* ========= AUTO-CIERRE POR RECEPCIÓN (AHORA: ENVÍA A FABRICACIÓN ANTES) ========= */
-function autoCerrarSiCompletoPorRecepcion(){
+async function autoCerrarSiCompletoPorRecepcion(){
   const totalLines = estadoMateriales.length;
   if(totalLines === 0) return;
 
@@ -3810,10 +3810,50 @@ function autoCerrarSiCompletoPorRecepcion(){
         return;
       }
     }catch(e){}
-    removeAny(KP(refActual));
-    removeAny(KM(refActual));
-    alert("✅ Pedido completo (material recibido) y ya está en Fabricación: retirado de Preparación.");
-    volverLista();
+    // V106 · El stock físico se consume SOLO cuando el trabajo sale definitivamente
+    // de Preparación. Estar ya en Fabricación no basta: mientras esta ficha siga viva,
+    // el material recibido continúa físico + reservado/asignado.
+    const refCierre = String(refActual || "").trim();
+    if(!refCierre) return;
+    window.__LDH_PREP_FINAL_CLOSE_LOCK_V106 = window.__LDH_PREP_FINAL_CLOSE_LOCK_V106 || new Set();
+    if(window.__LDH_PREP_FINAL_CLOSE_LOCK_V106.has(refCierre)) return;
+    window.__LDH_PREP_FINAL_CLOSE_LOCK_V106.add(refCierre);
+    try{
+      // Deshacer primero cualquier consumo prematuro creado por la antigua V51
+      // mientras esta misma OT seguía viva en Preparación.
+      if(typeof window.LDH_prepRestorePrematureConsumptionV106 === "function"){
+        await window.LDH_prepRestorePrematureConsumptionV106(refCierre);
+      }
+
+      const consumeFn = window.LDH_consumirStockAsignadoAlMandarFabricacion
+        || window.LDH_consumirStockComunAlMandarFabricacion;
+      if(typeof consumeFn !== "function") throw new Error("El conector de consumo de Stock todavía no está disponible.");
+
+      const consumed = await consumeFn(refCierre);
+      try{
+        if(typeof window.LDH_prepApplyFirebaseStockV28 === "function")
+          await window.LDH_prepApplyFirebaseStockV28(true);
+      }catch(_){ }
+
+      removeAny(KP(refCierre));
+      removeAny(KM(refCierre));
+      alert(
+        "✅ Pedido completo y retirado de Preparación." +
+        (Number(consumed && consumed.consumedQty || 0) > 0
+          ? "\n\nStock consumido al cerrar Preparación: " + Number(consumed.consumedQty || 0)
+          : "")
+      );
+      volverLista();
+    }catch(error){
+      console.error("[Preparación V106] No se pudo cerrar Preparación/consumir Stock", error);
+      alert(
+        "No se ha retirado el trabajo de Preparación.\n\n" +
+        "El Stock no se consumirá hasta que el cierre pueda confirmarse correctamente.\n\n" +
+        String(error && (error.code || error.message) || error || "Error de sincronización")
+      );
+    }finally{
+      window.__LDH_PREP_FINAL_CLOSE_LOCK_V106.delete(refCierre);
+    }
   }
 }
 
@@ -17884,8 +17924,9 @@ function LDH_prepSameRefV32(a, b) {
 function LDH_prepCommonAssignmentActiveV32(row) {
   if (!row || typeof row !== "object") return false;
   /*
-   * V51: al entrar en Fabricación se consume cualquier asignación propia del
-   * trabajo (stock libre, reserva propia, donación recibida o STOCK COMÚN).
+   * V106: la asignación permanece activa mientras la OT siga viva en Preparación,
+   * aunque ya exista también en Fabricación. Solo se consume al cierre definitivo.
+   * Se incluyen stock libre, reserva propia, donación recibida o STOCK COMÚN.
    * Los préstamos entre empresas se excluyen porque mantienen su circuito de
    * deuda/devolución, y Ferretería conserva su base independiente.
    */
@@ -17905,9 +17946,9 @@ function LDH_prepCommonAssignmentActiveV32(row) {
 
 /*
  * Convierte de forma atómica las asignaciones propias activas del trabajo en
- * movimientos físicos de salida. Incluye STOCK COMÚN. El id fijo de cada
- * movimiento impide descontar dos veces aunque se repita el clic, se recargue
- * la página o se regularice un trabajo que ya estaba en Fabricación.
+ * movimientos físicos de salida CUANDO el trabajo abandona definitivamente
+ * Preparación. Incluye STOCK COMÚN. El id fijo de cada movimiento impide
+ * descontar dos veces aunque el cierre se ejecute más de una vez.
  */
 async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
   const reference = String(workRef ?? "").trim();
@@ -18014,9 +18055,9 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
           jobRef: reference,
           concept: assignment.concept ?? "",
           reason: isCommonStock
-            ? "consumo_stock_comun_al_mandar_fabricacion"
-            : "consumo_stock_propio_al_mandar_fabricacion",
-          source: "preparacion_pedidos_consumo_fabricacion_v51",
+            ? "consumo_stock_comun_al_salir_preparacion"
+            : "consumo_stock_propio_al_salir_preparacion",
+          source: "preparacion_pedidos_consumo_salida_preparacion_v106",
           assignmentId,
           debtExempt: true,
           returnRequired: false
@@ -18071,7 +18112,7 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
       rawMovements: movements.length,
       rawReservations: Array.isArray(remoteDB.reservations) ? remoteDB.reservations.length : 0,
       rawAssignments: assignments.length,
-      source: "preparacion_pedidos_consumo_stock_asignado_fabricacion_v51"
+      source: "preparacion_pedidos_consumo_stock_asignado_salida_preparacion_v106"
     }, { merge: true });
 
     return { remoteDB, consumedQty, consumedAssignments };
@@ -18098,9 +18139,157 @@ window.LDH_consumirStockAsignadoAlMandarFabricacion =
   LDH_prepConsumeCommonAtFabricationV32;
 
 /*
- * Última capa efectiva del botón. Primero confirma y consolida el consumo en
- * Firebase; solo después crea el trabajo en Fabricación. Si falla la nube, el
- * pedido permanece en Preparación y no se descuenta nada.
+ * V106 · Revierte exclusivamente salidas antiguas V51 hechas al ENTRAR en
+ * Fabricación cuando la misma OT todavía sigue viva en Preparación.
+ * No toca salidas manuales, otras OTs, préstamos ni Ferretería.
+ * Las pletinas legacy sin modo mm se dejan intactas para no mezclar barras/mm.
+ */
+const LDH_PREP_RESTORE_PREMATURE_LOCK_V106 = new Set();
+
+async function LDH_prepRestorePrematureConsumptionV106(workRef){
+  const reference=String(workRef||"").trim();
+  if(!reference) return {restoredQty:0,restoredAssignments:0};
+  if(LDH_PREP_RESTORE_PREMATURE_LOCK_V106.has(reference))
+    return {restoredQty:0,restoredAssignments:0};
+  if(!LDH_PREP_STOCK_AUTH_V28.currentUser)
+    throw new Error("Stock nube todavía no está autenticado.");
+
+  LDH_PREP_RESTORE_PREMATURE_LOCK_V106.add(reference);
+  try{
+    const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
+      const metaRef=doc(LDH_PREP_STOCK_DB_V28,"taller_data","stock");
+      const remoteDB=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
+      const assignments=Array.isArray(remoteDB.assignments)?remoteDB.assignments:[];
+      const movements=Array.isArray(remoteDB.movements)?remoteDB.movements:[];
+      const now=new Date().toISOString();
+
+      const sameRef=row=>LDH_prepSameRefV32(
+        row?.consumerRef ?? row?.jobRef ?? row?.ref ?? row?.reference ?? "",
+        reference
+      );
+      const materialName=materialId=>{
+        const m=(remoteDB.materials||[]).find(x=>String(x?.id ?? x?.materialId ?? x?.matId ?? "")===String(materialId));
+        return LDH_prepNormCloudV30(m?.name ?? m?.nombre ?? m?.material ?? m?.mat ?? "");
+      };
+      const isLegacyPletinaMovement=movement=>{
+        const companyId=String(movement?.companyId ?? movement?.empresaId ?? "");
+        const materialId=String(movement?.materialId ?? movement?.matId ?? "");
+        const name=materialName(materialId);
+        const isPletina=name.includes("pletina") || name.includes("planchuela") || name.includes("llanta");
+        if(!isPletina) return false;
+        const mmRow=(remoteDB.stock||[]).find(row=>
+          String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? "")===companyId &&
+          String(row?.materialId ?? row?.matId ?? row?.material_id ?? "")===materialId &&
+          String(row?.lengthMode ?? "").toLowerCase()==="mm"
+        );
+        return !mmRow;
+      };
+
+      const candidateMovements=movements.filter(movement=>{
+        if(!sameRef(movement)) return false;
+        const source=String(movement?.source||"").toLowerCase();
+        const reason=String(movement?.reason||movement?.motivo||"").toLowerCase();
+        const oldV51=source==="preparacion_pedidos_consumo_fabricacion_v51" ||
+          reason==="consumo_stock_comun_al_mandar_fabricacion" ||
+          reason==="consumo_stock_propio_al_mandar_fabricacion";
+        if(!oldV51 || isLegacyPletinaMovement(movement)) return false;
+        const movementId=String(movement?.id ?? movement?.movementId ?? "");
+        const assignmentId=String(movement?.assignmentId ?? "");
+        return assignments.some(a=>
+          sameRef(a) && (
+            (movementId && String(a?.movementId ?? "")===movementId) ||
+            (assignmentId && String(a?.id ?? a?.assignmentId ?? "")===assignmentId)
+          )
+        );
+      });
+
+      if(!candidateMovements.length)
+        return {remoteDB,restoredQty:0,restoredAssignments:0,changed:false};
+
+      const ids=new Set(candidateMovements.map(m=>String(m?.id ?? m?.movementId ?? "")).filter(Boolean));
+      const assignmentIds=new Set(candidateMovements.map(m=>String(m?.assignmentId ?? "")).filter(Boolean));
+      remoteDB.movements=movements.filter(m=>!ids.has(String(m?.id ?? m?.movementId ?? "")));
+
+      let restoredAssignments=0;
+      assignments.forEach(a=>{
+        if(!sameRef(a)) return;
+        const aid=String(a?.id ?? a?.assignmentId ?? "");
+        const mid=String(a?.movementId ?? "");
+        if(!(assignmentIds.has(aid) || ids.has(mid))) return;
+        a.status="activa";
+        a.estado="activa";
+        a.phase=a.phase || a.fase || "fabricacion";
+        a.fase=a.fase || a.phase || "fabricacion";
+        delete a.consumedQty; delete a.consumedAt; delete a.movementId;
+        a.prematureConsumptionRestoredAt=now;
+        a.updatedAt=now;
+        restoredAssignments+=1;
+      });
+
+      let restoredQty=0;
+      candidateMovements.forEach(movement=>{
+        const qty=Math.max(0,Number(movement?.qty ?? movement?.cantidad ?? 0)||0);
+        restoredQty+=qty;
+        const companyId=String(movement?.companyId ?? movement?.empresaId ?? "");
+        const materialId=String(movement?.materialId ?? movement?.matId ?? "");
+        const mmRow=(remoteDB.stock||[]).find(row=>
+          String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? "")===companyId &&
+          String(row?.materialId ?? row?.matId ?? row?.material_id ?? "")===materialId &&
+          String(row?.lengthMode ?? "").toLowerCase()==="mm"
+        );
+        if(mmRow){
+          mmRow.lengthPhysicalMm=Math.max(0,Number(mmRow.lengthPhysicalMm||0)||0)+qty;
+          mmRow.updatedAt=now;
+        }
+      });
+
+      remoteDB.assignments=assignments;
+      LDH_prepWriteRemoteStockTransactionV45(
+        transaction,metaRef,remoteDB,"preparacion_v106_restaura_consumo_prematuro_v51"
+      );
+      return {remoteDB,restoredQty,restoredAssignments,changed:true};
+    });
+
+    if(result.changed){
+      const rawText=JSON.stringify(result.remoteDB);
+      try{setAny(LDH_PREP_STOCK_KEY_V28,rawText);}catch(_){
+        try{sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28,rawText);}catch(__){}
+      }
+      window.__LDH_STOCK_MEMORY_DB=result.remoteDB;
+      window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;
+      window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB);
+      console.info("[Preparación V106] Consumo prematuro V51 restaurado",reference,result.restoredQty);
+    }
+    return result;
+  }finally{
+    LDH_PREP_RESTORE_PREMATURE_LOCK_V106.delete(reference);
+  }
+}
+window.LDH_prepRestorePrematureConsumptionV106=LDH_prepRestorePrematureConsumptionV106;
+
+async function LDH_prepRestoreCurrentLiveV106(){
+  const reference=String(window.refActual ?? (typeof refActual!=="undefined"?refActual:"") ?? "").trim();
+  if(!reference) return;
+  let live=false;
+  try{live=!!getAny(KP(reference));}catch(_){ }
+  if(!live) return;
+  if(!LDH_PREP_STOCK_AUTH_V28.currentUser) return;
+  try{
+    const result=await LDH_prepRestorePrematureConsumptionV106(reference);
+    if(result && result.changed){
+      try{if(typeof window.LDH_prepApplyFirebaseStockV28==="function") await window.LDH_prepApplyFirebaseStockV28(true);}catch(_){ }
+      try{if(typeof window.renderTabla==="function") window.renderTabla();}catch(_){ }
+    }
+  }catch(error){
+    console.warn("[Preparación V106] No se pudo restaurar consumo prematuro",reference,error);
+  }
+}
+window.LDH_prepRestoreCurrentLiveV106=LDH_prepRestoreCurrentLiveV106;
+
+/*
+ * V106 · Última capa efectiva del botón. Entrar en Fabricación NO consume Stock.
+ * La OT puede permanecer simultáneamente en Fabricación y Preparación mientras
+ * falte material. El consumo físico se reserva para el cierre definitivo de Preparación.
  */
 const LDH_confirmarFabricacionAnteriorV32 = window.confirmarTodoRecepcion;
 window.confirmarTodoRecepcion = async function () {
@@ -18108,14 +18297,14 @@ window.confirmarTodoRecepcion = async function () {
     ? window.LDH_getTrabajoStage(window.refActual ?? refActual)
     : "preparacion";
   if (stage && stage !== "preparacion") {
-    alert("Este trabajo ya no está en Preparación.\n\nNo se vuelve a mandar para evitar duplicados.");
+    alert("Este trabajo ya no está solo en Preparación.\n\nNo se vuelve a mandar para evitar duplicados.");
     return;
   }
 
-  const ironLines = Array.isArray(window.estadoMateriales ?? estadoMateriales)
+  const allLines = Array.isArray(window.estadoMateriales ?? estadoMateriales)
     ? (window.estadoMateriales ?? estadoMateriales)
     : [];
-  if (ironLines.some((line) => String(line?.unit ?? "").toLowerCase() === "barra")
+  if (allLines.some((line) => String(line?.unit ?? "").toLowerCase() === "barra")
       && !(window.metaActual ?? metaActual)?.tipo_hierro) {
     (window.metaActual ?? metaActual).tipo_hierro = "Negro";
     try { setAny(KM(window.refActual ?? refActual), JSON.stringify(window.metaActual ?? metaActual)); } catch (_) {}
@@ -18131,30 +18320,42 @@ window.confirmarTodoRecepcion = async function () {
   }
   if (!confirm(
     `Mandar a FABRICACIÓN:\nUnidades: ${units}\n\n` +
-    "El material reservado/asignado se descontará ahora del stock físico."
+    "El trabajo puede seguir en Preparación mientras falte material.\n" +
+    "El Stock físico NO se descontará hasta que el pedido salga definitivamente de Preparación."
   )) return;
 
   const button = document.getElementById("btnFaseTrabajo");
   const oldText = button?.textContent || "";
   if (button) {
     button.disabled = true;
-    button.textContent = "Actualizando Stock…";
+    button.textContent = "Enviando a Fabricación…";
   }
   try {
     const reference = String(window.refActual ?? refActual ?? "");
-    const consumed = await LDH_prepConsumeCommonAtFabricationV32(reference);
-    mandarAFabricacion(units, false);
-    alert(
-      "✅ Enviado a Fabricación." +
-      (consumed.consumedQty > 0
-        ? `\n\nStock consumido físicamente: ${consumed.consumedQty}`
-        : "")
+    const allComplete = allLines.length > 0 && allLines.every(line =>
+      Math.max(0,Number(line?.qty_recibida ?? line?.recibida ?? 0)||0) + 1e-9 >=
+      Math.max(0,Number(line?.qty_pedida ?? line?.pedida ?? line?.qty ?? 0)||0)
     );
+
+    // V106: entrar en Fabricación NO consume Stock.
+    mandarAFabricacion(units, false);
+
+    if(allComplete){
+      // Si ya estaba todo recibido, ahora sí va a abandonar Preparación;
+      // el auto-cierre hará el consumo atómico justo antes de eliminar la ficha.
+      if(typeof window.autoCerrarSiCompletoPorRecepcion === "function")
+        await window.autoCerrarSiCompletoPorRecepcion();
+    }else{
+      alert(
+        "✅ Enviado a Fabricación.\n\n" +
+        "El pedido seguirá en Preparación hasta recibir todo el material.\n" +
+        "El Stock físico todavía NO se ha descontado."
+      );
+    }
   } catch (error) {
-    console.error("No se pudo consolidar el stock al mandar a Fabricación", error);
+    console.error("No se pudo mandar a Fabricación", error);
     alert(
-      "No se ha enviado el trabajo a Fabricación.\n\n" +
-      "No se ha descontado material físico porque no se pudo confirmar la actualización en la nube.\n\n" +
+      "No se ha podido completar el envío a Fabricación.\n\n" +
       String(error?.code || error?.message || error || "Error de sincronización")
     );
   } finally {
@@ -18969,10 +19170,9 @@ if (
 }
 
 /*
- * V51 · Regularización segura de trabajos que ya estaban en Fabricación antes
- * de instalar esta corrección. Solo actúa sobre la referencia abierta, exige
- * una fase posterior a Preparación y reutiliza los ids deterministas de los
- * movimientos. Por tanto, volver a abrir o recargar no duplica la salida.
+ * V51 legacy conservada solo para trabajos que YA NO tienen ficha viva en
+ * Preparación. V106 bloquea esta regularización mientras prep_recepcion_REF
+ * exista, aunque la OT esté también en Fabricación/Pintura/Almacén.
  */
 const LDH_PREP_RECONCILING_FAB_V51 = new Set();
 const LDH_PREP_RECONCILED_FAB_V51 = new Set();
@@ -18983,6 +19183,12 @@ async function LDH_prepReconcileCurrentFabricationV51() {
       || LDH_PREP_RECONCILED_FAB_V51.has(reference)) {
     return;
   }
+
+  // V106: mientras exista la ficha prep_recepcion_REF, estar en Fabricación
+  // NO autoriza consumo físico. El consumo se hace al desaparecer de Preparación.
+  try{
+    if(getAny(KP(reference))) return;
+  }catch(_){ }
 
   const stage = typeof window.LDH_getTrabajoStage === "function"
     ? LDH_prepNormCloudV30(window.LDH_getTrabajoStage(reference))
@@ -19005,7 +19211,7 @@ async function LDH_prepReconcileCurrentFabricationV51() {
       try { await LDH_prepApplyFirebaseStockV28(true); } catch (_) {}
       alert(
         `✅ Stock de ${reference} regularizado.\n\n` +
-        `Descontado físicamente al estar en Fabricación: ${result.consumedQty}`
+        `Descontado físicamente al estar ya fuera de Preparación: ${result.consumedQty}`
       );
     }
   } catch (error) {
@@ -19027,6 +19233,17 @@ window.addEventListener("ldh:stock-cloud-updated", () => {
 window.addEventListener("DOMContentLoaded", () => {
   setTimeout(LDH_prepReconcileCurrentFabricationV51, 1400);
   setTimeout(LDH_prepReconcileCurrentFabricationV51, 3200);
+});
+
+// V106 · Al abrir una OT todavía viva en Preparación, restaura únicamente
+// consumos prematuros de la antigua V51 y deja la asignación activa.
+window.addEventListener("ldh:stock-cloud-updated", () => {
+  setTimeout(() => { try{ window.LDH_prepRestoreCurrentLiveV106?.(); }catch(_){ } }, 260);
+});
+window.addEventListener("DOMContentLoaded", () => {
+  [1700,3600,6500].forEach(delay => setTimeout(() => {
+    try{ window.LDH_prepRestoreCurrentLiveV106?.(); }catch(_){ }
+  }, delay));
 });
 
 /*
@@ -26610,5 +26827,195 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
 })();
 </script>
 <!-- /LDH_PREP_V104_LIBRE_NO_NEGATIVO_PLETINA_LEGACY_DISPLAY_20260819 -->
+
+
+
+<!-- LDH_PREP_V105_REPARA_RECEPCION_FISICA_LEGACY_EN_PREPARACION_20260819 -->
+<script id="LDH_PREP_V105_REPARA_RECEPCION_FISICA_LEGACY_EN_PREPARACION_20260819">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V105_LEGACY_PHYSICAL_RECEIPT_REPAIR__) return;
+  window.__LDH_PREP_V105_LEGACY_PHYSICAL_RECEIPT_REPAIR__ = true;
+
+  const BUILD='PREPARACION-V105-RECEPCION-FISICA-LEGACY-PREPARACION-20260819';
+  const running=new Set();
+  let batchRunning=false;
+
+  const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const norm=v=>String(v??'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/ø/g,'o').replace(/[x×*]/g,'x')
+    .replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+
+  function refNow(){
+    try{return String(window.refActual ?? (typeof refActual!=='undefined'?refActual:'') ?? '').trim();}
+    catch(_){return '';}
+  }
+  function linesNow(){
+    try{
+      if(Array.isArray(window.estadoMateriales)) return window.estadoMateriales;
+      if(typeof estadoMateriales!=='undefined' && Array.isArray(estadoMateriales)) return estadoMateriales;
+    }catch(_){ }
+    return [];
+  }
+  function metaNow(){
+    try{return window.metaActual ?? (typeof metaActual!=='undefined'?metaActual:null) ?? {};}
+    catch(_){return {};}
+  }
+  function stageNow(ref){
+    try{
+      if(typeof window.LDH_getTrabajoStage==='function'){
+        const s=norm(window.LDH_getTrabajoStage(ref));
+        if(s) return s;
+      }
+    }catch(_){ }
+    const m=metaNow();
+    if(m?.entregado||m?.en_entregado) return 'entregado';
+    if(m?.en_almacen||m?.almacen_ts) return 'almacen';
+    if(m?.en_pintura||m?.pintura_ts) return 'pintura';
+    if(m?.en_fabricacion||m?.fabricacion_ts) return 'fabricacion';
+    return 'preparacion';
+  }
+  function lineName(line){
+    return String(line?.linked_matName ?? line?.stockLinkLabel ?? line?.mat ?? line?.material ?? line?.name ?? '').trim();
+  }
+  function isBar(line){
+    return norm(line?.unit ?? line?.unidad ?? '')==='barra';
+  }
+  function isPletinaMm(line){
+    const name=norm(lineName(line));
+    const unit=norm(line?.unit ?? line?.unidad ?? '');
+    const mode=norm(line?.unitBasis ?? line?.lengthMode ?? line?.measureMode ?? '');
+    return line?.pletinaMm===true || line?.pletina_mm===true || line?.gestion_mm===true || mode==='mm' || (unit==='mm' && (name.includes('pletina')||name.includes('planchuela')||name.includes('llanta')));
+  }
+  function isChapaEscalon(line){
+    const name=norm(lineName(line));
+    return name==='chapa escalon' || name.startsWith('chapa escalon ');
+  }
+  function hasExistingStockSource(line){
+    const traces=Array.isArray(line?.trace)?line.trace:[];
+    return traces.some(t=>{
+      const s=norm(t?.source ?? '');
+      return s.startsWith('reserva ') || s==='reserva' ||
+        s.startsWith('libre ') || s==='libre' || s.startsWith('libre exacto stock') ||
+        s.startsWith('stock comun') || s.startsWith('otra empresa') ||
+        s.startsWith('asignado otra empresa') || s.startsWith('stock recibido ok') ||
+        s.startsWith('stock asignado propio sync') || s.startsWith('stock asignado propio confirmado') ||
+        s.startsWith('devolucion prestamo recibida');
+    });
+  }
+  function eligible(line){
+    if(!line || typeof line!=='object') return false;
+    if(!isBar(line) || isPletinaMm(line) || isChapaEscalon(line)) return false;
+    const requested=Math.max(0,n(line.qty_pedida ?? line.pedida ?? line.qty));
+    const received=Math.max(0,n(line.qty_recibida ?? line.recibida ?? line.received));
+    const applied=Math.max(0,n(line.aplicado_qty ?? line.aplicado));
+    if(requested<=0 || received+1e-9<requested) return false;
+    if(applied+1e-9>=received) return false;
+    // Si la propia traza demuestra que el material vino de stock ya existente,
+    // no se crea una entrada fisica nueva aunque el historico local este incompleto.
+    if(hasExistingStockSource(line)) return false;
+    return true;
+  }
+
+  async function repairOne(ref,index,line){
+    const key=ref+'|'+index+'|'+norm(lineName(line));
+    if(running.has(key)) return false;
+    running.add(key);
+    try{
+      if(typeof window.LDH_prepReceivePhysicalCloudV66!=='function') return false;
+      const result=await window.LDH_prepReceivePhysicalCloudV66(line,index);
+      const current=(typeof window.LDH_prepFindCurrentLineV66==='function')
+        ? window.LDH_prepFindCurrentLineV66(index,result?.materialId,result?.materialName)
+        : linesNow()[index];
+      if(!current) return false;
+
+      const requested=Math.max(0,n(current.qty_pedida ?? current.pedida ?? current.qty));
+      const received=Math.max(0,n(current.qty_recibida ?? current.recibida ?? current.received));
+      const target=Math.min(requested||received,received);
+      current.aplicado_qty=Math.max(n(current.aplicado_qty),target);
+      current.aplicado=Math.max(n(current.aplicado),target);
+      if(result?.materialId){
+        current.linked_matId=result.materialId;
+        current.stockMatId=result.materialId;
+        current.matId=result.materialId;
+      }
+      if(result?.materialName){
+        current.linked_matName=result.materialName;
+        current.stockLinkLabel=result.materialName;
+      }
+      if(!Array.isArray(current.trace)) current.trace=[];
+      const op=String(result?.operationId||'');
+      if(!current.trace.some(t=>String(t?.source||'')==='legacy_recepcion_fisica_repair_v105' && (!op || String(t?.operationId||'')===op))){
+        current.trace.push({
+          at:new Date().toISOString(),
+          qty:target,
+          qtyAddedToPhysical:n(result?.qtyAdded),
+          operationId:op,
+          source:'legacy_recepcion_fisica_repair_v105'
+        });
+      }
+      console.info('[Preparacion V105] Recepcion fisica legacy regularizada',ref,lineName(current),'anadido',n(result?.qtyAdded));
+      return true;
+    }catch(error){
+      const msg=String(error?.message||error||'');
+      if(!/autentic|todavia no|cargad|conect/i.test(msg)) console.warn('[Preparacion V105] No se pudo regularizar recepcion fisica legacy',ref,index,error);
+      return false;
+    }finally{
+      running.delete(key);
+    }
+  }
+
+  function hasLivePreparation(ref){
+    try{
+      if(typeof getAny==='function' && typeof KP==='function' && getAny(KP(ref))) return true;
+    }catch(_){ }
+    return ref===refNow() && linesNow().length>0;
+  }
+
+  async function repairCurrent(){
+    if(batchRunning) return;
+    const ref=refNow();
+    if(!ref) return;
+    // V106: una OT puede estar simultáneamente en Fabricación y seguir en Preparación.
+    // Si la ficha de Preparación sigue viva, una recepción física pendiente debe repararse.
+    if(!hasLivePreparation(ref)) return;
+    const lines=linesNow();
+    const pending=[];
+    lines.forEach((line,index)=>{if(eligible(line)) pending.push({line,index});});
+    if(!pending.length) return;
+
+    batchRunning=true;
+    let changed=false;
+    try{
+      for(const item of pending){
+        if(await repairOne(ref,item.index,item.line)) changed=true;
+      }
+      if(changed){
+        try{if(typeof window.guardarEstadoLocal==='function') window.guardarEstadoLocal(); else if(typeof guardarEstadoLocal==='function') guardarEstadoLocal();}catch(_){ }
+        try{if(typeof window.__ldhPrepSyncNow==='function') await window.__ldhPrepSyncNow('legacy_recepcion_fisica_v105:'+ref);}catch(_){ }
+        try{if(typeof window.LDH_prepApplyFirebaseStockV28==='function') await window.LDH_prepApplyFirebaseStockV28(true);}catch(_){ }
+        try{if(typeof window.renderTabla==='function') window.renderTabla();}catch(_){ }
+        try{if(typeof window.cargarLista==='function') window.cargarLista();}catch(_){ }
+      }
+    }finally{
+      batchRunning=false;
+    }
+  }
+
+  function schedule(){[400,1200,2800,5200,8500].forEach(d=>setTimeout(repairCurrent,d));}
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',schedule,{once:true}); else schedule();
+  try{window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(repairCurrent,300));}catch(_){ }
+  window.LDH_PREP_V105_LEGACY_PHYSICAL_RECEIPT_REPAIR=BUILD;
+  console.info('[Preparacion V105] Reparacion segura de recepciones fisicas legacy en Preparacion activa');
+})();
+</script>
+<!-- /LDH_PREP_V105_REPARA_RECEPCION_FISICA_LEGACY_EN_PREPARACION_20260819 -->
+
+<!-- LDH_PREP_V106_CONSUMO_SOLO_AL_SALIR_PREPARACION_20260819 -->
+<script>
+window.LDH_PREP_V106_CONSUMO_SOLO_AL_SALIR_PREPARACION='PREPARACION-V106-CONSUMO-AL-SALIR-PREPARACION-20260819';
+console.info('[Preparación V106] Stock físico se consume únicamente al cerrar/salir de Preparación');
+</script>
 
 </body></html>
