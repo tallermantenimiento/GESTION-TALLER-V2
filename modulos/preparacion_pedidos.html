@@ -495,6 +495,7 @@
 </style>
 
 <meta name="ldh-fix" content="PREPARACION-V84-PLETINA-MM-GLOBAL-20260813">
+<meta name="ldh-fix-paint-company" content="PREPARACION-V98-PINTURA-CANONICA-EMPRESA-20260819">
 <!-- LDH_PREP_IMPORTACION_COMPUESTA_SYNC_V55_20260805 -->
 
 <!-- LDH_PREP_V58_STORAGE_SESSION_OVERRIDE_20260805 -->
@@ -19545,6 +19546,412 @@ function LDH_prepResolveMaterialV66(remoteDB, line) {
   return material || null;
 }
 
+/* V98 · PINTURA: nunca crear una segunda fila de Stock por un ID historico.
+ * La pintura debe existir ya dentro de la empresa receptora. Si el ID recibido
+ * desde Calculo es antiguo, se reconcilia contra la ficha real de esa empresa
+ * por nombre/RAL. Solo se acepta una coincidencia inequívoca. */
+function LDH_prepMaterialIdV98(material) {
+  return String(material?.id ?? material?.materialId ?? material?.matId ?? "").trim();
+}
+function LDH_prepPaintNormV98(value) {
+  return String(value ?? "").trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+}
+function LDH_prepPaintIdentityV98(value) {
+  return LDH_prepPaintNormV98(value)
+    .replace(/\b(?:pintura|paint|color|base|solvente|bote|botes|cabina)\b/g, " ")
+    .replace(/\s+/g, " ").trim();
+}
+function LDH_prepPaintRalV98(value) {
+  const text = LDH_prepPaintNormV98(value);
+  const match = text.match(/\bral\s*(\d{3,4})\b/) || text.match(/\b(\d{4})\b/);
+  return match ? String(match[1] || "") : "";
+}
+function LDH_prepIsPaintMaterialV98(material) {
+  const classText = LDH_prepPaintNormV98([
+    material?.type, material?.tipo, material?.cat, material?.category,
+    material?.family, material?.familia, material?.grp, material?.group
+  ].filter(Boolean).join(" "));
+  const name = LDH_prepPaintNormV98(
+    material?.name ?? material?.nombre ?? material?.material ?? material?.mat ?? ""
+  );
+  if (/\b(?:disolvente|diluyente|thinner)\b/.test(name)) return false;
+  return classText.includes("pintur") || name.includes("pintur") || /\bral\s*\d{3,4}\b/.test(name);
+}
+function LDH_prepIsPaintReceiptV98(line, material) {
+  const text = LDH_prepPaintNormV98([
+    line?.mat, line?.material, line?.name, line?.linked_matName,
+    line?.stockLinkLabel, line?.paintQuery, line?.color, line?.ral
+  ].filter(Boolean).join(" "));
+  if (/\b(?:disolvente|diluyente|thinner)\b/.test(text)) return false;
+  const classText = LDH_prepPaintNormV98([
+    line?.cat, line?.category, line?.type, line?.tipo, line?.grp, line?.group
+  ].filter(Boolean).join(" "));
+  return classText.includes("pintur") || text.includes("pintur")
+    || /\bral\s*\d{3,4}\b/.test(text) || LDH_prepIsPaintMaterialV98(material);
+}
+function LDH_prepIsPrepCreatedStockRowV98(row) {
+  const id = String(row?.id ?? "");
+  const src = LDH_prepPaintNormV98(
+    row?.createdFrom ?? row?.source ?? row?.reason ?? ""
+  );
+  return id.startsWith("lot_prep_v66_") || src.includes("preparacion pedidos v66");
+}
+function LDH_prepResolveCompanyMaterialV98(remoteDB, line, companyId, sharedStockReceipt) {
+  const generic = LDH_prepResolveMaterialV66(remoteDB, line);
+  const isPaint = !sharedStockReceipt && LDH_prepIsPaintReceiptV98(line, generic);
+  const companyRows = (remoteDB.stock || []).filter((row) =>
+    LDH_prepRowCompanyIdV66(row) === String(companyId)
+  );
+  const rowByMaterialId = new Map();
+  companyRows.forEach((row) => {
+    const id = LDH_prepRowMaterialIdV66(row);
+    if (id && !rowByMaterialId.has(id)) rowByMaterialId.set(id, row);
+  });
+
+  if (!isPaint) {
+    const materialId = LDH_prepMaterialIdV98(generic);
+    return {
+      material: generic || null,
+      stockRow: materialId ? (rowByMaterialId.get(materialId) || null) : null,
+      isPaint: false,
+      reconciled: false
+    };
+  }
+
+  const materialById = new Map();
+  (remoteDB.materials || []).forEach((material) => {
+    const id = LDH_prepMaterialIdV98(material);
+    if (id) materialById.set(id, material);
+  });
+  const candidates = companyRows.map((row) => {
+    const id = LDH_prepRowMaterialIdV66(row);
+    const material = materialById.get(id) || null;
+    const name = String(
+      material?.name ?? material?.nombre ?? material?.material
+      ?? row?.name ?? row?.material ?? ""
+    ).trim();
+    return {
+      row, id, material, name,
+      norm: LDH_prepPaintNormV98(name),
+      identity: LDH_prepPaintIdentityV98(name),
+      ral: LDH_prepPaintRalV98(name),
+      prepCreated: LDH_prepIsPrepCreatedStockRowV98(row)
+    };
+  }).filter((item) => item.id && item.material && LDH_prepIsPaintMaterialV98(item.material));
+
+  const explicitIds = new Set([
+    line?.linked_matId, line?.linkedMatId, line?.stockMatId, line?.stock_matId,
+    line?.stockLinkId, line?.stockId, line?.matId, line?.v2MaterialId,
+    line?.stockMaterialId
+  ].filter(Boolean).map(String));
+  try {
+    const linked = window.getLinkedMatIdForLine?.(line);
+    if (linked) explicitIds.add(String(linked));
+  } catch (_) {}
+
+  const exact = candidates.filter((item) => explicitIds.has(item.id));
+  const exactCanonical = exact.filter((item) => !item.prepCreated);
+  if (exactCanonical.length === 1) {
+    return { material: exactCanonical[0].material, stockRow: exactCanonical[0].row, isPaint: true, reconciled: false };
+  }
+
+  const targetTexts = [
+    line?.stockLinkLabel, line?.linked_matName, line?.paintMaterialName,
+    line?.paintQuery, line?.color, line?.ral,
+    generic?.name, generic?.nombre, generic?.material,
+    line?.mat, line?.material, line?.name
+  ].filter(Boolean).map(String);
+  const targetNorms = new Set(targetTexts.map(LDH_prepPaintNormV98).filter(Boolean));
+  const targetIdentities = new Set(targetTexts.map(LDH_prepPaintIdentityV98).filter(Boolean));
+  const targetRals = new Set(targetTexts.map(LDH_prepPaintRalV98).filter(Boolean));
+
+  const chooseUniqueCanonical = (list) => {
+    const canonical = list.filter((item) => !item.prepCreated);
+    if (canonical.length === 1) return canonical[0];
+    if (canonical.length > 1) return null;
+    return list.length === 1 ? list[0] : null;
+  };
+
+  let matches = candidates.filter((item) =>
+    (item.norm && targetNorms.has(item.norm))
+    || (item.identity && targetIdentities.has(item.identity))
+  );
+  let chosen = chooseUniqueCanonical(matches);
+
+  if (!chosen && targetRals.size) {
+    matches = candidates.filter((item) => item.ral && targetRals.has(item.ral));
+    chosen = chooseUniqueCanonical(matches);
+  }
+
+  if (!chosen && exact.length === 1 && candidates.length === 1) chosen = exact[0];
+  if (!chosen) {
+    const label = targetTexts.find(Boolean) || LDH_prepLineNameV66(line) || "pintura";
+    throw new Error(
+      `La pintura "${label}" no tiene una unica ficha valida en el Stock de la empresa. ` +
+      "No se ha creado ninguna ficha nueva. Revisa el vinculo desde Calculo/PC."
+    );
+  }
+
+  return {
+    material: chosen.material,
+    stockRow: chosen.row,
+    isPaint: true,
+    reconciled: !explicitIds.has(chosen.id)
+      || exact.some((item) => item.prepCreated && item.id !== chosen.id)
+  };
+}
+
+/* V98 · Fusion estricta del duplicado que una recepción V66 pudo crear antes
+ * de este arreglo. Solo actúa si la fila duplicada lleva la marca lot_prep_v66_
+ * / createdFrom=preparacion_pedidos_v66 y existe UNA ficha canónica equivalente
+ * de pintura en la misma empresa. Si detecta cualquier colisión operativa, no toca nada. */
+async function LDH_prepMergePaintDuplicateCloudV98(line, forcedMaterialId) {
+  if (!line) return { merged:false, reason:"sin_linea" };
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    try { await signInAnonymously(LDH_PREP_STOCK_AUTH_V28); } catch (_) {}
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) return { merged:false, reason:"sin_auth" };
+
+  const orderCompanyName = String(
+    (window.metaActual ?? metaActual)?.empresa
+    ?? (window.metaActual ?? metaActual)?.company
+    ?? ""
+  ).trim();
+  if (!orderCompanyName || LDH_prepLineUsesSharedStockV96(line)) {
+    return { merged:false, reason:"no_aplica" };
+  }
+
+  const requestedIds = new Set([
+    forcedMaterialId,
+    line?.linked_matId, line?.linkedMatId, line?.stockMatId, line?.stock_matId,
+    line?.stockLinkId, line?.stockId, line?.matId, line?.v2MaterialId,
+    line?.stockMaterialId
+  ].filter(Boolean).map(String));
+  if (!requestedIds.size) return { merged:false, reason:"sin_id" };
+
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction, metaRef);
+    remoteDB.companies = Array.isArray(remoteDB.companies) ? remoteDB.companies : [];
+    remoteDB.materials = Array.isArray(remoteDB.materials) ? remoteDB.materials : [];
+    remoteDB.stock = Array.isArray(remoteDB.stock) ? remoteDB.stock : [];
+    remoteDB.movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
+    remoteDB.reservations = Array.isArray(remoteDB.reservations) ? remoteDB.reservations : [];
+    remoteDB.assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
+    remoteDB.reservationDebts = Array.isArray(remoteDB.reservationDebts) ? remoteDB.reservationDebts : [];
+
+    const company = remoteDB.companies.find((row) =>
+      LDH_prepCompanyMatchesV45(row, orderCompanyName)
+    );
+    if (!company) return { merged:false, reason:"empresa_no_encontrada", remoteDB };
+    const companyId = String(company.id ?? company.companyId ?? company.empresaId ?? orderCompanyName);
+    const materialsById = new Map();
+    remoteDB.materials.forEach((material) => {
+      const id = LDH_prepMaterialIdV98(material);
+      if (id) materialsById.set(id, material);
+    });
+    const companyRows = remoteDB.stock.filter((row) =>
+      LDH_prepRowCompanyIdV66(row) === companyId
+    );
+
+    const duplicateRows = companyRows.filter((row) =>
+      requestedIds.has(LDH_prepRowMaterialIdV66(row))
+      && LDH_prepIsPrepCreatedStockRowV98(row)
+    );
+    if (duplicateRows.length !== 1) {
+      return { merged:false, reason:duplicateRows.length ? "duplicado_ambiguo" : "sin_duplicado_v66", remoteDB };
+    }
+
+    const duplicateRow = duplicateRows[0];
+    const duplicateId = LDH_prepRowMaterialIdV66(duplicateRow);
+    const duplicateMaterial = materialsById.get(duplicateId) || null;
+    if (!duplicateMaterial || !LDH_prepIsPaintMaterialV98(duplicateMaterial)) {
+      return { merged:false, reason:"duplicado_no_pintura", remoteDB };
+    }
+    const duplicateName = String(
+      duplicateMaterial.name ?? duplicateMaterial.nombre ?? duplicateMaterial.material ?? ""
+    ).trim();
+    const duplicateNorm = LDH_prepPaintNormV98(duplicateName);
+    const duplicateIdentity = LDH_prepPaintIdentityV98(duplicateName);
+    const duplicateRal = LDH_prepPaintRalV98(duplicateName);
+
+    const canonicalCandidates = companyRows.map((row) => {
+      const id = LDH_prepRowMaterialIdV66(row);
+      if (!id || id === duplicateId || LDH_prepIsPrepCreatedStockRowV98(row)) return null;
+      const material = materialsById.get(id) || null;
+      if (!material || !LDH_prepIsPaintMaterialV98(material)) return null;
+      const name = String(material.name ?? material.nombre ?? material.material ?? "").trim();
+      return {
+        row, id, material, name,
+        norm: LDH_prepPaintNormV98(name),
+        identity: LDH_prepPaintIdentityV98(name),
+        ral: LDH_prepPaintRalV98(name)
+      };
+    }).filter(Boolean);
+
+    let matches = canonicalCandidates.filter((item) =>
+      (duplicateNorm && item.norm === duplicateNorm)
+      || (duplicateIdentity && item.identity === duplicateIdentity)
+    );
+    if (matches.length !== 1 && duplicateRal) {
+      matches = canonicalCandidates.filter((item) => item.ral === duplicateRal);
+    }
+    if (matches.length !== 1) {
+      return { merged:false, reason:"canonica_no_unica", remoteDB };
+    }
+    const canonical = matches[0];
+    const canonicalId = canonical.id;
+    const canonicalName = canonical.name;
+
+    const rowRef = (row) => LDH_prepNormCloudV30(
+      row?.ref ?? row?.jobRef ?? row?.workRef ?? row?.referencia ?? ""
+    );
+    const rowLine = (row) => String(row?.lineIndex ?? row?.linea ?? row?.index ?? "");
+    const active = (row) => {
+      try { return LDH_prepActiveOperationalV45(row); } catch (_) { return false; }
+    };
+
+    const dupAssignments = remoteDB.assignments.filter((row) =>
+      active(row)
+      && LDH_prepRowCompanyIdV66(row) === companyId
+      && LDH_prepRowMaterialIdV66(row) === duplicateId
+    );
+    const duplicateReservationRows = remoteDB.reservations.filter((row) =>
+      active(row)
+      && LDH_prepRowCompanyIdV66(row) === companyId
+      && LDH_prepRowMaterialIdV66(row) === duplicateId
+    );
+    const assignmentCollision = dupAssignments.some((row) =>
+      remoteDB.assignments.some((other) => other !== row && active(other)
+        && LDH_prepRowCompanyIdV66(other) === companyId
+        && LDH_prepRowMaterialIdV66(other) === canonicalId
+        && rowRef(other) === rowRef(row))
+    );
+    const reservationCollision = duplicateReservationRows.some((row) =>
+      remoteDB.reservations.some((other) => other !== row && active(other)
+        && LDH_prepRowCompanyIdV66(other) === companyId
+        && LDH_prepRowMaterialIdV66(other) === canonicalId
+        && rowRef(other) === rowRef(row))
+    );
+    const duplicateReceiptMoves = remoteDB.movements.filter((row) => {
+      const source = LDH_prepNormCloudV30(`${row?.source ?? ""} ${row?.reason ?? ""}`);
+      return LDH_prepRowCompanyIdV66(row) === companyId
+        && LDH_prepRowMaterialIdV66(row) === duplicateId
+        && source.includes("preparacion pedidos recepcion fisica");
+    });
+    const movementCollision = duplicateReceiptMoves.some((row) =>
+      remoteDB.movements.some((other) => {
+        if (other === row) return false;
+        const source = LDH_prepNormCloudV30(`${other?.source ?? ""} ${other?.reason ?? ""}`);
+        return LDH_prepRowCompanyIdV66(other) === companyId
+          && LDH_prepRowMaterialIdV66(other) === canonicalId
+          && source.includes("preparacion pedidos recepcion fisica")
+          && rowRef(other) === rowRef(row)
+          && rowLine(other) === rowLine(row);
+      })
+    );
+    if (assignmentCollision || reservationCollision || movementCollision) {
+      return { merged:false, reason:"colision_operativa", remoteDB };
+    }
+
+    const replaceMaterialId = (row, fields) => {
+      fields.forEach((field) => {
+        if (String(row?.[field] ?? "") === duplicateId) row[field] = canonicalId;
+      });
+    };
+    const replaceMaterialName = (row) => {
+      ["material","mat","materialName","name","nombreMaterial"].forEach((field) => {
+        if (row && row[field] !== undefined && row[field] !== null) row[field] = canonicalName;
+      });
+    };
+
+    remoteDB.movements.forEach((row) => {
+      if (LDH_prepRowCompanyIdV66(row) !== companyId) return;
+      if (LDH_prepRowMaterialIdV66(row) !== duplicateId) return;
+      replaceMaterialId(row,["materialId","matId","material_id","stockMatId"]);
+      replaceMaterialName(row);
+    });
+    remoteDB.reservations.forEach((row) => {
+      if (LDH_prepRowCompanyIdV66(row) !== companyId) return;
+      if (LDH_prepRowMaterialIdV66(row) !== duplicateId) return;
+      replaceMaterialId(row,["materialId","matId","material_id","stockMatId"]);
+      replaceMaterialName(row);
+    });
+    remoteDB.assignments.forEach((row) => {
+      if (LDH_prepRowCompanyIdV66(row) === companyId && LDH_prepRowMaterialIdV66(row) === duplicateId) {
+        replaceMaterialId(row,["materialId","matId","material_id","stockMatId"]);
+        replaceMaterialName(row);
+      }
+      const toCompanyId = String(row?.toCompanyId ?? row?.destCompanyId ?? "");
+      if (toCompanyId === companyId && String(row?.toMaterialId ?? "") === duplicateId) {
+        row.toMaterialId = canonicalId;
+        if (row.toMaterialName !== undefined) row.toMaterialName = canonicalName;
+      }
+    });
+    remoteDB.reservationDebts.forEach((row) => {
+      if (LDH_prepRowCompanyIdV66(row) !== companyId) return;
+      if (LDH_prepRowMaterialIdV66(row) !== duplicateId) return;
+      replaceMaterialId(row,["materialId","matId","material_id","stockMatId"]);
+      replaceMaterialName(row);
+    });
+
+    remoteDB.stock = remoteDB.stock.filter((row) => row !== duplicateRow);
+    const canonicalStockRow = remoteDB.stock.find((row) =>
+      LDH_prepRowCompanyIdV66(row) === companyId
+      && LDH_prepRowMaterialIdV66(row) === canonicalId
+    );
+    if (!canonicalStockRow) {
+      return { merged:false, reason:"canonica_sin_stock", remoteDB };
+    }
+    const physical = LDH_prepPhysicalRemoteV45(remoteDB, companyId, canonicalId);
+    canonicalStockRow.qty = physical;
+    canonicalStockRow.cantidad = physical;
+    canonicalStockRow.stock = physical;
+    canonicalStockRow.real = physical;
+    canonicalStockRow.fisico = physical;
+    canonicalStockRow.physicalQty = physical;
+    canonicalStockRow.updatedAt = new Date().toISOString();
+
+    const duplicateStillUsed =
+      remoteDB.stock.some((row) => LDH_prepRowMaterialIdV66(row) === duplicateId)
+      || remoteDB.movements.some((row) => LDH_prepRowMaterialIdV66(row) === duplicateId)
+      || remoteDB.reservations.some((row) => LDH_prepRowMaterialIdV66(row) === duplicateId)
+      || remoteDB.assignments.some((row) =>
+        LDH_prepRowMaterialIdV66(row) === duplicateId || String(row?.toMaterialId ?? "") === duplicateId
+      )
+      || remoteDB.reservationDebts.some((row) => LDH_prepRowMaterialIdV66(row) === duplicateId);
+    if (!duplicateStillUsed) {
+      remoteDB.materials = remoteDB.materials.filter((material) =>
+        LDH_prepMaterialIdV98(material) !== duplicateId
+      );
+    }
+
+    LDH_prepWriteRemoteStockTransactionV45(
+      transaction, metaRef, remoteDB, "preparacion_merge_pintura_duplicada_v98"
+    );
+    return {
+      merged:true, remoteDB, companyId,
+      duplicateId, canonicalId, canonicalName, physical
+    };
+  });
+
+  if (result?.merged && result.remoteDB) {
+    window.__LDH_PREP_STOCK_CLOUD_DB = result.remoteDB;
+    window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(result.remoteDB);
+    window.__LDH_STOCK_MEMORY_DB = result.remoteDB;
+    try { setAny(LDH_PREP_STOCK_KEY_V28, JSON.stringify(result.remoteDB)); } catch (_) {}
+    try {
+      window.dispatchEvent(new CustomEvent("ldh:stock-cloud-updated", {
+        detail: { source:"merge_pintura_duplicada_v98", materialId:result.canonicalId }
+      }));
+    } catch (_) {}
+  }
+  return result || { merged:false, reason:"sin_resultado" };
+}
+window.LDH_prepMergePaintDuplicateCloudV98 = LDH_prepMergePaintDuplicateCloudV98;
+
 function LDH_prepFindCurrentLineV66(index, materialId, materialName) {
   const lines = window.estadoMateriales ?? estadoMateriales;
   const direct = lines?.[index];
@@ -19654,7 +20061,10 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         consumerCompany?.id ?? consumerCompany?.companyId ?? consumerCompany?.empresaId ?? ""
       );
 
-      const material = LDH_prepResolveMaterialV66(remoteDB, line);
+      const resolvedMaterialV98 = LDH_prepResolveCompanyMaterialV98(
+        remoteDB, line, companyId, sharedStockReceipt
+      );
+      const material = resolvedMaterialV98.material;
       if (!material) {
         throw new Error(`No se encuentra ${LDH_prepLineNameV66(line)} en Stock.`);
       }
@@ -19741,11 +20151,17 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
       const physical = LDH_prepPhysicalRemoteV45(
         remoteDB, companyId, materialId
       );
-      let stockRow = remoteDB.stock.find((row) =>
+      let stockRow = resolvedMaterialV98.stockRow || remoteDB.stock.find((row) =>
         LDH_prepRowCompanyIdV66(row) === companyId
         && LDH_prepRowMaterialIdV66(row) === materialId
       );
       if (!stockRow) {
+        if (resolvedMaterialV98.isPaint) {
+          throw new Error(
+            `La pintura "${materialName}" no esta dada de alta en ${String(company.name ?? company.nombre ?? companyName)}. ` +
+            "Preparacion no crea fichas de pintura automaticamente."
+          );
+        }
         stockRow = {
           id: "lot_prep_v66_" + LDH_prepSafeIdV66(companyId)
             + "_" + LDH_prepSafeIdV66(materialId),
@@ -19874,6 +20290,7 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         companyId,
         materialId,
         materialName,
+        materialReconciledV98: !!resolvedMaterialV98.reconciled,
         operationId,
         requested,
         qtyAdded: qtyToAdd,
@@ -25530,6 +25947,71 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     const name=norm(line && (line.mat||line.material||line.name||''));
     return name==='pintura' || name==='paint';
   }
+  function paintLine(line){
+    if(!line || solventLine(line)) return false;
+    const text=norm([
+      line.mat,line.material,line.name,line.linked_matName,line.stockLinkLabel,
+      line.paintQuery,line.color,line.ral,line.cat,line.category,line.type,line.tipo
+    ].filter(Boolean).join(' '));
+    return text.includes('pintur') || /\bral\s*\d{3,4}\b/.test(text);
+  }
+  function prepCreatedRow(row){
+    const id=String(row && row.id || '');
+    const source=norm(row && (row.createdFrom||row.source||row.reason) || '');
+    return id.startsWith('lot_prep_v66_') || source.includes('preparacion pedidos v66');
+  }
+  function companyForOrder(pack){
+    const wanted=norm(metaNow().empresa||metaNow().company||metaNow().emp||'');
+    const companies=pack && (pack.companies || pack.db?.companies || []);
+    return (Array.isArray(companies)?companies:[]).find(c=>[
+      c.id,c.companyId,c.empresaId,c.name,c.nombre,c.empresa,c.company,c.code,c.codigo
+    ].map(norm).filter(Boolean).some(v=>v===wanted || (wanted && (v.includes(wanted)||wanted.includes(v))))) || null;
+  }
+  function paintRal(value){
+    const text=norm(value); const m=text.match(/\bral\s*(\d{3,4})\b/) || text.match(/\b(\d{4})\b/);
+    return m ? String(m[1]||'') : '';
+  }
+  function paintIdentity(value){
+    return norm(value).replace(/\b(?:pintura|paint|color|base|solvente|bote|botes|cabina)\b/g,' ').replace(/\s+/g,' ').trim();
+  }
+  function resolveCompanyPaint(pack,line,paintId,paintName){
+    if(!pack) return null;
+    const company=companyForOrder(pack); if(!company) return null;
+    const cid=String(company.id||company.companyId||company.empresaId||company.name||'');
+    const cname=norm(company.name||company.nombre||company.empresa||company.company||cid);
+    const lots=pack.lots || pack.db?.stock || [];
+    const materials=pack.materials || pack.db?.materials || [];
+    const byId=new Map((Array.isArray(materials)?materials:[]).map(m=>[idOfMaterial(m),m]).filter(x=>x[0]));
+    const rows=(Array.isArray(lots)?lots:[]).filter(row=>{
+      const rc=rowCompany(row); return rc===cid || norm(rc)===norm(cid) || norm(rc)===cname;
+    });
+    const candidates=rows.map(row=>{
+      const id=rowMaterial(row), material=byId.get(id); if(!id||!material) return null;
+      const name=nameOfMaterial(material);
+      const cls=norm([material.type,material.tipo,material.cat,material.category,material.family,material.familia,name].filter(Boolean).join(' '));
+      if(solventLine({mat:name}) || !(cls.includes('pintur') || /\bral\s*\d{3,4}\b/.test(cls))) return null;
+      return {row,id,material,name,normName:norm(name),identity:paintIdentity(name),ral:paintRal(name),prepCreated:prepCreatedRow(row)};
+    }).filter(Boolean);
+    const explicitIds=new Set([
+      line && line.linked_matId,line && line.linkedMatId,line && line.stockMatId,line && line.stock_matId,
+      line && line.stockLinkId,line && line.stockId,line && line.matId,paintId
+    ].filter(Boolean).map(String));
+    const exact=candidates.filter(c=>explicitIds.has(c.id));
+    const exactCanonical=exact.filter(c=>!c.prepCreated);
+    if(exactCanonical.length===1) return {material:exactCanonical[0].material,company};
+    const texts=[
+      line&&line.stockLinkLabel,line&&line.linked_matName,line&&line.paintQuery,line&&line.color,line&&line.ral,
+      paintName, ...exact.map(c=>c.name), line&&line.mat,line&&line.material,line&&line.name
+    ].filter(Boolean).map(String);
+    const norms=new Set(texts.map(norm).filter(Boolean));
+    const identities=new Set(texts.map(paintIdentity).filter(Boolean));
+    const rals=new Set(texts.map(paintRal).filter(Boolean));
+    const choose=list=>{const canonical=list.filter(c=>!c.prepCreated); if(canonical.length===1)return canonical[0]; if(canonical.length>1)return null; return list.length===1?list[0]:null;};
+    let chosen=choose(candidates.filter(c=>(c.normName&&norms.has(c.normName))||(c.identity&&identities.has(c.identity))));
+    if(!chosen && rals.size) chosen=choose(candidates.filter(c=>c.ral&&rals.has(c.ral)));
+    if(!chosen && exact.length===1 && candidates.length===1) chosen=exact[0];
+    return chosen ? {material:chosen.material,company} : null;
+  }
   function resolveCommonSolvent(pack,line){
     if(!pack) return null;
     const companies=pack.companies || pack.db?.companies || [];
@@ -25591,18 +26073,17 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
         }
         return;
       }
-      if(genericPaintLine(line) && paintId){
-        const material=findMaterial(pack,paintId);
-        if(material){
-          changed=applyLink(line,material,{linkSource:'calculo_pintura_exacta_v96'})||changed;
-          const exactName=nameOfMaterial(material)||paintName;
-          if(exactName){
+      if(paintLine(line) && (paintId || line.linked_matId || line.stockMatId || line.stockLinkId)){
+        const hit=resolveCompanyPaint(pack,line,paintId,paintName);
+        if(hit && hit.material){
+          changed=applyLink(line,hit.material,{linkSource:'calculo_pintura_empresa_canonica_v98'})||changed;
+          const exactName=nameOfMaterial(hit.material)||paintName;
+          if(exactName && genericPaintLine(line)){
             if(line.mat!==exactName){line.mat=exactName;changed=true;}
             if(line.material!==exactName){line.material=exactName;changed=true;}
             if(line.name!==exactName){line.name=exactName;changed=true;}
-            line.paintQuery=exactName;
-            line.color=exactName;
           }
+          if(exactName){ line.paintQuery=exactName; line.color=exactName; }
         }
       }
     });
@@ -25612,10 +26093,43 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
     }
     return changed;
   }
-  function start(){ repair(); [400,1200,3000,6000].forEach(d=>setTimeout(repair,d)); }
+  let mergeRunning=false;
+  async function mergeLegacyPaintDuplicate(){
+    if(mergeRunning || typeof window.LDH_prepMergePaintDuplicateCloudV98!=='function') return;
+    const meta=metaNow();
+    const paintId=String(meta.paintMaterialId||meta.paint_material_id||meta.selectedPaintId||'').trim();
+    const line=linesNow().find(item=>paintLine(item));
+    if(!line || !(paintId || line.linked_matId || line.stockMatId || line.stockLinkId)) return;
+    mergeRunning=true;
+    try{
+      const result=await window.LDH_prepMergePaintDuplicateCloudV98(line,paintId);
+      if(result && result.merged){
+        const pack=packNow();
+        const material=findMaterial(pack,result.canonicalId) || {id:result.canonicalId,name:result.canonicalName};
+        applyLink(line,material,{linkSource:'pintura_duplicada_v66_fusionada_v98'});
+        if(result.canonicalName){
+          line.paintQuery=result.canonicalName;
+          line.color=result.canonicalName;
+          if(genericPaintLine(line)){
+            line.mat=result.canonicalName; line.material=result.canonicalName; line.name=result.canonicalName;
+          }
+        }
+        try{ if(typeof guardarEstadoLocal==='function') guardarEstadoLocal(); }catch(_){ }
+        try{ if(typeof renderTabla==='function') renderTabla(); }catch(_){ }
+        console.info('[Preparacion V98] Pintura duplicada V66 fusionada con ficha canonica',result.duplicateId,'->',result.canonicalId);
+      }
+    }catch(error){
+      console.warn('[Preparacion V98] No se pudo fusionar pintura duplicada de forma segura',error);
+    }finally{ mergeRunning=false; }
+  }
+  function start(){
+    repair();
+    [400,1200,3000,6000].forEach(d=>setTimeout(repair,d));
+    [900,2400,5200].forEach(d=>setTimeout(mergeLegacyPaintDuplicate,d));
+  }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start,{once:true}); else start();
-  try{window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(repair,120));}catch(_){ }
-  console.info('[Preparacion] Vinculo pintura exacta + disolvente STOCK COMUN activo');
+  try{window.addEventListener('ldh:stock-cloud-updated',()=>{setTimeout(repair,120);setTimeout(mergeLegacyPaintDuplicate,500);});}catch(_){ }
+  console.info('[Preparacion] Vinculo pintura exacta + disolvente STOCK COMUN + anti-duplicado V98 activo');
 })();
 </script>
 <!-- LDH_PREP_PAINT_SOLVENT_LINK_REPAIR_20260819 -->
