@@ -19536,6 +19536,45 @@ function LDH_prepFindCurrentLineV66(index, materialId, materialName) {
   }) || null;
 }
 
+function LDH_prepReceiptNormV96(value) {
+  return String(value ?? "").trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+}
+function LDH_prepLineUsesSharedStockV96(line) {
+  if (!line) return false;
+  if (line.sharedStock === true || line.sharedPool === true || line.isSharedStock === true) return true;
+  const source = LDH_prepReceiptNormV96([
+    line.stockLinkEmpresa, line.linkSource, line.stockSource, line.originCompany,
+    line.linkedStore, line.warehouse
+  ].filter(Boolean).join(" "));
+  if (source.includes("stock comun") || source.includes("almacen comun")) return true;
+  const name = LDH_prepReceiptNormV96(
+    line.mat ?? line.material ?? line.name ?? line.linked_matName ?? line.stockLinkLabel ?? ""
+  );
+  // En el flujo de pintura los disolventes son material comun de cabina.
+  return name.includes("disolvente") || name.includes("diluyente") || name.includes("thinner");
+}
+function LDH_prepIsCommonCompanyReceiptV96(company) {
+  if (!company) return false;
+  if (company.sharedStock === true || company.sharedPool === true || company.isSharedStock === true || company.common === true || company.isCommon === true) return true;
+  return [
+    company.id, company.companyId, company.empresaId, company.name, company.nombre,
+    company.empresa, company.company, company.code, company.codigo, company.label
+  ].map(LDH_prepReceiptNormV96).some((value) =>
+    value === "stock comun" || value === "stock comun global" || value === "almacen comun" || value === "stock common"
+  );
+}
+function LDH_prepCommonAssignmentMatchesV96(row, aliases, companyId, materialId) {
+  if (!row || !LDH_prepActiveOperationalV45(row)) return false;
+  if (LDH_prepIsLoanV45(row)) return false;
+  if (LDH_prepRowCompanyIdV66(row) !== String(companyId)) return false;
+  if (LDH_prepRowMaterialIdV66(row) !== String(materialId)) return false;
+  if (!LDH_prepReferenceMatchesV66(row, aliases)) return false;
+  const kind = LDH_prepReceiptNormV96(row.assignmentType ?? row.reason ?? row.source ?? "");
+  return row.sharedStock === true || kind.includes("stock comun") || kind.includes("recepcion fisica stock comun");
+}
+
 async function LDH_prepReceivePhysicalCloudV66(line, index) {
   const reference = String(window.refActual ?? refActual ?? "").trim();
   if (!reference) throw new Error("El pedido no tiene referencia.");
@@ -19555,11 +19594,13 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
   );
   const targetPhysicalReceipt = Math.max(0, requested - appliedBefore);
   const aliases = LDH_prepReferenceAliasesV57(reference);
-  const companyName = String(
+  const orderCompanyName = String(
     (window.metaActual ?? metaActual)?.empresa
     ?? (window.metaActual ?? metaActual)?.company
     ?? ""
   ).trim();
+  const sharedStockReceipt = LDH_prepLineUsesSharedStockV96(line);
+  const companyName = sharedStockReceipt ? "STOCK COMÚN" : orderCompanyName;
   if (!companyName) throw new Error("El pedido no tiene empresa receptora.");
 
   const result = await runTransaction(
@@ -19573,14 +19614,22 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
       remoteDB.movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
       remoteDB.assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
 
-      const company = remoteDB.companies.find((row) =>
-        LDH_prepCompanyMatchesV45(row, companyName)
-      );
+      const company = sharedStockReceipt
+        ? remoteDB.companies.find(LDH_prepIsCommonCompanyReceiptV96)
+        : remoteDB.companies.find((row) => LDH_prepCompanyMatchesV45(row, companyName));
       if (!company) {
-        throw new Error(`No se encuentra la empresa ${companyName} en Stock.`);
+        throw new Error(sharedStockReceipt
+          ? "No se encuentra STOCK COMÚN en Stock."
+          : `No se encuentra la empresa ${companyName} en Stock.`);
       }
       const companyId = String(
         company.id ?? company.companyId ?? company.empresaId ?? companyName
+      );
+      const consumerCompany = sharedStockReceipt && orderCompanyName
+        ? remoteDB.companies.find((row) => LDH_prepCompanyMatchesV45(row, orderCompanyName))
+        : null;
+      const consumerCompanyId = String(
+        consumerCompany?.id ?? consumerCompany?.companyId ?? consumerCompany?.empresaId ?? ""
       );
 
       const material = LDH_prepResolveMaterialV66(remoteDB, line);
@@ -19652,8 +19701,14 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
           ref: reference,
           jobRef: reference,
           lineIndex: Number(index),
-          source: "preparacion_pedidos_recepcion_fisica_v66",
-          reason: "recibido_fisico_v66",
+          source: sharedStockReceipt ? "preparacion_pedidos_recepcion_fisica_stock_comun_v96" : "preparacion_pedidos_recepcion_fisica_v66",
+          reason: sharedStockReceipt ? "recibido_fisico_stock_comun_v96" : "recibido_fisico_v66",
+          sharedStock: !!sharedStockReceipt,
+          consumerCompanyId: sharedStockReceipt ? consumerCompanyId : "",
+          consumerEmpresa: sharedStockReceipt ? orderCompanyName : "",
+          consumerRef: sharedStockReceipt ? reference : "",
+          debtExempt: !!sharedStockReceipt,
+          returnRequired: sharedStockReceipt ? false : undefined,
           idempotencyKey: operationId,
           createdAt: now,
           updatedAt: now
@@ -19703,9 +19758,9 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         + LDH_prepSafeIdV66(materialId) + "_"
         + String(index) + "_" + receiptCycleV74;
       const matchingAssignments = remoteDB.assignments.filter((row) =>
-        LDH_prepOwnAssignmentMatchesV66(
-          row, aliases, companyId, materialId
-        )
+        sharedStockReceipt
+          ? LDH_prepCommonAssignmentMatchesV96(row, aliases, companyId, materialId)
+          : LDH_prepOwnAssignmentMatchesV66(row, aliases, companyId, materialId)
       );
       const receiptRows = matchingAssignments.filter((row) => {
         const id = String(row.id ?? row.assignmentId ?? "");
@@ -19735,9 +19790,15 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
             ref: reference,
             jobRef: reference,
             lineIndex: Number(index),
-            assignmentType: "libre",
-            source: "preparacion_pedidos_recepcion_fisica_v66",
-            reason: "recibido_fisico_v66",
+            assignmentType: sharedStockReceipt ? "stock_comun" : "libre",
+            source: sharedStockReceipt ? "preparacion_pedidos_recepcion_fisica_stock_comun_v96" : "preparacion_pedidos_recepcion_fisica_v66",
+            reason: sharedStockReceipt ? "recibido_fisico_stock_comun_v96" : "recibido_fisico_v66",
+            sharedStock: !!sharedStockReceipt,
+            debtExempt: !!sharedStockReceipt,
+            returnRequired: sharedStockReceipt ? false : undefined,
+            consumerCompanyId: sharedStockReceipt ? consumerCompanyId : "",
+            consumerEmpresa: sharedStockReceipt ? orderCompanyName : "",
+            consumerRef: sharedStockReceipt ? reference : "",
             phase: "preparacion",
             fase: "preparacion",
             status: "activa",
@@ -19752,6 +19813,15 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         receiptAssignment.qtyPending = targetReceiptAssignment;
         receiptAssignment.status = "activa";
         receiptAssignment.estado = "activa";
+        if (sharedStockReceipt) {
+          receiptAssignment.assignmentType = "stock_comun";
+          receiptAssignment.sharedStock = true;
+          receiptAssignment.debtExempt = true;
+          receiptAssignment.returnRequired = false;
+          receiptAssignment.consumerCompanyId = consumerCompanyId;
+          receiptAssignment.consumerEmpresa = orderCompanyName;
+          receiptAssignment.consumerRef = reference;
+        }
         receiptAssignment.phase = "preparacion";
         receiptAssignment.fase = "preparacion";
         receiptAssignment.updatedAt = now;
@@ -25380,4 +25450,139 @@ window.LDH_PREP_PLETINA_MM_CLOUD_V81 = true;
 })();
 </script>
 <!-- LDH_PREP_CHAPA_ESCALON_NO_STOCK_20260819 -->
+
+
+<script id="LDH_PREP_PAINT_SOLVENT_LINK_REPAIR_20260819">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_PAINT_SOLVENT_LINK_REPAIR_20260819) return;
+  window.__LDH_PREP_PAINT_SOLVENT_LINK_REPAIR_20260819 = true;
+
+  const norm = value => String(value ?? '').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,' ').trim();
+  const idOfMaterial = m => String(m && (m.id || m.materialId || m.matId || m._id || m.key) || '').trim();
+  const nameOfMaterial = m => String(m && (m.name || m.nombre || m.material || m.label) || '').trim();
+  const rowCompany = r => String(r && (r.companyId || r.empresaId || r.empresa || r.company || r.companyName) || '').trim();
+  const rowMaterial = r => String(r && (r.materialId || r.matId || r.material_id || r.stockMatId || r.idMaterial) || '').trim();
+
+  function linesNow(){
+    try{ if(Array.isArray(window.estadoMateriales)) return window.estadoMateriales; }catch(_){ }
+    try{ if(typeof estadoMateriales !== 'undefined' && Array.isArray(estadoMateriales)) return estadoMateriales; }catch(_){ }
+    return [];
+  }
+  function metaNow(){
+    try{ return window.metaActual || (typeof metaActual !== 'undefined' ? metaActual : {}) || {}; }catch(_){ return {}; }
+  }
+  function packNow(){
+    try{ if(typeof _v2LoadCompanyStockDB === 'function') return _v2LoadCompanyStockDB(); }catch(_){ }
+    try{
+      const raw = localStorage.getItem('ldh_v2_company_stock_v1') || sessionStorage.getItem('ldh_v2_company_stock_v1');
+      const db = raw ? JSON.parse(raw) : null;
+      return db ? {db,companies:db.companies||[],materials:db.materials||[],lots:db.stock||[]} : null;
+    }catch(_){ return null; }
+  }
+  function isCommonCompany(c){
+    if(!c) return false;
+    if(c.sharedStock===true || c.sharedPool===true || c.isSharedStock===true || c.common===true || c.isCommon===true) return true;
+    return [c.id,c.companyId,c.empresaId,c.name,c.nombre,c.empresa,c.company,c.code,c.codigo,c.label]
+      .map(norm).some(v=>v==='stock comun'||v==='stock comun global'||v==='almacen comun'||v==='stock common');
+  }
+  function solventLine(line){
+    const name=norm(line && (line.mat||line.material||line.name||''));
+    return name.includes('disolvente') || name.includes('diluyente') || name.includes('thinner');
+  }
+  function genericPaintLine(line){
+    const name=norm(line && (line.mat||line.material||line.name||''));
+    return name==='pintura' || name==='paint';
+  }
+  function resolveCommonSolvent(pack,line){
+    if(!pack) return null;
+    const companies=pack.companies || pack.db?.companies || [];
+    const common=companies.find(isCommonCompany);
+    if(!common) return null;
+    const cid=String(common.id||common.companyId||common.empresaId||common.name||'');
+    const cname=norm(common.name||common.nombre||'stock comun');
+    const lots=pack.lots || pack.db?.stock || [];
+    const ids=new Set();
+    (Array.isArray(lots)?lots:[]).forEach(row=>{
+      const rc=rowCompany(row);
+      if(rc===cid || norm(rc)===norm(cid) || norm(rc)===cname){
+        const mid=rowMaterial(row); if(mid) ids.add(mid);
+      }
+    });
+    const materials=pack.materials || pack.db?.materials || [];
+    const candidates=(Array.isArray(materials)?materials:[]).filter(m=>ids.has(idOfMaterial(m)) && solventLine({mat:nameOfMaterial(m)}));
+    if(!candidates.length) return null;
+    const target=norm(line && (line.mat||line.material||line.name||''));
+    if(target.includes('mezcla')){
+      const hit=candidates.find(m=>norm(nameOfMaterial(m)).includes('mezcla')); if(hit) return {material:hit,company:common};
+    }
+    if(target.includes('limpieza')){
+      const hit=candidates.find(m=>norm(nameOfMaterial(m)).includes('limpieza')); if(hit) return {material:hit,company:common};
+    }
+    const words=target.split(/\s+/).filter(w=>w.length>2 && w!=='universal');
+    let best=null,bestScore=-1;
+    candidates.forEach(m=>{const nm=norm(nameOfMaterial(m));const score=words.reduce((s,w)=>s+(nm.includes(w)?1:0),0);if(score>bestScore){bestScore=score;best=m;}});
+    return best ? {material:best,company:common} : null;
+  }
+  function findMaterial(pack,id){
+    const materials=pack && (pack.materials || pack.db?.materials || []);
+    return (Array.isArray(materials)?materials:[]).find(m=>idOfMaterial(m)===String(id||'')) || null;
+  }
+  function applyLink(line,material,extra){
+    const id=idOfMaterial(material), name=nameOfMaterial(material);
+    if(!id) return false;
+    let changed=false;
+    ['linked_matId','stockMatId','matId'].forEach(k=>{if(String(line[k]||'')!==id){line[k]=id;changed=true;}});
+    if(name && String(line.linked_matName||'')!==name){line.linked_matName=name;changed=true;}
+    if(name && String(line.stockLinkLabel||'')!==name){line.stockLinkLabel=name;changed=true;}
+    Object.entries(extra||{}).forEach(([k,v])=>{if(line[k]!==v){line[k]=v;changed=true;}});
+    return changed;
+  }
+  function repair(){
+    const pack=packNow(); if(!pack) return false;
+    const meta=metaNow(); const lines=linesNow(); let changed=false;
+    const paintId=String(meta.paintMaterialId||meta.paint_material_id||meta.selectedPaintId||'').trim();
+    const paintName=String(meta.paintMaterialName||meta.paint_material_name||'').trim();
+    lines.forEach(line=>{
+      if(!line || typeof line!=='object') return;
+      if(solventLine(line)){
+        const hit=resolveCommonSolvent(pack,line);
+        if(hit){
+          changed = applyLink(line,hit.material,{
+            stockLinkEmpresa:'STOCK COMÚN',linkSource:'preparacion_stock_comun_auto_v96',
+            sharedStock:true,sharedPool:true
+          }) || changed;
+        }
+        return;
+      }
+      if(genericPaintLine(line) && paintId){
+        const material=findMaterial(pack,paintId);
+        if(material){
+          changed=applyLink(line,material,{linkSource:'calculo_pintura_exacta_v96'})||changed;
+          const exactName=nameOfMaterial(material)||paintName;
+          if(exactName){
+            if(line.mat!==exactName){line.mat=exactName;changed=true;}
+            if(line.material!==exactName){line.material=exactName;changed=true;}
+            if(line.name!==exactName){line.name=exactName;changed=true;}
+            line.paintQuery=exactName;
+            line.color=exactName;
+          }
+        }
+      }
+    });
+    if(changed){
+      try{ if(typeof guardarEstadoLocal==='function') guardarEstadoLocal(); }catch(_){ }
+      try{ if(typeof renderTabla==='function') renderTabla(); }catch(_){ }
+    }
+    return changed;
+  }
+  function start(){ repair(); [400,1200,3000,6000].forEach(d=>setTimeout(repair,d)); }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start,{once:true}); else start();
+  try{window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(repair,120));}catch(_){ }
+  console.info('[Preparacion] Vinculo pintura exacta + disolvente STOCK COMUN activo');
+})();
+</script>
+<!-- LDH_PREP_PAINT_SOLVENT_LINK_REPAIR_20260819 -->
 </body></html>
