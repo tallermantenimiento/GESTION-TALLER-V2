@@ -456,6 +456,52 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     }
     return 0;
   }
+  /* V4 19/08/2026: el vinculo exacto que viaja PC -> Preparacion -> Fabricacion
+     es autoritativo. El terminal nunca debe sustituirlo por una busqueda por RAL. */
+  function workLinkedPaintRow(work,all,ral){
+    const rows=Array.isArray(all)?all:[];
+    const byId=id=>rows.find(r=>text(r&&r.mat&&r.mat.id)===text(id))||null;
+
+    const directIds=[
+      work&&work.paintStockMaterialId,
+      work&&work.paintMaterialId,
+      work&&work.paintMatId,
+      work&&work.stockPaintMaterialId,
+      work&&work.linkedPaintMaterialId
+    ].map(text).filter(Boolean);
+    for(const id of directIds){
+      const row=byId(id);
+      if(row) return row;
+    }
+
+    const linked=[];
+    workMaterialLines(work).forEach(line=>{
+      const id=workMaterialId(line); if(!id) return;
+      const row=byId(id); if(!row) return;
+      const lineLabel=norm(workMaterialName(line));
+      const rowLabel=norm(row&&row.mat&&(row.mat.name||row.mat.nombre));
+      const aux=/\b(disolvente|solvente|diluyente|catalizador|limpieza|desengrasante)\b/.test(lineLabel+' '+rowLabel);
+      if(aux) return;
+      linked.push({row,line,lineLabel,rowLabel});
+    });
+
+    const unique=[]; const seen=new Set();
+    linked.forEach(entry=>{
+      const id=text(entry.row&&entry.row.mat&&entry.row.mat.id); if(!id||seen.has(id)) return;
+      seen.add(id); unique.push(entry);
+    });
+    if(unique.length===1) return unique[0].row;
+
+    const spec=ralSpec(ral);
+    if(spec.key){
+      const byRal=unique.filter(entry=>paintMatchesRal(entry.row,ral));
+      if(byRal.length===1) return byRal[0].row;
+    }
+
+    const explicit=unique.filter(entry=>entry.lineLabel.includes('pintura') || entry.rowLabel.includes('pintura'));
+    if(explicit.length===1) return explicit[0].row;
+    return null;
+  }
   function workPaintRequiredBotes(work,link){
     const lines=workMaterialLines(work); if(!lines.length||!link||link.kind!=='linked') return null;
     const targetId=text(link.row&&link.row.mat&&link.row.mat.id);
@@ -819,15 +865,28 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const company=stockCompanyForWork(work); if(!company)return {kind:'no_company',ral};
     const all=paintRows().filter(r=>r.companyId===text(company.id));
     const meta=state.orderMetaByRef[text(work&&work.ref)]||{};
-    /* Autoridad normal: vinculo exacto recibido desde el PC. El terminal no lo modifica. */
+
+    /* 1) Autoridad principal: ID exacto conservado en el snapshot del trabajo.
+       Preparacion copia stockLinkId/linked_matId a Fabricacion, por lo que una OT
+       nueva no debe volver a decidir su pintura por RAL. */
+    const snapshotRow=workLinkedPaintRow(work,all,ral);
+    if(snapshotRow){
+      const resolved=text(meta.paintRalResolved)||ralFromPaintRow(snapshotRow)||ral;
+      return {kind:'linked',ral:resolved,row:snapshotRow,ownReserved:ownPaintReserved(state.stock,snapshotRow.companyId,text(snapshotRow.mat.id),work.ref),via:'pc_snapshot'};
+    }
+
+    /* 2) Compatibilidad: vinculo exacto guardado en la orden de Agenda/PC. */
     const pcMaterialId=text(meta.paintStockMaterialId);
     if(pcMaterialId){
       const row=all.find(r=>text(r.mat.id)===pcMaterialId);
-      if(row){const resolved=text(meta.paintRalResolved)||ral;return {kind:'linked',ral:resolved,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'pc'};}
+      if(row){const resolved=text(meta.paintRalResolved)||ralFromPaintRow(row)||ral;return {kind:'linked',ral:resolved,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'pc'};}
     }
+
+    /* 3) Una reserva exacta de esta OT tambien identifica inequívocamente la ficha. */
     const existing=all.filter(r=>ownPaintReserved(state.stock,r.companyId,text(r.mat.id),work.ref)>0);
-    if(existing.length===1){const row=existing[0];return {kind:'linked',ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'reserva'};}
-    /* Excepciones historicas: solo lectura. No crea botones ni escribe vinculos desde cabina. */
+    if(existing.length===1){const row=existing[0];return {kind:'linked',ral:ralFromPaintRow(row)||ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'reserva'};}
+
+    /* 4) Excepciones historicas: solo lectura. No crea botones ni escribe vinculos desde cabina. */
     const legacy=legacyPaintLinkForWork(work);
     if(legacy&&legacy.ral){
       let legacyCandidates=all.filter(r=>paintMatchesRal(r,legacy.ral));
@@ -838,6 +897,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       }
       if(legacyCandidates.length===1){const row=legacyCandidates[0];return {kind:'linked',ral:legacy.ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'legacy'};}
     }
+
+    /* 5) Ultimo recurso solo para OT antiguas sin ningun ID: buscar por RAL. */
     const candidates=all.filter(r=>paintMatchesRal(r,ral));
     if(candidates.length===1){const row=candidates[0];return {kind:'linked',ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'ral'};}
     if(candidates.length>1)return {kind:'ambiguous',ral,candidates};
