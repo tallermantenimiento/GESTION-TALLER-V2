@@ -6015,7 +6015,7 @@ const firebaseConfig = {
 
 const {initializeApp,getApps,getApp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
 const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-const {getFirestore,doc,getDoc,setDoc,serverTimestamp,writeBatch} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+const {getFirestore,doc,getDoc,setDoc,serverTimestamp,writeBatch,collection,getDocs} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
 const fbApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const fbAuth = getAuth(fbApp);
@@ -6179,10 +6179,22 @@ async function cloudPublishSafetyCheck(force){
     const remoteIsNewer = remoteTime > localTime + 500;
     const remoteHasMoreMaterials = remoteMaterials > local.materials;
 
-    if(remote && remote.raw && (
-      remoteIsNewer ||
-      (remoteHasMoreMaterials && !authoritativeDelete)
-    )){
+    /*
+     * BORRADO AUTORITATIVO:
+     * mientras una eliminación local está pendiente de publicarse, NUNCA se
+     * restaura la copia remota, aunque tenga updatedAt posterior o más materiales.
+     * De lo contrario Firebase reinyecta exactamente la ficha que acabamos de borrar.
+     */
+    if(authoritativeDelete){
+      setCloudStatus(
+        'Stock nube aplicando borrado...',
+        'warn',
+        'Borrado local autoritativo pendiente: se publicará primero y no se restaurará una copia remota anterior.'
+      );
+      return true;
+    }
+
+    if(remote && remote.raw && (remoteIsNewer || remoteHasMoreMaterials)){
       writeStockEverywhere(remote.raw);
       lastRawPublished = remote.raw;
       setCloudStatus(
@@ -6233,38 +6245,73 @@ window.LDH_restoreStockFromCloudNow = async function(){
 
 
 async function publishStockMaterialsMirror(data){
-  // Espejo auxiliar para la app informativa. Si las reglas no permiten esta colección,
-  // no bloquea la publicación principal por chunks.
+  // Espejo auxiliar para la app informativa.
+  // Debe ser un espejo EXACTO del stock canónico: además de actualizar las filas
+  // actuales, elimina documentos que ya no existen para evitar materiales fantasma.
   try{
     const byId = new Map((data.materials||[]).map(m=>[String(m.id||''), m]));
-    const batch = writeBatch(fbDb);
-    let count = 0;
+    const rows = [];
+    const wantedIds = new Set();
+
     (data.stock||[]).forEach((srow, i)=>{
       const mat = byId.get(String(srow.materialId||'')) || {};
       if(!mat.id && !mat.name && !mat.nombre) return;
       const id = String(srow.id || (String(srow.companyId||'stock') + '_' + String(srow.materialId||i))).replace(/[\/#?\[\]]/g,'_');
-      batch.set(doc(fbDb,'stock_materials',id), {
+      wantedIds.add(id);
+      rows.push({
         id,
-        stockId:String(srow.id||id),
-        companyId:String(srow.companyId||''),
-        materialId:String(srow.materialId||''),
-        name:String(mat.name||mat.nombre||srow.name||''),
-        family:String(mat.family||mat.familia||srow.family||'Sin familia'),
-        type:String(mat.type||mat.tipo||srow.type||'hierro'),
-        unit:String(mat.unit||mat.unidad||srow.unit||'und'),
-        location:String(srow.location||srow.ubicacion||''),
-        min:Number(srow.min||mat.min||mat.minimo||0),
-        qty:Number(srow.qty||srow.cantidad||srow.physicalQty||0),
-        order:Number(srow.order||mat.order||i),
-        familyOrder:Number(srow.familyOrder||mat.familyOrder||i),
-        updatedAt:serverTimestamp()
-      }, {merge:true});
-      count++;
+        payload:{
+          id,
+          stockId:String(srow.id||id),
+          companyId:String(srow.companyId||''),
+          materialId:String(srow.materialId||''),
+          name:String(mat.name||mat.nombre||srow.name||''),
+          family:String(mat.family||mat.familia||srow.family||'Sin familia'),
+          type:String(mat.type||mat.tipo||srow.type||'hierro'),
+          unit:String(mat.unit||mat.unidad||srow.unit||'und'),
+          location:String(srow.location||srow.ubicacion||''),
+          min:Number(srow.min||mat.min||mat.minimo||0),
+          qty:Number(srow.qty||srow.cantidad||srow.physicalQty||0),
+          order:Number(srow.order||mat.order||i),
+          familyOrder:Number(srow.familyOrder||mat.familyOrder||i),
+          updatedAt:serverTimestamp()
+        }
+      });
     });
-    if(count) await batch.commit();
+
+    // 1) Eliminar huérfanos del espejo. Se hace en lotes separados para no superar
+    //    el límite de operaciones de Firestore y para no bloquear las actualizaciones.
+    let deleted = 0;
+    try{
+      const snap = await getDocs(collection(fbDb,'stock_materials'));
+      const staleRefs = snap.docs.filter(d=>!wantedIds.has(String(d.id))).map(d=>d.ref);
+      for(let i=0;i<staleRefs.length;i+=400){
+        const batch = writeBatch(fbDb);
+        const part = staleRefs.slice(i,i+400);
+        part.forEach(ref=>batch.delete(ref));
+        if(part.length) await batch.commit();
+        deleted += part.length;
+      }
+    }catch(e){
+      // El espejo es auxiliar: un fallo de lectura/borrado no debe bloquear el stock canónico.
+      console.warn('stock_materials: no se pudieron borrar documentos huérfanos', e);
+    }
+
+    // 2) Publicar/actualizar las filas vigentes.
+    let count = 0;
+    for(let i=0;i<rows.length;i+=400){
+      const batch = writeBatch(fbDb);
+      const part = rows.slice(i,i+400);
+      part.forEach(row=>batch.set(doc(fbDb,'stock_materials',row.id), row.payload, {merge:true}));
+      if(part.length) await batch.commit();
+      count += part.length;
+    }
+
+    window.__LDH_STOCK_MIRROR_LAST_DELETED = deleted;
     return count;
   }catch(e){
     console.warn('stock_materials mirror no publicado', e);
+    window.__LDH_STOCK_MIRROR_LAST_DELETED = 0;
     return 0;
   }
 }
@@ -6329,7 +6376,7 @@ async function publishFullStock(force=false){
     setCloudStatus(
       'Stock nube conectado · ' + data.materials.length + ' materiales',
       'ok',
-      'Publicado en Firestore. Empresas: ' + data.companies.length + ' · materiales: ' + data.materials.length + ' · stock: ' + data.stock.length + ' · chunks: ' + chunks.length + ' · espejo: ' + mirrorCount
+      'Publicado en Firestore. Empresas: ' + data.companies.length + ' · materiales: ' + data.materials.length + ' · stock: ' + data.stock.length + ' · chunks: ' + chunks.length + ' · espejo: ' + mirrorCount + ' · huérfanos espejo borrados: ' + Number(window.__LDH_STOCK_MIRROR_LAST_DELETED||0)
     );
   }catch(e){
     const msg = String((e && (e.code || e.message)) || e || 'error');
