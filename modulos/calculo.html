@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
-  <meta name="ldh-build" content="CALC-PLETINA-MM-V2-PREP-V81-20260813">
+  <meta name="ldh-build" content="CALC-PLETINA-MM-V2-PREP-V81-COMMON-SOLVENT-20260819">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -413,6 +413,96 @@
       });
     return [...byName.values()];
   }
+  function isCommonStockCompanyRecord(c){
+    if(!c) return false;
+    if(c.sharedStock === true || c.sharedPool === true || c.isSharedStock === true || c.common === true || c.isCommon === true) return true;
+    const vals = [c.id,c.companyId,c.empresaId,c.name,c.nombre,c.empresa,c.company,c.code,c.codigo,c.label]
+      .map(norm).filter(Boolean);
+    const compact = vals.map(v=>v.replace(/\s+/g,""));
+    return vals.some(v=>v === "stock comun" || v === "stock comun global" || v === "almacen comun" || v === "stock common")
+      || compact.some(v=>v === "stockcomun" || v === "stockcomunglobal" || v === "almacencomun" || v === "stockcommon" || v === "commonstock");
+  }
+  function commonStockAliases(db){
+    const out = new Set(["stock comun","stock comun global","almacen comun","stock common","stockcomun","stockcomunglobal","almacencomun","stockcommon","commonstock"]);
+    const companies = Array.isArray(db && db.companies) ? db.companies : [];
+    companies.filter(isCommonStockCompanyRecord).forEach(c=>{
+      [c.id,c.companyId,c.empresaId,c.name,c.nombre,c.empresa,c.company,c.code,c.codigo,c.label]
+        .map(norm).filter(Boolean).forEach(v=>{ out.add(v); out.add(v.replace(/\s+/g,"")); });
+    });
+    return out;
+  }
+  function rowBelongsToCommonStock(row, aliases){
+    if(!row) return false;
+    const vals = [row.companyId,row.empresaId,row.empresa,row.company,row.companyName,row.empresaNombre]
+      .map(norm).filter(Boolean);
+    return vals.some(v=>aliases.has(v) || aliases.has(v.replace(/\s+/g,"")));
+  }
+  function commonMaterialIdsFromStock(db){
+    const aliases = commonStockAliases(db);
+    const ids = new Set();
+    const addRow = row=>{
+      if(!rowBelongsToCommonStock(row, aliases)) return;
+      const id = stockRowMaterialId(row) || stockMaterialId(row);
+      if(id) ids.add(id);
+    };
+    const scan = stock=>{
+      if(Array.isArray(stock)){ stock.forEach(addRow); return; }
+      if(!stock || typeof stock !== "object") return;
+      Object.entries(stock).forEach(([key,pack])=>{
+        const nk = norm(key), keyCommon = aliases.has(nk) || aliases.has(nk.replace(/\s+/g,""));
+        if(Array.isArray(pack)){
+          pack.forEach(row=>{
+            if(keyCommon){ const id=stockRowMaterialId(row)||stockMaterialId(row); if(id) ids.add(id); }
+            else addRow(row);
+          });
+          return;
+        }
+        if(!pack || typeof pack !== "object") return;
+        if(keyCommon && Array.isArray(pack.materials)) pack.materials.forEach(m=>{ const id=stockMaterialId(m); if(id) ids.add(id); });
+        addRow(pack);
+        if(Array.isArray(pack.stock)) pack.stock.forEach(addRow);
+        if(Array.isArray(pack.rows)) pack.rows.forEach(addRow);
+      });
+    };
+    scan(db && db.stock);
+    if(db && db.db) scan(db.db.stock);
+    return ids;
+  }
+  function isSolventName(value){
+    const t = norm(value);
+    return /(^|\s)(disolvente|diluyente|solvente|thinner)(\s|$)/.test(t);
+  }
+  function materialLooksCommon(m){
+    const t = norm([m && m.grp,m && m.grupo,m && m.family,m && m.familia,m && m.group,m && m.empresa,m && m.company,m && m.companyName].filter(Boolean).join(" "));
+    return t.includes("stock comun") || t.includes("almacen comun") || t.includes("stock common");
+  }
+  function resolveCommonSolventMaterial(lineName, preferredId){
+    if(!isSolventName(lineName)) return null;
+    const db = readStock();
+    const ids = commonMaterialIdsFromStock(db);
+    const target = norm(lineName);
+    const all = allStockMaterials("");
+    const candidates = all.filter(m=>{
+      const id = stockMaterialId(m);
+      if(!id || !isSolventName(stockMaterialName(m))) return false;
+      return ids.has(id) || materialLooksCommon(m);
+    });
+    const preferred = String(preferredId || "").trim();
+    if(preferred){
+      const hit = candidates.find(m=>stockMaterialId(m) === preferred);
+      if(hit) return hit;
+    }
+    const exact = candidates.find(m=>norm(stockMaterialName(m)) === target);
+    if(exact) return exact;
+    const targetWords = target.split(/\s+/).filter(w=>w.length>2);
+    let best = null, bestScore = -1;
+    candidates.forEach(m=>{
+      const nm = norm(stockMaterialName(m));
+      const score = targetWords.reduce((sum,w)=>sum+(nm.includes(w)?1:0),0);
+      if(score > bestScore){ bestScore=score; best=m; }
+    });
+    return bestScore > 0 ? best : null;
+  }
   function isPletinaMaterial(name, m){
     const txt = norm([
       name,
@@ -816,6 +906,11 @@
         let name = u.name;
         let stockMatId = conceptLineStockId(concept, "unit", u.name, u);
         let color = "";
+        let commonStockMaterial = null;
+        if(isSolventName(u.name)){
+          commonStockMaterial = resolveCommonSolventMaterial(u.name, stockMatId);
+          if(commonStockMaterial) stockMatId = stockMaterialId(commonStockMaterial);
+        }
         if(isPaintLine(u)){
           const paintId = document.getElementById("paintSelect").value;
           const paint = materialById(paintId);
@@ -833,7 +928,11 @@
           qty: total, qty_pedida: total,
           unit:"ud", unidad:"ud", tipo:"unidad", type:"unidad",
           stockMatId:stockMatId || "", matId:stockMatId || "", linked_matId:stockMatId || "",
-          linked_matName: mat ? mat.name : "",
+          linked_matName: mat ? mat.name : (commonStockMaterial ? stockMaterialName(commonStockMaterial) : ""),
+          stockLinkEmpresa: commonStockMaterial ? "STOCK COMÚN" : "",
+          linkSource: commonStockMaterial ? "calculo_stock_comun" : "",
+          sharedStock: !!commonStockMaterial,
+          sharedPool: !!commonStockMaterial,
           color,
           paintQuery: color || u.name,
           multVar:u.multVar || ""
