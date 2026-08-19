@@ -115,7 +115,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         <select id="stockCompany"><option value="">Selecciona empresa...</option></select>
         <button id="stockClear" class="btn small ghost" type="button">Limpiar</button>
       </div>
-      <div class="notice">La regularizaci&oacute;n se introduce aqu&iacute; en <b>litros</b>, pero se convierte autom&aacute;ticamente a botes de 4 L antes de guardar. No borra reservas ni hist&oacute;rico.</div>
+      <div class="notice">La regularizaci&oacute;n se introduce directamente en <b>botes</b>. La equivalencia se muestra autom&aacute;ticamente en litros: <b>1 bote = 4 L</b>. No borra reservas ni hist&oacute;rico.</div>
       <div id="stockList" class="stock-list"></div>
     </div>
   </section>
@@ -165,8 +165,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     <h2>Regularizar stock f&iacute;sico</h2>
     <div id="stockSub" class="subm"></div>
     <div class="form-grid">
-      <div class="field"><label>Stock del sistema (L)</label><input id="stSystem" readonly></div>
-      <div class="field"><label>Stock f&iacute;sico real (L)</label><input id="stReal" type="number" min="0" step="0.001" inputmode="decimal"></div>
+      <div class="field"><label>Stock del sistema (botes)</label><input id="stSystem" readonly></div>
+      <div class="field"><label>Stock f&iacute;sico real (botes)</label><input id="stReal" type="number" min="0" step="0.01" inputmode="decimal"></div>
     </div>
     <div id="stockDelta" class="sumline"></div>
     <div class="field" style="margin-top:12px"><label>Motivo</label>
@@ -1004,17 +1004,17 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
   function openStockModal(companyId,materialId){
     if(!requireOperator())return; const row=paintRows().find(r=>r.companyId===companyId&&text(r.mat.id)===materialId);if(!row)return alert('Pintura no encontrada.');
-    state.activeStock={companyId,materialId}; $('stockSub').textContent=row.company+' · '+text(row.mat.name||row.mat.nombre)+' · 1 bote = '+BOTE_LITROS+' L'; $('stSystem').value=inputNum(litersFromBotes(row.physical)); $('stReal').value=inputNum(litersFromBotes(row.physical)); $('stNote').value=''; $('stReasonType').value='Recuento fisico'; updateStockDelta(); openModal('stockModal');
+    state.activeStock={companyId,materialId}; $('stockSub').textContent=row.company+' · '+text(row.mat.name||row.mat.nombre)+' · 1 bote = '+BOTE_LITROS+' L'; $('stSystem').value=inputNum(row.physical); $('stReal').value=inputNum(row.physical); $('stNote').value=''; $('stReasonType').value='Recuento fisico'; updateStockDelta(); openModal('stockModal');
   }
   function updateStockDelta(){
-    const a=state.activeStock;if(!a)return;const row=paintRows().find(r=>r.companyId===a.companyId&&text(r.mat.id)===a.materialId);if(!row)return;const realLiters=num($('stReal').value),target=botesFromLiters(realLiters),delta=target-row.physical,deltaL=litersFromBotes(delta);const el=$('stockDelta');el.className='sumline '+(Math.abs(delta)<.000001?'ok':(delta<0?'bad':'ok'));el.textContent='Ajuste: '+(deltaL>0?'+':'')+fmt(deltaL)+' L ('+(delta>0?'+':'')+fmt(delta)+' botes) · Resultado: '+fmt(realLiters)+' L ('+fmtBotesEq(target)+')';
+    const a=state.activeStock;if(!a)return;const row=paintRows().find(r=>r.companyId===a.companyId&&text(r.mat.id)===a.materialId);if(!row)return;const target=Math.max(0,num($('stReal').value)),delta=target-row.physical,deltaL=litersFromBotes(delta),resultL=litersFromBotes(target);const el=$('stockDelta');el.className='sumline '+(Math.abs(delta)<.000001?'ok':(delta<0?'bad':'ok'));el.textContent='Ajuste: '+(delta>0?'+':'')+fmt(delta)+' botes ('+(deltaL>0?'+':'')+fmt(deltaL)+' L) · Resultado: '+fmt(target)+' botes ('+fmt(resultL)+' L)';
   }
   $('stReal').addEventListener('input',updateStockDelta);
   $('stockSave').onclick=async()=>{
-    const a=state.activeStock;if(!a)return;const targetLiters=num($('stReal').value);if(targetLiters<0)return alert('El stock fisico no puede ser negativo.');const target=botesFromLiters(targetLiters),reason=text($('stReasonType').value),note=text($('stNote').value);const row=paintRows().find(r=>r.companyId===a.companyId&&text(r.mat.id)===a.materialId);if(!row)return;
+    const a=state.activeStock;if(!a)return;const target=num($('stReal').value);if(target<0)return alert('El stock fisico no puede ser negativo.');const targetLiters=litersFromBotes(target),reason=text($('stReasonType').value),note=text($('stNote').value);const row=paintRows().find(r=>r.companyId===a.companyId&&text(r.mat.id)===a.materialId);if(!row)return;
     const delta=target-row.physical,deltaL=litersFromBotes(delta);if(Math.abs(delta)<.000001){closeModal('stockModal');return toast('No hay descuadre que corregir.');}
-    if(!confirm('Regularizar '+text(row.mat.name||row.mat.nombre)+'?\n\nSistema: '+fmtLiters(row.physical)+' ('+fmtBotesEq(row.physical)+')\nFisico real: '+fmt(targetLiters)+' L ('+fmtBotesEq(target)+')\nAjuste: '+(deltaL>0?'+':'')+fmt(deltaL)+' L ('+(delta>0?'+':'')+fmt(delta)+' botes)\n\nSe registrara un movimiento de ajuste en la unidad interna del Stock.'))return;
-    try{await regularizeStock(a.companyId,a.materialId,target,reason,note);closeModal('stockModal');toast('Stock regularizado: '+fmt(targetLiters)+' L ('+fmtBotesEq(target)+').');await loadStockPackage();}catch(e){console.error(e);alert('No se pudo regularizar Stock: '+String(e&&e.message||e));}
+    if(!confirm('Regularizar '+text(row.mat.name||row.mat.nombre)+'?\n\nSistema: '+fmt(row.physical)+' botes ('+fmtLiters(row.physical)+')\nFisico real: '+fmt(target)+' botes ('+fmt(targetLiters)+' L)\nAjuste: '+(delta>0?'+':'')+fmt(delta)+' botes ('+(deltaL>0?'+':'')+fmt(deltaL)+' L)\n\nSe registrara un movimiento de ajuste en botes, manteniendo la equivalencia de 4 L por bote.'))return;
+    try{await regularizeStock(a.companyId,a.materialId,target,reason,note);closeModal('stockModal');toast('Stock regularizado: '+fmt(target)+' botes ('+fmt(targetLiters)+' L).');await loadStockPackage();}catch(e){console.error(e);alert('No se pudo regularizar Stock: '+String(e&&e.message||e));}
   };
 
   function openModal(id){const el=$(id);el.classList.add('show');el.setAttribute('aria-hidden','false');}
