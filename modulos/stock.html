@@ -7828,5 +7828,333 @@ body{
 </script>
 <!-- /LDH_STOCK_PLETINA_MM_ASIGNACIONES_REPAIR_20260818 -->
 
+
+
+<!-- LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819 -->
+<script id="LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819__) return;
+  window.__LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819__ = true;
+
+  /*
+   * V61 · Reparación quirúrgica de pinturas duplicadas creadas por Preparación.
+   *
+   * Caso protegido:
+   * - la fila duplicada de Stock fue creada por Preparación
+   *   (id lot_prep_v66_* o createdFrom/source equivalente),
+   * - pertenece a una empresa concreta,
+   * - existe UNA sola fila original no creada por Preparación en esa misma empresa,
+   * - ambas representan la misma pintura (RAL/familia/unidad o, sin RAL, nombre exacto).
+   *
+   * La reparación remapea movimientos, reservas, asignaciones y deudas al material
+   * original, conserva el stock físico y elimina SOLO la fila Stock duplicada.
+   * No toca Fabricación ni cambia de fase ninguna OT.
+   */
+
+  let repairing = false;
+
+  function text(v){ return String(v == null ? '' : v).trim(); }
+  function norm(v){
+    return text(v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/×/g,'x')
+      .replace(/[^a-z0-9]+/g,' ')
+      .replace(/\s+/g,' ').trim();
+  }
+  function first(){
+    for(let i=0;i<arguments.length;i+=1){
+      const v=arguments[i];
+      if(v !== undefined && v !== null && text(v) !== '') return v;
+    }
+    return '';
+  }
+  function mid(m){ return text(first(m&&m.id,m&&m.materialId,m&&m.matId)); }
+  function cid(r){ return text(first(r&&r.companyId,r&&r.empresaId,r&&r.company,r&&r.empresa)); }
+  function matFor(id){
+    try{
+      if(typeof materialById === 'function') return materialById(id) || null;
+    }catch(_){ }
+    try{
+      return (db && Array.isArray(db.materials))
+        ? db.materials.find(m=>mid(m)===text(id)) || null
+        : null;
+    }catch(_){ return null; }
+  }
+  function matName(m,row){
+    return text(first(m&&m.name,m&&m.nombre,m&&m.material,row&&row.name,row&&row.material,row&&row.mat));
+  }
+  function isPrepGeneratedStockRow(row){
+    if(!row) return false;
+    const id = text(row.id);
+    if(/^lot_prep_v66_/i.test(id)) return true;
+    const src = norm([row.createdFrom,row.source,row.reason,row.origin].filter(Boolean).join(' '));
+    return src.includes('preparacion pedidos v66') ||
+      src.includes('preparacion_pedidos_v66') ||
+      src.includes('preparacion pedidos recepcion fisica');
+  }
+  function isPaintMaterial(m,row){
+    const type = norm(first(m&&m.type,m&&m.tipo,m&&m.cat,m&&m.category,row&&row.type,row&&row.tipo));
+    const family = norm(first(m&&m.family,m&&m.familia,m&&m.grp,m&&m.group,row&&row.family,row&&row.familia));
+    const name = norm(matName(m,row));
+    return type.includes('pintura') ||
+      family.includes('base solvente') || family.includes('pintura') ||
+      /\bral\s*[0-9]{3,4}\b/.test(name) || name.includes('pintura');
+  }
+  function identity(m,row){
+    const name = norm(matName(m,row));
+    const family = norm(first(m&&m.family,m&&m.familia,m&&m.grp,m&&m.group,row&&row.family,row&&row.familia));
+    const unit = norm(first(m&&m.unit,m&&m.unidad,row&&row.unit,row&&row.unidad));
+    const ralMatch = name.match(/\bral\s*([0-9]{3,4})\b/);
+    if(ralMatch){
+      return 'ral:'+ralMatch[1]+'|fam:'+family+'|unit:'+unit;
+    }
+    const cleanName = name.replace(/^pintura\s+/,'').replace(/^color\s+/,'').trim();
+    return 'name:'+cleanName+'|fam:'+family+'|unit:'+unit;
+  }
+  function num(v){ const n=Number(v); return Number.isFinite(n)?n:0; }
+  function movementPhysical(companyId,materialId){
+    try{
+      if(typeof realStock === 'function') return num(realStock(companyId,materialId));
+    }catch(_){ }
+    return (Array.isArray(db&&db.movements)?db.movements:[])
+      .filter(r=>cid(r)===text(companyId) && text(first(r.materialId,r.matId,r.material_id))===text(materialId))
+      .reduce((sum,r)=>{
+        const t=norm(first(r.type,r.tipo,'entrada')).replace(/\s+/g,'_');
+        const q=num(first(r.qty,r.cantidad,r.amount,r.quantity,0));
+        if(['salida','ajuste_neg','consumo','out'].includes(t)) return sum-q;
+        if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return sum;
+        return sum+q;
+      },0);
+  }
+  function cachedPhysical(row){
+    if(!row) return 0;
+    const vals=[row.qty,row.cantidad,row.physicalQty,row.fisico,row['físico'],row.real,row.stock]
+      .map(num).filter(v=>Number.isFinite(v));
+    return vals.length ? Math.max.apply(null,vals) : 0;
+  }
+  function same(v,id){ return text(v) === text(id); }
+  function replaceField(row,key,oldId,newId){
+    if(row && same(row[key],oldId)){
+      row[key]=newId;
+      return true;
+    }
+    return false;
+  }
+  function markRemap(row,oldId,newId,companyId){
+    if(!row) return;
+    row.materialMergeFrom = oldId;
+    row.materialMergeTo = newId;
+    row.materialMergeCompanyId = companyId;
+    row.materialMergeAt = new Date().toISOString();
+  }
+  function remapDirectForCompany(row,companyId,oldId,newId){
+    if(!row) return false;
+    const ownCompany = text(first(row.companyId,row.empresaId,row.company,row.empresa));
+    const sourceCompany = text(first(row.fromCompanyId,row.sourceCompanyId,row.originCompanyId,ownCompany));
+    const destCompany = text(first(row.toCompanyId,row.destinationCompanyId,row.targetCompanyId,row.consumerCompanyId));
+    let changed=false;
+
+    if(ownCompany===companyId || sourceCompany===companyId){
+      ['materialId','matId','material_id','v2MaterialId','stockMaterialId','sourceMaterialId','fromMaterialId'].forEach(k=>{
+        if(replaceField(row,k,oldId,newId)) changed=true;
+      });
+      if(same(row.material,oldId)){ row.material=newId; changed=true; }
+    }
+    if(destCompany===companyId){
+      ['toMaterialId','destinationMaterialId','targetMaterialId'].forEach(k=>{
+        if(replaceField(row,k,oldId,newId)) changed=true;
+      });
+      /* Asignaciones propias antiguas pueden no traer toMaterialId. */
+      if(!row.toMaterialId && !row.destinationMaterialId && !row.targetMaterialId && !sourceCompany){
+        ['materialId','matId','material_id'].forEach(k=>{ if(replaceField(row,k,oldId,newId)) changed=true; });
+      }
+    }
+    if(changed) markRemap(row,oldId,newId,companyId);
+    return changed;
+  }
+  function remapCollection(name,companyId,oldId,newId){
+    const arr = db && Array.isArray(db[name]) ? db[name] : [];
+    let n=0;
+    arr.forEach(row=>{ if(remapDirectForCompany(row,companyId,oldId,newId)) n+=1; });
+    return n;
+  }
+  function updateCanonicalCache(row,companyId,materialId){
+    if(!row) return;
+    const physical = Math.max(0,movementPhysical(companyId,materialId));
+    row.qty=physical;
+    row.cantidad=physical;
+    row.stock=physical;
+    row.real=physical;
+    row.fisico=physical;
+    row.physicalQty=physical;
+    row.updatedAt=new Date().toISOString();
+  }
+  function maybeAddMissingPhysical(companyId,oldId,newId,dupRow,canonicalMat){
+    const byMovements = Math.max(0,movementPhysical(companyId,oldId));
+    const byRow = Math.max(0,cachedPhysical(dupRow));
+    const gap = Math.max(0,byRow-byMovements);
+    if(gap <= 0.000001) return 0;
+    if(!Array.isArray(db.movements)) db.movements=[];
+    db.movements.push({
+      id:'mov_merge_paint_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-5),
+      companyId:companyId,
+      materialId:newId,
+      matId:newId,
+      material_id:newId,
+      material:matName(canonicalMat,null),
+      materialName:matName(canonicalMat,null),
+      name:matName(canonicalMat,null),
+      type:'entrada',
+      tipo:'entrada',
+      qty:gap,
+      cantidad:gap,
+      amount:gap,
+      date:new Date().toISOString(),
+      reason:'fusion_pintura_duplicada_preparacion_saldo_stockrow_v61',
+      source:'stock_fusion_pintura_prep_v61',
+      mergedFromMaterialId:oldId,
+      mergedToMaterialId:newId
+    });
+    return gap;
+  }
+  function mergeOne(dupRow,canonicalRow){
+    const companyId = cid(dupRow);
+    const oldId = text(first(dupRow.materialId,dupRow.matId,dupRow.material_id));
+    const newId = text(first(canonicalRow.materialId,canonicalRow.matId,canonicalRow.material_id));
+    if(!companyId || !oldId || !newId || oldId===newId) return false;
+
+    const oldMat=matFor(oldId);
+    const newMat=matFor(newId);
+    if(!oldMat || !newMat) return false;
+
+    /* Preserva un posible saldo cacheado si faltara el movimiento histórico. */
+    const gapAdded = maybeAddMissingPhysical(companyId,oldId,newId,dupRow,newMat);
+
+    let remapped=0;
+    ['movements','reservations','assignments','reservationDebts','debts','loans','transfers','jobs']
+      .forEach(name=>{ remapped += remapCollection(name,companyId,oldId,newId); });
+
+    /* Si el duplicado tenía metadatos útiles y el original no, se conservan sin
+       pisar la ubicación/familia buena de la ficha canónica. */
+    if(!canonicalRow.location && dupRow.location) canonicalRow.location=dupRow.location;
+    if(!canonicalRow.ubicacion && dupRow.ubicacion) canonicalRow.ubicacion=dupRow.ubicacion;
+    canonicalRow.min=Math.max(num(canonicalRow.min),num(dupRow.min));
+    canonicalRow.mergedPrepDuplicateAt=new Date().toISOString();
+    canonicalRow.mergedPrepDuplicateFrom=oldId;
+
+    db.stock = (db.stock||[]).filter(r=>r!==dupRow);
+
+    /* No borramos la ficha maestra antigua a ciegas: puede ser una referencia
+       histórica de otra OT/empresa. Queda marcada como alias, pero ya no genera
+       una segunda fila visible en esta empresa. */
+    oldMat.mergedIntoMaterialId=newId;
+    oldMat.mergedIntoCompanyId=companyId;
+    oldMat.deprecatedStockAlias=true;
+    oldMat.mergedAt=new Date().toISOString();
+
+    updateCanonicalCache(canonicalRow,companyId,newId);
+
+    if(!Array.isArray(db.paintDuplicateMergeLog)) db.paintDuplicateMergeLog=[];
+    db.paintDuplicateMergeLog.push({
+      at:new Date().toISOString(),
+      companyId,
+      fromMaterialId:oldId,
+      toMaterialId:newId,
+      name:matName(newMat,canonicalRow),
+      remappedRecords:remapped,
+      addedPhysicalGap:gapAdded,
+      source:'LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819'
+    });
+    if(db.paintDuplicateMergeLog.length>40) db.paintDuplicateMergeLog=db.paintDuplicateMergeLog.slice(-40);
+    return true;
+  }
+
+  function repair(publishNow){
+    if(repairing) return false;
+    repairing=true;
+    let changed=false;
+    try{
+      if(typeof db==='undefined' || !db || !Array.isArray(db.stock) || !Array.isArray(db.materials)) return false;
+      const generated = db.stock.filter(row=>isPrepGeneratedStockRow(row));
+
+      generated.forEach(dupRow=>{
+        if(!db.stock.includes(dupRow)) return;
+        const companyId=cid(dupRow);
+        const oldId=text(first(dupRow.materialId,dupRow.matId,dupRow.material_id));
+        const oldMat=matFor(oldId);
+        if(!companyId || !oldMat || !isPaintMaterial(oldMat,dupRow)) return;
+        const wanted=identity(oldMat,dupRow);
+        if(!wanted) return;
+
+        const candidates=db.stock.filter(row=>{
+          if(row===dupRow) return false;
+          if(cid(row)!==companyId) return false;
+          if(isPrepGeneratedStockRow(row)) return false;
+          const candidateId=text(first(row.materialId,row.matId,row.material_id));
+          if(!candidateId || candidateId===oldId) return false;
+          const m=matFor(candidateId);
+          if(!m || !isPaintMaterial(m,row)) return false;
+          return identity(m,row)===wanted;
+        });
+
+        /* Ambigüedad = no tocar nada. */
+        if(candidates.length!==1) return;
+        if(mergeOne(dupRow,candidates[0])) changed=true;
+      });
+
+      if(changed){
+        db.updatedAt=new Date().toISOString();
+        db.paintDuplicateMergeRepairVersion='V61-20260819';
+        /* La reparación elimina filas de Stock: no permitimos que la nube antigua
+           las reinyecte antes de confirmar la publicación. */
+        window.__LDH_STOCK_AUTHORITATIVE_DELETE_ONCE=true;
+        if(typeof save==='function') save();
+        try{ if(typeof render==='function') render(); }catch(_){ }
+        if(publishNow!==false){
+          try{
+            if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true);
+          }catch(_){ }
+        }
+        console.info('[Stock] Pintura duplicada de Preparación fusionada con su ficha canónica.');
+      }
+      return changed;
+    }catch(error){
+      console.warn('[Stock] No se pudo fusionar pintura duplicada de Preparación',error);
+      return false;
+    }finally{
+      repairing=false;
+    }
+  }
+
+  /* Si Firebase vuelve a aplicar una copia que aún contiene el duplicado, se
+     repara inmediatamente antes de que pueda quedarse visible otra vez. */
+  try{
+    if(typeof window.LDH_applyRemoteStockWithoutReload==='function' &&
+       !window.LDH_applyRemoteStockWithoutReload.__ldhPaintPrepMergeV61){
+      const prev=window.LDH_applyRemoteStockWithoutReload;
+      const wrapped=function(){
+        const result=prev.apply(this,arguments);
+        setTimeout(function(){ repair(true); },60);
+        return result;
+      };
+      wrapped.__ldhPaintPrepMergeV61=true;
+      window.LDH_applyRemoteStockWithoutReload=wrapped;
+    }
+  }catch(_){ }
+
+  const run=function(){ repair(true); };
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',run,{once:true});
+  else setTimeout(run,0);
+  [900,2200,5000].forEach(delay=>setTimeout(run,delay));
+  window.addEventListener('storage',function(ev){
+    if(!ev || ev.key==='ldh_v2_company_stock_v1') setTimeout(run,180);
+  });
+
+  window.LDH_fusionarDuplicadosPinturaPreparacion=function(){ return repair(true); };
+})();
+</script>
+<!-- /LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819 -->
+
 </body>
 </html>
