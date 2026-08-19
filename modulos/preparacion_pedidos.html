@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V106-CONSUMO-AL-SALIR-PREPARACION-20260819" />
+<meta name="ldh-build" content="PREPARACION-V107-RECEPCION-FISICA-VIVA-Y-CONSUMO-AL-CIERRE-20260819" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -18190,17 +18190,18 @@ async function LDH_prepRestorePrematureConsumptionV106(workRef){
         const source=String(movement?.source||"").toLowerCase();
         const reason=String(movement?.reason||movement?.motivo||"").toLowerCase();
         const oldV51=source==="preparacion_pedidos_consumo_fabricacion_v51" ||
+          source==="preparacion_pedidos_consumo_stock_asignado_fabricacion_v51" ||
           reason==="consumo_stock_comun_al_mandar_fabricacion" ||
           reason==="consumo_stock_propio_al_mandar_fabricacion";
         if(!oldV51 || isLegacyPletinaMovement(movement)) return false;
-        const movementId=String(movement?.id ?? movement?.movementId ?? "");
-        const assignmentId=String(movement?.assignmentId ?? "");
-        return assignments.some(a=>
-          sameRef(a) && (
-            (movementId && String(a?.movementId ?? "")===movementId) ||
-            (assignmentId && String(a?.id ?? a?.assignmentId ?? "")===assignmentId)
-          )
-        );
+        /*
+         * V107: si la OT sigue viva en Preparacion, CUALQUIER salida de la V51
+         * identificada por referencia es prematura por definicion. Las versiones
+         * antiguas no siempre guardaban assignmentId/movementId en ambos lados;
+         * exigir ese enlace dejaba el fisico a 0 aunque la asignacion siguiera activa.
+         * No se tocan salidas manuales ni movimientos de otras fuentes.
+         */
+        return true;
       });
 
       if(!candidateMovements.length)
@@ -26900,7 +26901,9 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
         s.startsWith('libre ') || s==='libre' || s.startsWith('libre exacto stock') ||
         s.startsWith('stock comun') || s.startsWith('otra empresa') ||
         s.startsWith('asignado otra empresa') || s.startsWith('stock recibido ok') ||
-        s.startsWith('stock asignado propio sync') || s.startsWith('stock asignado propio confirmado') ||
+        /* V107: "stock asignado propio sync/confirmado" solo demuestra que existe
+           una asignacion; NO demuestra que el material procediera de stock libre.
+           Bloquear por esas trazas impedia reconstruir recepciones fisicas antiguas. */
         s.startsWith('devolucion prestamo recibida');
     });
   }
@@ -26910,9 +26913,13 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
     const requested=Math.max(0,n(line.qty_pedida ?? line.pedida ?? line.qty));
     const received=Math.max(0,n(line.qty_recibida ?? line.recibida ?? line.received));
     const applied=Math.max(0,n(line.aplicado_qty ?? line.aplicado));
+    const consumed=Math.max(0,n(line.stock_consumed_qty));
     if(requested<=0 || received+1e-9<requested) return false;
     if(applied+1e-9>=received) return false;
-    // Si la propia traza demuestra que el material vino de stock ya existente,
+    /* Si stock_consumed_qty ya cubre lo recibido, la linea vino de stock existente
+       aunque falte una traza antigua. No se inventa una entrada fisica. */
+    if(consumed+1e-9>=received) return false;
+    // Si la propia traza demuestra que el material vino de reserva/libre/otra empresa,
     // no se crea una entrada fisica nueva aunque el historico local este incompleto.
     if(hasExistingStockSource(line)) return false;
     return true;
@@ -27012,10 +27019,11 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
 </script>
 <!-- /LDH_PREP_V105_REPARA_RECEPCION_FISICA_LEGACY_EN_PREPARACION_20260819 -->
 
-<!-- LDH_PREP_V106_CONSUMO_SOLO_AL_SALIR_PREPARACION_20260819 -->
+<!-- LDH_PREP_V107_RECEPCION_FISICA_VIVA_Y_CONSUMO_AL_CIERRE_20260819 -->
 <script>
 window.LDH_PREP_V106_CONSUMO_SOLO_AL_SALIR_PREPARACION='PREPARACION-V106-CONSUMO-AL-SALIR-PREPARACION-20260819';
-console.info('[Preparación V106] Stock físico se consume únicamente al cerrar/salir de Preparación');
+window.LDH_PREP_V107_RECEPCION_FISICA_VIVA_Y_CONSUMO_AL_CIERRE='PREPARACION-V107-RECEPCION-FISICA-VIVA-Y-CONSUMO-AL-CIERRE-20260819';
+console.info('[Preparación V107] Recepción física mientras vive en Preparación; consumo únicamente al cierre definitivo');
 </script>
 
 </body></html>
