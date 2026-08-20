@@ -26931,7 +26931,7 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
     running.add(key);
     try{
       if(typeof window.LDH_prepReceivePhysicalCloudV66!=='function') return false;
-      const result=await window.LDH_prepReceivePhysicalCloudV66(line,index);
+      const result=await (typeof window.LDH_prepRepairLegacyPhysicalOnlyV108==='function' ? window.LDH_prepRepairLegacyPhysicalOnlyV108(line,index) : window.LDH_prepReceivePhysicalCloudV66(line,index));
       const current=(typeof window.LDH_prepFindCurrentLineV66==='function')
         ? window.LDH_prepFindCurrentLineV66(index,result?.materialId,result?.materialName)
         : linesNow()[index];
@@ -27025,5 +27025,253 @@ window.LDH_PREP_V106_CONSUMO_SOLO_AL_SALIR_PREPARACION='PREPARACION-V106-CONSUMO
 window.LDH_PREP_V107_RECEPCION_FISICA_VIVA_Y_CONSUMO_AL_CIERRE='PREPARACION-V107-RECEPCION-FISICA-VIVA-Y-CONSUMO-AL-CIERRE-20260819';
 console.info('[Preparación V107] Recepción física mientras vive en Preparación; consumo únicamente al cierre definitivo');
 </script>
+
+
+
+<!-- LDH_PREP_V108_RECEPCION_FISICA_SIN_DUPLICAR_ASIGNACION_20260820 -->
+<script id="LDH_PREP_V108_RECEPCION_FISICA_SIN_DUPLICAR_ASIGNACION_20260820">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V108_PHYSICAL_ONLY_REPAIR__) return;
+  window.__LDH_PREP_V108_PHYSICAL_ONLY_REPAIR__ = true;
+
+  const BUILD='PREPARACION-V108-RECEPCION-FISICA-SIN-DUPLICAR-ASIGNACION-20260820';
+  const running=new Set();
+  let batchRunning=false;
+  const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const norm=v=>String(v??'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/ø/g,'o').replace(/[x×*]/g,'x')
+    .replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  const first=(...vals)=>{for(const v of vals){if(v!==undefined&&v!==null&&String(v).trim()!=='')return v;}return '';};
+
+  function refNow(){try{return String(window.refActual ?? (typeof refActual!=='undefined'?refActual:'') ?? '').trim();}catch(_){return '';}}
+  function linesNow(){try{if(Array.isArray(window.estadoMateriales))return window.estadoMateriales;if(typeof estadoMateriales!=='undefined'&&Array.isArray(estadoMateriales))return estadoMateriales;}catch(_){ }return [];}
+  function metaNow(){try{return window.metaActual ?? (typeof metaActual!=='undefined'?metaActual:null) ?? {};}catch(_){return {};}}
+  function lineName(line){return String(first(line?.linked_matName,line?.stockLinkLabel,line?.mat,line?.material,line?.name,'')).trim();}
+  function isBar(line){return norm(first(line?.unit,line?.unidad,''))==='barra';}
+  function isPletina(line){const x=norm(lineName(line));return x.includes('pletina')||x.includes('planchuela')||x.includes('llanta');}
+  function isChapaEscalon(line){const x=norm(lineName(line));return x==='chapa escalon'||x.startsWith('chapa escalon ');}
+  function livePreparation(ref){try{if(typeof getAny==='function'&&typeof KP==='function'&&getAny(KP(ref)))return true;}catch(_){ }return ref===refNow()&&linesNow().length>0;}
+  function traceSources(line){return (Array.isArray(line?.trace)?line.trace:[]).map(t=>norm(t?.source??''));}
+  function hasLegacyReceiptTrace(line){return traceSources(line).some(s=>s==='legacy recepcion fisica repair v105'||s==='legacy recepcion fisica repair v108');}
+  function hasStockBackingTrace(line){return traceSources(line).some(s=>
+    s==='libre'||s.startsWith('libre ')||s.startsWith('libre exacto stock')||
+    s.startsWith('stock recibido ok')||s.startsWith('stock asignado propio')
+  );}
+  function hasExistingStockSource(line){return traceSources(line).some(s=>
+    s==='reserva'||s.startsWith('reserva ')||s==='libre'||s.startsWith('libre ')||
+    s.startsWith('libre exacto stock')||s.startsWith('stock comun')||
+    s.startsWith('otra empresa')||s.startsWith('asignado otra empresa')||
+    s.startsWith('stock recibido ok')||s.startsWith('devolucion prestamo recibida')
+  );}
+  function active(row){try{return typeof LDH_prepActiveOperationalV45==='function'?LDH_prepActiveOperationalV45(row):!['consumida','consumido','liberada','liberado','cancelada','cancelado','consolidada v108'].includes(norm(first(row?.status,row?.estado,'')));}catch(_){return true;}}
+  function isLoan(row){try{return typeof LDH_prepIsLoanV45==='function'?LDH_prepIsLoanV45(row):norm(first(row?.assignmentType,row?.reason,row?.source,'')).includes('prestamo');}catch(_){return false;}}
+  function rowRefMatches(row,aliases,reference){try{if(typeof LDH_prepReferenceMatchesV66==='function')return LDH_prepReferenceMatchesV66(row,aliases);}catch(_){ }return norm(first(row?.consumerRef,row?.jobRef,row?.ref,row?.reference,''))===norm(reference);}
+  function materialId(row){return String(first(row?.materialId,row?.matId,row?.material_id,row?.stockMatId,''));}
+  function companyId(row){return String(first(row?.companyId,row?.empresaId,row?.company,row?.empresa,''));}
+  function materialNameById(db,id){const m=(db.materials||[]).find(x=>String(first(x?.id,x?.materialId,x?.matId,''))===String(id));return String(first(m?.name,m?.nombre,m?.material,m?.mat,''));}
+  function rowMaterialName(db,row){return String(first(row?.materialName,row?.material,row?.mat,row?.name,row?.nombreMaterial,materialNameById(db,materialId(row)),''));}
+  function materialMatches(db,row,targetId,targetName){const id=materialId(row);if(targetId&&id===targetId)return true;const a=norm(rowMaterialName(db,row));const b=norm(targetName);return !!a&&!!b&&a===b;}
+  function receiptAssignment(row){const id=String(first(row?.id,row?.assignmentId,''));const src=norm([row?.source,row?.reason].filter(Boolean).join(' '));return id.startsWith('asg_prep_received_')||src.includes('preparacion pedidos recepcion fisica')||src.includes('recibido fisico v66');}
+  function qty(row){return Math.max(0,n(first(row?.qty,row?.cantidad,row?.pendingQty,row?.qtyPending,0)));}
+  function setQty(row,value){row.qty=value;row.cantidad=value;if(row.pendingQty!==undefined)row.pendingQty=value;if(row.qtyPending!==undefined)row.qtyPending=value;}
+  function closeDuplicate(row,keepId,now){row.status='consolidada_v108';row.estado='consolidada_v108';row.pendingQty=0;row.qtyPending=0;row.consolidatedInto=keepId||'';row.consolidatedAt=now;row.consolidatedReason='duplicado_asignacion_recepcion_fisica_legacy_v108';row.updatedAt=now;}
+  function remapAssignment(row,targetId,targetName,now){row.materialId=targetId;row.matId=targetId;if(row.material_id!==undefined)row.material_id=targetId;if(row.stockMatId!==undefined)row.stockMatId=targetId;row.materialName=targetName;if(row.material!==undefined)row.material=targetName;if(row.mat!==undefined)row.mat=targetName;row.updatedAt=now;}
+  function knownPrematureMovement(row){const src=norm(row?.source??'');const reason=norm(first(row?.reason,row?.motivo,''));return src.includes('consumo fabricacion v51')||src.includes('consumo stock asignado fabricacion v51')||reason.includes('consumo stock propio al mandar fabricacion')||reason.includes('consumo stock comun al mandar fabricacion');}
+  function isPositivePhysicalReceipt(row){const type=norm(first(row?.type,row?.tipo,''));if(!['entrada','in','ajuste pos','devolucion','add stock','entrada preparacion','entrada prep','entrada desde preparacion','stock entrada','recepcion stock'].includes(type))return false;const src=norm([row?.source,row?.reason].filter(Boolean).join(' '));return src.includes('recepcion fisica')||src.includes('entrada desde preparacion')||src.includes('legacy physical');}
+
+  async function repairPhysicalOnly(line,index){
+    const reference=refNow();
+    if(!reference) throw new Error('El pedido no tiene referencia.');
+    if(!livePreparation(reference)) return {changed:false,reason:'no_vive_en_preparacion'};
+    if(!LDH_PREP_STOCK_AUTH_V28.currentUser){try{await signInAnonymously(LDH_PREP_STOCK_AUTH_V28);}catch(_){ }}
+    if(!LDH_PREP_STOCK_AUTH_V28.currentUser) throw new Error('Stock nube todavía no está autenticado.');
+
+    const requested=Math.max(0,n(first(line?.qty_pedida,line?.pedida,line?.qty,0)));
+    const received=Math.max(0,n(first(line?.qty_recibida,line?.recibida,line?.received,0)));
+    if(requested<=0||received<=0) return {changed:false,reason:'sin_recepcion'};
+    const orderCompanyName=String(first(metaNow()?.empresa,metaNow()?.company,'')).trim();
+    if(!orderCompanyName) throw new Error('El pedido no tiene empresa receptora.');
+    const aliases=typeof LDH_prepReferenceAliasesV57==='function'?LDH_prepReferenceAliasesV57(reference):[reference];
+    const desired=Math.min(requested,received);
+    const appliedBefore=Math.max(0,n(first(line?.aplicado_qty,line?.aplicado,0)));
+    const needsReceiptByLine=hasLegacyReceiptTrace(line)||(desired>appliedBefore+1e-9&&!hasExistingStockSource(line));
+    const backingProof=hasStockBackingTrace(line);
+
+    const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
+      const metaRef=doc(LDH_PREP_STOCK_DB_V28,'taller_data','stock');
+      const remoteDB=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
+      remoteDB.companies=Array.isArray(remoteDB.companies)?remoteDB.companies:[];
+      remoteDB.materials=Array.isArray(remoteDB.materials)?remoteDB.materials:[];
+      remoteDB.stock=Array.isArray(remoteDB.stock)?remoteDB.stock:[];
+      remoteDB.movements=Array.isArray(remoteDB.movements)?remoteDB.movements:[];
+      remoteDB.assignments=Array.isArray(remoteDB.assignments)?remoteDB.assignments:[];
+
+      const company=remoteDB.companies.find(row=>LDH_prepCompanyMatchesV45(row,orderCompanyName));
+      if(!company) throw new Error(`No se encuentra la empresa ${orderCompanyName} en Stock.`);
+      const cid=String(first(company?.id,company?.companyId,company?.empresaId,orderCompanyName));
+      const resolved=LDH_prepResolveCompanyMaterialV98(remoteDB,line,cid,false);
+      const material=resolved?.material;
+      if(!material) throw new Error(`No se encuentra ${lineName(line)} en Stock.`);
+      const mid=String(first(material?.id,material?.materialId,material?.matId,''));
+      const mname=String(first(material?.name,material?.nombre,material?.material,lineName(line)));
+      if(!mid) throw new Error('El material no tiene identificador.');
+      const now=new Date().toISOString();
+      let changed=false;
+      let consolidated=0;
+      let restoredPremature=0;
+      let qtyAdded=0;
+
+      // 1) Consolidar SOLO asignaciones activas de esta OT + empresa + material lógico.
+      const candidates=remoteDB.assignments.filter(row=>
+        active(row)&&!isLoan(row)&&companyId(row)===cid&&rowRefMatches(row,aliases,reference)&&materialMatches(remoteDB,row,mid,mname)
+      );
+      if(candidates.length){
+        const receipts=candidates.filter(receiptAssignment);
+        const originals=candidates.filter(row=>!receiptAssignment(row));
+        const total=candidates.reduce((s,row)=>s+qty(row),0);
+        const shouldConsolidate=total>desired+1e-9 || (receipts.length>0&&originals.length>0&&hasLegacyReceiptTrace(line));
+        if(shouldConsolidate){
+          const preferred=originals.find(row=>materialId(row)===mid)||originals[0]||receipts.find(row=>materialId(row)===mid)||receipts[0];
+          if(preferred){
+            const keepId=String(first(preferred?.id,preferred?.assignmentId,''));
+            setQty(preferred,desired);
+            preferred.status='activa';preferred.estado='activa';
+            preferred.phase=first(preferred.phase,preferred.fase,'preparacion');
+            preferred.fase=first(preferred.fase,preferred.phase,'preparacion');
+            remapAssignment(preferred,mid,mname,now);
+            candidates.forEach(row=>{if(row===preferred)return;closeDuplicate(row,keepId,now);consolidated+=1;});
+            changed=true;
+          }
+        }else{
+          // Si hay una sola asignación legacy bajo un ID homónimo, remapearla al ID canónico.
+          const one=candidates.length===1?candidates[0]:null;
+          if(one&&materialId(one)!==mid){remapAssignment(one,mid,mname,now);changed=true;}
+        }
+      }
+
+      // 2) Si existe una salida V51 prematura de ESTA OT/material, retirarla mientras siga viva en Preparación.
+      const premature=remoteDB.movements.filter(row=>
+        rowRefMatches(row,aliases,reference)&&companyId(row)===cid&&materialMatches(remoteDB,row,mid,mname)&&knownPrematureMovement(row)
+      );
+      if(premature.length){
+        const ids=new Set(premature.map(row=>String(first(row?.id,row?.movementId,''))).filter(Boolean));
+        premature.forEach(row=>{restoredPremature+=Math.max(0,n(first(row?.qty,row?.cantidad,0)));});
+        remoteDB.movements=remoteDB.movements.filter(row=>!ids.has(String(first(row?.id,row?.movementId,''))));
+        changed=true;
+      }
+
+      // 3) Reconstrucción física de una recepción antigua: SOLO movimiento de entrada, NUNCA nueva asignación.
+      const opId='mov_prep_legacy_physical_v108_'+LDH_prepSafeIdV66(reference)+'_'+LDH_prepSafeIdV66(cid)+'_'+LDH_prepSafeIdV66(mid)+'_'+String(index);
+      const priorReceipt=remoteDB.movements.filter(row=>
+        companyId(row)===cid&&rowRefMatches(row,aliases,reference)&&materialMatches(remoteDB,row,mid,mname)&&isPositivePhysicalReceipt(row)
+      ).reduce((s,row)=>s+Math.max(0,n(first(row?.qty,row?.cantidad,0))),0);
+      if(needsReceiptByLine){
+        const targetReceipt=Math.max(0,desired-appliedBefore);
+        qtyAdded=Math.max(0,targetReceipt-priorReceipt);
+        if(qtyAdded>1e-9){
+          remoteDB.movements.push({
+            id:opId,movementId:opId,companyId:cid,empresaId:cid,
+            empresa:String(first(company?.name,company?.nombre,orderCompanyName)),company:String(first(company?.name,company?.nombre,orderCompanyName)),companyName:String(first(company?.name,company?.nombre,orderCompanyName)),
+            materialId:mid,matId:mid,material_id:mid,material:mname,mat:mname,materialName:mname,name:mname,
+            unit:String(first(material?.unit,material?.unidad,line?.unit,line?.unidad,'')),unidad:String(first(material?.unit,material?.unidad,line?.unit,line?.unidad,'')),
+            type:'entrada',tipo:'entrada',qty:qtyAdded,cantidad:qtyAdded,amount:qtyAdded,date:now,createdAt:now,updatedAt:now,
+            ref:reference,jobRef:reference,lineIndex:Number(index),source:'preparacion_pedidos_legacy_physical_v108',reason:'reconstruccion_recepcion_fisica_legacy_v108',idempotencyKey:opId
+          });
+          changed=true;
+        }
+      }
+
+      // 4) Si la línea demuestra "stock libre" pero el histórico físico quedó por debajo de SU asignación,
+      // restaurar solo el déficit probado. Antes se han retirado las salidas V51 conocidas.
+      let physical=LDH_prepPhysicalRemoteV45(remoteDB,cid,mid);
+      const ownActive=remoteDB.assignments.filter(row=>
+        active(row)&&!isLoan(row)&&companyId(row)===cid&&rowRefMatches(row,aliases,reference)&&materialMatches(remoteDB,row,mid,mname)
+      ).reduce((s,row)=>s+qty(row),0);
+      if(backingProof&&desired>0&&ownActive>0&&physical+1e-9<Math.min(desired,ownActive)){
+        const minPhysical=Math.min(desired,ownActive);
+        const deficit=Math.max(0,minPhysical-physical);
+        if(deficit>1e-9){
+          const backId='mov_prep_legacy_backing_v108_'+LDH_prepSafeIdV66(reference)+'_'+LDH_prepSafeIdV66(cid)+'_'+LDH_prepSafeIdV66(mid)+'_'+String(index);
+          const exists=remoteDB.movements.some(row=>String(first(row?.id,row?.movementId,''))===backId);
+          if(!exists){
+            remoteDB.movements.push({
+              id:backId,movementId:backId,companyId:cid,empresaId:cid,empresa:String(first(company?.name,company?.nombre,orderCompanyName)),company:String(first(company?.name,company?.nombre,orderCompanyName)),companyName:String(first(company?.name,company?.nombre,orderCompanyName)),
+              materialId:mid,matId:mid,material_id:mid,material:mname,mat:mname,materialName:mname,name:mname,
+              unit:String(first(material?.unit,material?.unidad,line?.unit,line?.unidad,'')),unidad:String(first(material?.unit,material?.unidad,line?.unit,line?.unidad,'')),
+              type:'ajuste_pos',tipo:'ajuste_pos',qty:deficit,cantidad:deficit,amount:deficit,date:now,createdAt:now,updatedAt:now,
+              ref:reference,jobRef:reference,lineIndex:Number(index),source:'preparacion_pedidos_legacy_backing_v108',reason:'restauracion_fisico_asignacion_stock_libre_legacy_v108',idempotencyKey:backId
+            });
+            changed=true;
+            qtyAdded+=deficit;
+          }
+        }
+      }
+
+      physical=LDH_prepPhysicalRemoteV45(remoteDB,cid,mid);
+      let stockRow=resolved?.stockRow||remoteDB.stock.find(row=>companyId(row)===cid&&materialId(row)===mid);
+      if(!stockRow) throw new Error(`No existe la fila de Stock de ${mname} en ${orderCompanyName}.`);
+      stockRow.qty=physical;stockRow.cantidad=physical;stockRow.stock=physical;stockRow.real=physical;stockRow.fisico=physical;stockRow.physicalQty=physical;stockRow.updatedAt=now;
+
+      if(changed) LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,remoteDB,'preparacion_legacy_physical_only_v108');
+      return {remoteDB,changed,companyId:cid,materialId:mid,materialName:mname,operationId:opId,qtyAdded,physical,consolidated,restoredPremature};
+    });
+
+    if(result?.remoteDB){
+      window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;
+      window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB);
+      window.__LDH_STOCK_MEMORY_DB=result.remoteDB;
+      try{setAny(LDH_PREP_STOCK_KEY_V28,JSON.stringify(result.remoteDB));}catch(_){ }
+      if(result.changed){try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'legacy_physical_only_v108',materialId:result.materialId}}));}catch(_){ }}
+    }
+    return result;
+  }
+  window.LDH_prepRepairLegacyPhysicalOnlyV108=repairPhysicalOnly;
+
+  function shouldAudit(line){
+    if(!line||!isBar(line)||isPletina(line)||isChapaEscalon(line))return false;
+    const requested=Math.max(0,n(first(line?.qty_pedida,line?.pedida,line?.qty,0)));
+    const received=Math.max(0,n(first(line?.qty_recibida,line?.recibida,line?.received,0)));
+    if(requested<=0||received+1e-9<requested)return false;
+    return hasLegacyReceiptTrace(line)||hasStockBackingTrace(line)||(Math.max(0,n(first(line?.aplicado_qty,line?.aplicado,0)))+1e-9<received&&!hasExistingStockSource(line));
+  }
+
+  async function auditCurrent(){
+    if(batchRunning)return;
+    const reference=refNow();
+    if(!reference||!livePreparation(reference))return;
+    const items=linesNow().map((line,index)=>({line,index})).filter(x=>shouldAudit(x.line));
+    if(!items.length)return;
+    batchRunning=true;
+    let changed=false;
+    try{
+      for(const item of items){
+        const key=reference+'|'+item.index+'|'+norm(lineName(item.line));
+        if(running.has(key))continue;
+        running.add(key);
+        try{
+          const res=await repairPhysicalOnly(item.line,item.index);
+          if(res?.changed){changed=true;const current=linesNow()[item.index];if(current){const desired=Math.min(Math.max(0,n(first(current?.qty_pedida,current?.pedida,current?.qty,0))),Math.max(0,n(first(current?.qty_recibida,current?.recibida,current?.received,0))));current.aplicado_qty=Math.max(n(current.aplicado_qty),desired);current.aplicado=Math.max(n(current.aplicado),desired);if(!Array.isArray(current.trace))current.trace=[];if(!current.trace.some(t=>norm(t?.source)==='legacy recepcion fisica repair v108'))current.trace.push({at:new Date().toISOString(),qty:desired,qtyAddedToPhysical:n(res.qtyAdded),source:'legacy_recepcion_fisica_repair_v108'});}}
+        }catch(error){const msg=String(error?.message||error||'');if(!/autentic|todavia no|cargad|conect/i.test(msg))console.warn('[Preparacion V108] Auditoria legacy',reference,item.index,error);}finally{running.delete(key);}
+      }
+      if(changed){
+        try{if(typeof window.guardarEstadoLocal==='function')window.guardarEstadoLocal();else if(typeof guardarEstadoLocal==='function')guardarEstadoLocal();}catch(_){ }
+        try{if(typeof window.__ldhPrepSyncNow==='function')await window.__ldhPrepSyncNow('legacy_physical_v108:'+reference);}catch(_){ }
+        try{if(typeof window.LDH_prepApplyFirebaseStockV28==='function')await window.LDH_prepApplyFirebaseStockV28(true);}catch(_){ }
+        try{if(typeof window.renderTabla==='function')window.renderTabla();}catch(_){ }
+        try{if(typeof window.cargarLista==='function')window.cargarLista();}catch(_){ }
+      }
+    }finally{batchRunning=false;}
+  }
+
+  function schedule(){[700,1800,3800,7000].forEach(d=>setTimeout(auditCurrent,d));}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',schedule,{once:true});else schedule();
+  try{window.addEventListener('ldh:stock-cloud-updated',e=>{if(norm(e?.detail?.source).includes('legacy physical only v108'))return;setTimeout(auditCurrent,500);});}catch(_){ }
+  window.LDH_PREP_V108_RECEPCION_FISICA_SIN_DUPLICAR_ASIGNACION=BUILD;
+  console.info('[Preparacion V108] Recepcion legacy: fisico sin duplicar asignaciones; consolidacion segura por OT/material');
+})();
+</script>
+<!-- /LDH_PREP_V108_RECEPCION_FISICA_SIN_DUPLICAR_ASIGNACION_20260820 -->
 
 </body></html>
