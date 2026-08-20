@@ -3785,18 +3785,9 @@ async function autoCerrarSiCompletoPorRecepcion(){
       return;
     }
 
-    // 2) Fase autoritativa: una OT puede estar ya en Fabricación aunque la meta
-    //    local todavía no haya recibido en_fabricacion. Se consulta primero el
-    //    flujo compartido para no dejar material físico/reservado colgado.
-    let faseCierreV114 = "preparacion";
-    try{
-      if(typeof window.LDH_getTrabajoStage === "function")
-        faseCierreV114 = String(window.LDH_getTrabajoStage(refActual) || "preparacion").toLowerCase();
-      else if(metaActual && (metaActual.en_fabricacion || metaActual.fabricacion_ts)) faseCierreV114 = "fabricacion";
-    }catch(_){
-      if(metaActual && (metaActual.en_fabricacion || metaActual.fabricacion_ts)) faseCierreV114 = "fabricacion";
-    }
-    if(!["fabricacion","pintura","almacen","entregado"].includes(faseCierreV114)){
+    // 2) Si NO está aún en Fabricación, NO lo retiramos de Preparación.
+    //    Debe enviarse SOLO cuando pulses el botón “Mandar a fabricación”.
+    if(!(metaActual && metaActual.en_fabricacion)){
       const wasNotified = !!(metaActual && metaActual._notified_complete);
       metaActual.recepcion_completa = true;
       metaActual._notified_complete = true;
@@ -3819,14 +3810,9 @@ async function autoCerrarSiCompletoPorRecepcion(){
         return;
       }
     }catch(e){}
-    // V114 · Un único cierre autoritativo: primero consumo atómico de Stock y
-    // solo después retirada de Preparación. Neutraliza la retirada antigua V80.
-    if(typeof window.LDH_prepFinalCloseAuthoritativeV114 === "function"){
-      await window.LDH_prepFinalCloseAuthoritativeV114(String(refActual || "").trim(),{source:"auto_recepcion",silent:false});
-      return;
-    }
-
-    // Fallback V106 por compatibilidad si el bloque final todavía no estuviera cargado.
+    // V106 · El stock físico se consume SOLO cuando el trabajo sale definitivamente
+    // de Preparación. Estar ya en Fabricación no basta: mientras esta ficha siga viva,
+    // el material recibido continúa físico + reservado/asignado.
     const refCierre = String(refActual || "").trim();
     if(!refCierre) return;
     window.__LDH_PREP_FINAL_CLOSE_LOCK_V106 = window.__LDH_PREP_FINAL_CLOSE_LOCK_V106 || new Set();
@@ -19220,10 +19206,7 @@ async function LDH_prepReconcileCurrentFabricationV51() {
 
   LDH_PREP_RECONCILING_FAB_V51.add(reference);
   try {
-    const consumeCurrent = window.LDH_consumirStockAsignadoAlMandarFabricacion
-      || window.LDH_consumirStockComunAlMandarFabricacion
-      || LDH_prepConsumeCommonAtFabricationV32;
-    const result = await consumeCurrent(reference);
+    const result = await LDH_prepConsumeCommonAtFabricationV32(reference);
     LDH_PREP_RECONCILED_FAB_V51.add(reference);
     if (result.consumedQty > 0) {
       try { await LDH_prepApplyFirebaseStockV28(true); } catch (_) {}
@@ -21369,263 +21352,6 @@ async function LDH_prepRepairCurrentHistoricalNegativesV99() {
 }
 window.LDH_prepRepairCurrentHistoricalNegativesV99=LDH_prepRepairCurrentHistoricalNegativesV99;
 window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
-
-
-/* === LDH_PREP_V114_CIERRE_ATOMICO_Y_PLETINA_UNIDADES_20260820 === */
-const LDH_PREP_FINAL_CONSUME_LOCK_V114 = new Set();
-
-function LDH_prepV114Material(remoteDB, materialId){
-  return (remoteDB.materials || []).find(row =>
-    String(row?.id ?? row?.materialId ?? row?.matId ?? '') === String(materialId || '')
-  ) || null;
-}
-function LDH_prepV114StockRow(remoteDB, companyId, materialId){
-  return (remoteDB.stock || []).find(row =>
-    String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? '') === String(companyId || '')
-    && String(row?.materialId ?? row?.matId ?? row?.material_id ?? '') === String(materialId || '')
-  ) || null;
-}
-function LDH_prepV114IsPletina(remoteDB, materialId){
-  const m = LDH_prepV114Material(remoteDB, materialId) || {};
-  const text = LDH_prepNormCloudV30([m.name,m.nombre,m.material,m.family,m.familia].filter(Boolean).join(' '));
-  return text.includes('pletina') || text.includes('planchuela') || text.includes('llanta');
-}
-function LDH_prepV114IsMmAssignment(row){
-  const unit = LDH_prepNormCloudV30(row?.unitBasis ?? row?.lengthMode ?? row?.unit ?? row?.unidad ?? '');
-  const schema = LDH_prepNormCloudV30(row?.lengthQtySchemaV66 ?? row?.lengthQtySchemaV64 ?? row?.lengthQtySchema ?? '');
-  return row?.pletinaMm === true || row?.pletina_mm === true || row?.gestion_mm === true
-    || unit === 'mm' || unit === 'milimetro' || unit === 'milimetros' || schema === 'mm';
-}
-function LDH_prepV114BarLength(row, stockRow){
-  return Math.max(1, Math.round(Number(
-    row?.barLengthMm ?? row?.commercial_bar_mm ?? stockRow?.barLengthMm ?? 6000
-  ) || 6000));
-}
-function LDH_prepV114SameMovementRef(row, reference){
-  return LDH_prepSameRefV32(row?.ref ?? row?.jobRef ?? row?.consumerRef ?? row?.reference ?? '', reference);
-}
-function LDH_prepV114RepairMalformedPletinaMovements(remoteDB, onlyRef){
-  const assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
-  const byId = new Map(assignments.map(row => [String(row?.id ?? row?.assignmentId ?? ''), row]));
-  let changed = 0;
-  (remoteDB.movements || []).forEach(movement => {
-    if(onlyRef && !LDH_prepV114SameMovementRef(movement, onlyRef)) return;
-    const type = LDH_prepNormCloudV30(movement?.type ?? movement?.tipo ?? '');
-    if(!['salida','out','consumo','ajuste neg','ajuste_neg'].includes(type)) return;
-    const src = LDH_prepNormCloudV30([movement?.source,movement?.reason].filter(Boolean).join(' '));
-    if(!src.includes('preparacion pedidos consumo salida preparacion v106')
-       && !src.includes('consumo stock propio al salir preparacion')
-       && !src.includes('consumo stock comun al salir preparacion')) return;
-    if(movement?.pletinaUnitRepairV114) return;
-
-    const companyId = String(movement?.companyId ?? movement?.empresaId ?? '');
-    const materialId = String(movement?.materialId ?? movement?.matId ?? '');
-    if(!companyId || !materialId || !LDH_prepV114IsPletina(remoteDB, materialId)) return;
-    const stockRow = LDH_prepV114StockRow(remoteDB, companyId, materialId);
-
-    // V115: incluso si la fila moderna de pletina ya trabaja en mm, los movimientos
-    // físicos siguen teniendo que ser compatibles con Stock, cuyo histórico base
-    // se expresa en equivalentes de barra. Por eso también normalizamos esos casos.
-    const assignment = byId.get(String(movement?.assignmentId ?? '')) || assignments.find(row => {
-      if(!LDH_prepV114IsMmAssignment(row)) return false;
-      if(!LDH_prepV114SameMovementRef(row, movement?.ref ?? movement?.jobRef ?? movement?.consumerRef ?? movement?.reference ?? '')) return false;
-      return String(row?.companyId ?? row?.empresaId ?? '') === companyId
-        && String(row?.materialId ?? row?.matId ?? '') === materialId;
-    }) || null;
-    const qtyMm = Math.max(0, Number(movement?.qty ?? movement?.cantidad ?? 0) || 0);
-    if(qtyMm < 1000) return;
-    const negativeLegacyPhysical = Number(LDH_prepPhysicalRemoteV45(remoteDB,companyId,materialId)) < -0.000001;
-    if((!assignment || !LDH_prepV114IsMmAssignment(assignment)) && !negativeLegacyPhysical) return;
-    const barLengthMm = LDH_prepV114BarLength(assignment || movement, stockRow);
-    const barsEquivalent = qtyMm / barLengthMm;
-    if(!(barsEquivalent > 0) || barsEquivalent > 1000) return;
-
-    movement.qtyOriginalMm = qtyMm;
-    movement.cantidadOriginalMm = qtyMm;
-    movement.qty = barsEquivalent;
-    movement.cantidad = barsEquivalent;
-    movement.unit = 'barras';
-    movement.unidad = 'barras';
-    movement.unitBasis = 'barra_legacy_equivalente';
-    movement.barLengthMm = barLengthMm;
-    movement.pletinaUnitRepairV114 = {at:new Date().toISOString(), fromMm:qtyMm, toBars:barsEquivalent};
-    movement.updatedAt = new Date().toISOString();
-    changed += 1;
-  });
-  return changed;
-}
-
-async function LDH_prepConsumeOnFinalCloseV114(workRef){
-  const reference = String(workRef || '').trim();
-  if(!reference) throw new Error('El trabajo no tiene referencia.');
-  if(LDH_PREP_FINAL_CONSUME_LOCK_V114.has(reference)) return {consumedQty:0,consumedAssignments:0,repairedPletina:0};
-  if(!LDH_PREP_STOCK_AUTH_V28.currentUser) throw new Error('Stock nube todavía no está autenticado.');
-  LDH_PREP_FINAL_CONSUME_LOCK_V114.add(reference);
-  try{
-    const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async transaction => {
-      const metaRef = doc(LDH_PREP_STOCK_DB_V28,'taller_data','stock');
-      const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
-      const assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
-      const movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
-      const movementIds = new Set(movements.map(row => String(row?.id ?? '')));
-      const now = new Date().toISOString();
-      let repairedPletina = LDH_prepV114RepairMalformedPletinaMovements(remoteDB, reference);
-      let consumedQty = 0;
-      let consumedAssignments = 0;
-
-      assignments.forEach(assignment => {
-        const assignmentRef = assignment?.consumerRef ?? assignment?.jobRef ?? assignment?.ref ?? assignment?.reference ?? '';
-        if(!LDH_prepSameRefV32(assignmentRef,reference)) return;
-        if(!LDH_prepCommonAssignmentActiveV32(assignment)) return;
-
-        const qty = Math.max(0,Number(assignment?.qty ?? assignment?.cantidad ?? 0) || 0);
-        if(qty <= 0) return;
-        const companyId = String(assignment?.companyId ?? assignment?.empresaId ?? '');
-        const materialId = String(assignment?.materialId ?? assignment?.matId ?? '');
-        if(!companyId || !materialId) return;
-        const assignmentId = String(assignment?.id ?? assignment?.assignmentId ?? `${companyId}_${materialId}_${reference}`);
-        const isCommon = LDH_prepIsCommonAssignmentV31(assignment);
-        const movementId = (isCommon ? 'mov_stock_comun_fabricacion_' : 'mov_stock_propio_fabricacion_')
-          + assignmentId.replace(/[^a-zA-Z0-9_-]+/g,'_');
-
-        if(!movementIds.has(movementId)){
-          const isPletina = LDH_prepV114IsPletina(remoteDB, materialId);
-          const isMm = isPletina && LDH_prepV114IsMmAssignment(assignment);
-          const stockRow = LDH_prepV114StockRow(remoteDB, companyId, materialId);
-          let movementQty = qty;
-          let movementUnit = assignment?.unit ?? assignment?.unidad ?? '';
-          let movementUnitBasis = assignment?.unitBasis ?? assignment?.lengthMode ?? '';
-          let barLengthMm = 0;
-          let legacyMm = 0;
-
-          if(isMm){
-            barLengthMm = LDH_prepV114BarLength(assignment, stockRow);
-            // V115: el movimiento histórico se escribe SIEMPRE en equivalente de barra
-            // para que cualquier lector antiguo de Stock no interprete 6000 mm como
-            // 6000 barras. El dato exacto en mm queda preservado aparte.
-            movementQty = qty / barLengthMm;
-            legacyMm = qty;
-            movementUnit = 'barras';
-            movementUnitBasis = 'barra_equivalente_mm';
-
-            if(String(stockRow?.lengthMode ?? '').toLowerCase() === 'mm'){
-              const beforeMm = Math.max(0,Number(stockRow?.lengthPhysicalMm ?? 0) || 0);
-              if(qty > beforeMm + 0.000001){
-                throw new Error(`Stock insuficiente para consumir la pletina: ${beforeMm} mm físicos, ${qty} mm asignados.`);
-              }
-              stockRow.lengthPhysicalMm = Math.max(0,beforeMm-qty);
-              stockRow.updatedAt = now;
-            }else{
-              const physicalBars = Math.max(0,Number(LDH_prepPhysicalRemoteV45(remoteDB,companyId,materialId)) || 0);
-              if(movementQty > physicalBars + 0.000001){
-                throw new Error(`Stock insuficiente para consumir la pletina legacy: ${physicalBars} barras físicas, equivalencia requerida ${movementQty}.`);
-              }
-            }
-          }
-
-          const movement = {
-            id:movementId,
-            companyId, materialId,
-            type:'salida', tipo:'salida',
-            qty:movementQty, cantidad:movementQty,
-            date:now, createdAt:now,
-            ref:reference, jobRef:reference,
-            concept:assignment?.concept ?? '',
-            reason:isCommon ? 'consumo_stock_comun_al_salir_preparacion' : 'consumo_stock_propio_al_salir_preparacion',
-            source:'preparacion_pedidos_consumo_salida_preparacion_v114',
-            assignmentId,
-            debtExempt:true,
-            returnRequired:false,
-            unit:movementUnit,
-            unidad:movementUnit,
-            unitBasis:movementUnitBasis
-          };
-          if(barLengthMm) movement.barLengthMm = barLengthMm;
-          if(legacyMm){
-            movement.qtyOriginalMm = legacyMm;
-            movement.cantidadOriginalMm = legacyMm;
-            movement.qtyMm = legacyMm;
-            movement.cantidadMm = legacyMm;
-            movement.pletinaLegacyMmToBarsV114 = true;
-            movement.pletinaMmToBarEquivalentV115 = true;
-          }
-          movements.push(movement);
-          movementIds.add(movementId);
-          consumedQty += movementQty;
-        }
-
-        assignment.status='consumida';
-        assignment.estado='consumida';
-        assignment.phase='fabricacion';
-        assignment.fase='fabricacion';
-        assignment.consumedQty=qty;
-        assignment.consumedAt=now;
-        assignment.updatedAt=now;
-        assignment.movementId=movementId;
-        consumedAssignments += 1;
-      });
-
-      if(!consumedAssignments && !repairedPletina){
-        return {remoteDB,consumedQty:0,consumedAssignments:0,repairedPletina:0,changed:false};
-      }
-      remoteDB.assignments=assignments;
-      remoteDB.movements=movements;
-      remoteDB.updatedAt=now;
-      remoteDB.finalCloseStockVersion='V115-20260820';
-      LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,remoteDB,'preparacion_cierre_final_stock_v114');
-      return {remoteDB,consumedQty,consumedAssignments,repairedPletina,changed:true};
-    });
-
-    if(result?.changed){
-      const raw = JSON.stringify(result.remoteDB);
-      try{ setAny(LDH_PREP_STOCK_KEY_V28,raw); }catch(_){ try{sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28,raw);}catch(__){} }
-      window.__LDH_STOCK_MEMORY_DB=result.remoteDB;
-      window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;
-      try{ window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB); }catch(_){ }
-      try{ window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'cierre_final_v114'}})); }catch(_){ }
-    }
-    return {consumedQty:Number(result?.consumedQty||0),consumedAssignments:Number(result?.consumedAssignments||0),repairedPletina:Number(result?.repairedPletina||0)};
-  }finally{
-    LDH_PREP_FINAL_CONSUME_LOCK_V114.delete(reference);
-  }
-}
-window.LDH_consumirStockComunAlMandarFabricacion = LDH_prepConsumeOnFinalCloseV114;
-window.LDH_consumirStockAsignadoAlMandarFabricacion = LDH_prepConsumeOnFinalCloseV114;
-window.LDH_prepConsumeOnFinalCloseV114 = LDH_prepConsumeOnFinalCloseV114;
-
-async function LDH_prepRepairAllMalformedPletinaMovementsV114(){
-  if(!LDH_PREP_STOCK_AUTH_V28.currentUser) return false;
-  try{
-    const result = await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
-      const metaRef=doc(LDH_PREP_STOCK_DB_V28,'taller_data','stock');
-      const remoteDB=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
-      const repaired=LDH_prepV114RepairMalformedPletinaMovements(remoteDB,'');
-      if(!repaired) return {changed:false,remoteDB,repaired:0};
-      remoteDB.updatedAt=new Date().toISOString();
-      remoteDB.pletinaLegacyMovementRepairVersion='V115-20260820';
-      LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,remoteDB,'preparacion_repara_salida_pletina_unidades_v114');
-      return {changed:true,remoteDB,repaired};
-    });
-    if(result?.changed){
-      const raw=JSON.stringify(result.remoteDB);
-      try{setAny(LDH_PREP_STOCK_KEY_V28,raw);}catch(_){ }
-      window.__LDH_STOCK_MEMORY_DB=result.remoteDB;
-      window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;
-      try{window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB);}catch(_){ }
-      try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'repara_pletina_v114'}}));}catch(_){ }
-      console.info('[Preparacion V114] Salidas legacy de pletina reparadas:',result.repaired);
-    }
-    return !!result?.changed;
-  }catch(error){
-    console.warn('[Preparacion V114] No se pudo reparar salida legacy de pletina',error);
-    return false;
-  }
-}
-window.LDH_prepRepairAllMalformedPletinaMovementsV114=LDH_prepRepairAllMalformedPletinaMovementsV114;
-[1800,4500,9000,16000].forEach(delay=>setTimeout(()=>{LDH_prepRepairAllMalformedPletinaMovementsV114();},delay));
-window.LDH_PREP_V114_CIERRE_ATOMICO_Y_PLETINA=true;
-/* === /LDH_PREP_V114_CIERRE_ATOMICO_Y_PLETINA_UNIDADES_20260820 === */
-
 /* V112 legacy auto-repair disabled 20260820: data was corrected explicitly with LIMPIAR PRUEBA + RECIBIDO; no further automatic stock mutation is allowed here. */
 
 /* === /LDH_PREP_NEGATIVOS_HISTORICOS_V99_20260819 === */
@@ -26222,14 +25948,6 @@ window.LDH_PREP_V114_CIERRE_ATOMICO_Y_PLETINA=true;
     }
   }
   function removeFromPreparation(ref){
-    // V114: V80 ya no puede borrar Preparación directamente. Debe consumir
-    // Stock y confirmar la nube antes de retirar la ficha.
-    try{
-      if(typeof window.LDH_prepFinalCloseAuthoritativeV114 === 'function'){
-        Promise.resolve(window.LDH_prepFinalCloseAuthoritativeV114(ref,{source:'v80_guard',silent:true})).catch(()=>{});
-      }
-    }catch(_){ }
-    return false;
     const info=closeInfo(ref);
     if(!info) return false;
     try{
@@ -27284,97 +27002,5 @@ console.info('[Preparación V107] Recepción física mientras vive en Preparaci�
 </script>
 <!-- /LDH_PREP_V113_ACCESORIO_SIN_VINCULO_NO_STOCK_20260820 -->
 
-
-<!-- LDH_PREP_V114_CIERRE_FINAL_AUTORITATIVO_20260820 -->
-<script id="LDH_PREP_V114_CIERRE_FINAL_AUTORITATIVO_20260820">
-(function(){
-  'use strict';
-  if(window.__LDH_PREP_V114_FINAL_CLOSE__) return;
-  window.__LDH_PREP_V114_FINAL_CLOSE__=true;
-  const BUILD='PREPARACION-V114-CIERRE-FINAL-AUTORITATIVO-20260820';
-  const locks=new Set();
-  const num=v=>{const n=Number(String(v??0).replace(',','.'));return Number.isFinite(n)?n:0;};
-  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-  function parse(raw,fallback){try{return JSON.parse(raw||'') ?? fallback;}catch(_){return fallback;}}
-  function getKey(key){try{if(typeof getAny==='function')return getAny(key)||'';}catch(_){ } try{return localStorage.getItem(key)||sessionStorage.getItem(key)||'';}catch(_){return '';}}
-  function setKey(key,value){try{if(typeof setAny==='function'){setAny(key,value);return;}}catch(_){ } try{localStorage.setItem(key,value);sessionStorage.setItem(key,value);}catch(_){ }}
-  function removeKey(key){try{if(typeof removeAny==='function'){removeAny(key);return;}}catch(_){ } try{localStorage.removeItem(key);sessionStorage.removeItem(key);}catch(_){ }}
-  function sameRef(a,b){return norm(a)===norm(b);}
-  function stage(ref,meta){
-    try{if(typeof window.LDH_getTrabajoStage==='function'){const s=norm(window.LDH_getTrabajoStage(ref));if(s&&s!=='preparacion')return s;}}catch(_){ }
-    const text=norm([meta?.workflow_stage,meta?.fase,meta?.estado,meta?.status].filter(Boolean).join(' '));
-    if(meta?.entregado||meta?.en_entregado||text.includes('entreg'))return 'entregado';
-    if(meta?.en_almacen||meta?.almacen_ts||text.includes('almacen'))return 'almacen';
-    if(meta?.en_pintura||meta?.pintura_ts||text.includes('pint'))return 'pintura';
-    if(meta?.en_fabricacion||meta?.fabricacion_ts||text.includes('fabric'))return 'fabricacion';
-    return 'preparacion';
-  }
-  function complete(lines){return Array.isArray(lines)&&lines.length>0&&lines.every(line=>num(line?.qty_recibida??line?.recibida)>=num(line?.qty_pedida??line?.pedida??line?.qty));}
-  function debt(ref,meta){
-    try{if(typeof window.LDH_trabajoTieneDeuda==='function'&&window.LDH_trabajoTieneDeuda(ref))return true;}catch(_){ }
-    const items=meta?.unassignedBorrow?.items;
-    return Array.isArray(items)&&items.some(item=>num(item?.qtyPending??item?.pending??item?.pendingQty??item?.qty_pending)>0);
-  }
-  function refsToSweep(){
-    const out=new Set();
-    for(const store of [localStorage,sessionStorage]){try{for(let i=0;i<store.length;i++){const k=store.key(i)||'';if(k.startsWith('prep_recepcion_'))out.add(k.slice(15));if(k.startsWith('prep_meta_')){const m=parse(store.getItem(k),{});if(m&&m.closed_from_preparation&&!m.stock_consumed_on_close_v114)out.add(k.slice(10));}}}catch(_){ }}
-    return Array.from(out);
-  }
-  async function finalClose(ref,options){
-    options=options||{};
-    ref=String(ref||'').trim();
-    if(!ref||locks.has(ref))return false;
-    const kp='prep_recepcion_'+ref, km='prep_meta_'+ref;
-    const rawLines=getKey(kp), meta=parse(getKey(km),{});
-    const lines=parse(rawLines,[]);
-    const oldV80Tombstone=!rawLines && !!meta?.closed_from_preparation;
-    if(oldV80Tombstone && meta?.stock_consumed_on_close_v114===true)return false;
-    if(!oldV80Tombstone && !complete(lines))return false;
-    const st=stage(ref,meta);
-    if(!['fabricacion','pintura','almacen','entregado'].includes(st))return false;
-    if(debt(ref,meta))return false;
-    const consume=window.LDH_prepConsumeOnFinalCloseV114||window.LDH_consumirStockAsignadoAlMandarFabricacion||window.LDH_consumirStockComunAlMandarFabricacion;
-    if(typeof consume!=='function')return false;
-    locks.add(ref);
-    try{
-      const result=await consume(ref);
-      try{if(typeof window.LDH_prepApplyFirebaseStockV28==='function')await window.LDH_prepApplyFirebaseStockV28(true);}catch(_){ }
-      if(rawLines) removeKey(kp);
-      const closed={...meta,en_fabricacion:st==='fabricacion'||!!meta.en_fabricacion,en_pintura:st==='pintura'||!!meta.en_pintura,en_almacen:st==='almacen'||!!meta.en_almacen,entregado:st==='entregado'||!!meta.entregado,fase:st,estado:st,workflow_stage:st,recepcion_completa:true,closed_from_preparation:true,stock_consumed_on_close_v114:true,preparation_closed_at:meta.preparation_closed_at||new Date().toISOString(),stock_consumed_at_v114:new Date().toISOString(),preparation_closed_by:'preparacion_v114_cierre_atomico'};
-      setKey(km,JSON.stringify(closed));
-      try{if(typeof window.__ldhPrepSyncNow==='function')await Promise.resolve(window.__ldhPrepSyncNow('cierre_final_v114:'+ref));}catch(_){ }
-      if(!options.silent){
-        const qty=num(result?.consumedQty);
-        alert('✅ Pedido completo y retirado de Preparación.'+(qty>0?'\n\nStock consumido al cierre: '+qty:''));
-      }
-      try{const active=String(window.refActual??'').trim();if(sameRef(active,ref)&&typeof volverLista==='function')volverLista();else if(typeof cargarLista==='function')cargarLista();}catch(_){ }
-      return true;
-    }catch(error){
-      console.warn('[Preparacion V114] Cierre final no confirmado',ref,error);
-      if(!options.silent)alert('No se ha retirado el trabajo de Preparación.\n\nEl Stock no se consumirá hasta confirmar el cierre en nube.\n\n'+String(error?.code||error?.message||error||'Error de sincronización'));
-      return false;
-    }finally{locks.delete(ref);}
-  }
-  window.LDH_prepFinalCloseAuthoritativeV114=finalClose;
-  async function sweep(){for(const ref of refsToSweep()){await finalClose(ref,{source:'sweep',silent:true});}}
-  function start(){try{document.documentElement.dataset.ldhPrepFinalClose='V114';}catch(_){ } sweep();}
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
-  [1200,3200,7000,14000].forEach(d=>setTimeout(sweep,d));
-  setInterval(sweep,5000);
-  window.addEventListener('storage',()=>setTimeout(sweep,250));
-  window.LDH_PREP_V114_FINAL_CLOSE=BUILD;
-  console.info('[Preparacion V114] Cierre final autoritativo activo: consumir Stock antes de retirar Preparacion');
-})();
-</script>
-<!-- /LDH_PREP_V114_CIERRE_FINAL_AUTORITATIVO_20260820 -->
-
-
-
-<!-- LDH_PREP_V115_PLETINA_MOVIMIENTO_EQUIVALENTE_BARRA_20260820 -->
-<script>
-window.LDH_PREP_V115_PLETINA_MOVIMIENTO_EQUIVALENTE_BARRA='PREPARACION-V115-PLETINA-MOVIMIENTO-EQUIVALENTE-BARRA-20260820';
-console.info('[Preparacion V115] Pletina/mm: salida fisica compatible en equivalente de barra + mm exactos');
-</script>
-<!-- /LDH_PREP_V115_PLETINA_MOVIMIENTO_EQUIVALENTE_BARRA_20260820 -->
 
 </body></html>
