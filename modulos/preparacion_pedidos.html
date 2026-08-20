@@ -6258,7 +6258,7 @@ function renderTabla() {
         const n = String((linea && (linea.mat || linea.material || linea.name || linea.title)) || "")
           .trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
           .replace(/[^a-z0-9]+/g, " ").trim();
-        return n === "chapa escalon";
+        return n === "chapa escalon" || !!(linea && linea.nonStockMaterial === true && String(linea.stockMode || "").trim().toLowerCase() === "none");
       }catch(_){ return false; }
     })();
     let recibida = toNum(linea.qty_recibida);
@@ -21352,292 +21352,7 @@ async function LDH_prepRepairCurrentHistoricalNegativesV99() {
 }
 window.LDH_prepRepairCurrentHistoricalNegativesV99=LDH_prepRepairCurrentHistoricalNegativesV99;
 window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
-/* === LDH_PREP_V112_REPARACION_LEGACY_REAL_20260820 ===
- * Reparacion unica y quirurgica de dos OTs historicas conocidas.
- * Se ejecuta dentro del modulo Firebase de Stock.
- * No cambia el flujo general: mientras la OT siga en Preparacion el material
- * permanece fisico + asignado; el consumo definitivo ocurre al salir de Preparacion.
- */
-const LDH_PREP_V112_LOCK = new Set();
-const LDH_PREP_V112_DONE = new Set();
-const LDH_PREP_V112_TARGETS = {
-  'OT-260724-005': {
-    company:'PROCEED',
-    restorePhysical:false,
-    materials:{'80x40x1 5':1,'60x40x1 5':6}
-  },
-  'OT-260728-003': {
-    company:'REYNOLDS',
-    restorePhysical:true,
-    materials:{'100x40x1 5':2,'pletina 30x6':1}
-  }
-};
-function LDH_prepV112Norm(v){
-  return String(v??'').trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/ø/g,'o').replace(/[x×*]/g,'x')
-    .replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-}
-function LDH_prepV112First(){
-  for(let i=0;i<arguments.length;i+=1){
-    const v=arguments[i];
-    if(v!==undefined&&v!==null&&String(v).trim()!=='') return v;
-  }
-  return '';
-}
-function LDH_prepV112Num(v){
-  const n=Number(String(v??0).replace(',','.'));
-  return Number.isFinite(n)?n:0;
-}
-function LDH_prepV112Qty(row){
-  return Math.max(0,LDH_prepV112Num(LDH_prepV112First(row?.qty,row?.cantidad,row?.amount,row?.quantity,row?.asignado,row?.reservado,0)));
-}
-function LDH_prepV112LineName(line){
-  return String(LDH_prepV112First(line?.linked_matName,line?.stockLinkLabel,line?.mat,line?.material,line?.name,'')).trim();
-}
-function LDH_prepV112RowRef(row){
-  return String(LDH_prepV112First(row?.consumerRef,row?.jobRef,row?.ref,row?.reference,row?.usedByRef,row?.workRef,'')).trim();
-}
-function LDH_prepV112SameRef(row,aliases,reference){
-  try{return LDH_prepReferenceMatchesV66(row,aliases);}catch(_){ }
-  return LDH_prepV112Norm(LDH_prepV112RowRef(row))===LDH_prepV112Norm(reference);
-}
-function LDH_prepV112IsActive(row){
-  const st=LDH_prepV112Norm(LDH_prepV112First(row?.status,row?.estado,'activa'));
-  return !['consumida','consumido','liberada','liberado','cancelada','cancelado','anulada','anulado','cerrada','cerrado','devuelta','devuelto','consolidada v112','convertida asignacion v112'].includes(st);
-}
-function LDH_prepV112IsLoan(row){
-  const txt=LDH_prepV112Norm([row?.assignmentType,row?.reason,row?.source].filter(Boolean).join(' '));
-  return txt.includes('otra empresa')||txt.includes('prestamo')||txt.includes('préstamo')||!!row?.toCompanyId||!!row?.toEmpresa;
-}
-function LDH_prepV112Sign(row){
-  const t=LDH_prepV112Norm(LDH_prepV112First(row?.type,row?.tipo,'')).replace(/ /g,'_');
-  if(['entrada','in','ajuste_pos','devolucion','devolucion_fisica','entrada_preparacion','entrada_prep','entrada_desde_preparacion','stock_entrada','recepcion_stock','add_stock'].includes(t)) return 1;
-  if(['salida','out','ajuste_neg','consumo','consumo_terminal','prestamo','baja','retirada'].includes(t)) return -1;
-  return 0;
-}
-function LDH_prepV112SetQty(row,q){
-  row.qty=q;row.cantidad=q;
-  if(row.amount!==undefined) row.amount=q;
-  if(row.asignado!==undefined) row.asignado=q;
-  if(row.reservado!==undefined) row.reservado=q;
-}
-function LDH_prepV112CompanyMatches(row,aliases){
-  return [row?.companyId,row?.empresaId,row?.empresa,row?.company,row?.companyName]
-    .map(LDH_prepV112Norm).filter(Boolean).some(v=>aliases.has(v));
-}
-function LDH_prepV112MovementPhysical(db,companyAliases,materialIds,targetName){
-  const movements=(db.movements||[]).filter(row=>{
-    if(!LDH_prepV112CompanyMatches(row,companyAliases)) return false;
-    const rid=String(LDH_prepV112First(row?.materialId,row?.matId,row?.material_id,''));
-    const rname=LDH_prepV112Norm(LDH_prepV112First(row?.materialName,row?.material,row?.mat,row?.name,''));
-    return (rid&&materialIds.has(rid)) || (!!rname&&rname===targetName);
-  });
-  const signed=movements.filter(m=>LDH_prepV112Sign(m)!==0);
-  if(signed.length){
-    return signed.reduce((sum,m)=>sum+(LDH_prepV112Sign(m)*LDH_prepV112Qty(m)),0);
-  }
-  const rows=(db.stock||[]).filter(row=>{
-    if(!LDH_prepV112CompanyMatches(row,companyAliases)) return false;
-    const rid=String(LDH_prepV112First(row?.materialId,row?.matId,row?.material_id,''));
-    const rname=LDH_prepV112Norm(LDH_prepV112First(row?.materialName,row?.material,row?.mat,row?.name,''));
-    return (rid&&materialIds.has(rid)) || (!!rname&&rname===targetName);
-  });
-  return rows.reduce((sum,row)=>sum+LDH_prepV112Num(LDH_prepV112First(row?.physicalQty,row?.fisico,row?.real,row?.qty,row?.cantidad,row?.stock,0)),0);
-}
-function LDH_prepV112CurrentRef(){
-  return String(window.refActual ?? (typeof refActual!=='undefined'?refActual:'') ?? '').trim();
-}
-function LDH_prepV112Lines(){
-  try{
-    const list=window.estadoMateriales ?? (typeof estadoMateriales!=='undefined'?estadoMateriales:[]);
-    return Array.isArray(list)?list:[];
-  }catch(_){return [];}
-}
-async function LDH_prepReconcileKnownLegacyV112(){
-  const reference=LDH_prepV112CurrentRef();
-  const cfg=LDH_PREP_V112_TARGETS[reference];
-  if(!cfg||LDH_PREP_V112_LOCK.has(reference)||LDH_PREP_V112_DONE.has(reference)) return false;
-  const lines=LDH_prepV112Lines();
-  if(!lines.length) return false;
-
-  // La propia pantalla abierta es la prueba de que la OT sigue viva en Preparacion.
-  // No dependemos de una clave localStorage antigua que puede no existir en equipos nuevos.
-  const selected=[];
-  lines.forEach((line,index)=>{
-    const key=LDH_prepV112Norm(LDH_prepV112LineName(line));
-    if(!Object.prototype.hasOwnProperty.call(cfg.materials,key)) return;
-    const target=cfg.materials[key];
-    const requested=Math.max(0,LDH_prepV112Num(LDH_prepV112First(line?.qty_pedida,line?.pedida,line?.qty,target)));
-    const received=Math.max(0,LDH_prepV112Num(LDH_prepV112First(line?.qty_recibida,line?.recibida,0)));
-    if(received+1e-9<Math.min(target,requested||target)) return;
-    selected.push({line,index,key,target:Math.min(target,requested||target,received||target)});
-  });
-  if(!selected.length) return false;
-
-  if(!LDH_PREP_STOCK_AUTH_V28.currentUser){
-    try{await signInAnonymously(LDH_PREP_STOCK_AUTH_V28);}catch(_){ }
-  }
-  if(!LDH_PREP_STOCK_AUTH_V28.currentUser) return false;
-
-  LDH_PREP_V112_LOCK.add(reference);
-  try{
-    const aliases=LDH_prepReferenceAliasesV57(reference);
-    const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
-      const metaRef=doc(LDH_PREP_STOCK_DB_V28,'taller_data','stock');
-      const db=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
-      db.companies=Array.isArray(db.companies)?db.companies:[];
-      db.materials=Array.isArray(db.materials)?db.materials:[];
-      db.stock=Array.isArray(db.stock)?db.stock:[];
-      db.movements=Array.isArray(db.movements)?db.movements:[];
-      db.assignments=Array.isArray(db.assignments)?db.assignments:[];
-      db.reservations=Array.isArray(db.reservations)?db.reservations:[];
-      db.legacyRepairsV112=(db.legacyRepairsV112&&typeof db.legacyRepairsV112==='object')?db.legacyRepairsV112:{};
-      if(db.legacyRepairsV112[reference]) return {db,changed:false,already:true,repairs:[]};
-
-      const company=db.companies.find(c=>{
-        try{return LDH_prepCompanyMatchesV45(c,cfg.company);}catch(_){
-          return LDH_prepV112Norm(LDH_prepV112First(c?.name,c?.nombre,c?.empresa,c?.company,c?.id,''))===LDH_prepV112Norm(cfg.company);
-        }
-      });
-      if(!company) throw new Error('No se encuentra la empresa '+cfg.company+' en Stock.');
-      const cid=String(LDH_prepV112First(company?.id,company?.companyId,company?.empresaId,cfg.company));
-      const companyAliases=new Set([cid,cfg.company,company?.name,company?.nombre,company?.empresa,company?.company].map(LDH_prepV112Norm).filter(Boolean));
-      const now=new Date().toISOString();
-      let changed=false;
-      const repairs=[];
-
-      for(const item of selected){
-        const line=item.line;
-        let resolved=null;
-        try{resolved=LDH_prepResolveCompanyMaterialV98(db,line,cid,false);}catch(_){ }
-        let material=resolved?.material||null;
-        const wanted=LDH_prepV112Norm(LDH_prepV112LineName(line));
-        if(!material){
-          material=db.materials.find(m=>LDH_prepV112Norm(LDH_prepV112First(m?.name,m?.nombre,m?.material,m?.mat,''))===wanted)||null;
-        }
-        if(!material) throw new Error('No se encuentra el material '+LDH_prepV112LineName(line)+' en Stock.');
-        const mid=String(LDH_prepV112First(material?.id,material?.materialId,material?.matId,''));
-        const mname=String(LDH_prepV112First(material?.name,material?.nombre,material?.material,LDH_prepV112LineName(line)));
-        const targetName=LDH_prepV112Norm(mname);
-        const materialIds=new Set([mid,line?.linked_matId,line?.stockMatId,line?.matId,line?.materialId].filter(Boolean).map(String));
-        db.materials.forEach(m=>{
-          if(LDH_prepV112Norm(LDH_prepV112First(m?.name,m?.nombre,m?.material,m?.mat,''))===targetName){
-            const id=String(LDH_prepV112First(m?.id,m?.materialId,m?.matId,''));
-            if(id) materialIds.add(id);
-          }
-        });
-        const sameMaterial=row=>{
-          const rid=String(LDH_prepV112First(row?.materialId,row?.matId,row?.material_id,row?.stockMatId,''));
-          const rname=LDH_prepV112Norm(LDH_prepV112First(row?.materialName,row?.material,row?.mat,row?.name,''));
-          return (rid&&materialIds.has(rid)) || (!!rname&&rname===targetName);
-        };
-        const sameCompany=row=>LDH_prepV112CompanyMatches(row,companyAliases);
-        const sameRef=row=>LDH_prepV112SameRef(row,aliases,reference);
-
-        // 1) Una sola asignacion activa por OT/material. Cualquier reserva paralela de la misma OT se cierra.
-        let activeAssignments=db.assignments.filter(a=>!LDH_prepV112IsLoan(a)&&sameCompany(a)&&sameMaterial(a)&&sameRef(a)&&LDH_prepV112IsActive(a));
-        activeAssignments.sort((a,b)=>String(a?.createdAt||'').localeCompare(String(b?.createdAt||'')));
-        let keeper=activeAssignments[0]||null;
-        if(!keeper){
-          const aid='asg_prep_legacy_v112_'+LDH_prepSafeIdV66(reference)+'_'+LDH_prepSafeIdV66(cid)+'_'+LDH_prepSafeIdV66(mid)+'_'+item.index;
-          keeper={id:aid,assignmentId:aid,companyId:cid,empresaId:cid,materialId:mid,matId:mid,materialName:mname,qty:item.target,cantidad:item.target,phase:'preparacion',fase:'preparacion',status:'activa',estado:'activa',ref:reference,jobRef:reference,assignmentType:'libre',reason:'normalizacion_legacy_ot_viva_v112',source:'preparacion_pedidos_v112',createdAt:now,updatedAt:now};
-          db.assignments.push(keeper);activeAssignments=[keeper];changed=true;
-        }
-        if(LDH_prepV112Qty(keeper)!==item.target || String(keeper.materialId||keeper.matId||'')!==mid){
-          LDH_prepV112SetQty(keeper,item.target);keeper.companyId=cid;keeper.empresaId=cid;keeper.materialId=mid;keeper.matId=mid;keeper.status='activa';keeper.estado='activa';keeper.phase='preparacion';keeper.fase='preparacion';keeper.ref=reference;keeper.jobRef=reference;keeper.updatedAt=now;changed=true;
-        }
-        activeAssignments.slice(1).forEach(a=>{
-          if(LDH_prepV112Qty(a)>0 || LDH_prepV112IsActive(a)){
-            LDH_prepV112SetQty(a,0);a.status='consolidada_v112';a.estado='consolidada_v112';a.consolidatedAt=now;a.updatedAt=now;changed=true;
-          }
-        });
-        const activeReservations=db.reservations.filter(r=>sameCompany(r)&&sameMaterial(r)&&sameRef(r)&&LDH_prepV112IsActive(r));
-        activeReservations.forEach(r=>{
-          r.status='convertida_asignacion_v112';r.estado='convertida_asignacion_v112';r.pendingQty=0;r.qtyPending=0;r.updatedAt=now;r.convertedAt=now;changed=true;
-        });
-        repairs.push({material:mname,type:'reservado_objetivo',target:item.target});
-
-        // 2) REYNOLDS: recuperar el fisico que una salida antigua dejo a cero mientras la OT sigue en Preparacion.
-        if(cfg.restorePhysical){
-          // Pletina legacy: retirar exclusivamente una salida de 6000 de esta misma OT/material si existe.
-          if(item.key==='pletina 30x6'){
-            const bad=db.movements.filter(m=>sameCompany(m)&&sameMaterial(m)&&sameRef(m)&&LDH_prepV112Sign(m)<0&&Math.abs(LDH_prepV112Qty(m)-6000)<1e-9);
-            if(bad.length===1){
-              const badId=String(LDH_prepV112First(bad[0]?.id,bad[0]?.movementId,''));
-              if(badId){
-                db.movements=db.movements.filter(m=>String(LDH_prepV112First(m?.id,m?.movementId,''))!==badId);
-                changed=true;repairs.push({material:mname,type:'retira_salida_legacy_6000'});
-              }
-            }
-          }
-          const physicalBefore=LDH_prepV112MovementPhysical(db,companyAliases,materialIds,targetName);
-          const opId='mov_prep_legacy_v112_'+LDH_prepSafeIdV66(reference)+'_'+LDH_prepSafeIdV66(cid)+'_'+LDH_prepSafeIdV66(mid)+'_'+item.index;
-          let repair=db.movements.find(m=>String(LDH_prepV112First(m?.id,m?.movementId,''))===opId);
-          const existing=repair?LDH_prepV112Qty(repair):0;
-          const base=physicalBefore-(repair&&LDH_prepV112Sign(repair)>0?existing:0);
-          const needed=Math.max(0,item.target-base);
-          if(needed>1e-9){
-            if(!repair){
-              repair={id:opId,movementId:opId,companyId:cid,empresaId:cid,empresa:cfg.company,company:cfg.company,companyName:cfg.company,materialId:mid,matId:mid,material_id:mid,material:mname,mat:mname,materialName:mname,name:mname,unit:String(LDH_prepV112First(material?.unit,material?.unidad,line?.unit,line?.unidad,'barra')),unidad:String(LDH_prepV112First(material?.unit,material?.unidad,line?.unit,line?.unidad,'barra')),type:'ajuste_pos',tipo:'ajuste_pos',qty:needed,cantidad:needed,amount:needed,date:now,createdAt:now,updatedAt:now,ref:reference,jobRef:reference,source:'preparacion_pedidos_v112',reason:'reconstruccion_fisico_legacy_ot_viva_v112',idempotencyKey:opId};
-              db.movements.push(repair);changed=true;
-            }else if(Math.abs(existing-needed)>1e-9){
-              LDH_prepV112SetQty(repair,needed);repair.type='ajuste_pos';repair.tipo='ajuste_pos';repair.updatedAt=now;changed=true;
-            }
-            repairs.push({material:mname,type:'fisico_objetivo',target:item.target,ajuste:needed});
-          }
-        }
-
-        // 3) Actualizar solo la fila canonica visible a partir de la verdad de movimientos.
-        const physicalNow=LDH_prepV112MovementPhysical(db,companyAliases,materialIds,targetName);
-        let stockRow=resolved?.stockRow||db.stock.find(r=>sameCompany(r)&&String(LDH_prepV112First(r?.materialId,r?.matId,r?.material_id,''))===mid);
-        if(!stockRow){
-          stockRow={id:'lot_prep_v112_'+LDH_prepSafeIdV66(cid)+'_'+LDH_prepSafeIdV66(mid),companyId:cid,empresaId:cid,empresa:cfg.company,company:cfg.company,materialId:mid,matId:mid,material_id:mid,material:mname,mat:mname,name:mname,unit:String(LDH_prepV112First(material?.unit,material?.unidad,line?.unit,line?.unidad,'barra')),unidad:String(LDH_prepV112First(material?.unit,material?.unidad,line?.unit,line?.unidad,'barra')),createdFrom:'preparacion_pedidos_v112'};
-          db.stock.push(stockRow);changed=true;
-        }
-        stockRow.qty=physicalNow;stockRow.cantidad=physicalNow;stockRow.stock=physicalNow;stockRow.real=physicalNow;stockRow.fisico=physicalNow;stockRow.physicalQty=physicalNow;stockRow.updatedAt=now;
-      }
-
-      db.legacyRepairsV112[reference]={at:now,version:'V112-20260820'};
-      db.updatedAt=now;
-      changed=true;
-      LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,db,'preparacion_reparacion_legacy_v112');
-      return {db,changed,repairs};
-    });
-
-    const db=result?.db;
-    if(db){
-      const raw=JSON.stringify(db);
-      try{setAny(LDH_PREP_STOCK_KEY_V28,raw);}catch(_){try{localStorage.setItem(LDH_PREP_STOCK_KEY_V28,raw);}catch(__){}}
-      window.__LDH_STOCK_MEMORY_DB=db;
-      window.__LDH_PREP_STOCK_CLOUD_DB=db;
-      try{window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(db);}catch(_){ }
-    }
-    LDH_PREP_V112_DONE.add(reference);
-    try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:'reparacion_legacy_v112',reference}}));}catch(_){ }
-    try{if(typeof window.renderTabla==='function')window.renderTabla();}catch(_){ }
-    try{if(typeof window.cargarLista==='function')window.cargarLista();}catch(_){ }
-    console.info('[Preparacion V112] Reparacion aplicada',reference,result?.repairs||[]);
-    return true;
-  }catch(error){
-    console.error('[Preparacion V112] ERROR',reference,error);
-    return false;
-  }finally{
-    LDH_PREP_V112_LOCK.delete(reference);
-  }
-}
-window.LDH_prepReconcileKnownLegacyV112=LDH_prepReconcileKnownLegacyV112;
-window.LDH_PREP_V112_REPARACION_LEGACY_REAL=true;
-function LDH_prepV112Schedule(){
-  [300,900,1800,3500,6500,10000].forEach(delay=>setTimeout(()=>{LDH_prepReconcileKnownLegacyV112().catch(()=>{});},delay));
-}
-if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',LDH_prepV112Schedule,{once:true});
-else LDH_prepV112Schedule();
-window.addEventListener('ldh:stock-cloud-updated',event=>{
-  if(String(event?.detail?.source||'')==='reparacion_legacy_v112') return;
-  setTimeout(()=>{LDH_prepReconcileKnownLegacyV112().catch(()=>{});},250);
-});
-/* === /LDH_PREP_V112_REPARACION_LEGACY_REAL_20260820 === */
+/* V112 legacy auto-repair disabled 20260820: data was corrected explicitly with LIMPIAR PRUEBA + RECIBIDO; no further automatic stock mutation is allowed here. */
 
 /* === /LDH_PREP_NEGATIVOS_HISTORICOS_V99_20260819 === */
 </script>
@@ -27122,6 +26837,170 @@ window.LDH_PREP_V107_RECEPCION_FISICA_VIVA_Y_CONSUMO_AL_CIERRE='PREPARACION-V107
 console.info('[Preparación V107] Recepción física mientras vive en Preparación; consumo únicamente al cierre definitivo');
 </script>
 
+
+
+<!-- LDH_PREP_V113_ACCESORIO_SIN_VINCULO_NO_STOCK_20260820 -->
+<script id="LDH_PREP_V113_ACCESORIO_SIN_VINCULO_NO_STOCK_20260820">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V113_ACCESSORY_NO_STOCK__) return;
+  window.__LDH_PREP_V113_ACCESSORY_NO_STOCK__ = true;
+
+  const BUILD='PREPARACION-V113-ACCESORIO-SIN-VINCULO-NO-STOCK-20260820';
+  const norm=value=>String(value??'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  const num=value=>{
+    const n=Number(String(value??0).replace(',','.'));
+    return Number.isFinite(n)?n:0;
+  };
+
+  function linesNow(){
+    try{ if(Array.isArray(window.estadoMateriales)) return window.estadoMateriales; }catch(_){ }
+    try{ if(typeof estadoMateriales!=='undefined' && Array.isArray(estadoMateriales)) return estadoMateriales; }catch(_){ }
+    return [];
+  }
+  function lineName(line){
+    return String(line && (line.mat || line.material || line.name || line.title || '') || '').trim();
+  }
+  function isPaintOrSolvent(line){
+    const n=norm(lineName(line));
+    return n.includes('pintura') || n.includes('disolvente') || n.includes('diluyente');
+  }
+  function isPletina(line){
+    const n=norm(lineName(line));
+    const u=norm(line && (line.unit || line.unidad || ''));
+    return u==='mm' || n.includes('pletina') || n.includes('planchuela') || n.includes('llanta');
+  }
+  function linkedId(line){
+    try{
+      if(typeof window.getLinkedMatIdForLine==='function') return String(window.getLinkedMatIdForLine(line)||'').trim();
+    }catch(_){ }
+    try{
+      if(typeof getLinkedMatIdForLine==='function') return String(getLinkedMatIdForLine(line)||'').trim();
+    }catch(_){ }
+    return '';
+  }
+  function shouldReceiveWithoutStock(line){
+    if(!line || typeof line!=='object') return false;
+    const name=norm(lineName(line));
+    const unit=norm(line.unit || line.unidad || 'ud');
+    if(name==='chapa escalon') return false; // conserva su flujo específico ya probado
+    if(unit==='barra' || isPletina(line)) return false;
+    if(isPaintOrSolvent(line)) return false; // pintura/disolvente conservan su flujo de Stock
+    if(linkedId(line)) return false;          // si existe vínculo, se usa Stock/Ferretería normal
+    return true;                              // accesorio/unidad puntual sin ficha de Stock
+  }
+
+  async function receiveWithoutStock(index){
+    const line=linesNow()[index];
+    if(!line || !shouldReceiveWithoutStock(line)) return false;
+
+    const requested=Math.max(0,num(line.qty_pedida ?? line.pedida ?? line.qty));
+    if(requested<=0) return true;
+    const already=Math.max(0,num(line.qty_recibida ?? line.recibida));
+    if(already>=requested) return true;
+
+    const button=document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    const oldText=button?.textContent || 'RECIBIDO';
+    if(button){ button.disabled=true; button.textContent='GUARDANDO...'; }
+
+    try{
+      try{
+        const cleanup=window.LDH_prepCleanupLockV62;
+        if(cleanup && typeof cleanup.clearLock==='function') cleanup.clearLock(line);
+        delete line._ldh_cleanup_tombstone_v62_at;
+        delete line._ldh_cleanup_tombstone_v62_ref;
+        delete line._ldh_cleanup_tombstone_v62_material;
+      }catch(_){ }
+
+      line.qty_recibida=requested;
+      line.recibida=requested;
+      line.receipt_manual_v83=true;
+      line.receipt_policy_explicit_v83=true;
+      line.nonStockMaterial=true;
+      line.stockMode='none';
+      line.ok=true;
+      line.completo=true;
+      line.done=true;
+      line.isDone=true;
+      line.isCompleted=true;
+
+      if(!Array.isArray(line.trace)) line.trace=[];
+      line.trace=line.trace.filter(row=>String(row && row.source || '')!=='manual_recibida_v83_accesorio_sin_stock');
+      line.trace.push({
+        at:new Date().toISOString(),
+        qty:requested,
+        source:'manual_recibida_v83_accesorio_sin_stock',
+        nonStockMaterial:true,
+        material:lineName(line)
+      });
+
+      try{
+        if(typeof window.guardarEstadoLocal==='function') window.guardarEstadoLocal();
+        else if(typeof guardarEstadoLocal==='function') guardarEstadoLocal();
+      }catch(_){ }
+
+      try{
+        if(typeof window.__ldhPrepSyncNow==='function'){
+          const ref=String(window.refActual ?? (typeof refActual!=='undefined'?refActual:'') ?? '').trim();
+          await Promise.resolve(window.__ldhPrepSyncNow('recibido_accesorio_sin_stock_v113:'+ref));
+        }
+      }catch(syncError){
+        console.warn('[Preparacion V113] Accesorio recibido; sincronizacion pendiente',syncError);
+      }
+
+      try{ if(typeof window.renderTabla==='function') window.renderTabla(); else if(typeof renderTabla==='function') renderTabla(); }catch(_){ }
+      try{ if(typeof window.cargarLista==='function') window.cargarLista(); else if(typeof cargarLista==='function') cargarLista(); }catch(_){ }
+
+      // Si era el último material pendiente, reutiliza el cierre V106.
+      // Ese cierre consume el Stock físico solo si la OT ya está en Fabricación
+      // y justo antes de eliminar definitivamente la ficha de Preparación.
+      try{
+        if(typeof window.autoCerrarSiCompletoPorRecepcion==='function')
+          await Promise.resolve(window.autoCerrarSiCompletoPorRecepcion());
+        else if(typeof autoCerrarSiCompletoPorRecepcion==='function')
+          await Promise.resolve(autoCerrarSiCompletoPorRecepcion());
+      }catch(closeError){
+        console.warn('[Preparacion V113] Recepcion guardada; cierre automatico pendiente',closeError);
+      }
+      return true;
+    }finally{
+      if(button && button.isConnected){ button.disabled=false; button.textContent=oldText; }
+    }
+  }
+
+  function install(){
+    const current=window.LDH_marcarRecibidoCompleto;
+    if(typeof current!=='function' || current.__ldhAccessoryNoStockV113) return;
+    const base=current;
+    const wrapped=function(index){
+      const line=linesNow()[index];
+      if(shouldReceiveWithoutStock(line)) return receiveWithoutStock(index);
+      return base.apply(this,arguments);
+    };
+    wrapped.__ldhAccessoryNoStockV113=true;
+    wrapped.__ldhAccessoryNoStockV113Base=base;
+    window.LDH_marcarRecibidoCompleto=wrapped;
+  }
+
+  function start(){
+    install();
+    try{
+      const meta=(typeof window.metaActual==='object' && window.metaActual) || (typeof metaActual!=='undefined' && metaActual) || null;
+      if(meta && typeof meta==='object') meta.accessory_no_stock_v113=true;
+    }catch(_){ }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start,{once:true});
+  else start();
+  [100,400,1200,3000,6000].forEach(delay=>setTimeout(install,delay));
+  setInterval(install,1600);
+
+  window.LDH_PREP_V113_ACCESSORY_NO_STOCK=BUILD;
+  console.info('[Preparacion V113] Accesorios/unidades sin vinculo se reciben sin Stock');
+})();
+</script>
+<!-- /LDH_PREP_V113_ACCESORIO_SIN_VINCULO_NO_STOCK_20260820 -->
 
 
 </body></html>
