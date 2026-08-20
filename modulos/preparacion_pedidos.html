@@ -21422,8 +21422,10 @@ function LDH_prepV114RepairMalformedPletinaMovements(remoteDB, onlyRef){
     const materialId = String(movement?.materialId ?? movement?.matId ?? '');
     if(!companyId || !materialId || !LDH_prepV114IsPletina(remoteDB, materialId)) return;
     const stockRow = LDH_prepV114StockRow(remoteDB, companyId, materialId);
-    if(String(stockRow?.lengthMode ?? '').toLowerCase() === 'mm') return; // fila moderna: no reinterpretar
 
+    // V115: incluso si la fila moderna de pletina ya trabaja en mm, los movimientos
+    // físicos siguen teniendo que ser compatibles con Stock, cuyo histórico base
+    // se expresa en equivalentes de barra. Por eso también normalizamos esos casos.
     const assignment = byId.get(String(movement?.assignmentId ?? '')) || assignments.find(row => {
       if(!LDH_prepV114IsMmAssignment(row)) return false;
       if(!LDH_prepV114SameMovementRef(row, movement?.ref ?? movement?.jobRef ?? movement?.consumerRef ?? movement?.reference ?? '')) return false;
@@ -21498,6 +21500,14 @@ async function LDH_prepConsumeOnFinalCloseV114(workRef){
 
           if(isMm){
             barLengthMm = LDH_prepV114BarLength(assignment, stockRow);
+            // V115: el movimiento histórico se escribe SIEMPRE en equivalente de barra
+            // para que cualquier lector antiguo de Stock no interprete 6000 mm como
+            // 6000 barras. El dato exacto en mm queda preservado aparte.
+            movementQty = qty / barLengthMm;
+            legacyMm = qty;
+            movementUnit = 'barras';
+            movementUnitBasis = 'barra_equivalente_mm';
+
             if(String(stockRow?.lengthMode ?? '').toLowerCase() === 'mm'){
               const beforeMm = Math.max(0,Number(stockRow?.lengthPhysicalMm ?? 0) || 0);
               if(qty > beforeMm + 0.000001){
@@ -21505,16 +21515,7 @@ async function LDH_prepConsumeOnFinalCloseV114(workRef){
               }
               stockRow.lengthPhysicalMm = Math.max(0,beforeMm-qty);
               stockRow.updatedAt = now;
-              movementQty = qty;
-              movementUnit = 'mm';
-              movementUnitBasis = 'mm';
             }else{
-              // Fila legacy en barras: convertir mm a equivalente de barra antes de crear la salida.
-              // Evita 1 barra - 6000 mm = -5999.
-              movementQty = qty / barLengthMm;
-              legacyMm = qty;
-              movementUnit = 'barras';
-              movementUnitBasis = 'barra_legacy_equivalente';
               const physicalBars = Math.max(0,Number(LDH_prepPhysicalRemoteV45(remoteDB,companyId,materialId)) || 0);
               if(movementQty > physicalBars + 0.000001){
                 throw new Error(`Stock insuficiente para consumir la pletina legacy: ${physicalBars} barras físicas, equivalencia requerida ${movementQty}.`);
@@ -21543,11 +21544,14 @@ async function LDH_prepConsumeOnFinalCloseV114(workRef){
           if(legacyMm){
             movement.qtyOriginalMm = legacyMm;
             movement.cantidadOriginalMm = legacyMm;
+            movement.qtyMm = legacyMm;
+            movement.cantidadMm = legacyMm;
             movement.pletinaLegacyMmToBarsV114 = true;
+            movement.pletinaMmToBarEquivalentV115 = true;
           }
           movements.push(movement);
           movementIds.add(movementId);
-          consumedQty += qty;
+          consumedQty += movementQty;
         }
 
         assignment.status='consumida';
@@ -21567,7 +21571,7 @@ async function LDH_prepConsumeOnFinalCloseV114(workRef){
       remoteDB.assignments=assignments;
       remoteDB.movements=movements;
       remoteDB.updatedAt=now;
-      remoteDB.finalCloseStockVersion='V114-20260820';
+      remoteDB.finalCloseStockVersion='V115-20260820';
       LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,remoteDB,'preparacion_cierre_final_stock_v114');
       return {remoteDB,consumedQty,consumedAssignments,repairedPletina,changed:true};
     });
@@ -21598,7 +21602,7 @@ async function LDH_prepRepairAllMalformedPletinaMovementsV114(){
       const repaired=LDH_prepV114RepairMalformedPletinaMovements(remoteDB,'');
       if(!repaired) return {changed:false,remoteDB,repaired:0};
       remoteDB.updatedAt=new Date().toISOString();
-      remoteDB.pletinaLegacyMovementRepairVersion='V114-20260820';
+      remoteDB.pletinaLegacyMovementRepairVersion='V115-20260820';
       LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,remoteDB,'preparacion_repara_salida_pletina_unidades_v114');
       return {changed:true,remoteDB,repaired};
     });
@@ -27364,5 +27368,13 @@ console.info('[Preparación V107] Recepción física mientras vive en Preparaci�
 </script>
 <!-- /LDH_PREP_V114_CIERRE_FINAL_AUTORITATIVO_20260820 -->
 
+
+
+<!-- LDH_PREP_V115_PLETINA_MOVIMIENTO_EQUIVALENTE_BARRA_20260820 -->
+<script>
+window.LDH_PREP_V115_PLETINA_MOVIMIENTO_EQUIVALENTE_BARRA='PREPARACION-V115-PLETINA-MOVIMIENTO-EQUIVALENTE-BARRA-20260820';
+console.info('[Preparacion V115] Pletina/mm: salida fisica compatible en equivalente de barra + mm exactos');
+</script>
+<!-- /LDH_PREP_V115_PLETINA_MOVIMIENTO_EQUIVALENTE_BARRA_20260820 -->
 
 </body></html>
