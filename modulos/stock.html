@@ -1709,21 +1709,11 @@ function companyById(id){return db.companies.find(c=>c.id===id)}
 function stockRow(companyId,materialId){return db.stock.find(s=>s.companyId===companyId&&s.materialId===materialId)}
 function jobById(id){return db.jobs.find(j=>j.id===id)}
 function realStock(companyId,materialId){
-  const sr = typeof stockRow==='function' ? stockRow(companyId,materialId) : null;
-  const lengthMode = String(sr && (sr.lengthMode||sr.unitBasis||sr.unit||sr.unidad) || '').toLowerCase();
-  if(lengthMode==='mm'){
-    return Math.max(0,Number(sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm ?? 0)||0);
-  }
-  const mat = typeof materialById==='function' ? (materialById(materialId)||{}) : {};
-  const matText = String([mat.name,mat.nombre,mat.material,mat.family,mat.familia].filter(Boolean).join(' ')).toLowerCase();
-  const isPletina = matText.includes('pletina') || matText.includes('planchuela') || matText.includes('llanta');
   return db.movements
    .filter(m=>m.companyId===companyId&&m.materialId===materialId)
    .reduce((a,m)=>{
       const t=String(m.type||m.tipo||'entrada').toLowerCase();
       const q=Number(m.qty||m.cantidad||0);
-      const mu=String(m.unitBasis||m.lengthMode||m.unit||m.unidad||'').toLowerCase();
-      if(isPletina && (m.pletinaMm===true || mu==='mm' || mu==='milimetro' || mu==='milimetros')) return a;
       if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
       if(t==='entrada'||t==='ajuste_pos'||t==='devolucion'||t==='in') return a+q;
       if(t==='salida'||t==='ajuste_neg'||t==='consumo'||t==='out') return a-q;
@@ -8166,82 +8156,382 @@ body{
 </script>
 <!-- /LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819 -->
 
-
-<!-- LDH_STOCK_V62_REPARAR_SALIDAS_PLETINA_MM_COMO_BARRAS_20260820 -->
-<script id="LDH_STOCK_V62_REPARAR_SALIDAS_PLETINA_MM_COMO_BARRAS_20260820">
+<!-- LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820 -->
+<script id="LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820">
 (function(){
   'use strict';
-  if(window.__LDH_STOCK_V62_PLETINA_MIX_REPAIR__)return;
-  window.__LDH_STOCK_V62_PLETINA_MIX_REPAIR__=true;
-  let repairing=false;
-  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
-  const num=v=>{const n=Number(v);return Number.isFinite(n)?n:0;};
-  function material(mid){try{return typeof materialById==='function'?(materialById(mid)||{}):{};}catch(_){return{};}}
-  function isPletina(mid){const m=material(mid);const t=norm([m.name,m.nombre,m.material,m.family,m.familia].filter(Boolean).join(' '));return t.includes('pletina')||t.includes('planchuela')||t.includes('llanta');}
-  function isBadAutoMmMove(m){
-    if(!m||m.pletinaUnitMixRepairV62)return false;
-    const t=norm(m.type||m.tipo||''); if(t!=='salida'&&t!=='consumo'&&t!=='out')return false;
-    const src=norm([m.source,m.reason].filter(Boolean).join(' '));
-    const auto=src.includes('preparacion pedidos consumo salida preparacion v106')
-      ||src.includes('consumo stock propio al salir preparacion')
-      ||src.includes('consumo stock comun al salir preparacion')
-      ||src.includes('preparacion pedidos consumo fabricacion v51')
-      ||src.includes('consumo stock propio al mandar fabricacion')
-      ||src.includes('consumo stock comun al mandar fabricacion');
-    if(!auto)return false;
-    const mid=String(m.materialId||m.matId||''); if(!mid||!isPletina(mid))return false;
-    const q=Math.abs(num(m.qty??m.cantidad)); if(q<1000)return false;
-    const mu=norm(m.unitBasis||m.lengthMode||m.unit||m.unidad||'');
-    return mu!=='barras'&&mu!=='barra';
+
+  const TARGET_REF = 'OT-260728-003';
+  const TARGET_DIM = '100x40x1.5';
+  const EPS = 0.000001;
+  let repairing = false;
+
+  function text(v){ return String(v == null ? '' : v).trim(); }
+  function num(v){
+    const n = Number(String(v == null ? 0 : v).replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
   }
-  function repair(publishNow){
-    if(repairing)return false; repairing=true; let changed=false;
-    try{
-      if(typeof db==='undefined'||!db||!Array.isArray(db.movements))return false;
-      db.movements.forEach(m=>{
-        if(!isBadAutoMmMove(m))return;
-        const cid=String(m.companyId||m.empresaId||''); const mid=String(m.materialId||m.matId||'');
-        const sr=typeof stockRow==='function'?stockRow(cid,mid):null;
-        if(sr&&norm(sr.lengthMode)==='mm'){
-          // En stock moderno el saldo real vive en lengthPhysicalMm; el movimiento
-          // conserva sus mm pero queda marcado para no entrar en el contador de barras.
-          m.unit='mm';m.unidad='mm';m.unitBasis='mm';m.lengthMode='mm';m.pletinaMm=true;
-          m.mmQty=num(m.qty??m.cantidad);m.pletinaUnitMixRepairV62='marked_mm_modern';m.updatedAt=new Date().toISOString();changed=true;return;
-        }
-        const q=num(m.qty??m.cantidad);
-        const assignment=(Array.isArray(db.assignments)?db.assignments:[]).find(a=>String(a.id||a.assignmentId||'')===String(m.assignmentId||''));
-        const barMm=Math.max(1,num(m.barLengthMm??assignment?.barLengthMm??sr?.barLengthMm??6000)||6000);
-        const bars=q/barMm;
-        m.originalQtyMm=q;m.originalCantidadMm=num(m.cantidad??q);m.qty=bars;m.cantidad=bars;
-        m.unit='barras';m.unidad='barras';m.unitBasis='barras';m.pletinaLegacyBars=true;m.barLengthMm=barMm;
-        m.pletinaUnitMixRepairV62='converted_mm_to_legacy_bars';m.pletinaUnitMixRepairAt=new Date().toISOString();
-        changed=true;
+  function norm(v){
+    return text(v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/×|\*/g,'x')
+      .replace(/,/g,'.')
+      .replace(/[^a-z0-9.x]+/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+  function dimKey(v){
+    const s = norm(v);
+    const m = s.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+    if(!m) return '';
+    const f = x => {
+      const n = Number(x);
+      return Number.isInteger(n) ? String(n) : String(n).replace(/0+$/,'').replace(/\.$/,'');
+    };
+    return f(m[1]) + 'x' + f(m[2]) + 'x' + f(m[3]);
+  }
+  function materialName(m){
+    return text(m && (m.name || m.nombre || m.material || m.mat || m.label));
+  }
+  function materialId(m){
+    return text(m && (m.id || m.materialId || m.matId || m.material_id));
+  }
+  function rowMaterialId(r){
+    return text(r && (r.materialId || r.matId || r.material_id || r.v2MaterialId || r.stockMaterialId));
+  }
+  function companyValue(r){
+    return text(r && (r.companyId || r.empresaId || r.company || r.empresa || r.companyName || r.empresaNombre));
+  }
+  function isReynoldsAlias(v, canonicalId){
+    const raw = norm(v);
+    if(!raw) return false;
+    const stripped = raw.replace(/^emp\s+/,'').replace(/^emp[_-]+/,'');
+    const cid = norm(canonicalId);
+    const cidStripped = cid.replace(/^emp\s+/,'').replace(/^emp[_-]+/,'');
+    return raw === 'reynolds' || stripped === 'reynolds' || raw === cid || stripped === cidStripped;
+  }
+  function findReynoldsCompany(){
+    if(typeof db === 'undefined' || !db || !Array.isArray(db.companies)) return null;
+    const matches = db.companies.filter(c => {
+      const vals = [c && c.id, c && c.companyId, c && c.empresaId, c && c.name, c && c.nombre, c && c.code, c && c.codigo];
+      return vals.some(v => {
+        const n = norm(v);
+        const stripped = n.replace(/^emp\s+/,'').replace(/^emp[_-]+/,'');
+        return n === 'reynolds' || stripped === 'reynolds';
       });
-      if(changed){
-        db.updatedAt=new Date().toISOString();db.pletinaUnitMixRepairVersion='V62-20260820';
-        if(typeof save==='function')save();
-        try{if(typeof render==='function')render();}catch(_){ }
-        if(publishNow!==false){try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){ }}
-        console.info('[Stock V62] Salidas de pletina mm mezcladas con barras corregidas.');
-      }
-      return changed;
-    }catch(error){console.warn('[Stock V62] No se pudo corregir mezcla pletina mm/barras',error);return false;}finally{repairing=false;}
+    });
+    return matches.length === 1 ? matches[0] : null;
   }
+  function candidateMaterialIds(){
+    if(typeof db === 'undefined' || !db || !Array.isArray(db.materials)) return [];
+    return db.materials
+      .filter(m => {
+        const type = norm(m && (m.type || m.tipo || 'hierro'));
+        return dimKey(materialName(m)) === TARGET_DIM && (!type || type === 'hierro');
+      })
+      .map(materialId)
+      .filter(Boolean);
+  }
+  function materialIsCandidate(id, ids){ return ids.includes(text(id)); }
+  function physicalSign(type){
+    const t = norm(type).replace(/\s+/g,'_');
+    if(['entrada','ajuste_pos','devolucion','in'].includes(t)) return 1;
+    if(['salida','ajuste_neg','consumo','out'].includes(t)) return -1;
+    return 0;
+  }
+  function stockCachedQty(row){
+    if(!row) return 0;
+    const vals = [row.qty,row.cantidad,row.physicalQty,row.fisico,row['físico'],row.real,row.stock]
+      .map(num).filter(Number.isFinite);
+    return vals.length ? Math.max.apply(null, vals) : 0;
+  }
+  function exactPhysicalForMaterial(companyId, matId){
+    const movs = (Array.isArray(db.movements) ? db.movements : []).filter(r =>
+      isReynoldsAlias(companyValue(r), companyId) && rowMaterialId(r) === matId && physicalSign(r.type || r.tipo) !== 0
+    );
+    if(movs.length){
+      return movs.reduce((sum,r)=>sum + physicalSign(r.type || r.tipo) * num(r.qty ?? r.cantidad ?? r.amount ?? r.quantity), 0);
+    }
+    const rows = (Array.isArray(db.stock) ? db.stock : []).filter(r =>
+      isReynoldsAlias(companyValue(r), companyId) && rowMaterialId(r) === matId
+    );
+    return rows.length ? Math.max.apply(null, rows.map(stockCachedQty)) : 0;
+  }
+  function activeOwnAssignmentQty(companyId, matId){
+    return (Array.isArray(db.assignments) ? db.assignments : [])
+      .filter(a => isReynoldsAlias(companyValue(a), companyId))
+      .filter(a => rowMaterialId(a) === matId)
+      .filter(a => text(a.ref || a.jobRef || a.referencia || a.trabajoRef) === TARGET_REF)
+      .filter(a => !['cancelada','cancelado','cerrada','cerrado','consumida','consumido','devuelta','devuelto','inactiva','inactivo'].includes(norm(a.status || a.estado || 'activa')))
+      .reduce((sum,a)=>sum + num(a.qty ?? a.cantidad ?? a.pendingQty ?? a.qtyPending),0);
+  }
+  function chooseCanonical(companyId, ids){
+    const strictRows = (Array.isArray(db.stock) ? db.stock : []).filter(r =>
+      text(r.companyId) === companyId && materialIsCandidate(rowMaterialId(r), ids)
+    );
+    if(!strictRows.length) return null;
+    if(strictRows.length === 1) return strictRows[0];
+
+    const scored = strictRows.map(row => ({
+      row,
+      score: activeOwnAssignmentQty(companyId, rowMaterialId(row)) * 1000 +
+             ((Array.isArray(db.movements)?db.movements:[]).filter(m=>text(m.companyId)===companyId && rowMaterialId(m)===rowMaterialId(row)).length)
+    })).sort((a,b)=>b.score-a.score);
+
+    if(scored.length > 1 && scored[0].score === scored[1].score) return null;
+    return scored[0].row;
+  }
+  function remapMaterialFields(row, oldIds, newId){
+    if(!row) return 0;
+    let changed = 0;
+    ['materialId','matId','material_id','v2MaterialId','stockMaterialId','sourceMaterialId','fromMaterialId'].forEach(k=>{
+      if(oldIds.includes(text(row[k])) && text(row[k]) !== newId){ row[k] = newId; changed++; }
+    });
+    ['toMaterialId','destinationMaterialId','targetMaterialId'].forEach(k=>{
+      if(oldIds.includes(text(row[k])) && text(row[k]) !== newId){ row[k] = newId; changed++; }
+    });
+    return changed;
+  }
+  function normalizeCompanyFields(row, companyId){
+    if(!row || !isReynoldsAlias(companyValue(row), companyId)) return 0;
+    let changed = 0;
+    if(text(row.companyId) !== companyId){ row.companyId = companyId; changed++; }
+    if(row.empresaId !== undefined && isReynoldsAlias(row.empresaId, companyId) && text(row.empresaId) !== companyId){ row.empresaId = companyId; changed++; }
+    return changed;
+  }
+  function remapCollection(name, companyId, oldIds, newId){
+    const arr = Array.isArray(db[name]) ? db[name] : [];
+    let n = 0;
+    arr.forEach(row=>{
+      if(!row) return;
+      const own = isReynoldsAlias(companyValue(row), companyId);
+      const dest = isReynoldsAlias(row.toCompanyId || row.destinationCompanyId || row.targetCompanyId || row.consumerCompanyId, companyId);
+      if(!own && !dest) return;
+      let rowChanged = 0;
+      if(own){
+        rowChanged += normalizeCompanyFields(row, companyId);
+        rowChanged += remapMaterialFields(row, oldIds, newId);
+      }else if(dest){
+        ['toMaterialId','destinationMaterialId','targetMaterialId'].forEach(k=>{
+          if(oldIds.includes(text(row[k])) && text(row[k]) !== newId){ row[k] = newId; rowChanged++; }
+        });
+      }
+      if(rowChanged){
+        row.reynolds100x40CanonicalRepairAt = new Date().toISOString();
+        row.reynolds100x40CanonicalMaterialId = newId;
+        n += rowChanged;
+      }
+    });
+    return n;
+  }
+  function logicalPhysicalBefore(companyId, ids){
+    return ids.reduce((sum,id)=>sum + exactPhysicalForMaterial(companyId,id),0);
+  }
+  function physicalAfterStrict(companyId, matId){
+    return (Array.isArray(db.movements)?db.movements:[])
+      .filter(r => text(r.companyId) === companyId && rowMaterialId(r) === matId)
+      .reduce((sum,r)=>sum + physicalSign(r.type || r.tipo) * num(r.qty ?? r.cantidad ?? r.amount ?? r.quantity),0);
+  }
+  function markUnusedAliases(ids, canonicalId){
+    ids.filter(id=>id!==canonicalId).forEach(id=>{
+      const stillUsed = ['stock','movements','reservations','assignments','reservationDebts'].some(name =>
+        (Array.isArray(db[name])?db[name]:[]).some(r => rowMaterialId(r) === id || text(r && r.toMaterialId) === id)
+      );
+      if(stillUsed) return;
+      const m = (db.materials||[]).find(x=>materialId(x)===id);
+      if(!m) return;
+      m.deprecatedStockAlias = true;
+      m.mergedIntoMaterialId = canonicalId;
+      m.mergedIntoCompanyId = 'REYNOLDS';
+      m.mergedAt = new Date().toISOString();
+    });
+  }
+
+  function repair(publishNow){
+    if(repairing) return false;
+    repairing = true;
+    try{
+      if(typeof db === 'undefined' || !db) return false;
+      const company = findReynoldsCompany();
+      if(!company) return false;
+      const companyId = text(company.id || company.companyId || company.empresaId);
+      if(!companyId) return false;
+
+      const ids = candidateMaterialIds();
+      if(ids.length < 2) return false;
+
+      const canonicalRow = chooseCanonical(companyId, ids);
+      if(!canonicalRow) return false;
+      const canonicalId = rowMaterialId(canonicalRow);
+      if(!canonicalId) return false;
+
+      const targetRows = (db.stock||[]).filter(r =>
+        isReynoldsAlias(companyValue(r), companyId) && materialIsCandidate(rowMaterialId(r), ids)
+      );
+      const legacyRows = targetRows.filter(r => r !== canonicalRow || text(r.companyId) !== companyId || rowMaterialId(r) !== canonicalId);
+
+      const legacyRecords = ['movements','reservations','assignments','reservationDebts'].some(name =>
+        (Array.isArray(db[name])?db[name]:[]).some(r => {
+          const own = isReynoldsAlias(companyValue(r), companyId);
+          const dest = isReynoldsAlias(r && (r.toCompanyId || r.destinationCompanyId || r.targetCompanyId), companyId);
+          if(!own && !dest) return false;
+          const mid = rowMaterialId(r);
+          const toMid = text(r && r.toMaterialId);
+          return (materialIsCandidate(mid,ids) && mid !== canonicalId) || (materialIsCandidate(toMid,ids) && toMid !== canonicalId) || (own && text(r.companyId)!==companyId && materialIsCandidate(mid,ids));
+        })
+      );
+
+      if(!legacyRows.length && !legacyRecords) return false;
+
+      const physicalBefore = logicalPhysicalBefore(companyId, ids);
+      /* Guardia fuerte: este parche SOLO corresponde al caso comprobado de 2 barras físicas. */
+      if(Math.abs(physicalBefore - 2) > EPS){
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada: físico lógico inesperado', physicalBefore);
+        return false;
+      }
+
+      /* Otra guardia: la ficha visible debe ser la que hoy muestra el compromiso de esta OT. */
+      let visibleCommitment = 0;
+      try{
+        if(typeof assignedStock === 'function') visibleCommitment += num(assignedStock(companyId,canonicalId));
+        if(typeof reservedStock === 'function') visibleCommitment += num(reservedStock(companyId,canonicalId));
+      }catch(_){ }
+      if(visibleCommitment > 0 && Math.abs(visibleCommitment - 2) > EPS){
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada: reservado/asignado inesperado', visibleCommitment);
+        return false;
+      }
+
+      const rollbackSnapshot = JSON.stringify(db);
+      const rollback = function(){
+        try{
+          db = JSON.parse(rollbackSnapshot);
+          window.__LDH_STOCK_MEMORY_DB = db;
+          return true;
+        }catch(_){ return false; }
+      };
+
+      const oldIds = ids.filter(id=>id!==canonicalId);
+      let remapped = 0;
+      ['movements','reservations','assignments','reservationDebts'].forEach(name=>{
+        remapped += remapCollection(name, companyId, oldIds, canonicalId);
+      });
+
+      /* Normalizar también registros ya canónicos pero con empresa legacy "REYNOLDS". */
+      ['movements','reservations','assignments','reservationDebts'].forEach(name=>{
+        const arr = Array.isArray(db[name]) ? db[name] : [];
+        arr.forEach(row=>{
+          if(!row || rowMaterialId(row)!==canonicalId) return;
+          if(isReynoldsAlias(companyValue(row),companyId)) remapped += normalizeCompanyFields(row,companyId);
+        });
+      });
+
+      /* Unificar filas Stock de REYNOLDS. No se toca ninguna fila de otra empresa. */
+      legacyRows.forEach(row=>{
+        if(!canonicalRow.location && row.location) canonicalRow.location = row.location;
+        if(!canonicalRow.ubicacion && row.ubicacion) canonicalRow.ubicacion = row.ubicacion;
+        canonicalRow.min = Math.max(num(canonicalRow.min), num(row.min));
+        if(!canonicalRow.barLengthMm && row.barLengthMm) canonicalRow.barLengthMm = row.barLengthMm;
+      });
+      canonicalRow.companyId = companyId;
+      canonicalRow.materialId = canonicalId;
+      canonicalRow.reynolds100x40CanonicalAt = new Date().toISOString();
+      canonicalRow.reynolds100x40MergedRows = legacyRows.length;
+      db.stock = (db.stock||[]).filter(row => !legacyRows.includes(row));
+
+      /* Tras remapear, los movimientos deben conservar exactamente el mismo físico.
+         Si el legado guardaba las 2 barras solo en la fila Stock (sin movimiento),
+         se crea únicamente el hueco necesario para no perder ese físico real. */
+      let after = physicalAfterStrict(companyId,canonicalId);
+      const gap = physicalBefore - after;
+      if(gap < -EPS){
+        rollback();
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada después del remapeo: el físico aumentaría indebidamente', {physicalBefore,after});
+        return false;
+      }
+      if(gap > EPS){
+        if(!Array.isArray(db.movements)) db.movements = [];
+        db.movements.push({
+          id:'mov_reynolds_100x40_merge_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-5),
+          companyId,
+          materialId:canonicalId,
+          matId:canonicalId,
+          type:'entrada',
+          tipo:'entrada',
+          qty:gap,
+          cantidad:gap,
+          date:new Date().toISOString(),
+          ref:TARGET_REF,
+          jobRef:TARGET_REF,
+          reason:'fusion_reynolds_100x40_legacy_saldo_stockrow_v62',
+          source:'stock_reynolds_100x40_canonical_v62',
+          note:'Conservación de físico legacy al unificar ficha duplicada REYNOLDS 100x40x1.5'
+        });
+        after += gap;
+      }
+
+      if(Math.abs(after - physicalBefore) > EPS){
+        rollback();
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada: no se conservó el físico', {physicalBefore,after});
+        return false;
+      }
+
+      markUnusedAliases(ids, canonicalId);
+      db.reynolds100x40CanonicalRepairV62 = {
+        at:new Date().toISOString(),
+        ref:TARGET_REF,
+        companyId,
+        materialId:canonicalId,
+        physicalBefore,
+        physicalAfter:after,
+        legacyRowsRemoved:legacyRows.length,
+        remappedRecords:remapped
+      };
+      db.updatedAt = new Date().toISOString();
+
+      /* Se han eliminado filas Stock legacy: la publicación local debe prevalecer
+         sobre cualquier copia remota inmediatamente anterior. */
+      window.__LDH_STOCK_AUTHORITATIVE_DELETE_ONCE = true;
+      if(typeof save === 'function') save();
+      try{ if(typeof render === 'function') render(); }catch(_){ }
+      if(publishNow !== false){
+        try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(_){ }
+      }
+      console.info('[Stock] REYNOLDS 100x40x1.5 unificado con conservación exacta del físico:', db.reynolds100x40CanonicalRepairV62);
+      return true;
+    }catch(error){
+      console.warn('[Stock] No se pudo unificar REYNOLDS 100x40x1.5',error);
+      return false;
+    }finally{
+      repairing = false;
+    }
+  }
+
   try{
-    if(typeof window.LDH_applyRemoteStockWithoutReload==='function'&&!window.LDH_applyRemoteStockWithoutReload.__ldhPletinaMixV62){
-      const prev=window.LDH_applyRemoteStockWithoutReload;
-      const wrapped=function(){const r=prev.apply(this,arguments);setTimeout(()=>repair(true),80);return r;};
-      wrapped.__ldhPletinaMixV62=true;window.LDH_applyRemoteStockWithoutReload=wrapped;
+    if(typeof window.LDH_applyRemoteStockWithoutReload === 'function' &&
+       !window.LDH_applyRemoteStockWithoutReload.__ldhReynolds100x40CanonicalV62){
+      const prev = window.LDH_applyRemoteStockWithoutReload;
+      const wrapped = function(){
+        const result = prev.apply(this,arguments);
+        setTimeout(function(){ repair(true); },90);
+        return result;
+      };
+      wrapped.__ldhReynolds100x40CanonicalV62 = true;
+      window.LDH_applyRemoteStockWithoutReload = wrapped;
     }
   }catch(_){ }
-  const run=()=>repair(true);
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run,{once:true});else setTimeout(run,0);
-  [800,2200,5000,9000].forEach(ms=>setTimeout(run,ms));
-  window.addEventListener('storage',e=>{if(!e||e.key==='ldh_v2_company_stock_v1')setTimeout(run,180);});
-  window.LDH_repararMezclaPletinaMmBarrasV62=run;
+
+  const run = function(){ repair(true); };
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',run,{once:true});
+  else setTimeout(run,0);
+  [1200,3200,6500].forEach(delay=>setTimeout(run,delay));
+  window.addEventListener('storage',function(ev){
+    if(!ev || ev.key === 'ldh_v2_company_stock_v1') setTimeout(run,220);
+  });
+
+  window.LDH_repararReynolds100x40Legacy = function(){ return repair(true); };
 })();
 </script>
-<!-- /LDH_STOCK_V62_REPARAR_SALIDAS_PLETINA_MM_COMO_BARRAS_20260820 -->
+<!-- /LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820 -->
 
 </body>
 </html>
