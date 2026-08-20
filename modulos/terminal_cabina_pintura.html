@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V6-ENVASES-ENTEROS-20260819">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V7-VINCULO-PC-FLUJO-20260820">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -59,7 +59,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V3 &middot; Control en litros &middot; 1 bote = 4 L &middot; reservas gestionadas desde PC.</div>
+      <div class="sub">V7 &middot; Control en litros &middot; envases enteros &middot; 1 bote equivalente = 4 L &middot; reservas gestionadas desde PC.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -219,7 +219,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V6-ENVASES-ENTEROS-20260819';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V7-VINCULO-PC-FLUJO-20260820';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -382,7 +382,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return Array.from(map.values()).map(item=>{
       const flow=flowOf(item); const total=totalOf(item,flow);
       return {...item,ref:refOf(item),company:text(item.company||item.empresa||item.empresaReceptora),concept:text(item.concept||item.concepto||item.nombreConcepto||'Sin concepto'),flow,total};
-    }).filter(item=>!item.deleted && item.flow.pintura>0);
+    }).filter(item=>{
+      if(item.deleted) return false;
+      if(item.flow.pintura>0) return true;
+      /* Los enlaces historicos expresos deben seguir visibles mientras esperan entrar en cabina. */
+      return item.flow.fab>0 && !!legacyPaintLinkForWork(item);
+    });
   }
   function paintSummary(item){
     const direct=[item.paintName,item.pinturaNombre,item.colorPintura,item.ral,item.color].map(text).filter(Boolean);
@@ -609,8 +614,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         row.estado=row.fase;
         row.status='pendiente';
         row.archived=false;
-        row.hideFromFab=(nextFlow.fab<=0 && nextFlow.pintura<=0 && nextFlow.almacen>0);
-        row.keepInFab=!row.hideFromFab;
+        const finishedInFab=(nextFlow.fab<=0 && nextFlow.pintura<=0);
+        row.hideFromFab=finishedInFab;
+        row.keepInFab=!finishedInFab;
         row.history=Array.isArray(row.history)?row.history.slice():[];
         row.history.push({id:uid('hist'),type:meta.type,qty:num(meta.qty),date:meta.at,operator:meta.operator,note:meta.note,source:'terminal_cabina_pintura'});
         row.updatedAt=meta.at;
@@ -624,7 +630,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   function updateOverridesAndInbox(pkg,ref,nextFlow,representative,at){
     const overrides=safeParse(pkg.overrides,'{}')||{};
     const cf=canonicalFlow(nextFlow);
-    overrides[ref]={...(overrides[ref]||{}),flow:cf,fase:phaseFromFlow(nextFlow),estado:phaseFromFlow(nextFlow),status:'pendiente',keepInFab:!(nextFlow.fab<=0&&nextFlow.pintura<=0&&nextFlow.almacen>0),hideFromFab:(nextFlow.fab<=0&&nextFlow.pintura<=0&&nextFlow.almacen>0),archived:false,updatedAt:at};
+    const finishedInFab=(nextFlow.fab<=0&&nextFlow.pintura<=0);
+    overrides[ref]={...(overrides[ref]||{}),flow:cf,fase:phaseFromFlow(nextFlow),estado:phaseFromFlow(nextFlow),status:'pendiente',keepInFab:!finishedInFab,hideFromFab:finishedInFab,archived:false,updatedAt:at};
     pkg.overrides=JSON.stringify(overrides);
     let inbox=safeParse(pkg.inbox,'[]'); if(!Array.isArray(inbox)) inbox=[];
     const idx=inbox.findIndex(x=>sameRef(refOf(x),ref));
@@ -854,21 +861,33 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(spec.kind==='code') return new RegExp('(?:^|\\s)'+spec.key+'(?:\\s|$)').test(n);
     return n.includes(spec.key);
   }
-  function stockCompanyForWork(work){
-    const db=state.stock;if(!db)return null;const wanted=norm(work&&work.company);if(!wanted)return null;
+  function stockCompanyForWork(work,meta){
+    const db=state.stock;if(!db)return null;
+    const exactIds=[
+      meta&&meta.paintStockCompanyId,
+      work&&work.paintStockCompanyId,
+      work&&work.stockPaintCompanyId,
+      work&&work.stockCompanyId
+    ].map(text).filter(Boolean);
+    for(const id of exactIds){
+      const exact=companyRecord(db,id);
+      if(exact&&!isCommonCompany(exact))return exact;
+    }
+    const wanted=norm(work&&work.company);if(!wanted)return null;
     const matches=(db.companies||[]).filter(c=>!isCommonCompany(c)).filter(c=>[c.name,c.nombre,c.code,c.codigo].some(v=>norm(v)===wanted));
     return matches.length===1?matches[0]:null;
   }
   function paintLinkForWork(work){
     if(!state.stock)return {kind:'loading'};
-    const ral=workRal(work); if(!ral)return {kind:'no_ral',ral:''};
-    const company=stockCompanyForWork(work); if(!company)return {kind:'no_company',ral};
+    const ref=text(work&&work.ref);
+    const meta=state.orderMetaByRef[ref]||{};
+    const ral=workRal(work);
+    const company=stockCompanyForWork(work,meta); if(!company)return {kind:'no_company',ral};
     const all=paintRows().filter(r=>r.companyId===text(company.id));
-    const meta=state.orderMetaByRef[text(work&&work.ref)]||{};
 
     /* 1) Autoridad principal: ID exacto conservado en el snapshot del trabajo.
-       Preparacion copia stockLinkId/linked_matId a Fabricacion, por lo que una OT
-       nueva no debe volver a decidir su pintura por RAL. */
+       Preparacion copia stockLinkId/linked_matId a Fabricacion. Este ID se resuelve
+       incluso si la OT no trae RAL, porque el RAL solo es informacion auxiliar. */
     const snapshotRow=workLinkedPaintRow(work,all,ral);
     if(snapshotRow){
       const resolved=text(meta.paintRalResolved)||ralFromPaintRow(snapshotRow)||ral;
@@ -885,6 +904,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     /* 3) Una reserva exacta de esta OT tambien identifica inequívocamente la ficha. */
     const existing=all.filter(r=>ownPaintReserved(state.stock,r.companyId,text(r.mat.id),work.ref)>0);
     if(existing.length===1){const row=existing[0];return {kind:'linked',ral:ralFromPaintRow(row)||ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'reserva'};}
+
+    /* Solo despues de agotar los IDs exactos se exige RAL para las busquedas antiguas. */
+    if(!ral)return {kind:'no_ral',ral:''};
 
     /* 4) Excepciones historicas: solo lectura. No crea botones ni escribe vinculos desde cabina. */
     const legacy=legacyPaintLinkForWork(work);
