@@ -1709,6 +1709,15 @@ function companyById(id){return db.companies.find(c=>c.id===id)}
 function stockRow(companyId,materialId){return db.stock.find(s=>s.companyId===companyId&&s.materialId===materialId)}
 function jobById(id){return db.jobs.find(j=>j.id===id)}
 function realStock(companyId,materialId){
+  // V114 · Las pletinas modernas gestionadas en mm tienen su físico autoritativo
+  // en la propia fila Stock. No se mezcla con el ledger legacy de barras.
+  try{
+    const sr = stockRow(companyId,materialId);
+    if(sr && String(sr.lengthMode||'').toLowerCase()==='mm'){
+      const mm = Number(sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm ?? 0);
+      return Number.isFinite(mm) ? Math.max(0,mm) : 0;
+    }
+  }catch(e){}
   return db.movements
    .filter(m=>m.companyId===companyId&&m.materialId===materialId)
    .reduce((a,m)=>{
@@ -3262,7 +3271,7 @@ function rowHTML(s,m){
        </div>`
     : '<span class="muted">Sin reservas/deudas</span>';
 
-  return `<tr draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv+asg)}</td><td class="num" aria-hidden="true">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','entrada')">+ Entrada</button> <button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','salida')">- Salida</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
+  return `<tr draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(String(s.lengthMode||'').toLowerCase()==='mm'?'mm':m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv+asg)}</td><td class="num" aria-hidden="true">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','entrada')">+ Entrada</button> <button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','salida')">- Salida</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
@@ -8532,6 +8541,57 @@ body{
 })();
 </script>
 <!-- /LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820 -->
+
+
+
+<!-- LDH_STOCK_REYNOLDS_CIERRE_RESIDUOS_V63_20260820 -->
+<script id="LDH_STOCK_REYNOLDS_CIERRE_RESIDUOS_V63_20260820">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_REYNOLDS_RESIDUOS_V63__)return;
+  window.__LDH_STOCK_REYNOLDS_RESIDUOS_V63__=true;
+  const REF='OT-260728-003',EPS=1e-6;
+  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  const num=v=>{const n=Number(v);return Number.isFinite(n)?n:0;};
+  const idOf=r=>String(r?.id??r?.materialId??r?.matId??'');
+  const midOf=r=>String(r?.materialId??r?.matId??r?.material_id??'');
+  const refOf=r=>String(r?.ref??r?.jobRef??r?.consumerRef??r?.reference??'').trim();
+  function company(){return (db.companies||[]).find(c=>norm(c?.name??c?.nombre??c?.code??c?.codigo??c?.id)==='reynolds')||null;}
+  function materialByName(name){const n=norm(name);return (db.materials||[]).find(m=>norm(m?.name??m?.nombre??m?.material)===n)||null;}
+  function physical(cid,mid){return (db.movements||[]).filter(m=>String(m?.companyId??m?.empresaId)==cid&&midOf(m)===mid).reduce((s,m)=>{const t=norm(m?.type??m?.tipo).replace(/ /g,'_'),q=num(m?.qty??m?.cantidad);if(['salida','ajuste_neg','consumo','out'].includes(t))return s-q;if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t))return s;return s+q;},0);}
+  function activeOwn(a,cid,mid){const st=norm(a?.status??a?.estado??'activa'),ph=norm(a?.phase??a?.fase??'preparacion'),typ=norm(a?.assignmentType??a?.reason??a?.source);return String(a?.companyId??a?.empresaId)==cid&&midOf(a)===mid&&refOf(a)===REF&&['activa','activo','active',''].includes(st)&&['preparacion','fabricacion',''].includes(ph)&&!a?.toCompanyId&&!typ.includes('otra empresa')&&!typ.includes('ferreteria');}
+  function prepStillAlive(){try{return !!(localStorage.getItem('prep_recepcion_'+REF)||sessionStorage.getItem('prep_recepcion_'+REF));}catch(_){return false;}}
+  function stageAdvanced(){try{const raw=localStorage.getItem('ldh_db')||sessionStorage.getItem('ldh_db')||'{}',x=JSON.parse(raw)||{};for(const key of ['fabricacion','fab','pintura','almacen','entregas','trabajos'])for(const r of (Array.isArray(x[key])?x[key]:[])){if(refOf(r)!==REF)continue;const txt=norm([r?.fase,r?.phase,r?.estado,r?.status,r?.workflow_stage].join(' '));if(key!=='trabajos'||txt.includes('fab')||txt.includes('pint')||txt.includes('almac')||txt.includes('entreg'))return true;}}catch(_){}return false;}
+  function repairPletina(cid){
+    const mat=materialByName('pletina 30x6');if(!mat)return false;const mid=idOf(mat);if(!mid)return false;
+    const before=physical(cid,mid);if(Math.abs(before+5999)>EPS)return false;
+    const bad=(db.movements||[]).filter(m=>String(m?.companyId??m?.empresaId)==cid&&midOf(m)===mid&&refOf(m)===REF&&['salida','consumo','out','ajuste_neg'].includes(norm(m?.type??m?.tipo).replace(/ /g,'_'))&&Math.abs(num(m?.qty??m?.cantidad)-6000)<EPS&&norm([m?.source,m?.reason].join(' ')).includes('preparacion'));
+    if(bad.length!==1){console.warn('[Stock V63] Pletina no corregida: no hay un unico movimiento 6000 comprobable',bad.length);return false;}
+    const move=bad[0];move.originalQtyBeforeUnitFix=6000;move.originalUnitBeforeFix='mm_mal_contabilizado_como_barras';move.qty=1;move.cantidad=1;if(move.amount!==undefined)move.amount=1;move.unit='barras';move.unidad='barras';move.pletinaLegacyUnitFixV63=true;move.pletinaLegacyUnitFixAt=new Date().toISOString();move.note=String(move.note||'')+' · V63 corrige 6000 mm contabilizados como 6000 barras: salida física real 1 barra';
+    const after=physical(cid,mid);if(Math.abs(after)>EPS){move.qty=6000;move.cantidad=6000;if(move.amount!==undefined)move.amount=6000;delete move.pletinaLegacyUnitFixV63;console.warn('[Stock V63] rollback pletina, saldo inesperado',after);return false;}
+    return true;
+  }
+  function repair100x40(cid){
+    if(prepStillAlive())return false; // Si sigue en Preparacion, V114 debe cerrar primero de forma autoritativa.
+    if(!stageAdvanced())return false;
+    const mat=materialByName('100x40x1.5');if(!mat)return false;const mid=idOf(mat);if(!mid)return false;
+    if(Math.abs(physical(cid,mid)-2)>EPS)return false;
+    const active=(db.assignments||[]).filter(a=>activeOwn(a,cid,mid));const total=active.reduce((s,a)=>s+num(a?.qty??a?.cantidad),0);
+    if(Math.abs(total-2)>EPS)return false;
+    if(!Array.isArray(db.movements))db.movements=[];
+    const moveId='mov_reynolds_100x40_cierre_v63_OT_260728_003';
+    if(!(db.movements||[]).some(m=>String(m?.id||'')===moveId))db.movements.push({id:moveId,companyId:cid,materialId:mid,matId:mid,type:'salida',tipo:'salida',qty:2,cantidad:2,date:new Date().toISOString(),ref:REF,jobRef:REF,reason:'consumo_stock_propio_al_salir_preparacion_reparado_v63',source:'stock_reynolds_cierre_residuo_v63',debtExempt:true,returnRequired:false});
+    const now=new Date().toISOString();active.forEach(a=>{a.status='consumida';a.estado='consumida';a.phase='fabricacion';a.fase='fabricacion';a.consumedQty=num(a?.qty??a?.cantidad);a.consumedAt=now;a.updatedAt=now;a.movementId=moveId;a.closedResidueV63=true;});
+    return Math.abs(physical(cid,mid))<EPS;
+  }
+  let busy=false;
+  function repair(publish){if(busy)return false;busy=true;try{if(typeof db==='undefined'||!db)return false;const c=company();if(!c)return false;const cid=String(c.id??c.companyId??c.empresaId??'');if(!cid)return false;const p=repairPletina(cid),b=repair100x40(cid);if(!(p||b))return false;db.updatedAt=new Date().toISOString();db.reynoldsResidueRepairV63={at:new Date().toISOString(),ref:REF,pletina30x6:p,barra100x40:b};if(typeof save==='function')save();try{if(typeof render==='function')render();}catch(_){}if(publish!==false)try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){}console.info('[Stock V63] Residuos REYNOLDS corregidos',db.reynoldsResidueRepairV63);return true;}catch(e){console.warn('[Stock V63] No se pudo reparar REYNOLDS',e);return false;}finally{busy=false;}}
+  try{if(typeof window.LDH_applyRemoteStockWithoutReload==='function'&&!window.LDH_applyRemoteStockWithoutReload.__ldhReynoldsResidueV63){const prev=window.LDH_applyRemoteStockWithoutReload;const wrap=function(){const r=prev.apply(this,arguments);setTimeout(()=>repair(true),120);return r;};wrap.__ldhReynoldsResidueV63=true;window.LDH_applyRemoteStockWithoutReload=wrap;}}catch(_){}
+  const run=()=>repair(true);if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run,{once:true});else setTimeout(run,0);[1000,2600,6000].forEach(ms=>setTimeout(run,ms));window.addEventListener('storage',()=>setTimeout(run,250));
+  window.LDH_repararReynoldsResiduosV63=run;
+})();
+</script>
+<!-- /LDH_STOCK_REYNOLDS_CIERRE_RESIDUOS_V63_20260820 -->
 
 </body>
 </html>
