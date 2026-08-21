@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V21-EDITAR-CALCULO-DIRECTO-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V22-EDITAR-CALCULO-POINTERDOWN-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -137,7 +137,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V20 &middot; El valor escrito en botes se respeta exactamente: 5 significa 5 &middot; litros recalculados desde botes &middot; Editar c&aacute;lculo abre siempre aunque Stock se est&eacute; actualizando &middot; blancos RAL mostrados en blanco real.</div>
+      <div class="sub">V22 &middot; El valor escrito en botes se respeta exactamente: 5 significa 5 &middot; litros recalculados desde botes &middot; Editar c&aacute;lculo se abre antes de cualquier repintado de Firestore &middot; blancos RAL mostrados en blanco real.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -296,7 +296,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V21-EDITAR-CALCULO-DIRECTO-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V22-EDITAR-CALCULO-POINTERDOWN-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1042,7 +1042,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     }else if(required===null){
       detail='Preparaci&oacute;n no envi&oacute; la cantidad de pintura. Introduce el total para todo el pedido.';
     }
-    const action=(required===null||manual)?'<button class="btn warn small calc-action-btn" type="button" data-paint-calc="'+encodeURIComponent(entry.work.ref)+'" onclick="event.preventDefault();event.stopPropagation();window.__terminalPinturaEditarCalculo(this.dataset.paintCalc);return false;">'+(required===null?'Introducir c&aacute;lculo':'Editar c&aacute;lculo')+'</button>':'';
+    const action=(required===null||manual)?'<button class="btn warn small calc-action-btn" type="button" data-paint-calc="'+encodeURIComponent(entry.work.ref)+'">'+(required===null?'Introducir c&aacute;lculo':'Editar c&aacute;lculo')+'</button>':'';
     return '<div class="job-paint-strip'+(required===null?' missing':'')+'">'+
       '<div><div class="job-paint-title">'+esc(info.paintName)+sourceBadge+'</div><div class="job-paint-sub">'+detail+'</div>'+action+'</div>'+ 
       '<div class="job-paint-value"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Necesidad sin dato':esc(fmtLiters(required))+' necesarios')+'</small></div>'+ 
@@ -1135,19 +1135,41 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     try{ref=decodeURIComponent(String(encoded));}catch(_){ref=String(encoded);}
     openPaintCalcModal(ref);
   }
-  /* Acción global estable: el botón llama directamente aquí aunque Firestore haya
-     reconstruido el contenido del trabajo justo antes del clic. */
+  /* V22: la lista de trabajos es estable aunque Firestore sustituya sus hijos.
+     La edición se captura en POINTERDOWN, antes de que un render pueda destruir el
+     botón entre pulsación y click. También queda click/teclado como respaldo. */
   window.__terminalPinturaEditarCalculo=launchPaintCalcEncoded;
-  function bindPaintCalcButtons(root){
-    /* Los botones ya llevan onclick directo. Este listener queda solo como respaldo
-       para navegadores que eliminen el atributo inline al reconstruir nodos. */
-    root.querySelectorAll('[data-paint-calc]').forEach(button=>{
-      button.addEventListener('click',ev=>{
-        if(ev.defaultPrevented)return;
-        ev.preventDefault();ev.stopPropagation();
-        launchPaintCalcEncoded(button.dataset.paintCalc||'');
-      });
-    });
+  let lastPaintCalcLaunch={ref:'',at:0};
+  function paintCalcEventRef(ev,root){
+    const target=ev&&ev.target&&ev.target.closest?ev.target.closest('[data-paint-calc]'):null;
+    if(!target||!root.contains(target))return '';
+    return target.dataset.paintCalc||'';
+  }
+  function launchPaintCalcFromEvent(ev,root){
+    const encoded=paintCalcEventRef(ev,root);
+    if(!encoded)return false;
+    if(ev.type==='pointerdown' && ev.button!==undefined && ev.button!==0)return false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if(typeof ev.stopImmediatePropagation==='function')ev.stopImmediatePropagation();
+    let ref='';
+    try{ref=decodeURIComponent(String(encoded));}catch(_){ref=String(encoded);}
+    const now=Date.now();
+    if(lastPaintCalcLaunch.ref===ref && now-lastPaintCalcLaunch.at<450)return true;
+    lastPaintCalcLaunch={ref,at:now};
+    openPaintCalcModal(ref);
+    return true;
+  }
+  function installPaintCalcDelegation(){
+    const root=$('workList');
+    if(!root||root.dataset.paintCalcDelegation==='1')return;
+    root.dataset.paintCalcDelegation='1';
+    root.addEventListener('pointerdown',ev=>launchPaintCalcFromEvent(ev,root),true);
+    root.addEventListener('click',ev=>launchPaintCalcFromEvent(ev,root),true);
+    root.addEventListener('keydown',ev=>{
+      if(ev.key!=='Enter'&&ev.key!==' ')return;
+      launchPaintCalcFromEvent(ev,root);
+    },true);
   }
   function renderWorks(){
     state.works=workRowsFromPackage(state.flowPackage);
@@ -1162,7 +1184,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     $('workList').innerHTML=groups.map(group=>companyAccordionHtml(group,forceOpen,'works')).join('');
     bindAccordionState($('workList'),'details[data-work-company-key]','details[data-work-color-key]',state.openWorkCompanies,state.openWorkColors);
     bindWorkJobState($('workList'));
-    bindPaintCalcButtons($('workList'));
     $('workList').querySelectorAll('[data-paint-one]').forEach(b=>b.onclick=()=>moveOnePaintToStore(decodeURIComponent(b.dataset.paintOne||''),b));
     $('workList').querySelectorAll('[data-move-store]').forEach(b=>b.onclick=()=>movePaintToStore(decodeURIComponent(b.dataset.moveStore||'')));
     $('workList').querySelectorAll('[data-fix-phase]').forEach(b=>b.onclick=()=>openPhaseModal(decodeURIComponent(b.dataset.fixPhase||'')));
@@ -1900,6 +1921,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(works)renderWorks();if(control)renderControl();if(stock)renderStock();
   }
   $('tabWorks').onclick=()=>setTab('works'); $('tabControl').onclick=()=>setTab('control'); $('tabStock').onclick=()=>setTab('stock');
+  installPaintCalcDelegation();
   $('workSearch').addEventListener('input',renderWorks); $('workCompany').addEventListener('change',renderWorks); $('workClear').onclick=()=>{$('workSearch').value='';$('workCompany').value='';renderWorks();};
   $('controlSearch').addEventListener('input',renderControl); $('controlCompany').addEventListener('change',renderControl); $('controlClear').onclick=()=>{$('controlSearch').value='';$('controlCompany').value='';renderControl();};
   $('stockSearch').addEventListener('input',renderStock); $('stockCompany').addEventListener('change',renderStock); $('stockClear').onclick=()=>{$('stockSearch').value='';renderStock();};
