@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V41-PINTURA-GENERICA-LEGACY-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V42-ENVASES-FISICOS-REALES-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V41 &middot; Recupera tambi&eacute;n la cantidad de pedidos antiguos cuya l&iacute;nea se guard&oacute; como pintura gen&eacute;rica &middot; TIENES, NECESITAS y TE SOBRA/TE FALTA.</div>
+      <div class="sub">V42 &middot; Conserva la recuperaci&oacute;n de pintura de pedidos antiguos &middot; guarda el envase f&iacute;sico real (1 L, 4 L, 5 L u otro formato) y mantiene aparte la equivalencia de 4 L para los c&aacute;lculos.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V41-PINTURA-GENERICA-LEGACY-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V42-ENVASES-FISICOS-REALES-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -999,24 +999,16 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         if(total>0)return total;
       }
     }
-
-    /* V41: compatibilidad con pedidos antiguos de Calculo que guardaban la cantidad
-       como una linea generica llamada simplemente "pintura", sin materialId ni RAL.
-       Solo se usa si el trabajo YA tiene un color/ral resuelto y existe una unica linea
-       de consumo de pintura no auxiliar. Asi no se confunden disolventes/catalizadores. */
-    if(ral.key){
-      const genericPaint=lines.filter(line=>{
-        const name=norm(workMaterialName(line));
-        const query=norm(line&&(line.paintQuery||line.color||line.stockLinkLabel));
-        const probe=(name+' '+query).trim();
-        if(!probe)return false;
-        if(/\b(disolvente|solvente|diluyente|catalizador|limpieza|desengrasante)\b/.test(probe))return false;
-        return name==='pintura' || query==='pintura' || /^pintura\b/.test(name) || /^pintura\b/.test(query);
-      });
-      if(genericPaint.length===1){
-        const total=workMaterialRequested(genericPaint[0]);
-        if(total>0)return total;
-      }
+    /* V41 conservado: pedidos antiguos podían guardar una sola línea genérica "pintura"
+       sin materialId ni RAL. Solo se usa como último recurso. */
+    const genericPaint=lines.filter(line=>{
+      const name=norm(workMaterialName(line));
+      const query=norm(line&&(line.paintQuery||line.paint_query||line.query));
+      return name==='pintura'||query==='pintura';
+    });
+    if(genericPaint.length===1){
+      const total=workMaterialRequested(genericPaint[0]);
+      if(total>0)return total;
     }
     return null;
   }
@@ -1255,10 +1247,11 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         needSub=esc(fmtLiters(known))+' para terminar todos los trabajos';
       }
     }
-    const availableMain=available===null?'&mdash;':fmtBotesEq(available);
+    const physicalPack=color.row?savedPhysicalPackageSnapshot(color.row):null;
+    const availableMain=available===null?'&mdash;':(physicalPack?esc(packageMainLabel(physicalPack)):fmtBotesEq(available));
     const linkKinds=(color.entries||[]).map(e=>text(e&&e.info&&e.info.kind));
     const stockUnavailable=available===null&&linkKinds.some(k=>k==='stock_error');
-    const availableSub=available===null?(stockUnavailable?'Stock no disponible':'Disponible sin determinar'):esc(fmtLiters(available))+' disponibles ahora en cabina';
+    const availableSub=available===null?(stockUnavailable?'Stock no disponible':'Disponible sin determinar'):(physicalPack?esc(packageSubLabel(physicalPack,available)):esc(fmtLiters(available))+' disponibles ahora en cabina');
     let balanceMain='&mdash;',balanceLabel='NO SE PUEDE CALCULAR',balanceSub='Falta stock o falta dato de pintura',balanceKind='warn';
     if(color.row&&!color.unknownCount){
       const balance=num(color.remaining);
@@ -2193,12 +2186,15 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const known=details.filter(x=>x.required!==null).reduce((sum,x)=>sum+num(x.required),0);
       const unknown=details.filter(x=>x.required===null).length;
       const available=Math.max(0,num(r.physical));
+      const physicalPack=savedPhysicalPackageSnapshot(r);
+      const availableMain=physicalPack?esc(packageMainLabel(physicalPack)):fmtBotesEq(available);
+      const availableSub=physicalPack?esc(packageSubLabel(physicalPack,available)):('Disponible en cabina &middot; '+esc(fmtLiters(available)));
       const needText=jobs.length?(unknown?(known>0?fmtBotesEq(known)+' + '+unknown+' OT sin dato':'&mdash;'):fmtBotesEq(known)):'0 botes';
       const needSub=jobs.length?(unknown?(known>0?fmtLiters(known)+' conocidos &middot; ':'')+unknown+' OT sin dato':fmtLiters(known)+' necesarios'):'Pintura pendiente';
       return '<article class="stock-row">'+
-        '<div class="stock-main"><div class="stock-name">'+esc(r.mat.name||r.mat.nombre)+'</div><div class="stock-sub">'+esc(r.company)+' &middot; '+esc(r.mat.family||'Sin familia')+' &middot; bote base: '+BOTE_LITROS+' L</div></div>'+
+        '<div class="stock-main"><div class="stock-name">'+esc(r.mat.name||r.mat.nombre)+'</div><div class="stock-sub">'+esc(r.company)+' &middot; '+esc(r.mat.family||'Sin familia')+' &middot; base de cálculo: '+BOTE_LITROS+' L eq</div></div>'+
         '<div class="qty">'+needText+'<small>'+needSub+'</small></div>'+
-        '<div class="qty">'+fmtBotesEq(available)+'<small>Disponible en cabina &middot; '+esc(fmtLiters(available))+'</small></div>'+
+        '<div class="qty">'+availableMain+'<small>'+availableSub+'</small></div>'+
         '<div class="stock-action"><button class="btn warn small" data-stock-fix="'+encodeURIComponent(r.companyId)+'|'+encodeURIComponent(text(r.mat.id))+'">Regularizar</button></div></article>';
     }).join('');
     document.querySelectorAll('[data-stock-fix]').forEach(b=>b.onclick=()=>{const parts=String(b.dataset.stockFix||'').split('|');openStockModal(decodeURIComponent(parts[0]||''),decodeURIComponent(parts[1]||''));});
@@ -2220,10 +2216,13 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const ral=ralFromPaintRow(row);
     const paintStyle=paintThemeStyle(ral,name);
     const available=Math.max(0,num(row&&row.physical));
+    const physicalPack=savedPhysicalPackageSnapshot(row);
+    const availableMain=physicalPack?esc(packageMainLabel(physicalPack)):fmtBotesEq(available);
+    const availableSub=physicalPack?esc(packageSubLabel(physicalPack,available)):esc(fmtLiters(available));
     return '<div class="paint-accordion control-color-static control-stock-only" style="'+paintStyle+'">'+
       '<div class="paint-summary control-paint-summary">'+
-        '<div class="paint-summary-main"><div class="accordion-main"><div class="level-label level-color">Color / pintura</div><div class="accordion-name">'+esc(name)+'</div><div class="accordion-sub">'+esc(family)+' &middot; bote base: '+BOTE_LITROS+' L</div></div></div>'+ 
-        '<div class="paint-metric available"><b>'+fmtBotesEq(available)+'</b><small>DISPONIBLES EN CABINA &middot; '+esc(fmtLiters(available))+'</small></div>'+ 
+        '<div class="paint-summary-main"><div class="accordion-main"><div class="level-label level-color">Color / pintura</div><div class="accordion-name">'+esc(name)+'</div><div class="accordion-sub">'+esc(family)+' &middot; base de cálculo: '+BOTE_LITROS+' L eq</div></div></div>'+ 
+        '<div class="paint-metric available"><b>'+availableMain+'</b><small>DISPONIBLE FÍSICO &middot; '+availableSub+'</small></div>'+ 
       '</div>'+ 
     '</div>';
   }
@@ -2274,20 +2273,48 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const result=await runTransaction(stockDb,async tx=>{
       const db=await readStockInTransaction(tx); db.movements=Array.isArray(db.movements)?db.movements:[]; db.stock=Array.isArray(db.stock)?db.stock:[]; db.materials=Array.isArray(db.materials)?db.materials:[];
       const srow=db.stock.find(s=>text(s.companyId)===companyId&&text(s.materialId)===materialId); if(!srow)throw new Error('La ficha de stock ya no existe.');
-      const mat=db.materials.find(m=>text(m.id)===materialId)||{}; const before=stockPhysical(db,companyId,materialId); const delta=num(target)-before; if(Math.abs(delta)<0.000001)return {noChange:true,before,target,db,srow,mat};
-      const packInfo=(packageDetail&&typeof packageDetail==='object')?packageDetail:null; const packText=packInfo&&text(packInfo.text)?text(packInfo.text):'';
-      const auditNote='Regularizacion cabina pintura · '+text(reason)+' · Sistema '+fmt(before)+' botes eq -> fisico '+fmt(target)+' botes eq · Operario '+op+(packText?' · Envases: '+packText:'')+(text(note)?' · '+text(note):'');
-      const movement={id:uid('mov_pintura_reg'),movementId:uid('mov_pintura_reg_id'),companyId,materialId,matId:materialId,material:materialName(db,materialId),materialName:materialName(db,materialId),type:delta>0?'ajuste_pos':'ajuste_neg',tipo:delta>0?'ajuste_pos':'ajuste_neg',qty:Math.abs(delta),cantidad:Math.abs(delta),date:at,fecha:at,source:'terminal_cabina_pintura_regularizacion',origen:'terminal_cabina_pintura_regularizacion',operator:op,operario:op,beforeQty:before,afterQty:num(target),reason:text(reason),physicalCountMode:packInfo?'envases_enteros':'equivalente_4l',physicalLiters:packInfo?num(packInfo.totalLiters):litersFromBotes(target),equivalent4LBotes:num(target),packageBreakdown:packInfo&&Array.isArray(packInfo.items)?packInfo.items:[],packageBreakdownText:packText,note:auditNote,nota:auditNote};
-      db.movements.push(movement); db.updatedAt=at;
+      const mat=db.materials.find(m=>text(m.id)===materialId)||{};
+      const before=stockPhysical(db,companyId,materialId), targetEq=num(target), delta=targetEq-before;
+      const packInfo=(packageDetail&&typeof packageDetail==='object')?packageDetail:null;
+      const packItems=packInfo&&Array.isArray(packInfo.items)?normalizedPackageItems(packInfo.items):[];
+      const packText=packInfo&&text(packInfo.text)?text(packInfo.text):(packItems.length?packItems.map(x=>x.count+' x '+fmt(x.litersPerContainer)+' L').join(' + '):'');
+      const hasPhysicalCount=!!packInfo;
+
+      /* V42: la cantidad operativa sigue en equivalentes de 4 L para no romper los
+         cálculos existentes, pero la ficha conserva además los envases físicos reales. */
+      if(hasPhysicalCount){
+        srow.physicalCountMode='envases_enteros';
+        srow.physicalPackageBreakdown=packItems;
+        srow.packageBreakdown=packItems;
+        srow.packageBreakdownText=packText;
+        srow.physicalLiters=num(packInfo.totalLiters);
+        srow.equivalent4LBotes=targetEq;
+        srow.packageCountUpdatedAt=at;
+        srow.packageCountOperator=op;
+      }
+
+      const qtyChanged=Math.abs(delta)>=0.000001;
+      const auditNote='Regularizacion cabina pintura · '+text(reason)+' · Sistema '+fmt(before)+' botes eq -> fisico '+fmt(targetEq)+' botes eq · Operario '+op+(packText?' · Envases: '+packText:'')+(text(note)?' · '+text(note):'');
+      if(qtyChanged){
+        db.movements.push({id:uid('mov_pintura_reg'),movementId:uid('mov_pintura_reg_id'),companyId,materialId,matId:materialId,material:materialName(db,materialId),materialName:materialName(db,materialId),type:delta>0?'ajuste_pos':'ajuste_neg',tipo:delta>0?'ajuste_pos':'ajuste_neg',qty:Math.abs(delta),cantidad:Math.abs(delta),date:at,fecha:at,source:'terminal_cabina_pintura_regularizacion',origen:'terminal_cabina_pintura_regularizacion',operator:op,operario:op,beforeQty:before,afterQty:targetEq,reason:text(reason),physicalCountMode:hasPhysicalCount?'envases_enteros':'equivalente_4l',physicalLiters:hasPhysicalCount?num(packInfo.totalLiters):litersFromBotes(targetEq),equivalent4LBotes:targetEq,packageBreakdown:packItems,packageBreakdownText:packText,note:auditNote,nota:auditNote});
+      }else if(hasPhysicalCount){
+        /* Si los litros coinciden pero cambia el formato físico, también hay que guardarlo.
+           Ejemplo: 6,25 equivalentes de 4 L = 1 bote físico de 25 L. */
+        db.movements.push({id:uid('mov_pintura_recuento_envases'),movementId:uid('mov_pintura_recuento_envases_id'),companyId,materialId,matId:materialId,material:materialName(db,materialId),materialName:materialName(db,materialId),type:'recuento_envases',tipo:'recuento_envases',qty:0,cantidad:0,date:at,fecha:at,source:'terminal_cabina_pintura_recuento_envases',origen:'terminal_cabina_pintura_recuento_envases',operator:op,operario:op,beforeQty:before,afterQty:targetEq,reason:text(reason),physicalCountMode:'envases_enteros',physicalLiters:num(packInfo.totalLiters),equivalent4LBotes:targetEq,packageBreakdown:packItems,packageBreakdownText:packText,note:auditNote,nota:auditNote});
+      }else{
+        return {noChange:true,quantityChanged:false,before,target:targetEq,db,srow,mat};
+      }
+
+      db.updatedAt=at;
       const raw=JSON.stringify(db); const pack={}; pack[STOCK_KEY]=raw; pack.updatedAt=at; pack.schema='ldh_stock_chunked_v2_full'; const parts=chunkString(JSON.stringify(pack));
       for(let i=0;i<parts.length;i++)tx.set(doc(stockDb,'taller_data','stock','chunks',String(i)),{part:parts[i],index:i,updatedAt:serverTimestamp()},{merge:false});
       tx.set(stockMetaRef,{totalChunks:parts.length,chunkSize:CHUNK_SIZE,updatedAt:serverTimestamp(),updatedAtISO:at,key:STOCK_KEY,rawCompanies:Array.isArray(db.companies)?db.companies.length:0,rawMaterials:db.materials.length,rawStock:db.stock.length,rawMovements:db.movements.length,rawReservations:Array.isArray(db.reservations)?db.reservations.length:0,rawAssignments:Array.isArray(db.assignments)?db.assignments.length:0,source:'terminal_cabina_pintura.html'},{merge:true});
-      return {noChange:false,before,target:num(target),srow,mat};
+      return {noChange:false,quantityChanged:qtyChanged,before,target:targetEq,srow,mat,packItems,packText,physicalLiters:hasPhysicalCount?num(packInfo.totalLiters):litersFromBotes(targetEq)};
     });
     if(!result.noChange){
       try{
         const id=text(result.srow.id||(companyId+'_'+materialId)).replace(/[\/#?\[\]]/g,'_');
-        await setDoc(doc(stockDb,'stock_materials',id),{id,stockId:text(result.srow.id||id),companyId,materialId,name:text(result.mat.name||result.mat.nombre),family:text(result.mat.family||result.mat.familia||'Sin familia'),type:'pintura',unit:text(result.mat.unit||result.mat.unidad||'ud'),location:text(result.srow.location||result.srow.ubicacion),min:num(result.srow.min||result.mat.min),qty:num(target),updatedAt:serverTimestamp()},{merge:true});
+        await setDoc(doc(stockDb,'stock_materials',id),{id,stockId:text(result.srow.id||id),companyId,materialId,name:text(result.mat.name||result.mat.nombre),family:text(result.mat.family||result.mat.familia||'Sin familia'),type:'pintura',unit:text(result.mat.unit||result.mat.unidad||'ud'),location:text(result.srow.location||result.srow.ubicacion),min:num(result.srow.min||result.mat.min),qty:num(result.target),physicalCountMode:'envases_enteros',physicalLiters:num(result.physicalLiters),equivalent4LBotes:num(result.target),physicalPackageBreakdown:Array.isArray(result.packItems)?result.packItems:[],packageBreakdown:Array.isArray(result.packItems)?result.packItems:[],packageBreakdownText:text(result.packText),updatedAt:serverTimestamp()},{merge:true});
       }catch(e){console.warn('mirror stock',e);}
     }
     return result;
@@ -2437,7 +2464,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const cname=text(r.company||r.empresa||r.companyName||r.empresaNombre)||knownCompanyNameFromId(companyId)||companyId;
       companyMap.set(companyId,{id:companyId,name:cname,code:cname});
       const qty=Math.max(0,num(r.qty??r.cantidad??r.stock??r.physical));
-      stock.push({id:text(r.stockId||r.id||('mirror_'+idx)),companyId,materialId,min:num(r.min),location:text(r.location||r.ubicacion),qty,cantidad:qty,__mirror:true});
+      stock.push({id:text(r.stockId||r.id||('mirror_'+idx)),companyId,materialId,min:num(r.min),location:text(r.location||r.ubicacion),qty,cantidad:qty,physicalCountMode:text(r.physicalCountMode),physicalLiters:num(r.physicalLiters),equivalent4LBotes:num(r.equivalent4LBotes??qty),physicalPackageBreakdown:Array.isArray(r.physicalPackageBreakdown)?r.physicalPackageBreakdown:(Array.isArray(r.packageBreakdown)?r.packageBreakdown:[]),packageBreakdown:Array.isArray(r.packageBreakdown)?r.packageBreakdown:(Array.isArray(r.physicalPackageBreakdown)?r.physicalPackageBreakdown:[]),packageBreakdownText:text(r.packageBreakdownText),__mirror:true});
       movements.push({id:'mirror_'+idx,companyId,materialId,type:'entrada',qty,cantidad:qty,source:'stock_materials_mirror'});
     });
     if(!stock.length)throw new Error('SDK espejo: no contiene pinturas');
@@ -2496,16 +2523,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         const row=directPaintRowForCompanyRal(companyName,spec.key);
         if(!row){unresolvedColors+=1;return;}
         const available=Math.max(0,num(row.physical));
+        const physicalPack=savedPhysicalPackageSnapshot(row);
         const metric=summary.querySelector('.paint-metric.available');
         if(metric){
           const b=metric.querySelector('b');const small=metric.querySelector('small');
-          if(b)b.textContent=fmtBotesEq(available);
+          if(b)b.textContent=physicalPack?packageMainLabel(physicalPack):fmtBotesEq(available);
           if(small){
             const label=small.querySelector('.metric-label');
             const sub=small.querySelector('.metric-sub');
+            const subText=physicalPack?packageSubLabel(physicalPack,available):(fmtLiters(available)+' disponibles ahora en cabina');
             if(label)label.textContent='TIENES EN CABINA';
-            if(sub)sub.textContent=fmtLiters(available)+' disponibles ahora en cabina';
-            if(!label&&!sub)small.innerHTML='<span class="metric-label">TIENES EN CABINA</span><span class="metric-sub">'+esc(fmtLiters(available))+' disponibles ahora en cabina</span>';
+            if(sub)sub.textContent=subText;
+            if(!label&&!sub)small.innerHTML='<span class="metric-label">TIENES EN CABINA</span><span class="metric-sub">'+esc(subText)+'</span>';
           }
         }
         const balanceMetric=summary.querySelector('.paint-metric.balance');
@@ -2642,14 +2671,74 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const textSummary=items.length?items.map(x=>x.count+' x '+fmt(x.litersPerContainer)+' L').join(' + '):'0 envases';
     return {q1,q4,q5,qOther,otherLiters,validCounts,validOther:qOther<=0||otherLiters>0,items,totalLiters,equivalent4LBotes,text:textSummary};
   }
+  function normalizedPackageItems(items){
+    if(!Array.isArray(items))return [];
+    return items.map(x=>{
+      const litersPerContainer=Math.max(0,num(x&&(x.litersPerContainer??x.litersPerBottle??x.litersPerBote??x.sizeLiters)));
+      const count=Math.max(0,Math.round(num(x&&(x.count??x.qty??x.cantidad))));
+      return {litersPerContainer,count,liters:litersPerContainer*count};
+    }).filter(x=>x.litersPerContainer>0&&x.count>0);
+  }
+  function packageSnapshotFromItems(items,physicalEq){
+    const clean=normalizedPackageItems(items); if(!clean.length)return null;
+    const totalLiters=clean.reduce((sum,x)=>sum+x.liters,0);
+    const equivalent4LBotes=botesFromLiters(totalLiters);
+    if(Math.abs(equivalent4LBotes-num(physicalEq))>0.0005)return null;
+    const totalContainers=clean.reduce((sum,x)=>sum+x.count,0);
+    const textSummary=clean.map(x=>x.count+' x '+fmt(x.litersPerContainer)+' L').join(' + ');
+    return {items:clean,totalLiters,equivalent4LBotes,totalContainers,text:textSummary};
+  }
+  function savedPhysicalPackageSnapshot(row){
+    if(!row||!state.stock)return null;
+    const physical=Math.max(0,num(row.physical));
+    const s=row.stockRow||{};
+    const direct=packageSnapshotFromItems(s.physicalPackageBreakdown||s.packageBreakdown,physical);
+    if(direct)return direct;
+    const movements=Array.isArray(state.stock.movements)?state.stock.movements:[];
+    for(let i=movements.length-1;i>=0;i--){
+      const m=movements[i];
+      if(stockRowCompanyId(m)!==text(row.companyId)||stockRowMaterialId(m)!==text(row.mat&&row.mat.id))continue;
+      const candidate=packageSnapshotFromItems(m&&m.packageBreakdown,physical);
+      if(candidate)return candidate;
+    }
+    return null;
+  }
+  function packageMainLabel(snapshot){
+    if(!snapshot)return '';
+    if(snapshot.items.length===1){
+      const x=snapshot.items[0];
+      return x.count+' bote'+(x.count===1?'':'s')+' de '+fmt(x.litersPerContainer)+' L';
+    }
+    return snapshot.totalContainers+' envase'+(snapshot.totalContainers===1?'':'s');
+  }
+  function packageSubLabel(snapshot,physicalEq){
+    if(!snapshot)return '';
+    return snapshot.text+' · Total '+fmt(snapshot.totalLiters)+' L · '+fmt(physicalEq)+' botes eq de 4 L';
+  }
+  function preloadPackageInputs(snapshot){
+    $('stQty1').value='0'; $('stQty4').value='0'; $('stQty5').value='0'; $('stQtyOther').value='0'; $('stOtherLiters').value='';
+    if(!snapshot)return false;
+    let other=null;
+    for(const x of snapshot.items){
+      if(Math.abs(x.litersPerContainer-1)<0.000001)$('stQty1').value=String(x.count);
+      else if(Math.abs(x.litersPerContainer-4)<0.000001)$('stQty4').value=String(x.count);
+      else if(Math.abs(x.litersPerContainer-5)<0.000001)$('stQty5').value=String(x.count);
+      else if(!other)other=x;
+      else return false;
+    }
+    if(other){$('stOtherLiters').value=String(other.litersPerContainer);$('stQtyOther').value=String(other.count);}
+    return true;
+  }
+
   function openStockModal(companyId,materialId){
     if(state.stockMirrorOnly)return alert('El Stock esta en modo de respaldo de solo lectura. Actualiza cuando vuelva a estar disponible el paquete principal.');
     if(!requireOperator())return; const row=paintRows().find(r=>r.companyId===companyId&&text(r.mat.id)===materialId);if(!row)return alert('Pintura no encontrada.');
     state.activeStock={companyId,materialId};
     $('stockSub').textContent=row.company+' · '+text(row.mat.name||row.mat.nombre)+' · base interna: 1 bote equivalente = '+BOTE_LITROS+' L';
-    $('stSystem').value=fmt(row.physical)+' botes eq · '+fmtLiters(row.physical);
-    $('stQty1').value='0'; $('stQty4').value='0'; $('stQty5').value='0'; $('stQtyOther').value='0'; $('stOtherLiters').value='';
-    if(isWholePackageCount(row.physical)) $('stQty4').value=String(Math.max(0,Math.round(row.physical)));
+    const savedPack=savedPhysicalPackageSnapshot(row);
+    $('stSystem').value=savedPack?(packageMainLabel(savedPack)+' · '+fmt(savedPack.totalLiters)+' L · '+fmt(row.physical)+' botes eq'):fmt(row.physical)+' botes eq · '+fmtLiters(row.physical);
+    const loaded=preloadPackageInputs(savedPack);
+    if(!loaded&&isWholePackageCount(row.physical)) $('stQty4').value=String(Math.max(0,Math.round(row.physical)));
     $('stNote').value=''; $('stReasonType').value='Recuento fisico'; updateStockDelta(); openModal('stockModal');
   }
   function updateStockDelta(){
@@ -2668,9 +2757,15 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(!pack.validCounts)return alert('La cantidad de botes debe ser entera. Usa 0, 1, 2, 3...');
     if(!pack.validOther)return alert('Has indicado botes en Otro. Escribe cuantos litros tiene cada bote.');
     const target=pack.equivalent4LBotes,targetLiters=pack.totalLiters,reason=text($('stReasonType').value),note=text($('stNote').value);const row=paintRows().find(r=>r.companyId===a.companyId&&text(r.mat.id)===a.materialId);if(!row)return;
-    const delta=target-row.physical,deltaL=targetLiters-litersFromBotes(row.physical);if(Math.abs(delta)<.000001){closeModal('stockModal');return toast('El recuento coincide con el Stock.');}
-    if(!confirm('Regularizar '+text(row.mat.name||row.mat.nombre)+'?\n\nSistema: '+fmtLiters(row.physical)+' ('+fmt(row.physical)+' botes eq de 4 L)\nEnvases contados: '+pack.text+'\nFisico real: '+fmt(targetLiters)+' L\nEquivalencia interna: '+fmt(target)+' botes de 4 L\nAjuste: '+(deltaL>0?'+':'')+fmt(deltaL)+' L ('+(delta>0?'+':'')+fmt(delta)+' botes eq)\n\nSe guardara tambien el desglose de envases en el movimiento de regularizacion.'))return;
-    try{await regularizeStock(a.companyId,a.materialId,target,reason,note,pack);closeModal('stockModal');toast('Stock regularizado: '+fmt(targetLiters)+' L · '+pack.text+'.');await loadStockPackage();}catch(e){console.error(e);alert('No se pudo regularizar Stock: '+String(e&&e.message||e));}
+    const delta=target-row.physical,deltaL=targetLiters-litersFromBotes(row.physical),sameQty=Math.abs(delta)<.000001;
+    const confirmText=(sameQty?'Guardar recuento de envases de ':'Regularizar ')+text(row.mat.name||row.mat.nombre)+'?\n\nSistema: '+fmtLiters(row.physical)+' ('+fmt(row.physical)+' botes eq de 4 L)\nEnvases físicos contados: '+pack.text+'\nFísico real: '+fmt(targetLiters)+' L\nEquivalencia interna para cálculos: '+fmt(target)+' botes de 4 L\nAjuste de cantidad: '+(deltaL>0?'+':'')+fmt(deltaL)+' L ('+(delta>0?'+':'')+fmt(delta)+' botes eq)'+(sameQty?'\n\nLos litros coinciden, pero se guardará el formato físico real de los envases.':'');
+    if(!confirm(confirmText))return;
+    try{
+      const result=await regularizeStock(a.companyId,a.materialId,target,reason,note,pack);
+      closeModal('stockModal');
+      toast((result&&result.quantityChanged?'Stock regularizado: ':'Envases guardados: ')+pack.text+' · '+fmt(targetLiters)+' L.');
+      await loadStockPackage();
+    }catch(e){console.error(e);alert('No se pudo regularizar Stock: '+String(e&&e.message||e));}
   };
 
   function openModal(id){const el=$(id);el.classList.add('show');el.setAttribute('aria-hidden','false');}
