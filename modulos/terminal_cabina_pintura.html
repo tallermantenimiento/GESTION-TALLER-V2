@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V24-RECUPERA-VINCULO-PC-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V25-EMPRESA-ID-HISTORICO-FIX-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -296,7 +296,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V24-RECUPERA-VINCULO-PC-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V25-EMPRESA-ID-HISTORICO-FIX-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1722,33 +1722,71 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       if(named.length===1)return named[0];
       if(named.length)rows=named;
     }
-    const withPhysical=rows.filter(r=>num(r&&r.physical)>0.000001);
+    const withPhysical=rows.filter(r=>num(r&&r.physical)>0.000001).sort((a,b)=>num(b&&b.physical)-num(a&&a.physical));
     if(withPhysical.length===1)return withPhysical[0];
+    if(withPhysical.length>1&&num(withPhysical[0].physical)>num(withPhysical[1].physical)+0.000001)return withPhysical[0];
     return null;
   }
-  function stockCompanyForWork(work,meta){
-    const db=state.stock;if(!db)return null;
+  function companyMatchesWorkName(company,wantedName){
+    const wanted=norm(wantedName);
+    if(!company||!wanted)return false;
+    const vals=[company.name,company.nombre,company.code,company.codigo,company.id].map(norm).filter(Boolean);
+    if(vals.some(v=>v===wanted))return true;
+    /* Compatibilidad con IDs historicos legibles como emp_sklum. Los IDs opacos
+       siguen entrando por el nombre/codigo real de la empresa. */
+    return vals.some(v=>v.endsWith(' '+wanted)||v.startsWith(wanted+' ')||v.includes(' '+wanted+' '));
+  }
+  function stockCompaniesForWork(work,meta){
+    const db=state.stock;if(!db)return [];
     const exactIds=[
       meta&&meta.paintStockCompanyId,
       work&&work.paintStockCompanyId,
       work&&work.stockPaintCompanyId,
       work&&work.stockCompanyId
     ].map(text).filter(Boolean);
-    for(const id of exactIds){
-      const exact=companyRecord(db,id);
-      if(exact&&!isCommonCompany(exact))return exact;
-    }
-    const wanted=norm(work&&work.company);if(!wanted)return null;
-    const matches=(db.companies||[]).filter(c=>!isCommonCompany(c)).filter(c=>[c.name,c.nombre,c.code,c.codigo].some(v=>norm(v)===wanted));
-    return matches.length===1?matches[0]:null;
+    const wanted=text(work&&work.company);
+    const out=[]; const seen=new Set();
+    const add=c=>{
+      if(!c||isCommonCompany(c))return;
+      const id=text(c.id); if(!id||seen.has(id))return;
+      seen.add(id);out.push(c);
+    };
+    /* Primero conserva cualquier ID exacto que venga del PC/Fabricacion. */
+    exactIds.forEach(id=>add(companyRecord(db,id)));
+    /* Pero NO se limita a ese ID: una empresa puede conservar IDs historicos.
+       Se incorporan todos los registros cuyo nombre/codigo corresponda a la OT. */
+    (db.companies||[]).forEach(c=>{if(companyMatchesWorkName(c,wanted))add(c);});
+    return out;
+  }
+  function stockCompanyForWork(work,meta){
+    const candidates=stockCompaniesForWork(work,meta);
+    if(!candidates.length)return null;
+    if(candidates.length===1)return candidates[0];
+    /* Si existen varios IDs de la misma empresa, prioriza el que realmente tenga
+       pintura fisica. Esto evita seleccionar una ficha historica vacia. */
+    const rows=paintRows();
+    const scored=candidates.map(c=>{
+      const cid=text(c.id);
+      const pr=rows.filter(r=>r.companyId===cid);
+      return {c,score:pr.reduce((s,r)=>s+Math.max(0,num(r.physical)),0),paintRows:pr.length};
+    }).sort((a,b)=>(b.score-a.score)||(b.paintRows-a.paintRows));
+    return scored[0].c;
+  }
+  function paintRowsForWorkCompany(work,meta){
+    const rows=paintRows();
+    const companies=stockCompaniesForWork(work,meta);
+    const ids=new Set(companies.map(c=>text(c.id)).filter(Boolean));
+    const wanted=norm(work&&work.company);
+    /* Incluye todas las fichas de todos los IDs equivalentes de la empresa. */
+    return rows.filter(r=>ids.has(text(r.companyId)) || (wanted&&norm(r.company)===wanted));
   }
   function paintLinkForWork(work){
     if(!state.stock)return {kind:'loading'};
     const ref=text(work&&work.ref);
     const meta=state.orderMetaByRef[ref]||{};
     const ral=workRal(work);
-    const company=stockCompanyForWork(work,meta); if(!company)return {kind:'no_company',ral};
-    const all=paintRows().filter(r=>r.companyId===text(company.id));
+    const companies=stockCompaniesForWork(work,meta); if(!companies.length)return {kind:'no_company',ral};
+    const all=paintRowsForWorkCompany(work,meta);
 
     /* 1) Autoridad principal: ID exacto conservado en el snapshot del trabajo.
        Preparacion copia stockLinkId/linked_matId a Fabricacion. Este ID se resuelve
