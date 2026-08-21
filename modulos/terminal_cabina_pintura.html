@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V28-STOCK-REST-MISMA-FUENTE-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V29-STOCK-PINTURA-DIRECTA-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -137,7 +137,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V28 &middot; Stock le&iacute;do desde la misma base remota que Stock/Preparaci&oacute;n &middot; respaldo local inmediato &middot; c&aacute;lculo manual directamente dentro del trabajo &middot; 5 significa 5 botes.</div>
+      <div class="sub">V29 &middot; Pintura disponible le&iacute;da directamente del Stock de cada empresa &middot; resoluci&oacute;n robusta por empresa + RAL &middot; respaldo local inmediato &middot; 5 significa 5 botes.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -296,7 +296,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V28-STOCK-REST-MISMA-FUENTE-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V29-STOCK-PINTURA-DIRECTA-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -757,7 +757,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
      es autoritativo. El terminal nunca debe sustituirlo por una busqueda por RAL. */
   function workLinkedPaintRow(work,all,ral){
     const rows=Array.isArray(all)?all:[];
-    const byId=id=>rows.find(r=>text(r&&r.mat&&r.mat.id)===text(id))||null;
+    const byId=id=>chooseBestPaintCandidate(rows.filter(r=>text(r&&r.mat&&r.mat.id)===text(id)),work,state.orderMetaByRef[text(work&&work.ref)]||{})||null;
 
     const directIds=[
       work&&work.paintStockMaterialId,
@@ -1597,20 +1597,26 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     }catch(e){console.error(e);alert('No se pudo corregir: '+String(e&&e.message||e));}
   };
 
+  function stockRowCompanyId(row){
+    return text(row&&(row.companyId||row.empresaId||row.company_id||row.empresa_id||row.company||row.empresa));
+  }
+  function stockRowMaterialId(row){
+    return text(row&&(row.materialId||row.matId||row.material_id||row.v2MaterialId||row.stockMaterialId));
+  }
   function stockPhysical(db,companyId,materialId){
-    const movements=(Array.isArray(db&&db.movements)?db.movements:[]).filter(m=>text(m.companyId||m.empresaId)===text(companyId)&&text(m.materialId||m.matId)===text(materialId));
+    const cid=text(companyId), mid=text(materialId);
+    const movements=(Array.isArray(db&&db.movements)?db.movements:[]).filter(m=>stockRowCompanyId(m)===cid&&stockRowMaterialId(m)===mid);
     if(movements.length){
-      return movements.reduce((a,m)=>{
+      return Math.max(0,movements.reduce((a,m)=>{
         const t=text(m.type||m.tipo||'entrada').toLowerCase(); const q=num(m.qty??m.cantidad??m.quantity);
         if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
         if(['entrada','ajuste_pos','devolucion','in'].includes(t)) return a+q;
         if(['salida','ajuste_neg','consumo','out'].includes(t)) return a-q;
         return a+q;
-      },0);
+      },0));
     }
-    /* Fallback seguro para el espejo stock_materials o paquetes que ya traen qty consolidada. */
-    const srow=(Array.isArray(db&&db.stock)?db.stock:[]).find(s=>text(s.companyId||s.empresaId)===text(companyId)&&text(s.materialId||s.matId)===text(materialId));
-    return srow?Math.max(0,num(srow.qty??srow.cantidad??srow.stock??srow.physical??0)):0;
+    const srow=(Array.isArray(db&&db.stock)?db.stock:[]).find(s=>stockRowCompanyId(s)===cid&&stockRowMaterialId(s)===mid);
+    return srow?Math.max(0,num(srow.qty??srow.cantidad??srow.physicalQty??srow.fisico??srow['físico']??srow.real??srow.stock??0)):0;
   }
   function isAutoReceivedReservation(r){
     const src=text(r&&(r.source||r.createdFrom||r.origin||r.reason||'')).toLowerCase();
@@ -1627,7 +1633,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const vals=[c.id,c.name,c.nombre,c.code,c.codigo].map(norm); return vals.some(v=>v==='stock comun'||v==='stock comun global'||v==='almacen comun');
   }
   function companyRecord(db,id){
-    return (db.companies||[]).find(x=>text(x.id)===text(id))||null;
+    const wanted=text(id);
+    return (db.companies||[]).find(x=>[x&&x.id,x&&x.companyId,x&&x.empresaId].some(v=>text(v)===wanted))||null;
   }
   function knownCompanyNameFromId(id){
     const raw=text(id), n=norm(raw).replace(/^emp\s+/,'').trim();
@@ -1635,33 +1642,56 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return known[n]||'';
   }
   function companyLabelForStockRow(db,s){
-    const c=companyRecord(db,s&&s.companyId);
-    if(c)return text(c.name||c.nombre||c.code||c.codigo||s.companyId);
+    const cid=stockRowCompanyId(s);
+    const c=companyRecord(db,cid);
+    if(c)return text(c.name||c.nombre||c.code||c.codigo||cid);
     const direct=text(s&&(s.company||s.empresa||s.companyName||s.empresaNombre));
     if(direct)return direct;
-    const known=knownCompanyNameFromId(s&&s.companyId);
+    const known=knownCompanyNameFromId(cid);
     if(known)return known;
     for(const w of (state.works||[])){
       const meta=state.orderMetaByRef[text(w&&w.ref)]||{};
       const ids=[meta.paintStockCompanyId,w&&w.paintStockCompanyId,w&&w.stockPaintCompanyId,w&&w.stockCompanyId].map(text).filter(Boolean);
-      if(ids.includes(text(s&&s.companyId))&&text(w&&w.company))return text(w.company);
+      if(ids.includes(cid)&&text(w&&w.company))return text(w.company);
     }
-    return text(s&&s.companyId);
+    return cid;
   }
   function companyName(db,id){const c=companyRecord(db,id);return text(c&&(c.name||c.nombre||c.code)||knownCompanyNameFromId(id)||id);}
-  function materialName(db,id){const m=(db.materials||[]).find(x=>text(x.id)===text(id));return text(m&&(m.name||m.nombre)||id);}
+  function materialName(db,id){const m=(db.materials||[]).find(x=>[x&&x.id,x&&x.materialId,x&&x.matId].some(v=>text(v)===text(id)));return text(m&&(m.name||m.nombre)||id);}
+  function materialRecordById(db,id){
+    const wanted=text(id);
+    return (db.materials||[]).find(m=>[m&&m.id,m&&m.materialId,m&&m.matId,m&&m.material_id].some(v=>text(v)===wanted))||null;
+  }
+  function isPaintMaterialLike(m,row){
+    const type=norm((m&&(m.type||m.tipo||m.cat||m.category))||(row&&(row.type||row.tipo))||'');
+    const family=norm((m&&(m.family||m.familia||m.grp||m.group))||(row&&(row.family||row.familia))||'');
+    const name=norm((m&&(m.name||m.nombre||m.material))||(row&&(row.name||row.materialName||row.nombre||row.material))||'');
+    const unit=norm((m&&(m.unit||m.unidad))||(row&&(row.unit||row.unidad))||'');
+    return type.includes('pintura') || family.includes('base solvente') || family.includes('pintura') || /\bral\s*[0-9]{3,4}\b/.test(name) || name.includes('pintura') || (unit.includes('bote')&&/\b[1-9]\d{3}\b/.test(name));
+  }
   function paintRows(){
-    const db=state.stock; if(!db)return[]; const mats=new Map((db.materials||[]).map(m=>[text(m.id),m]));
-    return (db.stock||[]).map(s=>{
-      let m=mats.get(text(s.materialId));
-      if(!m&&text(s.name||s.materialName)){
-        m={id:text(s.materialId||s.matId),name:text(s.name||s.materialName),family:text(s.family||s.familia),type:text(s.type||s.tipo||'pintura'),unit:text(s.unit||s.unidad)};
+    const db=state.stock; if(!db)return[];
+    const out=[];
+    (db.stock||[]).forEach((s,idx)=>{
+      if(!s||typeof s!=='object')return;
+      const materialId=stockRowMaterialId(s), companyId=stockRowCompanyId(s);
+      if(!materialId||!companyId)return;
+      let m=materialRecordById(db,materialId);
+      if(!m){
+        m={id:materialId,name:text(s.name||s.materialName||s.nombre||s.material),family:text(s.family||s.familia),type:text(s.type||s.tipo),unit:text(s.unit||s.unidad)};
       }
-      if(!m||text(m.type||m.tipo).toLowerCase()!=='pintura')return null;
-      const physical=stockPhysical(db,s.companyId,s.materialId);
-      const reserved=activeReserved(db,s.companyId,s.materialId);
-      return {stockRow:s,mat:m,companyId:text(s.companyId),company:companyLabelForStockRow(db,s),physical,reserved,free:physical-reserved};
-    }).filter(Boolean);
+      if(!isPaintMaterialLike(m,s))return;
+      if(!text(m.id))m={...m,id:materialId};
+      const physical=stockPhysical(db,companyId,materialId);
+      const reserved=activeReserved(db,companyId,materialId);
+      const row={stockRow:s,mat:m,companyId,company:companyLabelForStockRow(db,s),physical,reserved,free:physical-reserved,__index:idx};
+      const key=companyId+'|'+materialId;
+      const pos=out.findIndex(x=>x.__key===key);
+      row.__key=key;
+      if(pos<0)out.push(row);
+      else if(row.physical>out[pos].physical+0.000001)out[pos]=row;
+    });
+    return out;
   }
   function reservationRef(r){return text(r&&(r.ref||r.jobRef||r.trabajoRef||r.reference));}
   function ownPaintReserved(db,companyId,materialId,ref){
@@ -1683,28 +1713,68 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(spec.kind==='code') return new RegExp('(?:^|\\s)'+spec.key+'(?:\\s|$)').test(n);
     return n.includes(spec.key);
   }
+  function stockCompanyIdsForWork(work,meta){
+    const db=state.stock;if(!db)return[];
+    const ids=new Set();
+    const add=id=>{id=text(id);if(id)ids.add(id);};
+    const exact=[meta&&meta.paintStockCompanyId,work&&work.paintStockCompanyId,work&&work.stockPaintCompanyId,work&&work.stockCompanyId].map(text).filter(Boolean);
+    exact.forEach(id=>{
+      if(companyRecord(db,id)||(db.stock||[]).some(s=>stockRowCompanyId(s)===id))add(id);
+    });
+    const wanted=norm(work&&work.company);
+    if(wanted){
+      (db.companies||[]).forEach(c=>{
+        if(isCommonCompany(c))return;
+        const labels=[c&&c.name,c&&c.nombre,c&&c.code,c&&c.codigo,c&&c.id,c&&c.companyId,c&&c.empresaId].map(norm).filter(Boolean);
+        if(labels.some(v=>v===wanted||v.replace(/^emp\s+/,'')===wanted))add(c.id||c.companyId||c.empresaId);
+      });
+      (db.stock||[]).forEach(row=>{
+        if(!row)return;
+        const cid=stockRowCompanyId(row);if(!cid)return;
+        const label=norm(companyLabelForStockRow(db,row));
+        const alias=norm(cid).replace(/^emp\s+/,'').trim();
+        if(label===wanted||alias===wanted||norm(knownCompanyNameFromId(cid))===wanted)add(cid);
+      });
+    }
+    return Array.from(ids);
+  }
   function stockCompanyForWork(work,meta){
     const db=state.stock;if(!db)return null;
-    const exactIds=[
-      meta&&meta.paintStockCompanyId,
-      work&&work.paintStockCompanyId,
-      work&&work.stockPaintCompanyId,
-      work&&work.stockCompanyId
-    ].map(text).filter(Boolean);
-    for(const id of exactIds){
-      const exact=companyRecord(db,id);
-      if(exact&&!isCommonCompany(exact))return exact;
-      if((db.stock||[]).some(s=>text(s.companyId)===id))return {id,name:text(work&&work.company)||knownCompanyNameFromId(id)||id};
+    const ids=stockCompanyIdsForWork(work,meta);
+    if(!ids.length)return null;
+    const exact=[meta&&meta.paintStockCompanyId,work&&work.paintStockCompanyId,work&&work.stockPaintCompanyId,work&&work.stockCompanyId].map(text).filter(Boolean);
+    const preferred=exact.find(id=>ids.includes(id))||ids[0];
+    return companyRecord(db,preferred)||{id:preferred,name:text(work&&work.company)||knownCompanyNameFromId(preferred)||preferred};
+  }
+  function paintCandidateIdentity(row){
+    const ral=ralFromPaintRow(row);
+    const name=norm(row&&row.mat&&(row.mat.name||row.mat.nombre)).replace(/^pintura\s+/,'').trim();
+    const fam=norm(row&&row.mat&&(row.mat.family||row.mat.familia));
+    return (ral?'ral:'+ral:'name:'+name)+'|fam:'+fam;
+  }
+  function chooseBestPaintCandidate(candidates,work,meta){
+    const rows=(Array.isArray(candidates)?candidates:[]).filter(Boolean);
+    if(!rows.length)return null;
+    if(rows.length===1)return rows[0];
+    const exactCompanyIds=[meta&&meta.paintStockCompanyId,work&&work.paintStockCompanyId,work&&work.stockPaintCompanyId,work&&work.stockCompanyId].map(text).filter(Boolean);
+    for(const cid of exactCompanyIds){
+      const exact=rows.filter(r=>r.companyId===cid);
+      if(exact.length===1)return exact[0];
+      if(exact.length>1){
+        const exactStock=exact.filter(r=>num(r.physical)>0);
+        if(exactStock.length===1)return exactStock[0];
+      }
     }
-    const wanted=norm(work&&work.company);if(!wanted)return null;
-    const matches=(db.companies||[]).filter(c=>!isCommonCompany(c)).filter(c=>[c.name,c.nombre,c.code,c.codigo].some(v=>norm(v)===wanted));
-    if(matches.length===1)return matches[0];
-    const stockIds=Array.from(new Set((db.stock||[]).map(s=>text(s.companyId)).filter(Boolean)));
-    const idMatches=stockIds.filter(id=>{
-      const n=norm(id).replace(/^emp\s+/,'').trim();
-      return n===wanted || norm(knownCompanyNameFromId(id))===wanted;
-    });
-    if(idMatches.length===1)return {id:idMatches[0],name:text(work&&work.company)||idMatches[0]};
+    const withStock=rows.filter(r=>num(r.physical)>0);
+    if(withStock.length===1)return withStock[0];
+    const identities=new Set(rows.map(paintCandidateIdentity));
+    if(identities.size===1){
+      return rows.slice().sort((a,b)=>num(b.physical)-num(a.physical)||num(b.free)-num(a.free)||num(a.__index)-num(b.__index))[0];
+    }
+    if(withStock.length){
+      const stockIdentities=new Set(withStock.map(paintCandidateIdentity));
+      if(stockIdentities.size===1)return withStock.slice().sort((a,b)=>num(b.physical)-num(a.physical))[0];
+    }
     return null;
   }
   function paintLinkForWork(work){
@@ -1712,47 +1782,43 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const ref=text(work&&work.ref);
     const meta=state.orderMetaByRef[ref]||{};
     const ral=workRal(work);
-    const company=stockCompanyForWork(work,meta); if(!company)return {kind:'no_company',ral};
-    const all=paintRows().filter(r=>r.companyId===text(company.id));
+    const companyIds=stockCompanyIdsForWork(work,meta);
+    if(!companyIds.length)return {kind:'no_company',ral};
+    const all=paintRows().filter(r=>companyIds.includes(r.companyId));
 
-    /* 1) Autoridad principal: ID exacto conservado en el snapshot del trabajo.
-       Preparacion copia stockLinkId/linked_matId a Fabricacion. Este ID se resuelve
-       incluso si la OT no trae RAL, porque el RAL solo es informacion auxiliar. */
     const snapshotRow=workLinkedPaintRow(work,all,ral);
     if(snapshotRow){
       const resolved=text(meta.paintRalResolved)||ralFromPaintRow(snapshotRow)||ral;
       return {kind:'linked',ral:resolved,row:snapshotRow,ownReserved:ownPaintReserved(state.stock,snapshotRow.companyId,text(snapshotRow.mat.id),work.ref),via:'pc_snapshot'};
     }
 
-    /* 2) Compatibilidad: vinculo exacto guardado en la orden de Agenda/PC. */
     const pcMaterialId=text(meta.paintStockMaterialId);
     if(pcMaterialId){
-      const row=all.find(r=>text(r.mat.id)===pcMaterialId);
+      const row=chooseBestPaintCandidate(all.filter(r=>text(r.mat.id)===pcMaterialId),work,meta);
       if(row){const resolved=text(meta.paintRalResolved)||ralFromPaintRow(row)||ral;return {kind:'linked',ral:resolved,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'pc'};}
     }
 
-    /* 3) Una reserva exacta de esta OT tambien identifica inequívocamente la ficha. */
     const existing=all.filter(r=>ownPaintReserved(state.stock,r.companyId,text(r.mat.id),work.ref)>0);
-    if(existing.length===1){const row=existing[0];return {kind:'linked',ral:ralFromPaintRow(row)||ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'reserva'};}
+    const existingRow=chooseBestPaintCandidate(existing,work,meta);
+    if(existingRow)return {kind:'linked',ral:ralFromPaintRow(existingRow)||ral,row:existingRow,ownReserved:ownPaintReserved(state.stock,existingRow.companyId,text(existingRow.mat.id),work.ref),via:'reserva'};
 
-    /* Solo despues de agotar los IDs exactos se exige RAL para las busquedas antiguas. */
     if(!ral)return {kind:'no_ral',ral:''};
 
-    /* 4) Excepciones historicas: solo lectura. No crea botones ni escribe vinculos desde cabina. */
     const legacy=legacyPaintLinkForWork(work);
     if(legacy&&legacy.ral){
       let legacyCandidates=all.filter(r=>paintMatchesRal(r,legacy.ral));
       if(legacy.paintText){
         const wanted=norm(legacy.paintText);
         const narrowed=legacyCandidates.filter(r=>norm([r&&r.mat&&(r.mat.name||r.mat.nombre),r&&r.mat&&(r.mat.family||r.mat.familia)].filter(Boolean).join(' ')).includes(wanted));
-        if(narrowed.length) legacyCandidates=narrowed;
+        if(narrowed.length)legacyCandidates=narrowed;
       }
-      if(legacyCandidates.length===1){const row=legacyCandidates[0];return {kind:'linked',ral:legacy.ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'legacy'};}
+      const row=chooseBestPaintCandidate(legacyCandidates,work,meta);
+      if(row)return {kind:'linked',ral:legacy.ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'legacy'};
     }
 
-    /* 5) Ultimo recurso solo para OT antiguas sin ningun ID: buscar por RAL. */
     const candidates=all.filter(r=>paintMatchesRal(r,ral));
-    if(candidates.length===1){const row=candidates[0];return {kind:'linked',ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'ral'};}
+    const row=chooseBestPaintCandidate(candidates,work,meta);
+    if(row)return {kind:'linked',ral:ralFromPaintRow(row)||ral,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'ral'};
     if(candidates.length>1)return {kind:'ambiguous',ral,candidates};
     return {kind:'no_match',ral,candidates:[]};
   }
@@ -1963,16 +2029,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
   function readLocalStockCache(){
     const candidates=[];
-    try{candidates.push(localStorage.getItem(STOCK_KEY));}catch(_){ }
-    try{candidates.push(sessionStorage.getItem(STOCK_KEY));}catch(_){ }
+    try{if(window.__LDH_STOCK_MEMORY_DB)candidates.push(window.__LDH_STOCK_MEMORY_DB);}catch(_){ }
+    try{const raw=localStorage.getItem(STOCK_KEY);if(raw)candidates.push(raw);}catch(_){ }
+    try{const raw=sessionStorage.getItem(STOCK_KEY);if(raw)candidates.push(raw);}catch(_){ }
+    const valid=[];
     for(const raw of candidates){
-      if(!raw)continue;
       try{
         const db=unwrapStockPayload(raw);
-        if(db.materials.length&&db.stock.length)return db;
+        if(db.materials.length&&db.stock.length)valid.push({db,at:Date.parse(text(db.updatedAt))||0});
       }catch(_){ }
     }
-    return null;
+    valid.sort((a,b)=>b.at-a.at);
+    return valid.length?valid[0].db:null;
   }
   function cacheStockLocally(db){
     if(!db||typeof db!=='object')return;
@@ -1992,15 +2060,20 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return null;
   }
   async function stockIdToken(){
-    if(!stockAuth.currentUser)await signInAnonymously(stockAuth);
-    if(!stockAuth.currentUser)throw new Error('REST: Stock nube no autenticado');
-    return stockAuth.currentUser.getIdToken(true);
+    try{
+      if(!stockAuth.currentUser)await signInAnonymously(stockAuth);
+      if(stockAuth.currentUser)return await stockAuth.currentUser.getIdToken(true);
+    }catch(e){
+      console.warn('Stock auth anonimo no disponible; se intentara lectura publica REST',e);
+    }
+    return '';
   }
   function stockRestUrl(path){
     return 'https://firestore.googleapis.com/v1/projects/'+STOCK_CONFIG.projectId+'/databases/'+encodeURIComponent('(default)')+'/documents/'+path;
   }
   async function stockRestGet(path,token){
-    const response=await fetch(stockRestUrl(path),{method:'GET',headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const headers=token?{Authorization:'Bearer '+token}:{};
+    const response=await fetch(stockRestUrl(path),{method:'GET',headers,cache:'no-store'});
     if(!response.ok){
       const body=await response.text();
       throw new Error('REST '+response.status+': '+body.slice(0,220));
@@ -2054,10 +2127,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(!stock.length)throw new Error('SDK espejo: no contiene pinturas');
     return {companies:Array.from(companyMap.values()),materials:Array.from(materialMap.values()),stock,movements,reservations:[],assignments:[],__mirrorOnly:true};
   }
+  function rerenderAfterStockLoad(){
+    const jobs=[['trabajos',renderWorks],['resumen',renderControl],['stock',renderStock]];
+    jobs.forEach(([name,fn])=>{try{fn();}catch(e){console.error('Render '+name+' despues de cargar Stock',e);}});
+    setTimeout(()=>{
+      if(!state.stock)return;
+      jobs.forEach(([name,fn])=>{try{fn();}catch(e){console.error('Segundo render '+name+' despues de cargar Stock',e);}});
+    },40);
+  }
   function applyLoadedStock(db,source,mirrorOnly,statusText,statusClass){
     state.stock=db;state.stockReady=true;state.stockError='';state.stockSource=source;state.stockMirrorOnly=!!mirrorOnly;
     setStatus('stockStatus',statusText||'Stock: conectado',statusClass||'ok');
-    renderStock();renderWorks();renderControl();
+    rerenderAfterStockLoad();
   }
   async function loadStockPackage(){
     const local=readLocalStockCache();
@@ -2099,17 +2180,19 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
   async function ensureStockAuth(){
     try{
-      if(!stockAuth.currentUser)await signInAnonymously(stockAuth);
+      if(!stockAuth.currentUser){
+        try{await signInAnonymously(stockAuth);}catch(e){console.warn('Stock: login anonimo no disponible; se continua con REST publico/local',e);}
+      }
       state.stockAuthReady=!!stockAuth.currentUser;
       await loadStockPackage();
     }catch(e){
-      console.error('Stock auth',e);
+      console.error('Stock init',e);
       state.stockAuthReady=false;
       const local=readLocalStockCache();
       if(local){applyLoadedStock(local,'local',true,'Stock: local','warn');return;}
       state.stockError=text(e&&e.message||e);
       setStatus('stockStatus','Stock: sin acceso','bad');
-      renderStock();renderWorks();renderControl();
+      rerenderAfterStockLoad();
     }
   }
 
