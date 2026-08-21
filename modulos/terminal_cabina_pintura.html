@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V37-VINCULO-PINTURA-PREPMETA-EMPRESAS-CANONICAS-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V38-NECESIDAD-INDEPENDIENTE-DE-STOCK-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V37 &middot; Respeta el material de pintura guardado en Preparaci&oacute;n/Fabricaci&oacute;n &middot; solo empresas can&oacute;nicas de Stock &middot; botes como dato principal y litros como secundario.</div>
+      <div class="sub">V38 &middot; La necesidad de pintura se lee directamente de Preparaci&oacute;n/Fabricaci&oacute;n aunque Stock est&eacute; cargando &middot; solo empresas can&oacute;nicas de Stock &middot; botes como dato principal y litros como secundario.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V37-VINCULO-PINTURA-PREPMETA-EMPRESAS-CANONICAS-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V38-NECESIDAD-INDEPENDIENTE-DE-STOCK-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -947,28 +947,57 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return null;
   }
   function workAutoPaintTotalRequiredBotes(work,link){
-    if(!link||link.kind!=='linked')return null;
     const lines=workMaterialLines(work); if(!lines.length)return null;
-    const targetId=text(link.row&&link.row.mat&&link.row.mat.id);
-    if(targetId){
+    const meta=paintMetaForWork(work);
+
+    /* V38: la cantidad necesaria pertenece al pedido, no al Stock. Por eso se busca
+       primero con el material de pintura que Preparacion/Fabricacion ya guardo. Esto
+       evita mostrar "Pintura sin dato" mientras Stock todavia esta cargando. */
+    const targetIds=[
+      meta&&meta.paintStockMaterialId,
+      meta&&meta.paintMaterialId,
+      meta&&meta.paint_material_id,
+      meta&&meta.paintMatId,
+      work&&work.paintStockMaterialId,
+      work&&work.paintMaterialId,
+      work&&work.paintMatId,
+      link&&link.row&&link.row.mat&&link.row.mat.id
+    ].map(text).filter(Boolean);
+    for(const targetId of Array.from(new Set(targetIds))){
       const exact=lines.filter(line=>workMaterialId(line)===targetId);
       if(exact.length){
         const total=exact.reduce((sum,line)=>sum+workMaterialRequested(line),0);
         if(total>0)return total;
       }
     }
-    const targetName=norm(link.row&&link.row.mat&&(link.row.mat.name||link.row.mat.nombre));
-    const ral=ralSpec(link.ral);
-    const candidates=lines.filter(line=>{
-      const name=norm(workMaterialName(line));
-      if(!name)return false;
-      if(targetName&&(name===targetName||name.includes(targetName)||targetName.includes(name)))return true;
-      if(ral.key&&ral.kind==='code'&&new RegExp('(?:^|\\s)'+ral.key+'(?:\\s|$)').test(name))return true;
-      return name.includes('pintura')&&targetName&&targetName.includes(name.replace(/^pintura\s*/,''));
-    });
-    if(candidates.length===1){
-      const total=workMaterialRequested(candidates[0]);
-      if(total>0)return total;
+
+    const targetNames=[
+      meta&&meta.paintStockMaterialName,
+      meta&&meta.paintMaterialName,
+      meta&&meta.paint_material_name,
+      meta&&meta.paintName,
+      link&&link.row&&link.row.mat&&(link.row.mat.name||link.row.mat.nombre)
+    ].map(norm).filter(Boolean);
+    for(const targetName of Array.from(new Set(targetNames))){
+      const exactByName=lines.filter(line=>norm(workMaterialName(line))===targetName);
+      if(exactByName.length===1){
+        const total=workMaterialRequested(exactByName[0]);
+        if(total>0)return total;
+      }
+    }
+
+    const rawRal=text((link&&link.ral)||workRal(work));
+    const ral=ralSpec(rawRal);
+    if(ral.key){
+      const byRal=lines.filter(line=>{
+        const name=norm(workMaterialName(line));
+        if(!name)return false;
+        return new RegExp('(?:^|\\s)'+ral.key+'(?:\\s|$)').test(name);
+      });
+      if(byRal.length===1){
+        const total=workMaterialRequested(byRal[0]);
+        if(total>0)return total;
+      }
     }
     return null;
   }
@@ -1096,6 +1125,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     }
     const rawRal=text((link&&link.ral)||fallbackRal);
     const spec=ralSpec(rawRal);
+    let calculation=null;
+    try{calculation=workPaintRequirementInfo(work,link||{kind:'loading',ral:rawRal,row:null});}catch(calcError){console.warn('Calculo pintura sin Stock',work&&work.ref,calcError);}
     return {
       key:'unlinked|'+(spec.key||text(link&&link.kind)||'sin-color'),
       kind:text(link&&link.kind)||'unlinked',
@@ -1103,7 +1134,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       row:null,
       ral:rawRal,
       paintName:rawRal?ralLabel(rawRal):'Pintura sin vincular',
-      required:null,
+      required:calculation?calculation.pendingBotes:null,
+      calculation,
       own:0
     };
   }
