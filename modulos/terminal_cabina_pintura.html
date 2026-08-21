@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V29-STOCK-PINTURA-DIRECTA-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V30-RECONCILIA-STOCK-VISIBLE-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -137,7 +137,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V29 &middot; Pintura disponible le&iacute;da directamente del Stock de cada empresa &middot; resoluci&oacute;n robusta por empresa + RAL &middot; respaldo local inmediato &middot; 5 significa 5 botes.</div>
+      <div class="sub">V30 &middot; Stock visible reconciliado directamente por empresa + RAL &middot; elimina CARGANDO STOCK cuando Stock ya est&aacute; conectado &middot; respaldo local inmediato &middot; 5 significa 5 botes.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -296,7 +296,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V29-STOCK-PINTURA-DIRECTA-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V30-RECONCILIA-STOCK-VISIBLE-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1213,6 +1213,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     bindAccordionState($('workList'),'details[data-work-company-key]','details[data-work-color-key]',state.openWorkCompanies,state.openWorkColors);
     bindWorkJobState($('workList'));
     bindInlinePaintCalculation($('workList'));
+    try{reconcileVisiblePaintStock();}catch(_){ }
     $('workList').querySelectorAll('[data-paint-one]').forEach(b=>b.onclick=()=>moveOnePaintToStore(decodeURIComponent(b.dataset.paintOne||''),b));
     $('workList').querySelectorAll('[data-move-store]').forEach(b=>b.onclick=()=>movePaintToStore(decodeURIComponent(b.dataset.moveStore||'')));
     $('workList').querySelectorAll('[data-fix-phase]').forEach(b=>b.onclick=()=>openPhaseModal(decodeURIComponent(b.dataset.fixPhase||'')));
@@ -2127,13 +2128,78 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(!stock.length)throw new Error('SDK espejo: no contiene pinturas');
     return {companies:Array.from(companyMap.values()),materials:Array.from(materialMap.values()),stock,movements,reservations:[],assignments:[],__mirrorOnly:true};
   }
+  function directPaintRowForCompanyRal(companyName,ralValue){
+    const db=state.stock;
+    if(!db||!Array.isArray(db.stock))return null;
+    const wantedCompany=norm(companyName);
+    const ral=ralSpec(ralValue);
+    if(!wantedCompany||!ral.key)return null;
+    const companyIds=new Set();
+    const add=id=>{id=text(id);if(id)companyIds.add(id);};
+    (Array.isArray(db.companies)?db.companies:[]).forEach(c=>{
+      if(!c||isCommonCompany(c))return;
+      const labels=[c.id,c.companyId,c.empresaId,c.name,c.nombre,c.code,c.codigo].map(norm).filter(Boolean);
+      if(labels.some(v=>v===wantedCompany||v.replace(/^emp\s+/,'')===wantedCompany))add(c.id||c.companyId||c.empresaId);
+    });
+    (Array.isArray(db.stock)?db.stock:[]).forEach(s=>{
+      const cid=stockRowCompanyId(s);if(!cid)return;
+      const label=norm(companyLabelForStockRow(db,s));
+      const alias=norm(cid).replace(/^emp\s+/,'').trim();
+      if(label===wantedCompany||alias===wantedCompany||norm(knownCompanyNameFromId(cid))===wantedCompany)add(cid);
+    });
+    const candidates=[];
+    (Array.isArray(db.stock)?db.stock:[]).forEach((s,idx)=>{
+      const cid=stockRowCompanyId(s),mid=stockRowMaterialId(s);
+      if(!cid||!mid||!companyIds.has(cid))return;
+      let m=materialRecordById(db,mid);
+      if(!m)m={id:mid,name:text(s.name||s.materialName||s.nombre||s.material),family:text(s.family||s.familia),type:text(s.type||s.tipo),unit:text(s.unit||s.unidad)};
+      if(!isPaintMaterialLike(m,s))return;
+      const probe={mat:m};
+      if(!paintMatchesRal(probe,ral.key))return;
+      let physical=0;
+      try{physical=stockPhysical(db,cid,mid);}catch(_){physical=Math.max(0,num(s.qty??s.cantidad??s.physicalQty??s.fisico??s['físico']??s.real??s.stock??0));}
+      candidates.push({stockRow:s,mat:m,companyId:cid,company:companyLabelForStockRow(db,s)||companyName,physical,free:physical,__index:idx});
+    });
+    if(!candidates.length)return null;
+    candidates.sort((a,b)=>num(b.physical)-num(a.physical)||num(a.__index)-num(b.__index));
+    return candidates[0];
+  }
+  function reconcileVisiblePaintStock(){
+    if(!state.stock)return;
+    const root=$('workList');if(!root)return;
+    root.querySelectorAll('.company-accordion').forEach(companyEl=>{
+      const companyName=text(companyEl.querySelector(':scope > .company-summary .accordion-name')?.textContent);
+      if(!companyName)return;
+      companyEl.querySelectorAll(':scope > .company-body > .paint-accordion').forEach(colorEl=>{
+        const summary=colorEl.querySelector(':scope > .paint-summary');if(!summary)return;
+        const colorName=text(summary.querySelector('.accordion-name')?.textContent);
+        const spec=ralSpec(colorName);if(!spec.key)return;
+        const row=directPaintRowForCompanyRal(companyName,spec.key);
+        if(!row)return;
+        const available=Math.max(0,num(row.physical));
+        const metric=summary.querySelector('.paint-metric.available');
+        if(metric){
+          const b=metric.querySelector('b');const small=metric.querySelector('small');
+          if(b)b.textContent=fmtBotesEq(available);
+          if(small)small.innerHTML='DISPONIBLES &middot; '+esc(fmtLiters(available))+' disponibles en cabina';
+        }
+        const stateEl=summary.querySelector('.paint-state');
+        if(stateEl&&/CARGANDO STOCK|PINTURA SIN VINCULAR|STOCK NO DISPONIBLE/i.test(text(stateEl.textContent))){
+          stateEl.classList.remove('bad');stateEl.classList.add('warn');
+          stateEl.textContent='STOCK ENCONTRADO';
+        }
+      });
+    });
+  }
   function rerenderAfterStockLoad(){
     const jobs=[['trabajos',renderWorks],['resumen',renderControl],['stock',renderStock]];
     jobs.forEach(([name,fn])=>{try{fn();}catch(e){console.error('Render '+name+' despues de cargar Stock',e);}});
-    setTimeout(()=>{
+    try{reconcileVisiblePaintStock();}catch(e){console.error('Reconciliacion visual de Stock',e);}
+    [40,180,500,1200].forEach(delay=>setTimeout(()=>{
       if(!state.stock)return;
-      jobs.forEach(([name,fn])=>{try{fn();}catch(e){console.error('Segundo render '+name+' despues de cargar Stock',e);}});
-    },40);
+      jobs.forEach(([name,fn])=>{try{fn();}catch(e){console.error('Render tardio '+name+' despues de cargar Stock',e);}});
+      try{reconcileVisiblePaintStock();}catch(e){console.error('Reconciliacion visual tardia de Stock',e);}
+    },delay));
   }
   function applyLoadedStock(db,source,mirrorOnly,statusText,statusClass){
     state.stock=db;state.stockReady=true;state.stockError='';state.stockSource=source;state.stockMirrorOnly=!!mirrorOnly;
