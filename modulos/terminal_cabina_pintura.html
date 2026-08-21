@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V35-PINTURA-EMPRESA-SOLO-STOCK-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V36-RECUPERA-NECESIDAD-DESDE-PREPARACION-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V35 &middot; Pintura por empresa muestra solo la pintura f&iacute;sica disponible de cada empresa &middot; sin trabajos, necesidades ni saldo &middot; botes como dato principal y litros como secundario.</div>
+      <div class="sub">V36 &middot; Recupera la necesidad de pintura desde las l&iacute;neas reales de Preparaci&oacute;n &middot; Pintura por empresa sigue mostrando solo stock f&iacute;sico &middot; botes como dato principal y litros como secundario.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V35-PINTURA-EMPRESA-SOLO-STOCK-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V36-RECUPERA-NECESIDAD-DESDE-PREPARACION-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -365,6 +365,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   const flowApp = appFor(FLOW_CONFIG,'ldh-terminal-pintura-flow-v1');
   const flowDb = getFirestore(flowApp);
   const flowRef = doc(flowDb,'taller_data','fabricacion');
+  const prepRef = doc(flowDb,'taller_data','preparacion');
   const deletedCol = collection(flowDb,'taller_data','fabricacion','deleted');
 
   const stockApp = appFor(STOCK_CONFIG,'ldh-terminal-pintura-stock-v1');
@@ -381,6 +382,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
   const state = {
     flowPackage:null,
+    prepPackage:null,
     works:[],
     deletedRefs:new Set(),
     stock:null,
@@ -504,8 +506,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     'RG3-SMB': {ral:'7016', paintText:'antracita', paintTotalBotesEq:45.8, paintTotalUnits:100}
   });
   function legacyPaintLinkForWork(item){
-    const ref=text(item&&item.ref).trim().toUpperCase();
-    const key=Object.keys(LEGACY_PAINT_LINKS).find(k=>ref===k || ref.startsWith(k+' '));
+    const ref=text(item&&item.ref).trim();
+    const refNorm=norm(ref);
+    const key=Object.keys(LEGACY_PAINT_LINKS).find(k=>{
+      const keyNorm=norm(k);
+      return refNorm===keyNorm || refNorm.startsWith(keyNorm+' ');
+    });
     return key ? LEGACY_PAINT_LINKS[key] : null;
   }
   function positiveField(source,keys){
@@ -740,11 +746,65 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const q=norm($('workSearch').value), company=text($('workCompany').value);
     return state.works.filter(w=>!company || w.company===company).filter(w=>!q || norm([w.ref,w.company,w.concept,paintSummary(w),workRal(w)].join(' ')).includes(q));
   }
+  function decodePrepLines(raw){
+    let value=raw;
+    for(let i=0;i<4 && typeof value==='string';i++){
+      const parsed=safeParse(value,null);
+      if(parsed===null) break;
+      value=parsed;
+    }
+    if(Array.isArray(value)) return value;
+    if(value&&typeof value==='object'){
+      for(const key of ['lines','materiales','materials','mats','items']){
+        if(Array.isArray(value[key])) return value[key];
+      }
+    }
+    return [];
+  }
+  function prepMapLookup(map,ref,prefixed){
+    if(!map||typeof map!=='object') return null;
+    const wanted=text(ref);
+    if(!wanted) return null;
+    const exactKey=(prefixed?'prep_recepcion_':'')+wanted;
+    if(Object.prototype.hasOwnProperty.call(map,exactKey)) return map[exactKey];
+    const wantedNorm=norm(wanted);
+    const entries=Object.keys(map).map(key=>{
+      const clean=prefixed&&key.startsWith('prep_recepcion_')?key.slice('prep_recepcion_'.length):key;
+      return {key,clean,cleanNorm:norm(clean)};
+    }).filter(x=>!prefixed||x.key.startsWith('prep_recepcion_'));
+    const same=entries.filter(x=>x.cleanNorm===wantedNorm);
+    if(same.length===1) return map[same[0].key];
+    const ot=wanted.match(/^(OT-\d{6}-\d{3}(?:-[A-Z])?)/i);
+    if(ot){
+      const codeNorm=norm(ot[1]);
+      const byCode=entries.filter(x=>x.cleanNorm===codeNorm||x.cleanNorm.startsWith(codeNorm+' '));
+      if(byCode.length===1) return map[byCode[0].key];
+    }
+    const compatible=entries.filter(x=>x.cleanNorm&&wantedNorm&&(x.cleanNorm.startsWith(wantedNorm+' ')||wantedNorm.startsWith(x.cleanNorm+' ')));
+    if(compatible.length===1) return map[compatible[0].key];
+    return null;
+  }
+  function prepReceptionLinesForWork(work){
+    const ref=text(work&&work.ref);
+    if(!ref) return [];
+    /* Fabricacion conserva una copia de prep_recepcion por referencia. Es la primera
+       fuente porque corresponde exactamente al pedido que entro en Fabricacion. */
+    const fromFab=prepMapLookup(state.flowPackage&&state.flowPackage.prepRecepcion,ref,false);
+    let lines=decodePrepLines(fromFab);
+    if(lines.length) return lines;
+    /* Respaldo vivo: leer tambien taller_data/preparacion. Ese documento guarda las
+       claves prep_recepcion_<ref> dentro de data y es la fuente autoritativa de lineas. */
+    const prep=state.prepPackage&&typeof state.prepPackage==='object'?state.prepPackage:{};
+    const prepData=prep.data&&typeof prep.data==='object'?prep.data:prep;
+    const fromPrep=prepMapLookup(prepData,ref,true);
+    lines=decodePrepLines(fromPrep);
+    return lines;
+  }
   function workMaterialLines(work){
     for(const key of ['materials','materiales','mats']){
       if(Array.isArray(work&&work[key]) && work[key].length) return work[key];
     }
-    return [];
+    return prepReceptionLinesForWork(work);
   }
   function workMaterialId(line){
     return text(line&&(line.stockLinkId||line.linked_matId||line.materialId||line.matId||line.stockMatId||line.stockId));
@@ -2434,12 +2494,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   $('stockSearch').addEventListener('input',renderStock); $('stockCompany').addEventListener('change',renderStock); $('stockClear').onclick=()=>{$('stockSearch').value='';renderStock();};
   $('saveOperator').onclick=()=>{const op=operator();if(!op)return alert('Escribe el nombre del operario.');localStorage.setItem(OP_KEY,op);toast('Operario guardado.');};
   $('operator').value=localStorage.getItem(OP_KEY)||'';
-  $('refreshBtn').onclick=async()=>{try{state.orderMetaByRef=Object.create(null);const s=await getDoc(flowRef);if(s.exists()){state.flowPackage=s.data()||{};renderWorks();}await refreshOrderMetaForWorks();await loadStockPackage();toast('Datos actualizados.');}catch(e){alert('No se pudo actualizar: '+String(e&&e.message||e));}};
+  $('refreshBtn').onclick=async()=>{try{state.orderMetaByRef=Object.create(null);const [s,p]=await Promise.all([getDoc(flowRef),getDoc(prepRef)]);if(p.exists())state.prepPackage=p.data()||{};if(s.exists()){state.flowPackage=s.data()||{};renderWorks();renderControl();}await refreshOrderMetaForWorks();await loadStockPackage();toast('Datos actualizados.');}catch(e){alert('No se pudo actualizar: '+String(e&&e.message||e));}};
 
   onSnapshot(flowRef,snap=>{
     if(!snap.exists()){setStatus('flowStatus','Fabricacion: sin documento','bad');return;}
     state.flowPackage=snap.data()||{};setStatus('flowStatus','Fabricacion: conectado','ok');renderWorks();renderControl();renderStock();
   },e=>{console.error(e);setStatus('flowStatus','Fabricacion: error','bad');});
+  onSnapshot(prepRef,snap=>{
+    state.prepPackage=snap.exists()?(snap.data()||{}):null;
+    /* Las lineas de Preparacion pueden llegar unos milisegundos despues que las fases.
+       Al recibirlas recalculamos necesidad sin tocar Stock ni Fabricacion. */
+    if(state.flowPackage){renderWorks();renderControl();}
+  },e=>console.warn('Preparacion: no se pudieron leer lineas de material',e));
   onSnapshot(deletedCol,snap=>{state.deletedRefs=new Set(snap.docs.map(d=>text((d.data()||{}).ref||(d.data()||{}).reference)).filter(Boolean));renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
   function startStockWatch(){
     if(stockUnsub) return;
