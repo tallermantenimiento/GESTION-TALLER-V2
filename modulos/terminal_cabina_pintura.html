@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V43-BOTON-PINTADO-RESET-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V44-FASES-OPTIMISTAS-SIN-REFRESCAR-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V43 &middot; Mantiene envases f&iacute;sicos reales &middot; corrige el bot&oacute;n PINTADO +1 para que no quede bloqueado en Guardando tras guardar correctamente.</div>
+      <div class="sub">V44 &middot; Fases actualizadas inmediatamente en la terminal tras PINTADO +1 / mover a Almac&eacute;n &middot; sin esperar al refresco de Firebase.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V43-BOTON-PINTADO-RESET-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V44-FASES-OPTIMISTAS-SIN-REFRESCAR-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -392,6 +392,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     stockMirrorOnly:false,
     stockAuthReady:false,
     ordersAuthReady:false,
+    lastLocalFlowCommitMs:0,
+    lastLocalFlowGuardUntil:0,
     orderMetaByRef:Object.create(null),
     orderMetaLoading:false,
     activePhaseRef:'',
@@ -1558,6 +1560,39 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     pkg.inbox=JSON.stringify(inbox.slice(-200));
   }
 
+  function flowPackageUpdatedMs(pkg){
+    if(!pkg||typeof pkg!=='object')return 0;
+    const stamp=pkg.updatedAt;
+    try{
+      if(stamp&&typeof stamp.toMillis==='function'){const ms=Number(stamp.toMillis());if(Number.isFinite(ms)&&ms>0)return ms;}
+      if(stamp&&Number.isFinite(Number(stamp.seconds)))return Number(stamp.seconds)*1000+Math.floor(Number(stamp.nanoseconds||0)/1000000);
+    }catch(_){ }
+    const iso=text(pkg.updatedAtISO||pkg.updatedAtIso||'');
+    if(iso){const ms=Date.parse(iso);if(Number.isFinite(ms))return ms;}
+    return 0;
+  }
+  function applyCommittedFlowResult(result){
+    if(!result||!result.package)return false;
+    state.flowPackage=result.package;
+    const commitMs=Number(result.commitMs)||flowPackageUpdatedMs(result.package)||Date.now();
+    state.lastLocalFlowCommitMs=Math.max(0,commitMs);
+    /* Durante unos segundos no permitimos que un snapshot anterior a nuestra propia
+       escritura vuelva a pintar cantidades viejas. Despues se aceptan de nuevo todos
+       los cambios remotos normalmente. */
+    state.lastLocalFlowGuardUntil=Date.now()+8000;
+    renderWorks();
+    renderControl();
+    renderStock();
+    return true;
+  }
+  function acceptIncomingFlowPackage(pkg){
+    if(Date.now()>num(state.lastLocalFlowGuardUntil))return true;
+    const incomingMs=flowPackageUpdatedMs(pkg);
+    const localMs=num(state.lastLocalFlowCommitMs);
+    if(!incomingMs||!localMs)return true;
+    return incomingMs+2>=localMs;
+  }
+
   async function mutateWorkFlow(ref,mode,payload){
     const op=requireOperator(); if(!op) throw new Error('Operario obligatorio');
     const at=nowISO();
@@ -1592,7 +1627,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       pkg.counts={...(pkg.counts||{}),...countsForLdh(ldh),prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:num(pkg.counts&&pkg.counts.prepMeta),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:num(pkg.counts&&pkg.counts.prepRecepcion)};
       pkg.updatedAtISO=at;
       tx.set(flowRef,{...pkg,updatedAt:serverTimestamp(),source:'terminal_cabina_pintura.html'},{merge:false});
-      return {flow:next,representative,note};
+      return {flow:next,representative,note,package:pkg,commitMs:Date.parse(at)||Date.now()};
     });
   }
 
@@ -1676,22 +1711,27 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
          secundaria con Agenda para volver a su estado normal. */
       const result=await mutateWorkFlow(ref,'to_store',{qty:1});
 
+      /* La transaccion ya nos devuelve exactamente el paquete que acaba de escribir.
+         Lo aplicamos a la terminal en el mismo instante: no esperamos a onSnapshot ni
+         a una lectura posterior para bajar PINT y subir ALM. */
+      applyCommittedFlowResult(result);
+
       if(button&&button.isConnected){
         button.textContent='✓ Guardado';
       }
 
-      /* Forzamos una lectura corta del documento que acabamos de guardar. El listener
-         normalmente ya lo hace, pero esto evita que la vista quede esperando si el
-         snapshot tarda o el navegador ha estado en segundo plano. */
+      /* Reconciliacion secundaria: solo aceptamos la lectura si no es anterior al
+         paquete que acabamos de confirmar. */
       try{
         const snap=await getDoc(flowRef);
-        if(snap.exists()){
+        if(snap.exists()&&acceptIncomingFlowPackage(snap.data()||{})){
           state.flowPackage=snap.data()||{};
           renderWorks();
           renderControl();
+          renderStock();
         }
       }catch(refreshErr){
-        console.warn('Refresco inmediato tras PINTADO +1',refreshErr);
+        console.warn('Reconciliacion tras PINTADO +1',refreshErr);
       }
 
       /* Agenda es una sincronizacion secundaria. No dejamos el boton bloqueado si
@@ -1736,6 +1776,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(!confirm('Mover '+fmt(qty)+' uds de PINTURA a ALMACEN para '+ref+'?')) return;
     try{
       const result=await mutateWorkFlow(ref,'to_store',{qty});
+      applyCommittedFlowResult(result);
       const agendaOk=await syncOrderWorkflow(ref,result.flow,result.note);
       toast('Movimiento guardado'+(agendaOk?' y Agenda sincronizada.':'. Agenda no vinculada.'));
     }catch(e){console.error(e);alert('No se pudo mover: '+String(e&&e.message||e));}
@@ -1918,7 +1959,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(Math.abs(sum-num(w.total))>0.000001)return alert('La suma de fases debe coincidir con el total del trabajo.');
     if(!confirm('Guardar correccion manual de fases para '+ref+'?\n\nMotivo: '+reason))return;
     try{
-      const result=await mutateWorkFlow(ref,'correct',payload); const agendaOk=await syncOrderWorkflow(ref,result.flow,result.note);
+      const result=await mutateWorkFlow(ref,'correct',payload);
+      applyCommittedFlowResult(result);
+      const agendaOk=await syncOrderWorkflow(ref,result.flow,result.note);
       closeModal('phaseModal'); toast('Descuadre corregido'+(agendaOk?' y Agenda sincronizada.':'. Agenda no vinculada.'));
     }catch(e){console.error(e);alert('No se pudo corregir: '+String(e&&e.message||e));}
   };
@@ -2837,7 +2880,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
   onSnapshot(flowRef,snap=>{
     if(!snap.exists()){setStatus('flowStatus','Fabricacion: sin documento','bad');return;}
-    state.flowPackage=snap.data()||{};setStatus('flowStatus','Fabricacion: conectado','ok');renderWorks();renderControl();renderStock();
+    const incoming=snap.data()||{};
+    if(!acceptIncomingFlowPackage(incoming)){
+      console.warn('Snapshot de Fabricacion anterior a la ultima accion local; se ignora para evitar volver a mostrar fases viejas.');
+      return;
+    }
+    state.flowPackage=incoming;setStatus('flowStatus','Fabricacion: conectado','ok');renderWorks();renderControl();renderStock();
   },e=>{console.error(e);setStatus('flowStatus','Fabricacion: error','bad');});
   onSnapshot(prepRef,snap=>{
     state.prepPackage=snap.exists()?(snap.data()||{}):null;
