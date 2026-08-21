@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V27-STOCK-ROBUSTO-FALLBACK-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V28-STOCK-REST-MISMA-FUENTE-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -137,7 +137,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V27 &middot; V&iacute;nculo de pintura restaurado sobre la base estable &middot; c&aacute;lculo manual directamente dentro del trabajo &middot; 5 significa 5 botes &middot; litros recalculados desde botes &middot; blancos RAL mostrados en blanco real.</div>
+      <div class="sub">V28 &middot; Stock le&iacute;do desde la misma base remota que Stock/Preparaci&oacute;n &middot; respaldo local inmediato &middot; c&aacute;lculo manual directamente dentro del trabajo &middot; 5 significa 5 botes.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -296,7 +296,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V27-STOCK-ROBUSTO-FALLBACK-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V28-STOCK-REST-MISMA-FUENTE-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1942,28 +1942,95 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
   async function loadStockFromMainPackage(){
     const metaSnap=await getDoc(stockMetaRef);
-    if(!metaSnap.exists())throw new Error('Sin taller_data/stock');
+    if(!metaSnap.exists())throw new Error('SDK: sin taller_data/stock');
     const meta=metaSnap.data()||{};
     const total=Math.max(0,num(meta.totalChunks??meta.chunkCount??meta.numChunks??meta.parts));
     let packed='';
     if(total>0){
       for(let i=0;i<total;i++){
-        const s=await getDoc(doc(stockDb,'taller_data','stock','chunks',String(i)));
-        if(!s.exists())throw new Error('Falta chunk '+i);
-        const piece=chunkPiece(s.data());
-        if(!piece)throw new Error('Chunk '+i+' vacio o con formato desconocido');
+        const snap=await getDoc(doc(stockDb,'taller_data','stock','chunks',String(i)));
+        if(!snap.exists())throw new Error('SDK: falta chunk '+i);
+        const piece=chunkPiece(snap.data());
+        if(!piece)throw new Error('SDK: chunk '+i+' vacio o con formato desconocido');
         packed+=piece;
       }
     }else{
       const direct=meta[STOCK_KEY]??meta.payload??meta.data??meta.stock??meta.db;
       if(direct!=null)packed=typeof direct==='string'?direct:JSON.stringify(direct);
     }
-    if(!packed)throw new Error('Stock vacio');
+    if(!packed)throw new Error('SDK: paquete Stock vacio');
+    return unwrapStockPayload(packed);
+  }
+  function readLocalStockCache(){
+    const candidates=[];
+    try{candidates.push(localStorage.getItem(STOCK_KEY));}catch(_){ }
+    try{candidates.push(sessionStorage.getItem(STOCK_KEY));}catch(_){ }
+    for(const raw of candidates){
+      if(!raw)continue;
+      try{
+        const db=unwrapStockPayload(raw);
+        if(db.materials.length&&db.stock.length)return db;
+      }catch(_){ }
+    }
+    return null;
+  }
+  function cacheStockLocally(db){
+    if(!db||typeof db!=='object')return;
+    let raw='';
+    try{raw=JSON.stringify(db);}catch(_){return;}
+    try{localStorage.setItem(STOCK_KEY,raw);}catch(_){ }
+    try{sessionStorage.setItem(STOCK_KEY,raw);}catch(_){ }
+  }
+  function firestoreRestValue(v){
+    if(v==null)return null;
+    if(Object.prototype.hasOwnProperty.call(v,'stringValue'))return v.stringValue;
+    if(Object.prototype.hasOwnProperty.call(v,'integerValue'))return Number(v.integerValue||0);
+    if(Object.prototype.hasOwnProperty.call(v,'doubleValue'))return Number(v.doubleValue||0);
+    if(Object.prototype.hasOwnProperty.call(v,'booleanValue'))return !!v.booleanValue;
+    if(Object.prototype.hasOwnProperty.call(v,'timestampValue'))return v.timestampValue;
+    if(Object.prototype.hasOwnProperty.call(v,'nullValue'))return null;
+    return null;
+  }
+  async function stockIdToken(){
+    if(!stockAuth.currentUser)await signInAnonymously(stockAuth);
+    if(!stockAuth.currentUser)throw new Error('REST: Stock nube no autenticado');
+    return stockAuth.currentUser.getIdToken(true);
+  }
+  function stockRestUrl(path){
+    return 'https://firestore.googleapis.com/v1/projects/'+STOCK_CONFIG.projectId+'/databases/'+encodeURIComponent('(default)')+'/documents/'+path;
+  }
+  async function stockRestGet(path,token){
+    const response=await fetch(stockRestUrl(path),{method:'GET',headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    if(!response.ok){
+      const body=await response.text();
+      throw new Error('REST '+response.status+': '+body.slice(0,220));
+    }
+    return response.json();
+  }
+  async function loadStockFromRest(){
+    const token=await stockIdToken();
+    const metaDoc=await stockRestGet('taller_data/stock',token);
+    const fields=metaDoc&&metaDoc.fields?metaDoc.fields:{};
+    const total=Math.max(0,num(firestoreRestValue(fields.totalChunks)));
+    let packed='';
+    if(total>0){
+      for(let i=0;i<total;i++){
+        const chunkDoc=await stockRestGet('taller_data/stock/chunks/'+i,token);
+        const cf=chunkDoc&&chunkDoc.fields?chunkDoc.fields:{};
+        const piece=firestoreRestValue(cf.part)??firestoreRestValue(cf.data)??firestoreRestValue(cf.payload)??firestoreRestValue(cf.content);
+        if(piece==null||String(piece)==='')throw new Error('REST: chunk '+i+' vacio');
+        packed+=String(piece);
+      }
+    }else{
+      const direct=firestoreRestValue(fields[STOCK_KEY])??firestoreRestValue(fields.payload)??firestoreRestValue(fields.data)??firestoreRestValue(fields.stock);
+      if(direct!=null)packed=String(direct);
+    }
+    if(!packed)throw new Error('REST: paquete Stock vacio');
     return unwrapStockPayload(packed);
   }
   async function loadStockFromMirror(){
     const snap=await getDocs(collection(stockDb,'stock_materials'));
-    if(snap.empty)throw new Error('El espejo stock_materials esta vacio');
+    if(snap.empty)throw new Error('SDK espejo: stock_materials vacio');
     const docs=snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
     const materialMap=new Map();
     const companyMap=new Map();
@@ -1984,38 +2051,66 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       stock.push({id:text(r.stockId||r.id||('mirror_'+idx)),companyId,materialId,min:num(r.min),location:text(r.location||r.ubicacion),qty,cantidad:qty,__mirror:true});
       movements.push({id:'mirror_'+idx,companyId,materialId,type:'entrada',qty,cantidad:qty,source:'stock_materials_mirror'});
     });
-    if(!stock.length)throw new Error('El espejo no contiene pinturas');
+    if(!stock.length)throw new Error('SDK espejo: no contiene pinturas');
     return {companies:Array.from(companyMap.values()),materials:Array.from(materialMap.values()),stock,movements,reservations:[],assignments:[],__mirrorOnly:true};
   }
+  function applyLoadedStock(db,source,mirrorOnly,statusText,statusClass){
+    state.stock=db;state.stockReady=true;state.stockError='';state.stockSource=source;state.stockMirrorOnly=!!mirrorOnly;
+    setStatus('stockStatus',statusText||'Stock: conectado',statusClass||'ok');
+    renderStock();renderWorks();renderControl();
+  }
   async function loadStockPackage(){
-    let primaryError=null;
+    const local=readLocalStockCache();
+    if(local&&!state.stockReady){
+      applyLoadedStock(local,'local',true,'Stock: local','warn');
+    }
+    const errors=[];
+    try{
+      const db=await loadStockFromRest();
+      cacheStockLocally(db);
+      applyLoadedStock(db,'rest',false,'Stock: conectado','ok');
+      return db;
+    }catch(e){errors.push(e);console.warn('Stock REST',e);}
     try{
       const db=await loadStockFromMainPackage();
-      state.stock=db;state.stockReady=true;state.stockError='';state.stockSource='principal';state.stockMirrorOnly=false;
-      setStatus('stockStatus','Stock: conectado','ok');
-      renderStock();renderWorks();renderControl();
-      return;
-    }catch(e){
-      primaryError=e;console.warn('Stock principal',e);
-    }
+      cacheStockLocally(db);
+      applyLoadedStock(db,'sdk',false,'Stock: conectado','ok');
+      return db;
+    }catch(e){errors.push(e);console.warn('Stock SDK',e);}
     try{
       const db=await loadStockFromMirror();
-      state.stock=db;state.stockReady=true;state.stockError='';state.stockSource='espejo';state.stockMirrorOnly=true;
-      setStatus('stockStatus','Stock: conectado','ok');
+      applyLoadedStock(db,'espejo',true,'Stock: respaldo','warn');
+      return db;
+    }catch(e){errors.push(e);console.warn('Stock espejo',e);}
+    const err=errors.map(e=>text(e&&e.message||e)).filter(Boolean).join(' | ');
+    state.stockError=err||'No se pudo leer Stock';
+    if(local){
+      state.stock=local;state.stockReady=true;state.stockSource='local';state.stockMirrorOnly=false;
+      setStatus('stockStatus','Stock: local','warn');
       renderStock();renderWorks();renderControl();
-      console.warn('Terminal pintura usando stock_materials como respaldo:',primaryError&&primaryError.message);
-      return;
-    }catch(fallbackError){
-      console.error('Stock principal y espejo fallaron',primaryError,fallbackError);
-      state.stock=null;state.stockReady=false;state.stockSource='';state.stockMirrorOnly=false;
-      state.stockError=text((primaryError&&primaryError.message)||primaryError||'')+(fallbackError?' | respaldo: '+text(fallbackError&&fallbackError.message||fallbackError):'');
-      setStatus('stockStatus','Stock: error','bad');
-      $('stockList').innerHTML='<div class="empty">No se pudo leer Stock: '+esc(state.stockError)+'</div>';
-      renderWorks();renderControl();
+      console.warn('Nube Stock no disponible; se conserva copia local:',state.stockError);
+      return local;
     }
+    state.stock=null;state.stockReady=false;state.stockSource='';state.stockMirrorOnly=false;
+    setStatus('stockStatus','Stock: error','bad');
+    $('stockList').innerHTML='<div class="empty">No se pudo leer Stock. '+esc(state.stockError)+'</div>';
+    renderWorks();renderControl();
+    return null;
   }
   async function ensureStockAuth(){
-    try{if(stockAuth.currentUser){state.stockAuthReady=true;await loadStockPackage();return;}await signInAnonymously(stockAuth);}catch(e){console.error(e);setStatus('stockStatus','Stock: sin acceso','bad');}
+    try{
+      if(!stockAuth.currentUser)await signInAnonymously(stockAuth);
+      state.stockAuthReady=!!stockAuth.currentUser;
+      await loadStockPackage();
+    }catch(e){
+      console.error('Stock auth',e);
+      state.stockAuthReady=false;
+      const local=readLocalStockCache();
+      if(local){applyLoadedStock(local,'local',true,'Stock: local','warn');return;}
+      state.stockError=text(e&&e.message||e);
+      setStatus('stockStatus','Stock: sin acceso','bad');
+      renderStock();renderWorks();renderControl();
+    }
   }
 
   function packageCountValue(id){
@@ -2093,8 +2188,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   onSnapshot(deletedCol,snap=>{state.deletedRefs=new Set(snap.docs.map(d=>text((d.data()||{}).ref||(d.data()||{}).reference)).filter(Boolean));renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
   function startStockWatch(){
     if(stockUnsub) return;
-    stockUnsub=onSnapshot(stockMetaRef,()=>{if(state.stockAuthReady)loadStockPackage();},e=>console.warn('stock listener',e));
+    stockUnsub=onSnapshot(stockMetaRef,()=>{if(state.stockAuthReady)loadStockPackage();},e=>console.warn('stock listener SDK no disponible; REST sigue activo',e));
   }
+  window.addEventListener('storage',event=>{
+    if(event.key!==STOCK_KEY||!event.newValue)return;
+    try{
+      const db=unwrapStockPayload(event.newValue);
+      if(db.materials.length&&db.stock.length)applyLoadedStock(db,'local-event',true,'Stock: local actualizado','warn');
+    }catch(_){ }
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible'&&state.stockAuthReady)loadStockPackage();
+  });
 
   onAuthStateChanged(stockAuth,user=>{if(user){state.stockAuthReady=true;startStockWatch();loadStockPackage();}else{state.stockAuthReady=false;}});
   onAuthStateChanged(ordersAuth,user=>{state.ordersAuthReady=!!user;if(user)setTimeout(refreshOrderMetaForWorks,0);});
