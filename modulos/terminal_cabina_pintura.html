@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V26-VINCULO-RESTAURADO-CALCULO-EN-LINEA-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V27-STOCK-ROBUSTO-FALLBACK-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -137,7 +137,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V26 &middot; V&iacute;nculo de pintura restaurado sobre la base estable &middot; c&aacute;lculo manual directamente dentro del trabajo &middot; 5 significa 5 botes &middot; litros recalculados desde botes &middot; blancos RAL mostrados en blanco real.</div>
+      <div class="sub">V27 &middot; V&iacute;nculo de pintura restaurado sobre la base estable &middot; c&aacute;lculo manual directamente dentro del trabajo &middot; 5 significa 5 botes &middot; litros recalculados desde botes &middot; blancos RAL mostrados en blanco real.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -296,7 +296,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V26-VINCULO-RESTAURADO-CALCULO-EN-LINEA-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V27-STOCK-ROBUSTO-FALLBACK-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -379,6 +379,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     deletedRefs:new Set(),
     stock:null,
     stockReady:false,
+    stockError:'',
+    stockSource:'',
+    stockMirrorOnly:false,
     stockAuthReady:false,
     ordersAuthReady:false,
     orderMetaByRef:Object.create(null),
@@ -979,7 +982,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     });
   }
   function paintGroupState(color){
-    if(!color.row)return {kind:'bad',label:'PINTURA SIN VINCULAR'};
+    if(!color.row){
+      const kinds=(color.entries||[]).map(e=>text(e&&e.info&&e.info.kind));
+      if(kinds.some(k=>k==='stock_error'))return {kind:'bad',label:'STOCK NO DISPONIBLE'};
+      if(kinds.some(k=>k==='loading'))return {kind:'warn',label:'CARGANDO STOCK'};
+      return {kind:'bad',label:'PINTURA SIN VINCULAR'};
+    }
     if(color.unknownCount)return {kind:'warn',label:color.unknownCount+' TRABAJO'+(color.unknownCount===1?'':'S')+' SIN DATO'};
     const remaining=num(color.remaining);
     if(remaining<-0.000001){
@@ -1010,7 +1018,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       }
     }
     const availableMain=available===null?'&mdash;':fmtBotesEq(available);
-    const availableSub=available===null?'Disponible sin determinar':esc(fmtLiters(available))+' disponibles en cabina';
+    const linkKinds=(color.entries||[]).map(e=>text(e&&e.info&&e.info.kind));
+    const stockUnavailable=available===null&&linkKinds.some(k=>k==='stock_error');
+    const availableSub=available===null?(stockUnavailable?'Stock no disponible':'Disponible sin determinar'):esc(fmtLiters(available))+' disponibles en cabina';
     let balanceMain='&mdash;',balanceSub='Saldo pendiente de datos',balanceKind='warn';
     if(color.row&&!color.unknownCount){
       const balance=num(color.remaining);
@@ -1588,13 +1598,19 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   };
 
   function stockPhysical(db,companyId,materialId){
-    return (Array.isArray(db.movements)?db.movements:[]).filter(m=>text(m.companyId||m.empresaId)===text(companyId)&&text(m.materialId||m.matId)===text(materialId)).reduce((a,m)=>{
-      const t=text(m.type||m.tipo||'entrada').toLowerCase(); const q=num(m.qty??m.cantidad??m.quantity);
-      if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
-      if(['entrada','ajuste_pos','devolucion','in'].includes(t)) return a+q;
-      if(['salida','ajuste_neg','consumo','out'].includes(t)) return a-q;
-      return a+q;
-    },0);
+    const movements=(Array.isArray(db&&db.movements)?db.movements:[]).filter(m=>text(m.companyId||m.empresaId)===text(companyId)&&text(m.materialId||m.matId)===text(materialId));
+    if(movements.length){
+      return movements.reduce((a,m)=>{
+        const t=text(m.type||m.tipo||'entrada').toLowerCase(); const q=num(m.qty??m.cantidad??m.quantity);
+        if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
+        if(['entrada','ajuste_pos','devolucion','in'].includes(t)) return a+q;
+        if(['salida','ajuste_neg','consumo','out'].includes(t)) return a-q;
+        return a+q;
+      },0);
+    }
+    /* Fallback seguro para el espejo stock_materials o paquetes que ya traen qty consolidada. */
+    const srow=(Array.isArray(db&&db.stock)?db.stock:[]).find(s=>text(s.companyId||s.empresaId)===text(companyId)&&text(s.materialId||s.matId)===text(materialId));
+    return srow?Math.max(0,num(srow.qty??srow.cantidad??srow.stock??srow.physical??0)):0;
   }
   function isAutoReceivedReservation(r){
     const src=text(r&&(r.source||r.createdFrom||r.origin||r.reason||'')).toLowerCase();
@@ -1613,18 +1629,38 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   function companyRecord(db,id){
     return (db.companies||[]).find(x=>text(x.id)===text(id))||null;
   }
-  function companyName(db,id){const c=companyRecord(db,id);return text(c&&(c.name||c.nombre||c.code)||id);}
+  function knownCompanyNameFromId(id){
+    const raw=text(id), n=norm(raw).replace(/^emp\s+/,'').trim();
+    const known={sklum:'SKLUM',create:'CREATE',woods:'WOODS','the masie':'THE MASIE',masie:'THE MASIE',reynolds:'REYNOLDS',proceed:'PROCEED'};
+    return known[n]||'';
+  }
+  function companyLabelForStockRow(db,s){
+    const c=companyRecord(db,s&&s.companyId);
+    if(c)return text(c.name||c.nombre||c.code||c.codigo||s.companyId);
+    const direct=text(s&&(s.company||s.empresa||s.companyName||s.empresaNombre));
+    if(direct)return direct;
+    const known=knownCompanyNameFromId(s&&s.companyId);
+    if(known)return known;
+    for(const w of (state.works||[])){
+      const meta=state.orderMetaByRef[text(w&&w.ref)]||{};
+      const ids=[meta.paintStockCompanyId,w&&w.paintStockCompanyId,w&&w.stockPaintCompanyId,w&&w.stockCompanyId].map(text).filter(Boolean);
+      if(ids.includes(text(s&&s.companyId))&&text(w&&w.company))return text(w.company);
+    }
+    return text(s&&s.companyId);
+  }
+  function companyName(db,id){const c=companyRecord(db,id);return text(c&&(c.name||c.nombre||c.code)||knownCompanyNameFromId(id)||id);}
   function materialName(db,id){const m=(db.materials||[]).find(x=>text(x.id)===text(id));return text(m&&(m.name||m.nombre)||id);}
   function paintRows(){
     const db=state.stock; if(!db)return[]; const mats=new Map((db.materials||[]).map(m=>[text(m.id),m]));
     return (db.stock||[]).map(s=>{
-      const company=companyRecord(db,s.companyId);
-      if(!company) return null; // Oculta filas antiguas huerfanas tipo emp_xxx sin tocar Firebase/Stock.
-      const m=mats.get(text(s.materialId));
+      let m=mats.get(text(s.materialId));
+      if(!m&&text(s.name||s.materialName)){
+        m={id:text(s.materialId||s.matId),name:text(s.name||s.materialName),family:text(s.family||s.familia),type:text(s.type||s.tipo||'pintura'),unit:text(s.unit||s.unidad)};
+      }
       if(!m||text(m.type||m.tipo).toLowerCase()!=='pintura')return null;
       const physical=stockPhysical(db,s.companyId,s.materialId);
       const reserved=activeReserved(db,s.companyId,s.materialId);
-      return {stockRow:s,mat:m,companyId:text(s.companyId),company:text(company.name||company.nombre||company.code||company.codigo||s.companyId),physical,reserved,free:physical-reserved};
+      return {stockRow:s,mat:m,companyId:text(s.companyId),company:companyLabelForStockRow(db,s),physical,reserved,free:physical-reserved};
     }).filter(Boolean);
   }
   function reservationRef(r){return text(r&&(r.ref||r.jobRef||r.trabajoRef||r.reference));}
@@ -1658,13 +1694,21 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     for(const id of exactIds){
       const exact=companyRecord(db,id);
       if(exact&&!isCommonCompany(exact))return exact;
+      if((db.stock||[]).some(s=>text(s.companyId)===id))return {id,name:text(work&&work.company)||knownCompanyNameFromId(id)||id};
     }
     const wanted=norm(work&&work.company);if(!wanted)return null;
     const matches=(db.companies||[]).filter(c=>!isCommonCompany(c)).filter(c=>[c.name,c.nombre,c.code,c.codigo].some(v=>norm(v)===wanted));
-    return matches.length===1?matches[0]:null;
+    if(matches.length===1)return matches[0];
+    const stockIds=Array.from(new Set((db.stock||[]).map(s=>text(s.companyId)).filter(Boolean)));
+    const idMatches=stockIds.filter(id=>{
+      const n=norm(id).replace(/^emp\s+/,'').trim();
+      return n===wanted || norm(knownCompanyNameFromId(id))===wanted;
+    });
+    if(idMatches.length===1)return {id:idMatches[0],name:text(work&&work.company)||idMatches[0]};
+    return null;
   }
   function paintLinkForWork(work){
-    if(!state.stock)return {kind:'loading'};
+    if(!state.stock)return {kind:state.stockError?'stock_error':'loading',error:state.stockError};
     const ref=text(work&&work.ref);
     const meta=state.orderMetaByRef[ref]||{};
     const ral=workRal(work);
@@ -1867,13 +1911,108 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return result;
   }
 
+  function unwrapStockPayload(value){
+    let cur=value;
+    for(let i=0;i<10;i++){
+      if(typeof cur==='string'){
+        const s=cur.trim(); if(!s)break;
+        try{cur=JSON.parse(s);continue;}catch(_){break;}
+      }
+      if(!cur||typeof cur!=='object')break;
+      if(cur[STOCK_KEY]!=null){cur=cur[STOCK_KEY];continue;}
+      if(cur.payload!=null){cur=cur.payload;continue;}
+      if(cur.data!=null && typeof cur.data!=='number'){cur=cur.data;continue;}
+      if(cur.db!=null){cur=cur.db;continue;}
+      break;
+    }
+    if(!cur||typeof cur!=='object')throw new Error('Formato Stock no valido.');
+    if(!Array.isArray(cur.stock)&&Array.isArray(cur.stockLots))cur.stock=cur.stockLots;
+    cur.companies=Array.isArray(cur.companies)?cur.companies:[];
+    cur.materials=Array.isArray(cur.materials)?cur.materials:[];
+    cur.stock=Array.isArray(cur.stock)?cur.stock:[];
+    cur.movements=Array.isArray(cur.movements)?cur.movements:[];
+    cur.reservations=Array.isArray(cur.reservations)?cur.reservations:[];
+    return cur;
+  }
+  function chunkPiece(data){
+    data=data&&typeof data==='object'?data:{};
+    const vals=[data.part,data.data,data.payload,data.content,data.value,data.chunk];
+    for(const v of vals){if(v!==undefined&&v!==null&&String(v)!=='')return String(v);}
+    return '';
+  }
+  async function loadStockFromMainPackage(){
+    const metaSnap=await getDoc(stockMetaRef);
+    if(!metaSnap.exists())throw new Error('Sin taller_data/stock');
+    const meta=metaSnap.data()||{};
+    const total=Math.max(0,num(meta.totalChunks??meta.chunkCount??meta.numChunks??meta.parts));
+    let packed='';
+    if(total>0){
+      for(let i=0;i<total;i++){
+        const s=await getDoc(doc(stockDb,'taller_data','stock','chunks',String(i)));
+        if(!s.exists())throw new Error('Falta chunk '+i);
+        const piece=chunkPiece(s.data());
+        if(!piece)throw new Error('Chunk '+i+' vacio o con formato desconocido');
+        packed+=piece;
+      }
+    }else{
+      const direct=meta[STOCK_KEY]??meta.payload??meta.data??meta.stock??meta.db;
+      if(direct!=null)packed=typeof direct==='string'?direct:JSON.stringify(direct);
+    }
+    if(!packed)throw new Error('Stock vacio');
+    return unwrapStockPayload(packed);
+  }
+  async function loadStockFromMirror(){
+    const snap=await getDocs(collection(stockDb,'stock_materials'));
+    if(snap.empty)throw new Error('El espejo stock_materials esta vacio');
+    const docs=snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
+    const materialMap=new Map();
+    const companyMap=new Map();
+    const stock=[];
+    const movements=[];
+    docs.forEach((r,idx)=>{
+      const materialId=text(r.materialId||r.matId);
+      const companyId=text(r.companyId||r.empresaId);
+      if(!materialId||!companyId)return;
+      const type=text(r.type||r.tipo||'').toLowerCase();
+      const name=text(r.name||r.materialName||r.nombre);
+      if(type&&type!=='pintura'&&!norm(name).includes('pintura'))return;
+      const mat={id:materialId,name:name||materialId,family:text(r.family||r.familia),type:'pintura',unit:text(r.unit||r.unidad||'botes 4L')};
+      materialMap.set(materialId,{...(materialMap.get(materialId)||{}),...mat});
+      const cname=text(r.company||r.empresa||r.companyName||r.empresaNombre)||knownCompanyNameFromId(companyId)||companyId;
+      companyMap.set(companyId,{id:companyId,name:cname,code:cname});
+      const qty=Math.max(0,num(r.qty??r.cantidad??r.stock??r.physical));
+      stock.push({id:text(r.stockId||r.id||('mirror_'+idx)),companyId,materialId,min:num(r.min),location:text(r.location||r.ubicacion),qty,cantidad:qty,__mirror:true});
+      movements.push({id:'mirror_'+idx,companyId,materialId,type:'entrada',qty,cantidad:qty,source:'stock_materials_mirror'});
+    });
+    if(!stock.length)throw new Error('El espejo no contiene pinturas');
+    return {companies:Array.from(companyMap.values()),materials:Array.from(materialMap.values()),stock,movements,reservations:[],assignments:[],__mirrorOnly:true};
+  }
   async function loadStockPackage(){
+    let primaryError=null;
     try{
-      const metaSnap=await getDoc(stockMetaRef); if(!metaSnap.exists())throw new Error('Sin taller_data/stock'); const meta=metaSnap.data()||{}; const total=Math.max(0,num(meta.totalChunks)); let packed='';
-      if(total>0){for(let i=0;i<total;i++){const s=await getDoc(doc(stockDb,'taller_data','stock','chunks',String(i)));if(!s.exists())throw new Error('Falta chunk '+i);packed+=String((s.data()||{}).part??'');}}
-      else{const direct=meta[STOCK_KEY]??meta.payload??meta.data??meta.stock;if(direct!=null)packed=typeof direct==='string'?direct:JSON.stringify({[STOCK_KEY]:direct});}
-      if(!packed)throw new Error('Stock vacio'); const outer=JSON.parse(packed); let db=outer&&outer[STOCK_KEY]!=null?outer[STOCK_KEY]:(outer.payload??outer.data??outer.stock??outer);for(let p=0;p<4&&typeof db==='string';p++)db=JSON.parse(db);state.stock=db;state.stockReady=true;setStatus('stockStatus','Stock: conectado','ok');renderStock();renderWorks();renderControl();
-    }catch(e){console.error(e);state.stockReady=false;setStatus('stockStatus','Stock: error','bad');$('stockList').innerHTML='<div class="empty">No se pudo leer Stock: '+esc(e&&e.message||e)+'</div>';}
+      const db=await loadStockFromMainPackage();
+      state.stock=db;state.stockReady=true;state.stockError='';state.stockSource='principal';state.stockMirrorOnly=false;
+      setStatus('stockStatus','Stock: conectado','ok');
+      renderStock();renderWorks();renderControl();
+      return;
+    }catch(e){
+      primaryError=e;console.warn('Stock principal',e);
+    }
+    try{
+      const db=await loadStockFromMirror();
+      state.stock=db;state.stockReady=true;state.stockError='';state.stockSource='espejo';state.stockMirrorOnly=true;
+      setStatus('stockStatus','Stock: conectado','ok');
+      renderStock();renderWorks();renderControl();
+      console.warn('Terminal pintura usando stock_materials como respaldo:',primaryError&&primaryError.message);
+      return;
+    }catch(fallbackError){
+      console.error('Stock principal y espejo fallaron',primaryError,fallbackError);
+      state.stock=null;state.stockReady=false;state.stockSource='';state.stockMirrorOnly=false;
+      state.stockError=text((primaryError&&primaryError.message)||primaryError||'')+(fallbackError?' | respaldo: '+text(fallbackError&&fallbackError.message||fallbackError):'');
+      setStatus('stockStatus','Stock: error','bad');
+      $('stockList').innerHTML='<div class="empty">No se pudo leer Stock: '+esc(state.stockError)+'</div>';
+      renderWorks();renderControl();
+    }
   }
   async function ensureStockAuth(){
     try{if(stockAuth.currentUser){state.stockAuthReady=true;await loadStockPackage();return;}await signInAnonymously(stockAuth);}catch(e){console.error(e);setStatus('stockStatus','Stock: sin acceso','bad');}
@@ -1898,6 +2037,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return {q1,q4,q5,qOther,otherLiters,validCounts,validOther:qOther<=0||otherLiters>0,items,totalLiters,equivalent4LBotes,text:textSummary};
   }
   function openStockModal(companyId,materialId){
+    if(state.stockMirrorOnly)return alert('El Stock esta en modo de respaldo de solo lectura. Actualiza cuando vuelva a estar disponible el paquete principal.');
     if(!requireOperator())return; const row=paintRows().find(r=>r.companyId===companyId&&text(r.mat.id)===materialId);if(!row)return alert('Pintura no encontrada.');
     state.activeStock={companyId,materialId};
     $('stockSub').textContent=row.company+' · '+text(row.mat.name||row.mat.nombre)+' · base interna: 1 bote equivalente = '+BOTE_LITROS+' L';
