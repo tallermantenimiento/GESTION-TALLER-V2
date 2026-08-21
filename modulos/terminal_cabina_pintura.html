@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V42-ENVASES-FISICOS-REALES-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V43-BOTON-PINTADO-RESET-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V42 &middot; Conserva la recuperaci&oacute;n de pintura de pedidos antiguos &middot; guarda el envase f&iacute;sico real (1 L, 4 L, 5 L u otro formato) y mantiene aparte la equivalencia de 4 L para los c&aacute;lculos.</div>
+      <div class="sub">V43 &middot; Mantiene envases f&iacute;sicos reales &middot; corrige el bot&oacute;n PINTADO +1 para que no quede bloqueado en Guardando tras guardar correctamente.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V42-ENVASES-FISICOS-REALES-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V43-BOTON-PINTADO-RESET-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1668,15 +1668,63 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function moveOnePaintToStore(ref,button){
     const work=state.works.find(w=>w.ref===ref); if(!work) return alert('Trabajo no encontrado.');
     if(num(work.flow.pintura)<1) return alert('No queda ninguna unidad completa en Pintura.');
+    const originalText='✅ PINTADO +1';
     if(button){button.disabled=true;button.textContent='Guardando +1...';}
     try{
+      /* El guardado autoritativo es Fabricacion. En cuanto termina esta transaccion,
+         la unidad ya esta movida y el boton no debe depender de la sincronizacion
+         secundaria con Agenda para volver a su estado normal. */
       const result=await mutateWorkFlow(ref,'to_store',{qty:1});
-      const agendaOk=await syncOrderWorkflow(ref,result.flow,result.note);
+
+      if(button&&button.isConnected){
+        button.textContent='✓ Guardado';
+      }
+
+      /* Forzamos una lectura corta del documento que acabamos de guardar. El listener
+         normalmente ya lo hace, pero esto evita que la vista quede esperando si el
+         snapshot tarda o el navegador ha estado en segundo plano. */
+      try{
+        const snap=await getDoc(flowRef);
+        if(snap.exists()){
+          state.flowPackage=snap.data()||{};
+          renderWorks();
+          renderControl();
+        }
+      }catch(refreshErr){
+        console.warn('Refresco inmediato tras PINTADO +1',refreshErr);
+      }
+
+      /* Agenda es una sincronizacion secundaria. No dejamos el boton bloqueado si
+         esa consulta tarda. A los 4 s continuamos; la escritura principal ya esta hecha. */
+      let agendaOk=false;
+      try{
+        agendaOk=await Promise.race([
+          syncOrderWorkflow(ref,result.flow,result.note),
+          new Promise(resolve=>setTimeout(()=>resolve(false),4000))
+        ]);
+      }catch(syncErr){
+        console.warn('Agenda tras PINTADO +1',syncErr);
+      }
       toast('✅ 1 unidad pintada enviada a Almacén'+(agendaOk?' · Agenda sincronizada':'')+'.');
     }catch(e){
       console.error(e);
       alert('No se pudo mover +1: '+String(e&&e.message||e));
-      if(button){button.disabled=false;button.textContent='✅ PINTADO +1';}
+    }finally{
+      /* Restablecer tanto el boton original como el que pueda haber sido recreado
+         por renderWorks() durante la sincronizacion. */
+      if(button&&button.isConnected){
+        const current=state.works.find(w=>sameRef(w.ref,ref));
+        button.disabled=current?num(current.flow.pintura)<1:false;
+        button.textContent=originalText;
+      }
+      try{
+        document.querySelectorAll('[data-paint-one]').forEach(btn=>{
+          if(decodeURIComponent(btn.dataset.paintOne||'')!==ref)return;
+          const current=state.works.find(w=>sameRef(w.ref,ref));
+          btn.disabled=current?num(current.flow.pintura)<1:false;
+          btn.textContent=originalText;
+        });
+      }catch(_){ }
     }
   }
 
