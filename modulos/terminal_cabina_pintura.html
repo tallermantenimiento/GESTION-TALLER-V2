@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V36-RECUPERA-NECESIDAD-DESDE-PREPARACION-20260821">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V37-VINCULO-PINTURA-PREPMETA-EMPRESAS-CANONICAS-20260821">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V36 &middot; Recupera la necesidad de pintura desde las l&iacute;neas reales de Preparaci&oacute;n &middot; Pintura por empresa sigue mostrando solo stock f&iacute;sico &middot; botes como dato principal y litros como secundario.</div>
+      <div class="sub">V37 &middot; Respeta el material de pintura guardado en Preparaci&oacute;n/Fabricaci&oacute;n &middot; solo empresas can&oacute;nicas de Stock &middot; botes como dato principal y litros como secundario.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V36-RECUPERA-NECESIDAD-DESDE-PREPARACION-20260821';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V37-VINCULO-PINTURA-PREPMETA-EMPRESAS-CANONICAS-20260821';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -477,10 +477,10 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const flow=flowOf(item); const total=totalOf(item,flow);
       return {...item,ref:refOf(item),company:text(item.company||item.empresa||item.empresaReceptora),concept:text(item.concept||item.concepto||item.nombreConcepto||'Sin concepto'),flow,total};
     }).filter(item=>{
-      if(item.deleted) return false;
-      if(item.flow.pintura>0) return true;
-      /* Los enlaces historicos expresos deben seguir visibles mientras esperan entrar en cabina. */
-      return item.flow.fab>0 && !!legacyPaintLinkForWork(item);
+      if(item.deleted)return false;
+      /* V37: la cabina solo recibe trabajos que Fabricacion ya ha movido a Pintura.
+         Un RAL historico no puede adelantar un trabajo que aun tiene PINT = 0. */
+      return item.flow.pintura>0;
     });
   }
   function paintSummary(item){
@@ -613,15 +613,77 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       seeded:true
     };
   }
+  function decodeObjectValue(raw){
+    let value=raw;
+    for(let i=0;i<4&&typeof value==='string';i++){
+      const parsed=safeParse(value,null);
+      if(parsed===null)break;
+      value=parsed;
+    }
+    return value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+  }
+  function mapValueForReference(map,reference,prefix){
+    if(!map||typeof map!=='object')return null;
+    const wanted=text(reference);if(!wanted)return null;
+    const pre=text(prefix);
+    const exactKey=pre+wanted;
+    if(Object.prototype.hasOwnProperty.call(map,exactKey))return map[exactKey];
+    const wantedNorm=norm(wanted);
+    const entries=Object.keys(map).map(key=>{
+      const clean=pre&&key.startsWith(pre)?key.slice(pre.length):key;
+      return {key,cleanNorm:norm(clean)};
+    }).filter(x=>!pre||x.key.startsWith(pre));
+    const same=entries.filter(x=>x.cleanNorm===wantedNorm);
+    if(same.length===1)return map[same[0].key];
+    const ot=wanted.match(/^(OT-\d{6}-\d{3}(?:-[A-Z])?)/i);
+    if(ot){
+      const codeNorm=norm(ot[1]);
+      const byCode=entries.filter(x=>x.cleanNorm===codeNorm||x.cleanNorm.startsWith(codeNorm+' '));
+      if(byCode.length===1)return map[byCode[0].key];
+    }
+    const compatible=entries.filter(x=>x.cleanNorm&&wantedNorm&&(x.cleanNorm.startsWith(wantedNorm+' ')||wantedNorm.startsWith(x.cleanNorm+' ')));
+    return compatible.length===1?map[compatible[0].key]:null;
+  }
+  function prepMetaForWork(work){
+    const ref=text(work&&work.ref);if(!ref)return {};
+    const fromFab=decodeObjectValue(mapValueForReference(state.flowPackage&&state.flowPackage.prepMeta,ref,''));
+    const prep=state.prepPackage&&typeof state.prepPackage==='object'?state.prepPackage:{};
+    const prepData=prep.data&&typeof prep.data==='object'?prep.data:prep;
+    const fromPrep=decodeObjectValue(mapValueForReference(prepData,ref,'prep_meta_'));
+    return {...fromPrep,...fromFab};
+  }
+  function paintMetaForWork(work){
+    const ref=text(work&&work.ref);
+    const prep=prepMetaForWork(work);
+    const order=ref?(state.orderMetaByRef[ref]||{}):{};
+    /* La orden del PC manda si tiene dato; Preparacion/Fabricacion es respaldo autoritativo. */
+    return {...prep,...order};
+  }
+  function ralCodeFromText(value){
+    const raw=text(value);if(!raw)return '';
+    const m=raw.match(/(?:ral\s*[:#-]?\s*)?([1-9]\d{3})/i);
+    return m?m[1]:'';
+  }
   function workRal(item){
-    const key=text(item&&item.ref);
-    const meta=key?(state.orderMetaByRef[key]||{}):{};
+    const meta=paintMetaForWork(item);
     /* El vinculo/resolucion que venga del PC manda siempre. */
-    const fromPc=text(meta.paintRalResolved);
-    if(fromPc) return fromPc;
+    const fromPc=text(meta.paintRalResolved||meta.paintRal||meta.colorRal||meta.ral||meta.RAL);
+    if(fromPc)return ralCodeFromText(fromPc)||fromPc;
+    /* V37: Preparacion ya guarda paintMaterialId/paintMaterialName. No se puede perder
+       ese color al cerrar Preparacion o al pasar la OT a Pintura. */
+    const fromPaintName=ralCodeFromText(meta.paintStockMaterialName||meta.paintMaterialName||meta.paint_material_name||meta.paintName);
+    if(fromPaintName)return fromPaintName;
     const legacy=legacyPaintLinkForWork(item);
-    if(legacy&&legacy.ral) return legacy.ral;
-    return text(meta.ral || (item&&item.ral) || (item&&item.RAL) || (item&&item.paintRal) || (item&&item.colorRal));
+    if(legacy&&legacy.ral)return legacy.ral;
+    const direct=text((item&&item.ral)||(item&&item.RAL)||(item&&item.paintRal)||(item&&item.colorRal));
+    if(direct)return ralCodeFromText(direct)||direct;
+    /* Ultimo respaldo: una linea vinculada de pintura que conserve el RAL en su nombre. */
+    for(const line of workMaterialLines(item)){
+      const name=workMaterialName(line);
+      const code=ralCodeFromText(name);
+      if(code&&(norm(name).includes('pintura')||norm(name).includes('antracita')||norm(name).includes('blanco')||text(line&&line.color)))return code;
+    }
+    return '';
   }
   function ralLabel(value){
     const raw=text(value);
@@ -827,9 +889,15 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
      es autoritativo. El terminal nunca debe sustituirlo por una busqueda por RAL. */
   function workLinkedPaintRow(work,all,ral){
     const rows=Array.isArray(all)?all:[];
-    const byId=id=>chooseBestPaintCandidate(rows.filter(r=>text(r&&r.mat&&r.mat.id)===text(id)),work,state.orderMetaByRef[text(work&&work.ref)]||{})||null;
+    const meta=paintMetaForWork(work);
+    const byId=id=>chooseBestPaintCandidate(rows.filter(r=>text(r&&r.mat&&r.mat.id)===text(id)),work,meta)||null;
 
+    /* V37: primero el ID exacto que ya quedo guardado por Preparacion/PC. */
     const directIds=[
+      meta&&meta.paintStockMaterialId,
+      meta&&meta.paintMaterialId,
+      meta&&meta.paint_material_id,
+      meta&&meta.paintMatId,
       work&&work.paintStockMaterialId,
       work&&work.paintMaterialId,
       work&&work.paintMatId,
@@ -838,7 +906,16 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     ].map(text).filter(Boolean);
     for(const id of directIds){
       const row=byId(id);
-      if(row) return row;
+      if(row)return row;
+    }
+
+    /* Si un dato antiguo perdio el ID pero conserva el nombre exacto, lo recuperamos
+       solo cuando hay una unica pintura canonica de esa empresa con ese nombre. */
+    const directNames=[meta&&meta.paintStockMaterialName,meta&&meta.paintMaterialName,meta&&meta.paint_material_name,meta&&meta.paintName].map(norm).filter(Boolean);
+    for(const wantedName of directNames){
+      const named=rows.filter(r=>norm(r&&r.mat&&(r.mat.name||r.mat.nombre))===wantedName);
+      const row=chooseBestPaintCandidate(named,work,meta);
+      if(row)return row;
     }
 
     const linked=[];
@@ -1843,6 +1920,17 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     });
     return out;
   }
+  function canonicalStockCompanyIds(){
+    const db=state.stock;if(!db)return new Set();
+    return new Set((db.companies||[]).map(c=>text(c&&(c.id||c.companyId||c.empresaId))).filter(Boolean));
+  }
+  function paintRowsForUi(){
+    const rows=paintRows();
+    const canonical=canonicalStockCompanyIds();
+    /* Stock principal define las empresas validas. Los IDs huerfanos de migraciones
+       antiguas (emp_sklum, emp_woods, emp_create...) no deben reaparecer en la terminal. */
+    return canonical.size?rows.filter(r=>canonical.has(text(r&&r.companyId))):rows;
+  }
   function reservationRef(r){return text(r&&(r.ref||r.jobRef||r.trabajoRef||r.reference));}
   function ownPaintReserved(db,companyId,materialId,ref){
     return (Array.isArray(db&&db.reservations)?db.reservations:[])
@@ -1930,7 +2018,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   function paintLinkForWork(work){
     if(!state.stock)return {kind:state.stockError?'stock_error':'loading',error:state.stockError};
     const ref=text(work&&work.ref);
-    const meta=state.orderMetaByRef[ref]||{};
+    const meta=paintMetaForWork(work);
     const ral=workRal(work);
     const companyIds=stockCompanyIdsForWork(work,meta);
     if(!companyIds.length)return {kind:'no_company',ral};
@@ -1942,7 +2030,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       return {kind:'linked',ral:resolved,row:snapshotRow,ownReserved:ownPaintReserved(state.stock,snapshotRow.companyId,text(snapshotRow.mat.id),work.ref),via:'pc_snapshot'};
     }
 
-    const pcMaterialId=text(meta.paintStockMaterialId);
+    const pcMaterialId=text(meta.paintStockMaterialId||meta.paintMaterialId||meta.paint_material_id||meta.paintMatId);
     if(pcMaterialId){
       const row=chooseBestPaintCandidate(all.filter(r=>text(r.mat.id)===pcMaterialId),work,meta);
       if(row){const resolved=text(meta.paintRalResolved)||ralFromPaintRow(row)||ral;return {kind:'linked',ral:resolved,row,ownReserved:ownPaintReserved(state.stock,row.companyId,text(row.mat.id),work.ref),via:'pc'};}
@@ -2030,7 +2118,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
   function renderStockCompanies(){
     const sel=$('stockCompany'),cur=sel.value; const db=state.stock;if(!db){sel.innerHTML='<option value="">Sin datos</option>';return;}
-    const ids=Array.from(new Set(paintRows().map(r=>r.companyId)));
+    const ids=Array.from(new Set(paintRowsForUi().map(r=>r.companyId)));
     const comps=ids.map(id=>(db.companies||[]).find(c=>text(c.id)===id)||{id,name:id}).sort((a,b)=>{const ac=isCommonCompany(a),bc=isCommonCompany(b);if(ac!==bc)return ac?1:-1;return companyName(db,a.id).localeCompare(companyName(db,b.id),'es',{sensitivity:'base'});});
     sel.innerHTML='<option value="">Selecciona empresa...</option>'+comps.map(c=>'<option value="'+esc(c.id)+'">'+esc(companyName(db,c.id))+'</option>').join('');
     if(comps.some(c=>text(c.id)===cur))sel.value=cur; else if(comps[0])sel.value=text(comps[0].id);
@@ -2038,7 +2126,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   function renderStock(){
     renderStockCompanies();
     const cid=text($('stockCompany').value),q=norm($('stockSearch').value);
-    const rows=paintRows().filter(r=>!cid||r.companyId===cid).filter(r=>!q||norm([r.mat.name,r.mat.family,r.mat.unit,r.company].join(' ')).includes(q));
+    const rows=paintRowsForUi().filter(r=>!cid||r.companyId===cid).filter(r=>!q||norm([r.mat.name,r.mat.family,r.mat.unit,r.company].join(' ')).includes(q));
     if(!state.stock){$('stockList').innerHTML='<div class="empty">Cargando Stock...</div>';return;}
     if(!rows.length){$('stockList').innerHTML='<div class="empty">No hay pinturas para esta empresa.</div>';return;}
     $('stockList').innerHTML=rows.map(r=>{
@@ -2061,7 +2149,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   function renderControlCompanies(){
     const sel=$('controlCompany'); if(!sel)return;
     const cur=sel.value;
-    const names=Array.from(new Set(paintRows().filter(r=>num(r.physical)>0).map(r=>text(r.company)).filter(Boolean))).sort((a,b)=>{
+    const names=Array.from(new Set(paintRowsForUi().filter(r=>num(r.physical)>0).map(r=>text(r.company)).filter(Boolean))).sort((a,b)=>{
       const ac=isCommonCompanyName(a),bc=isCommonCompanyName(b);if(ac!==bc)return ac?1:-1;
       return a.localeCompare(b,'es',{sensitivity:'base'});
     });
@@ -2097,7 +2185,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     renderControlCompanies();
     if(!state.stock){list.innerHTML='<div class="empty">Cargando Stock...</div>';return;}
     const q=norm($('controlSearch')&&$('controlSearch').value),company=text($('controlCompany')&&$('controlCompany').value);
-    const rows=paintRows().filter(r=>num(r.physical)>0).filter(r=>!company||text(r.company)===company).filter(r=>{
+    const rows=paintRowsForUi().filter(r=>num(r.physical)>0).filter(r=>!company||text(r.company)===company).filter(r=>{
       if(!q)return true;
       const name=text(r&&r.mat&&(r.mat.name||r.mat.nombre));
       const family=text(r&&r.mat&&(r.mat.family||r.mat.familia));
