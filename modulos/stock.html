@@ -1329,6 +1329,7 @@ html, body{
   }
 </style>
 
+  <meta name="ldh-stock-build" content="STOCK-V64-RAL-CONFIGURATOR-20260824">
 </head>
 <body>
 <div class="app">
@@ -1709,27 +1710,20 @@ function companyById(id){return db.companies.find(c=>c.id===id)}
 function stockRow(companyId,materialId){return db.stock.find(s=>s.companyId===companyId&&s.materialId===materialId)}
 function jobById(id){return db.jobs.find(j=>j.id===id)}
 function realStock(companyId,materialId){
-  const material = typeof materialById === 'function' ? (materialById(materialId) || {}) : {};
-  const srow = typeof stockRow === 'function' ? (stockRow(companyId,materialId) || {}) : {};
-  const materialTxt = String(material.name || material.nombre || material.material || '').toLowerCase();
-  const isPletina = materialTxt.includes('pletina') || materialTxt.includes('planchuela') || materialTxt.includes('llanta');
-  const legacyBarMode = String(srow.lengthMode || '').toLowerCase() !== 'mm';
-  const barLengthMm = Math.max(1, Number(srow.barLengthMm || 6000) || 6000);
+  // V114 · Las pletinas modernas gestionadas en mm tienen su físico autoritativo
+  // en la propia fila Stock. No se mezcla con el ledger legacy de barras.
+  try{
+    const sr = stockRow(companyId,materialId);
+    if(sr && String(sr.lengthMode||'').toLowerCase()==='mm'){
+      const mm = Number(sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm ?? 0);
+      return Number.isFinite(mm) ? Math.max(0,mm) : 0;
+    }
+  }catch(e){}
   return db.movements
    .filter(m=>m.companyId===companyId&&m.materialId===materialId)
    .reduce((a,m)=>{
       const t=String(m.type||m.tipo||'entrada').toLowerCase();
-      let q=Number(m.qty||m.cantidad||0);
-      // V114 · compatibilidad de seguridad para salidas antiguas de PLETINA/MM
-      // grabadas por error como 6000 "barras" en una ficha legacy de barras.
-      if(isPletina && legacyBarMode && ['salida','ajuste_neg','consumo','out'].includes(t) && q>=1000){
-        const src=String([m.source,m.reason,m.note,m.nota].filter(Boolean).join(' ')).toLowerCase();
-        const unit=String(m.unit||m.unidad||m.originalAssignedUnit||'').toLowerCase();
-        const looksMm = unit==='mm' || m.pletinaMm===true || m.pletinaMmConvertedToBars===true
-          || src.includes('preparacion_pedidos_consumo') || src.includes('consumo_stock_propio_al_salir_preparacion')
-          || src.includes('consumo_stock_comun_al_salir_preparacion');
-        if(looksMm) q = q / Math.max(1, Number(m.barLengthMm || barLengthMm) || barLengthMm);
-      }
+      const q=Number(m.qty||m.cantidad||0);
       if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
       if(t==='entrada'||t==='ajuste_pos'||t==='devolucion'||t==='in') return a+q;
       if(t==='salida'||t==='ajuste_neg'||t==='consumo'||t==='out') return a-q;
@@ -3278,7 +3272,7 @@ function rowHTML(s,m){
        </div>`
     : '<span class="muted">Sin reservas/deudas</span>';
 
-  return `<tr draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv+asg)}</td><td class="num" aria-hidden="true">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','entrada')">+ Entrada</button> <button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','salida')">- Salida</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
+  return `<tr draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(String(s.lengthMode||'').toLowerCase()==='mm'?'mm':m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv+asg)}</td><td class="num" aria-hidden="true">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','entrada')">+ Entrada</button> <button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','salida')">- Salida</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
@@ -8172,152 +8166,565 @@ body{
 </script>
 <!-- /LDH_STOCK_FUSION_PINTURA_PREP_V61_20260819 -->
 
-
-
-<!-- LDH_STOCK_V114_REYNOLDS_CIERRE_RESIDUAL_20260820 -->
-<script id="LDH_STOCK_V114_REYNOLDS_CIERRE_RESIDUAL_20260820">
+<!-- LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820 -->
+<script id="LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820">
 (function(){
   'use strict';
-  if(window.__LDH_STOCK_V114_REYNOLDS_CIERRE_RESIDUAL__) return;
-  window.__LDH_STOCK_V114_REYNOLDS_CIERRE_RESIDUAL__=true;
 
-  const REF='OT-260728-003';
-  const TAG='STOCK-V114-REYNOLDS-CIERRE-RESIDUAL-20260820';
-  const EPS=1e-6;
-  let running=false;
-  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[^a-z0-9]+/g,'');
-  const refNorm=v=>String(v??'').trim().toUpperCase().replace(/\s+/g,'');
-  const num=v=>Number(String(v??0).replace(',','.'))||0;
-  const rowRef=row=>row?.ref??row?.jobRef??row?.consumerRef??row?.reference??row?.trabajoRef??'';
-  const sameRef=row=>refNorm(rowRef(row))===refNorm(REF) || String(row?.note??row?.nota??'').toUpperCase().includes(REF);
-  const cid=row=>String(row?.companyId??row?.empresaId??row?.company??row?.empresa??'');
-  const mid=row=>String(row?.materialId??row?.matId??row?.toMaterialId??row?.stockMaterialId??'');
-  const isOpen=row=>!['consumida','consumido','liberada','liberado','cancelada','cancelado','anulada','anulado','cerrada','cerrado','devuelta','devuelto'].includes(String(row?.status??row?.estado??'activa').toLowerCase());
-  const isNeg=m=>['salida','ajuste_neg','consumo','out'].includes(String(m?.type??m?.tipo??'').toLowerCase());
+  const TARGET_REF = 'OT-260728-003';
+  const TARGET_DIM = '100x40x1.5';
+  const EPS = 0.000001;
+  let repairing = false;
 
-  function findCompany(){
-    return (db.companies||[]).find(c=>norm([c?.id,c?.name,c?.nombre,c?.code,c?.codigo].filter(Boolean).join(' ')).includes('reynolds')) || null;
+  function text(v){ return String(v == null ? '' : v).trim(); }
+  function num(v){
+    const n = Number(String(v == null ? 0 : v).replace(',', '.'));
+    return Number.isFinite(n) ? n : 0;
   }
-  function findMaterial(key){
-    return (db.materials||[]).find(m=>{
-      const n=norm(m?.name??m?.nombre??m?.material??'');
-      if(key==='100x40') return n==='100x40x15';
-      if(key==='plet30x6') return n==='pletina30x6';
-      return false;
-    }) || null;
+  function norm(v){
+    return text(v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/×|\*/g,'x')
+      .replace(/,/g,'.')
+      .replace(/[^a-z0-9.x]+/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
   }
-  function activeRows(list,CID,MID){
-    return (list||[]).filter(r=>sameRef(r)&&cid(r)===CID&&(mid(r)===MID||String(r?.toMaterialId??'')===MID)&&isOpen(r));
+  function dimKey(v){
+    const s = norm(v);
+    const m = s.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+    if(!m) return '';
+    const f = x => {
+      const n = Number(x);
+      return Number.isInteger(n) ? String(n) : String(n).replace(/0+$/,'').replace(/\.$/,'');
+    };
+    return f(m[1]) + 'x' + f(m[2]) + 'x' + f(m[3]);
   }
-  function closeRows(rows){
-    const now=new Date().toISOString();
-    rows.forEach(r=>{
-      r.status='consumida'; r.estado='consumida'; r.phase='fabricacion'; r.fase='fabricacion';
-      r.consumedAt=now; r.updatedAt=now; r.stockV114ResidualFix=TAG;
+  function materialName(m){
+    return text(m && (m.name || m.nombre || m.material || m.mat || m.label));
+  }
+  function materialId(m){
+    return text(m && (m.id || m.materialId || m.matId || m.material_id));
+  }
+  function rowMaterialId(r){
+    return text(r && (r.materialId || r.matId || r.material_id || r.v2MaterialId || r.stockMaterialId));
+  }
+  function companyValue(r){
+    return text(r && (r.companyId || r.empresaId || r.company || r.empresa || r.companyName || r.empresaNombre));
+  }
+  function isReynoldsAlias(v, canonicalId){
+    const raw = norm(v);
+    if(!raw) return false;
+    const stripped = raw.replace(/^emp\s+/,'').replace(/^emp[_-]+/,'');
+    const cid = norm(canonicalId);
+    const cidStripped = cid.replace(/^emp\s+/,'').replace(/^emp[_-]+/,'');
+    return raw === 'reynolds' || stripped === 'reynolds' || raw === cid || stripped === cidStripped;
+  }
+  function findReynoldsCompany(){
+    if(typeof db === 'undefined' || !db || !Array.isArray(db.companies)) return null;
+    const matches = db.companies.filter(c => {
+      const vals = [c && c.id, c && c.companyId, c && c.empresaId, c && c.name, c && c.nombre, c && c.code, c && c.codigo];
+      return vals.some(v => {
+        const n = norm(v);
+        const stripped = n.replace(/^emp\s+/,'').replace(/^emp[_-]+/,'');
+        return n === 'reynolds' || stripped === 'reynolds';
+      });
+    });
+    return matches.length === 1 ? matches[0] : null;
+  }
+  function candidateMaterialIds(){
+    if(typeof db === 'undefined' || !db || !Array.isArray(db.materials)) return [];
+    return db.materials
+      .filter(m => {
+        const type = norm(m && (m.type || m.tipo || 'hierro'));
+        return dimKey(materialName(m)) === TARGET_DIM && (!type || type === 'hierro');
+      })
+      .map(materialId)
+      .filter(Boolean);
+  }
+  function materialIsCandidate(id, ids){ return ids.includes(text(id)); }
+  function physicalSign(type){
+    const t = norm(type).replace(/\s+/g,'_');
+    if(['entrada','ajuste_pos','devolucion','in'].includes(t)) return 1;
+    if(['salida','ajuste_neg','consumo','out'].includes(t)) return -1;
+    return 0;
+  }
+  function stockCachedQty(row){
+    if(!row) return 0;
+    const vals = [row.qty,row.cantidad,row.physicalQty,row.fisico,row['físico'],row.real,row.stock]
+      .map(num).filter(Number.isFinite);
+    return vals.length ? Math.max.apply(null, vals) : 0;
+  }
+  function exactPhysicalForMaterial(companyId, matId){
+    const movs = (Array.isArray(db.movements) ? db.movements : []).filter(r =>
+      isReynoldsAlias(companyValue(r), companyId) && rowMaterialId(r) === matId && physicalSign(r.type || r.tipo) !== 0
+    );
+    if(movs.length){
+      return movs.reduce((sum,r)=>sum + physicalSign(r.type || r.tipo) * num(r.qty ?? r.cantidad ?? r.amount ?? r.quantity), 0);
+    }
+    const rows = (Array.isArray(db.stock) ? db.stock : []).filter(r =>
+      isReynoldsAlias(companyValue(r), companyId) && rowMaterialId(r) === matId
+    );
+    return rows.length ? Math.max.apply(null, rows.map(stockCachedQty)) : 0;
+  }
+  function activeOwnAssignmentQty(companyId, matId){
+    return (Array.isArray(db.assignments) ? db.assignments : [])
+      .filter(a => isReynoldsAlias(companyValue(a), companyId))
+      .filter(a => rowMaterialId(a) === matId)
+      .filter(a => text(a.ref || a.jobRef || a.referencia || a.trabajoRef) === TARGET_REF)
+      .filter(a => !['cancelada','cancelado','cerrada','cerrado','consumida','consumido','devuelta','devuelto','inactiva','inactivo'].includes(norm(a.status || a.estado || 'activa')))
+      .reduce((sum,a)=>sum + num(a.qty ?? a.cantidad ?? a.pendingQty ?? a.qtyPending),0);
+  }
+  function chooseCanonical(companyId, ids){
+    const strictRows = (Array.isArray(db.stock) ? db.stock : []).filter(r =>
+      text(r.companyId) === companyId && materialIsCandidate(rowMaterialId(r), ids)
+    );
+    if(!strictRows.length) return null;
+    if(strictRows.length === 1) return strictRows[0];
+
+    const scored = strictRows.map(row => ({
+      row,
+      score: activeOwnAssignmentQty(companyId, rowMaterialId(row)) * 1000 +
+             ((Array.isArray(db.movements)?db.movements:[]).filter(m=>text(m.companyId)===companyId && rowMaterialId(m)===rowMaterialId(row)).length)
+    })).sort((a,b)=>b.score-a.score);
+
+    if(scored.length > 1 && scored[0].score === scored[1].score) return null;
+    return scored[0].row;
+  }
+  function remapMaterialFields(row, oldIds, newId){
+    if(!row) return 0;
+    let changed = 0;
+    ['materialId','matId','material_id','v2MaterialId','stockMaterialId','sourceMaterialId','fromMaterialId'].forEach(k=>{
+      if(oldIds.includes(text(row[k])) && text(row[k]) !== newId){ row[k] = newId; changed++; }
+    });
+    ['toMaterialId','destinationMaterialId','targetMaterialId'].forEach(k=>{
+      if(oldIds.includes(text(row[k])) && text(row[k]) !== newId){ row[k] = newId; changed++; }
+    });
+    return changed;
+  }
+  function normalizeCompanyFields(row, companyId){
+    if(!row || !isReynoldsAlias(companyValue(row), companyId)) return 0;
+    let changed = 0;
+    if(text(row.companyId) !== companyId){ row.companyId = companyId; changed++; }
+    if(row.empresaId !== undefined && isReynoldsAlias(row.empresaId, companyId) && text(row.empresaId) !== companyId){ row.empresaId = companyId; changed++; }
+    return changed;
+  }
+  function remapCollection(name, companyId, oldIds, newId){
+    const arr = Array.isArray(db[name]) ? db[name] : [];
+    let n = 0;
+    arr.forEach(row=>{
+      if(!row) return;
+      const own = isReynoldsAlias(companyValue(row), companyId);
+      const dest = isReynoldsAlias(row.toCompanyId || row.destinationCompanyId || row.targetCompanyId || row.consumerCompanyId, companyId);
+      if(!own && !dest) return;
+      let rowChanged = 0;
+      if(own){
+        rowChanged += normalizeCompanyFields(row, companyId);
+        rowChanged += remapMaterialFields(row, oldIds, newId);
+      }else if(dest){
+        ['toMaterialId','destinationMaterialId','targetMaterialId'].forEach(k=>{
+          if(oldIds.includes(text(row[k])) && text(row[k]) !== newId){ row[k] = newId; rowChanged++; }
+        });
+      }
+      if(rowChanged){
+        row.reynolds100x40CanonicalRepairAt = new Date().toISOString();
+        row.reynolds100x40CanonicalMaterialId = newId;
+        n += rowChanged;
+      }
+    });
+    return n;
+  }
+  function logicalPhysicalBefore(companyId, ids){
+    return ids.reduce((sum,id)=>sum + exactPhysicalForMaterial(companyId,id),0);
+  }
+  function physicalAfterStrict(companyId, matId){
+    return (Array.isArray(db.movements)?db.movements:[])
+      .filter(r => text(r.companyId) === companyId && rowMaterialId(r) === matId)
+      .reduce((sum,r)=>sum + physicalSign(r.type || r.tipo) * num(r.qty ?? r.cantidad ?? r.amount ?? r.quantity),0);
+  }
+  function markUnusedAliases(ids, canonicalId){
+    ids.filter(id=>id!==canonicalId).forEach(id=>{
+      const stillUsed = ['stock','movements','reservations','assignments','reservationDebts'].some(name =>
+        (Array.isArray(db[name])?db[name]:[]).some(r => rowMaterialId(r) === id || text(r && r.toMaterialId) === id)
+      );
+      if(stillUsed) return;
+      const m = (db.materials||[]).find(x=>materialId(x)===id);
+      if(!m) return;
+      m.deprecatedStockAlias = true;
+      m.mergedIntoMaterialId = canonicalId;
+      m.mergedIntoCompanyId = 'REYNOLDS';
+      m.mergedAt = new Date().toISOString();
     });
   }
-  function addOut(CID,MID,qty,suffix,note,extra={}){
-    const id=(TAG+'_'+suffix).replace(/[^a-zA-Z0-9_-]+/g,'_');
-    if((db.movements||[]).some(m=>String(m?.id??'')===id)) return false;
-    const now=new Date().toISOString();
-    db.movements.push({id,companyId:CID,materialId:MID,type:'salida',tipo:'salida',qty,cantidad:qty,date:now,createdAt:now,ref:REF,jobRef:REF,reason:'cierre_residual_ot_completa_fuera_preparacion',source:TAG,note,debtExempt:true,returnRequired:false,...extra});
-    return true;
-  }
 
-  function repair(){
-    if(running || typeof db==='undefined' || !db || typeof save!=='function' || typeof realStock!=='function') return false;
-    running=true;
+  function repair(publishNow){
+    if(repairing) return false;
+    repairing = true;
     try{
-      const company=findCompany(), m100=findMaterial('100x40'), mp=findMaterial('plet30x6');
-      if(!company || !m100 || !mp) return false;
-      const CID=String(company.id??company.companyId??'');
-      const MID100=String(m100.id??''), MIDP=String(mp.id??'');
-      if(!CID || !MID100 || !MIDP) return false;
-      db.assignments=Array.isArray(db.assignments)?db.assignments:[];
-      db.reservations=Array.isArray(db.reservations)?db.reservations:[];
-      db.movements=Array.isArray(db.movements)?db.movements:[];
+      if(typeof db === 'undefined' || !db) return false;
+      const company = findReynoldsCompany();
+      if(!company) return false;
+      const companyId = text(company.id || company.companyId || company.empresaId);
+      if(!companyId) return false;
 
-      const a100=activeRows(db.assignments,CID,MID100), r100=activeRows(db.reservations,CID,MID100);
-      const ap=activeRows(db.assignments,CID,MIDP), rp=activeRows(db.reservations,CID,MIDP);
-      if(!a100.length && !r100.length && !ap.length && !rp.length) return false; // ya cerrado
+      const ids = candidateMaterialIds();
+      if(ids.length < 2) return false;
 
-      let changed=false;
+      const canonicalRow = chooseCanonical(companyId, ids);
+      if(!canonicalRow) return false;
+      const canonicalId = rowMaterialId(canonicalRow);
+      if(!canonicalId) return false;
 
-      // 100x40x1.5: esta OT tiene 2 barras recibidas/asignadas.
-      // Miramos el FISICO ACTUAL, no la suma histórica de salidas: una V51 antigua
-      // pudo haber sido restaurada y, por tanto, sus salidas previas ya no representan
-      // consumo pendiente. El id determinista evita repetir este cierre.
-      if(a100.length || r100.length){
-        const physical=num(realStock(CID,MID100));
-        const finalId=(TAG+'_100X40').replace(/[^a-zA-Z0-9_-]+/g,'_');
-        const finalExists=db.movements.some(m=>String(m?.id??'')===finalId);
-        if(Math.abs(physical-2)<=EPS && !finalExists){
-          changed = addOut(CID,MID100,2,'100X40','Cierre definitivo '+REF+': consumir 100x40x1.5 pendiente') || changed;
-        }else if(!(Math.abs(physical)<=EPS && finalExists)){
-          console.warn('[Stock V114] 100x40 fuera del patron seguro; no se toca', {physical,finalExists});
-          return false;
-        }
-        closeRows(a100); closeRows(r100); changed=true;
+      const targetRows = (db.stock||[]).filter(r =>
+        isReynoldsAlias(companyValue(r), companyId) && materialIsCandidate(rowMaterialId(r), ids)
+      );
+      const legacyRows = targetRows.filter(r => r !== canonicalRow || text(r.companyId) !== companyId || rowMaterialId(r) !== canonicalId);
+
+      const legacyRecords = ['movements','reservations','assignments','reservationDebts'].some(name =>
+        (Array.isArray(db[name])?db[name]:[]).some(r => {
+          const own = isReynoldsAlias(companyValue(r), companyId);
+          const dest = isReynoldsAlias(r && (r.toCompanyId || r.destinationCompanyId || r.targetCompanyId), companyId);
+          if(!own && !dest) return false;
+          const mid = rowMaterialId(r);
+          const toMid = text(r && r.toMaterialId);
+          return (materialIsCandidate(mid,ids) && mid !== canonicalId) || (materialIsCandidate(toMid,ids) && toMid !== canonicalId) || (own && text(r.companyId)!==companyId && materialIsCandidate(mid,ids));
+        })
+      );
+
+      if(!legacyRows.length && !legacyRecords) return false;
+
+      const physicalBefore = logicalPhysicalBefore(companyId, ids);
+      /* Guardia fuerte: este parche SOLO corresponde al caso comprobado de 2 barras físicas. */
+      if(Math.abs(physicalBefore - 2) > EPS){
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada: físico lógico inesperado', physicalBefore);
+        return false;
       }
 
-      // Pletina 30x6 legacy: corregir únicamente el conocido 6000 mm == 1 barra.
-      if(ap.length || rp.length){
-        const bad=db.movements.filter(m=>cid(m)===CID&&mid(m)===MIDP&&isNeg(m)&&sameRef(m)&&num(m?.qty??m?.cantidad)>=1000&&String([m?.source,m?.reason].filter(Boolean).join(' ')).toLowerCase().includes('preparacion'));
-        if(bad.length===1){
-          const q=num(bad[0]?.qty??bad[0]?.cantidad);
-          const barMm=Math.max(1,num(bad[0]?.barLengthMm)||6000);
-          const barEq=q/barMm;
-          if(Math.abs(barEq-1)<=EPS){
-            bad[0].originalQtyBeforeV114=q;
-            bad[0].qty=1; bad[0].cantidad=1; bad[0].unit='barra'; bad[0].unidad='barra';
-            bad[0].pletinaLegacyMmCorrected=true; bad[0].stockV114ResidualFix=TAG; bad[0].updatedAt=new Date().toISOString();
-            changed=true;
-          }
-        }
-        const physical=num(realStock(CID,MIDP));
-        const finalId=(TAG+'_PLETINA30X6').replace(/[^a-zA-Z0-9_-]+/g,'_');
-        const finalExists=db.movements.some(m=>String(m?.id??'')===finalId);
-        if(Math.abs(physical-1)<=EPS && !finalExists){
-          changed = addOut(CID,MIDP,1,'PLETINA30X6','Cierre definitivo '+REF+': consumir 1 barra equivalente de pletina 30x6',{unit:'barra',unidad:'barra',originalAssignedUnit:'mm',barLengthMm:6000,pletinaMmConvertedToBars:true}) || changed;
-        }else if(!(Math.abs(physical)<=EPS && (finalExists || bad.length===1))){
-          console.warn('[Stock V114] Pletina 30x6 fuera del patron seguro; no se toca', {physical,finalExists,badMoves:bad.length});
-          return false;
-        }
-        closeRows(ap); closeRows(rp); changed=true;
-      }
-
-      if(!changed) return false;
-      db.updatedAt=new Date().toISOString();
-      save();
-      try{ if(typeof render==='function') render(); }catch(_){ }
+      /* Otra guardia: la ficha visible debe ser la que hoy muestra el compromiso de esta OT. */
+      let visibleCommitment = 0;
       try{
-        if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true);
-        else if(window.LDH_publishStockDirectFromMemory) window.LDH_publishStockDirectFromMemory(window.__LDH_STOCK_MEMORY_DB||db);
-      }catch(error){ console.warn('[Stock V114] Publicacion inmediata pendiente',error); }
-      console.info('[Stock V114] REYNOLDS '+REF+' cierre residual corregido sin tocar otras OTs.');
+        if(typeof assignedStock === 'function') visibleCommitment += num(assignedStock(companyId,canonicalId));
+        if(typeof reservedStock === 'function') visibleCommitment += num(reservedStock(companyId,canonicalId));
+      }catch(_){ }
+      if(visibleCommitment > 0 && Math.abs(visibleCommitment - 2) > EPS){
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada: reservado/asignado inesperado', visibleCommitment);
+        return false;
+      }
+
+      const rollbackSnapshot = JSON.stringify(db);
+      const rollback = function(){
+        try{
+          db = JSON.parse(rollbackSnapshot);
+          window.__LDH_STOCK_MEMORY_DB = db;
+          return true;
+        }catch(_){ return false; }
+      };
+
+      const oldIds = ids.filter(id=>id!==canonicalId);
+      let remapped = 0;
+      ['movements','reservations','assignments','reservationDebts'].forEach(name=>{
+        remapped += remapCollection(name, companyId, oldIds, canonicalId);
+      });
+
+      /* Normalizar también registros ya canónicos pero con empresa legacy "REYNOLDS". */
+      ['movements','reservations','assignments','reservationDebts'].forEach(name=>{
+        const arr = Array.isArray(db[name]) ? db[name] : [];
+        arr.forEach(row=>{
+          if(!row || rowMaterialId(row)!==canonicalId) return;
+          if(isReynoldsAlias(companyValue(row),companyId)) remapped += normalizeCompanyFields(row,companyId);
+        });
+      });
+
+      /* Unificar filas Stock de REYNOLDS. No se toca ninguna fila de otra empresa. */
+      legacyRows.forEach(row=>{
+        if(!canonicalRow.location && row.location) canonicalRow.location = row.location;
+        if(!canonicalRow.ubicacion && row.ubicacion) canonicalRow.ubicacion = row.ubicacion;
+        canonicalRow.min = Math.max(num(canonicalRow.min), num(row.min));
+        if(!canonicalRow.barLengthMm && row.barLengthMm) canonicalRow.barLengthMm = row.barLengthMm;
+      });
+      canonicalRow.companyId = companyId;
+      canonicalRow.materialId = canonicalId;
+      canonicalRow.reynolds100x40CanonicalAt = new Date().toISOString();
+      canonicalRow.reynolds100x40MergedRows = legacyRows.length;
+      db.stock = (db.stock||[]).filter(row => !legacyRows.includes(row));
+
+      /* Tras remapear, los movimientos deben conservar exactamente el mismo físico.
+         Si el legado guardaba las 2 barras solo en la fila Stock (sin movimiento),
+         se crea únicamente el hueco necesario para no perder ese físico real. */
+      let after = physicalAfterStrict(companyId,canonicalId);
+      const gap = physicalBefore - after;
+      if(gap < -EPS){
+        rollback();
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada después del remapeo: el físico aumentaría indebidamente', {physicalBefore,after});
+        return false;
+      }
+      if(gap > EPS){
+        if(!Array.isArray(db.movements)) db.movements = [];
+        db.movements.push({
+          id:'mov_reynolds_100x40_merge_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-5),
+          companyId,
+          materialId:canonicalId,
+          matId:canonicalId,
+          type:'entrada',
+          tipo:'entrada',
+          qty:gap,
+          cantidad:gap,
+          date:new Date().toISOString(),
+          ref:TARGET_REF,
+          jobRef:TARGET_REF,
+          reason:'fusion_reynolds_100x40_legacy_saldo_stockrow_v62',
+          source:'stock_reynolds_100x40_canonical_v62',
+          note:'Conservación de físico legacy al unificar ficha duplicada REYNOLDS 100x40x1.5'
+        });
+        after += gap;
+      }
+
+      if(Math.abs(after - physicalBefore) > EPS){
+        rollback();
+        console.warn('[Stock] Reparación REYNOLDS 100x40 abortada: no se conservó el físico', {physicalBefore,after});
+        return false;
+      }
+
+      markUnusedAliases(ids, canonicalId);
+      db.reynolds100x40CanonicalRepairV62 = {
+        at:new Date().toISOString(),
+        ref:TARGET_REF,
+        companyId,
+        materialId:canonicalId,
+        physicalBefore,
+        physicalAfter:after,
+        legacyRowsRemoved:legacyRows.length,
+        remappedRecords:remapped
+      };
+      db.updatedAt = new Date().toISOString();
+
+      /* Se han eliminado filas Stock legacy: la publicación local debe prevalecer
+         sobre cualquier copia remota inmediatamente anterior. */
+      window.__LDH_STOCK_AUTHORITATIVE_DELETE_ONCE = true;
+      if(typeof save === 'function') save();
+      try{ if(typeof render === 'function') render(); }catch(_){ }
+      if(publishNow !== false){
+        try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(_){ }
+      }
+      console.info('[Stock] REYNOLDS 100x40x1.5 unificado con conservación exacta del físico:', db.reynolds100x40CanonicalRepairV62);
       return true;
     }catch(error){
-      console.warn('[Stock V114] No se aplico cierre residual REYNOLDS',error);
+      console.warn('[Stock] No se pudo unificar REYNOLDS 100x40x1.5',error);
       return false;
-    }finally{ running=false; }
+    }finally{
+      repairing = false;
+    }
   }
 
-  const run=()=>{ try{ repair(); }catch(_){ } };
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',run,{once:true}); else setTimeout(run,0);
-  [800,2200,5000,9000].forEach(delay=>setTimeout(run,delay));
-  window.addEventListener('storage',()=>setTimeout(run,180));
   try{
-    if(typeof window.LDH_applyRemoteStockWithoutReload==='function' && !window.LDH_applyRemoteStockWithoutReload.__ldhReynoldsV114){
-      const base=window.LDH_applyRemoteStockWithoutReload;
-      const wrapped=function(){ const result=base.apply(this,arguments); setTimeout(run,120); return result; };
-      wrapped.__ldhReynoldsV114=true;
-      window.LDH_applyRemoteStockWithoutReload=wrapped;
+    if(typeof window.LDH_applyRemoteStockWithoutReload === 'function' &&
+       !window.LDH_applyRemoteStockWithoutReload.__ldhReynolds100x40CanonicalV62){
+      const prev = window.LDH_applyRemoteStockWithoutReload;
+      const wrapped = function(){
+        const result = prev.apply(this,arguments);
+        setTimeout(function(){ repair(true); },90);
+        return result;
+      };
+      wrapped.__ldhReynolds100x40CanonicalV62 = true;
+      window.LDH_applyRemoteStockWithoutReload = wrapped;
     }
   }catch(_){ }
-  window.LDH_repararCierreReynoldsV114=run;
+
+  const run = function(){ repair(true); };
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',run,{once:true});
+  else setTimeout(run,0);
+  [1200,3200,6500].forEach(delay=>setTimeout(run,delay));
+  window.addEventListener('storage',function(ev){
+    if(!ev || ev.key === 'ldh_v2_company_stock_v1') setTimeout(run,220);
+  });
+
+  window.LDH_repararReynolds100x40Legacy = function(){ return repair(true); };
 })();
 </script>
-<!-- /LDH_STOCK_V114_REYNOLDS_CIERRE_RESIDUAL_20260820 -->
+<!-- /LDH_STOCK_REYNOLDS_100X40_CANONICAL_V62_20260820 -->
+
+
+
+<!-- LDH_STOCK_REYNOLDS_CIERRE_RESIDUOS_V63_20260820 -->
+<script id="LDH_STOCK_REYNOLDS_CIERRE_RESIDUOS_V63_20260820">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_REYNOLDS_RESIDUOS_V63__)return;
+  window.__LDH_STOCK_REYNOLDS_RESIDUOS_V63__=true;
+  const REF='OT-260728-003',EPS=1e-6;
+  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  const num=v=>{const n=Number(v);return Number.isFinite(n)?n:0;};
+  const idOf=r=>String(r?.id??r?.materialId??r?.matId??'');
+  const midOf=r=>String(r?.materialId??r?.matId??r?.material_id??'');
+  const refOf=r=>String(r?.ref??r?.jobRef??r?.consumerRef??r?.reference??'').trim();
+  function company(){return (db.companies||[]).find(c=>norm(c?.name??c?.nombre??c?.code??c?.codigo??c?.id)==='reynolds')||null;}
+  function materialByName(name){const n=norm(name);return (db.materials||[]).find(m=>norm(m?.name??m?.nombre??m?.material)===n)||null;}
+  function physical(cid,mid){return (db.movements||[]).filter(m=>String(m?.companyId??m?.empresaId)==cid&&midOf(m)===mid).reduce((s,m)=>{const t=norm(m?.type??m?.tipo).replace(/ /g,'_'),q=num(m?.qty??m?.cantidad);if(['salida','ajuste_neg','consumo','out'].includes(t))return s-q;if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t))return s;return s+q;},0);}
+  function activeOwn(a,cid,mid){const st=norm(a?.status??a?.estado??'activa'),ph=norm(a?.phase??a?.fase??'preparacion'),typ=norm(a?.assignmentType??a?.reason??a?.source);return String(a?.companyId??a?.empresaId)==cid&&midOf(a)===mid&&refOf(a)===REF&&['activa','activo','active',''].includes(st)&&['preparacion','fabricacion',''].includes(ph)&&!a?.toCompanyId&&!typ.includes('otra empresa')&&!typ.includes('ferreteria');}
+  function prepStillAlive(){try{return !!(localStorage.getItem('prep_recepcion_'+REF)||sessionStorage.getItem('prep_recepcion_'+REF));}catch(_){return false;}}
+  function stageAdvanced(){try{const raw=localStorage.getItem('ldh_db')||sessionStorage.getItem('ldh_db')||'{}',x=JSON.parse(raw)||{};for(const key of ['fabricacion','fab','pintura','almacen','entregas','trabajos'])for(const r of (Array.isArray(x[key])?x[key]:[])){if(refOf(r)!==REF)continue;const txt=norm([r?.fase,r?.phase,r?.estado,r?.status,r?.workflow_stage].join(' '));if(key!=='trabajos'||txt.includes('fab')||txt.includes('pint')||txt.includes('almac')||txt.includes('entreg'))return true;}}catch(_){}return false;}
+  function repairPletina(cid){
+    const mat=materialByName('pletina 30x6');if(!mat)return false;const mid=idOf(mat);if(!mid)return false;
+    const before=physical(cid,mid);if(Math.abs(before+5999)>EPS)return false;
+    const bad=(db.movements||[]).filter(m=>String(m?.companyId??m?.empresaId)==cid&&midOf(m)===mid&&refOf(m)===REF&&['salida','consumo','out','ajuste_neg'].includes(norm(m?.type??m?.tipo).replace(/ /g,'_'))&&Math.abs(num(m?.qty??m?.cantidad)-6000)<EPS&&norm([m?.source,m?.reason].join(' ')).includes('preparacion'));
+    if(bad.length!==1){console.warn('[Stock V63] Pletina no corregida: no hay un unico movimiento 6000 comprobable',bad.length);return false;}
+    const move=bad[0];move.originalQtyBeforeUnitFix=6000;move.originalUnitBeforeFix='mm_mal_contabilizado_como_barras';move.qty=1;move.cantidad=1;if(move.amount!==undefined)move.amount=1;move.unit='barras';move.unidad='barras';move.pletinaLegacyUnitFixV63=true;move.pletinaLegacyUnitFixAt=new Date().toISOString();move.note=String(move.note||'')+' · V63 corrige 6000 mm contabilizados como 6000 barras: salida física real 1 barra';
+    const after=physical(cid,mid);if(Math.abs(after)>EPS){move.qty=6000;move.cantidad=6000;if(move.amount!==undefined)move.amount=6000;delete move.pletinaLegacyUnitFixV63;console.warn('[Stock V63] rollback pletina, saldo inesperado',after);return false;}
+    return true;
+  }
+  function repair100x40(cid){
+    if(prepStillAlive())return false; // Si sigue en Preparacion, V114 debe cerrar primero de forma autoritativa.
+    if(!stageAdvanced())return false;
+    const mat=materialByName('100x40x1.5');if(!mat)return false;const mid=idOf(mat);if(!mid)return false;
+    if(Math.abs(physical(cid,mid)-2)>EPS)return false;
+    const active=(db.assignments||[]).filter(a=>activeOwn(a,cid,mid));const total=active.reduce((s,a)=>s+num(a?.qty??a?.cantidad),0);
+    if(Math.abs(total-2)>EPS)return false;
+    if(!Array.isArray(db.movements))db.movements=[];
+    const moveId='mov_reynolds_100x40_cierre_v63_OT_260728_003';
+    if(!(db.movements||[]).some(m=>String(m?.id||'')===moveId))db.movements.push({id:moveId,companyId:cid,materialId:mid,matId:mid,type:'salida',tipo:'salida',qty:2,cantidad:2,date:new Date().toISOString(),ref:REF,jobRef:REF,reason:'consumo_stock_propio_al_salir_preparacion_reparado_v63',source:'stock_reynolds_cierre_residuo_v63',debtExempt:true,returnRequired:false});
+    const now=new Date().toISOString();active.forEach(a=>{a.status='consumida';a.estado='consumida';a.phase='fabricacion';a.fase='fabricacion';a.consumedQty=num(a?.qty??a?.cantidad);a.consumedAt=now;a.updatedAt=now;a.movementId=moveId;a.closedResidueV63=true;});
+    return Math.abs(physical(cid,mid))<EPS;
+  }
+  let busy=false;
+  function repair(publish){if(busy)return false;busy=true;try{if(typeof db==='undefined'||!db)return false;const c=company();if(!c)return false;const cid=String(c.id??c.companyId??c.empresaId??'');if(!cid)return false;const p=repairPletina(cid),b=repair100x40(cid);if(!(p||b))return false;db.updatedAt=new Date().toISOString();db.reynoldsResidueRepairV63={at:new Date().toISOString(),ref:REF,pletina30x6:p,barra100x40:b};if(typeof save==='function')save();try{if(typeof render==='function')render();}catch(_){}if(publish!==false)try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){}console.info('[Stock V63] Residuos REYNOLDS corregidos',db.reynoldsResidueRepairV63);return true;}catch(e){console.warn('[Stock V63] No se pudo reparar REYNOLDS',e);return false;}finally{busy=false;}}
+  try{if(typeof window.LDH_applyRemoteStockWithoutReload==='function'&&!window.LDH_applyRemoteStockWithoutReload.__ldhReynoldsResidueV63){const prev=window.LDH_applyRemoteStockWithoutReload;const wrap=function(){const r=prev.apply(this,arguments);setTimeout(()=>repair(true),120);return r;};wrap.__ldhReynoldsResidueV63=true;window.LDH_applyRemoteStockWithoutReload=wrap;}}catch(_){}
+  const run=()=>repair(true);if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run,{once:true});else setTimeout(run,0);[1000,2600,6000].forEach(ms=>setTimeout(run,ms));window.addEventListener('storage',()=>setTimeout(run,250));
+  window.LDH_repararReynoldsResiduosV63=run;
+})();
+</script>
+<!-- /LDH_STOCK_REYNOLDS_CIERRE_RESIDUOS_V63_20260820 -->
+
+
+<style id="LDH_STOCK_RAL_CONFIGURATOR_V64_CSS">
+.ral-config-wrap{display:flex;flex-direction:column;gap:12px}.ral-config-toolbar{display:flex;flex-direction:column;gap:9px}.ral-family-tabs{display:flex;gap:6px;flex-wrap:wrap}.ral-family-btn{border:1px solid #ffffff24;background:#111f36;color:#dbe7f6;border-radius:999px;padding:7px 10px;font-size:11px;font-weight:900;cursor:pointer}.ral-family-btn.active{border-color:#38bdf8;background:#0b3557;color:#e7f8ff}.ral-chart{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;max-height:320px;overflow:auto;padding:8px;border:1px solid #ffffff1e;border-radius:14px;background:#07111f}.ral-swatch{position:relative;min-height:70px;border:2px solid #ffffff24;border-radius:12px;cursor:pointer;display:flex;align-items:flex-end;padding:7px;overflow:hidden;box-shadow:inset 0 -26px 32px rgba(0,0,0,.13);transition:transform .12s ease,border-color .12s ease}.ral-swatch:hover{transform:translateY(-1px);border-color:#ffffff90}.ral-swatch.selected{border-color:#38bdf8;box-shadow:0 0 0 2px #38bdf844,inset 0 -26px 32px rgba(0,0,0,.13)}.ral-swatch-code{display:inline-flex;padding:4px 6px;border-radius:8px;background:rgba(0,0,0,.48);color:#fff;font-size:11px;font-weight:950;letter-spacing:.25px;text-shadow:0 1px 2px #000}.ral-selected-panel{display:grid;grid-template-columns:minmax(180px,.65fr) minmax(0,1.7fr);gap:12px;align-items:stretch}.ral-preview{min-height:210px;border-radius:18px;border:2px solid #ffffff35;padding:16px;display:flex;flex-direction:column;justify-content:flex-end;box-shadow:inset 0 -70px 80px rgba(0,0,0,.10)}.ral-preview .ral-preview-code{font-size:29px;font-weight:1000;line-height:1}.ral-preview .ral-preview-name{font-size:13px;font-weight:900;margin-top:7px}.ral-preview .ral-preview-hex{font-size:11px;margin-top:4px;font-weight:800;opacity:.78}.ral-fields{display:flex;flex-direction:column;gap:10px}.ral-hex-row{display:grid;grid-template-columns:72px 1fr;gap:9px;align-items:center}.ral-hex-row input[type=color]{width:72px;height:44px;padding:3px;border-radius:10px}.ral-muted{font-size:11px;color:#9fb0c7;line-height:1.35}.ral-empty{grid-column:1/-1;padding:28px 12px;text-align:center;color:#9fb0c7}.ral-source-pill{display:inline-flex;width:max-content;padding:4px 8px;border-radius:999px;background:#0b3557;border:1px solid #38bdf85c;color:#dff6ff;font-size:9px;font-weight:950;text-transform:uppercase;letter-spacing:.35px}.ral-config-wrap input[readonly]{opacity:.88;background:#0a1424}.ral-new-button-hint{font-size:9px;opacity:.78;display:block;font-weight:750;margin-top:2px}@media(max-width:760px){.ral-chart{grid-template-columns:repeat(4,minmax(0,1fr))}.ral-selected-panel{grid-template-columns:1fr}.ral-preview{min-height:150px}}@media(max-width:480px){.ral-chart{grid-template-columns:repeat(3,minmax(0,1fr))}}
+</style>
+
+<!-- LDH_STOCK_RAL_CONFIGURATOR_V64_20260824 -->
+<script id="LDH_STOCK_RAL_CONFIGURATOR_V64_20260824">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_RAL_CONFIGURATOR_V64__)return;
+  window.__LDH_STOCK_RAL_CONFIGURATOR_V64__=true;
+
+  const RAL_CLASSIC=Object.freeze({"1000":"#BEBD7F","1001":"#C2B078","1002":"#C6A664","1003":"#E5BE01","1004":"#CDA434","1005":"#A98307","1006":"#E4A010","1007":"#DC9D00","1011":"#8A6642","1012":"#C7B446","1013":"#EDE6D0","1014":"#E1CC4F","1015":"#E6D2B5","1016":"#EDFF21","1017":"#F5D033","1018":"#F8F32B","1019":"#9E9764","1020":"#999950","1021":"#F3DA0B","1023":"#F7B500","1024":"#AEA04B","1026":"#FFFF00","1027":"#9D9101","1028":"#F4A900","1032":"#D6AE01","1033":"#F3A505","1034":"#EFA94A","1035":"#6A5D4D","1036":"#705335","1037":"#F39F18","2000":"#ED760E","2001":"#C93C20","2002":"#CB2821","2003":"#FF7514","2004":"#E8590C","2005":"#FF2301","2007":"#FFA420","2008":"#F75E25","2009":"#F54021","2010":"#D84B20","2011":"#EC7C26","2012":"#E55137","2013":"#C35831","3000":"#A72920","3001":"#A52019","3002":"#A2231D","3003":"#9B111E","3004":"#75151E","3005":"#5E2129","3007":"#412227","3009":"#642424","3011":"#781F19","3012":"#C1876B","3013":"#A12312","3014":"#D36E70","3015":"#EA899A","3016":"#B32821","3017":"#E63244","3018":"#D53032","3020":"#CC2B2B","3022":"#D95030","3024":"#F80000","3026":"#FE0000","3027":"#C51D34","3028":"#CB3234","3031":"#B32428","3032":"#721422","3033":"#B44C43","4001":"#6D3F5B","4002":"#922B3E","4003":"#DE4C8A","4004":"#641C34","4005":"#6C4675","4006":"#A03472","4007":"#4A192C","4008":"#924E7D","4009":"#A18594","4010":"#CF3476","4011":"#8673A1","4012":"#6C6874","5000":"#354D73","5001":"#1F3438","5002":"#20214F","5003":"#1D1E33","5004":"#18171C","5005":"#1E2460","5007":"#3E5F8A","5008":"#26252D","5009":"#025669","5010":"#0F4C81","5011":"#231A24","5012":"#3B83BD","5013":"#1E213D","5014":"#606E8C","5015":"#007CB0","5017":"#063971","5018":"#3F888F","5019":"#1B5583","5020":"#1D334A","5021":"#256D7B","5022":"#252850","5023":"#49678D","5024":"#5D9B9B","5025":"#2A6478","5026":"#102C54","6000":"#316650","6001":"#287233","6002":"#2D572C","6003":"#424632","6004":"#1F3A3D","6005":"#114232","6006":"#3E3B32","6007":"#343B29","6008":"#39352A","6009":"#31372B","6010":"#35682D","6011":"#587246","6012":"#343E40","6013":"#6C7156","6014":"#47402E","6015":"#3B3C36","6016":"#1E5945","6017":"#4C9141","6018":"#57A639","6019":"#BDECB6","6020":"#2E3A23","6021":"#89AC76","6022":"#25221B","6024":"#308446","6025":"#3D642D","6026":"#015D52","6027":"#84C3BE","6028":"#2C5545","6029":"#008C45","6032":"#317F43","6033":"#497E76","6034":"#7FB5B5","6035":"#1C542D","6036":"#193737","6037":"#008F39","6038":"#00BB2D","7000":"#78858B","7001":"#8A9597","7002":"#7E7B52","7003":"#6C7059","7004":"#969992","7005":"#646B63","7006":"#6D6552","7008":"#6A5F31","7009":"#4D5645","7010":"#4C514A","7011":"#434B4D","7012":"#4E5754","7013":"#464531","7015":"#434750","7016":"#383E42","7021":"#23282B","7022":"#332F2C","7023":"#686C5E","7024":"#474A51","7026":"#2F353B","7030":"#8B8C7A","7031":"#474B4E","7032":"#B8B799","7033":"#7D8471","7034":"#8F8B66","7035":"#CBD0C8","7036":"#7F7679","7037":"#7D7F7D","7038":"#B5B8B1","7039":"#6C6960","7040":"#9DA3A6","7042":"#8F9695","7043":"#4E5452","7044":"#CAC4B0","7045":"#909090","7046":"#82898F","7047":"#D0D0D0","7048":"#898176","8000":"#826C34","8001":"#955F20","8002":"#6C3B2A","8003":"#734222","8004":"#8E402A","8007":"#59351F","8008":"#6F4F28","8011":"#5B3A29","8012":"#592321","8014":"#382C1E","8015":"#633A34","8016":"#4C2F27","8017":"#45322E","8019":"#403A3A","8022":"#212121","8023":"#A65E2E","8024":"#79553D","8025":"#755C48","8028":"#4E3B31","8029":"#763C28","9001":"#FDF4E3","9002":"#E7EBDA","9003":"#FFFFFF","9004":"#282828","9005":"#0A0A0A","9006":"#A5A5A5","9007":"#8F8F8F","9010":"#F7F5E8","9011":"#1C1C1C","9016":"#FFFFFF","9017":"#1E1E1E","9018":"#D7D7D7","9022":"#9C9C9C","9023":"#828282"});
+  const RAL_FAMILY_LABELS=Object.freeze({'1':'Amarillos / beige','2':'Naranjas','3':'Rojos','4':'Violetas','5':'Azules','6':'Verdes','7':'Grises','8':'Marrones','9':'Blancos / negros'});
+  const RAL_ALIASES=Object.freeze({
+    '7016':'Antracita','7035':'Gris luminoso','7032':'Gris guijarro','7040':'Gris ventana','7042':'Gris tráfico A','7047':'Gris tele 4',
+    '9001':'Blanco crema','9002':'Blanco grisáceo','9003':'Blanco señales','9005':'Negro intenso','9006':'Aluminio blanco','9007':'Aluminio gris',
+    '9010':'Blanco puro','9011':'Negro grafito','9016':'Blanco tráfico','9017':'Negro tráfico','9018':'Blanco papiro',
+    '1013':'Blanco perla','1015':'Marfil claro','1023':'Amarillo tráfico','2004':'Naranja puro','3000':'Rojo fuego','3020':'Rojo tráfico',
+    '5010':'Azul genciana','5015':'Azul cielo','6005':'Verde musgo','6018':'Verde amarillento','6029':'Verde menta'
+  });
+  const baseOpenMaterialModal = window.openMaterialModal;
+  const baseSetType = window.setType;
+  const state={code:'',family:'all',search:'',autoDesc:true};
+
+  function norm(v){return String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');}
+  function validHex(v){return /^#[0-9a-f]{6}$/i.test(String(v||'').trim());}
+  function textColor(hex){
+    const h=String(hex||'').replace('#','');if(h.length!==6)return '#ffffff';
+    const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);
+    const lum=(0.299*r+0.587*g+0.114*b)/255;return lum>0.66?'#0b1020':'#ffffff';
+  }
+  function materialRalCode(m){
+    const direct=String(m?.ralCode??m?.ral??m?.paintRal??'').match(/([1-9]\d{3})/);if(direct)return direct[1];
+    const label=String(m?.name??m?.nombre??'');const hit=label.match(/(?:ral\s*[:#-]?\s*)?([1-9]\d{3})/i);return hit?hit[1]:'';
+  }
+  function updateNewButton(){
+    const b=document.querySelector('button[onclick="openMaterialModal()"]');if(!b)return;
+    if(String(window.activeType??activeType)==='pintura'){b.innerHTML='🎨 + Pintura RAL<span class="ral-new-button-hint">Carta visual RAL Classic</span>';}
+    else b.textContent='+ Material';
+  }
+  function familyButtons(){
+    return '<button type="button" class="ral-family-btn '+(state.family==='all'?'active':'')+'" data-ral-family="all">Todos</button>'+Object.entries(RAL_FAMILY_LABELS).map(([k,v])=>'<button type="button" class="ral-family-btn '+(state.family===k?'active':'')+'" data-ral-family="'+k+'">'+v+'</button>').join('');
+  }
+  function chartItems(){
+    const q=norm(state.search);return Object.entries(RAL_CLASSIC).filter(([code])=>state.family==='all'||code[0]===state.family).filter(([code])=>{const alias=RAL_ALIASES[code]||'';return !q||norm(code+' '+alias+' ral '+code).includes(q);});
+  }
+  window.LDH_RAL_renderChart=function(){
+    const search=document.getElementById('ralSearch');if(search)state.search=search.value;
+    const box=document.getElementById('ralChart');if(!box)return;
+    const items=chartItems();
+    box.innerHTML=items.length?items.map(([code,hex])=>'<button type="button" class="ral-swatch '+(state.code===code?'selected':'')+'" style="background:'+hex+'" onclick="LDH_RAL_select(\''+code+'\')" title="RAL '+code+(RAL_ALIASES[code]?' · '+RAL_ALIASES[code]:'')+'"><span class="ral-swatch-code">RAL '+code+'</span></button>').join(''):'<div class="ral-empty">No hay colores que coincidan con el filtro.</div>';
+  };
+  window.LDH_RAL_select=function(code){
+    code=String(code||'').trim();if(!RAL_CLASSIC[code])return;
+    state.code=code;
+    const c=document.getElementById('ralCode'),h=document.getElementById('ralHex'),d=document.getElementById('ralDesc');
+    if(c)c.value=code;if(h)h.value=RAL_CLASSIC[code];const ht=document.getElementById('ralHexText');if(ht)ht.value=RAL_CLASSIC[code].toUpperCase();
+    if(d&&(!d.value.trim()||state.autoDesc)){d.value=RAL_ALIASES[code]||'';state.autoDesc=true;}
+    window.LDH_RAL_updatePreview();window.LDH_RAL_renderChart();
+  };
+  window.LDH_RAL_updatePreview=function(){
+    const code=(document.getElementById('ralCode')?.value||state.code||'').trim();
+    const hex=(document.getElementById('ralHex')?.value||RAL_CLASSIC[code]||'#334155').trim();
+    const desc=(document.getElementById('ralDesc')?.value||'').trim();
+    const p=document.getElementById('ralPreview');if(!p)return;
+    const bg=validHex(hex)?hex:'#334155',fg=textColor(bg);
+    p.style.background=bg;p.style.color=fg;p.style.borderColor=fg==='#ffffff'?'#ffffff55':'#0b102055';
+    const pc=document.getElementById('ralPreviewCode'),pn=document.getElementById('ralPreviewName'),ph=document.getElementById('ralPreviewHex');
+    if(pc)pc.textContent=code?'RAL '+code:'Selecciona un RAL';if(pn)pn.textContent=desc||'Vista previa de etiqueta';if(ph)ph.textContent=validHex(hex)?hex.toUpperCase():'';
+  };
+  window.LDH_RAL_setFamily=function(fam){state.family=fam||'all';document.querySelectorAll('[data-ral-family]').forEach(b=>b.classList.toggle('active',b.dataset.ralFamily===state.family));window.LDH_RAL_renderChart();};
+  window.LDH_RAL_openClassicPaint=function(){
+    if(typeof baseOpenMaterialModal!=='function')return;
+    baseOpenMaterialModal();try{document.getElementById('matType').value='pintura';}catch(_){}
+  };
+  window.LDH_openRalPaintConfigurator=function(){
+    state.code='';state.family='all';state.search='';state.autoDesc=true;
+    const body=`<div class="ral-config-wrap">
+      <div class="note"><b>Carta visual RAL Classic.</b> Selecciona la muestra que quieras. El color guardado se usará como referencia visual en las etiquetas del sistema. La representación en pantalla es orientativa y depende del monitor.</div>
+      <div class="ral-config-toolbar"><div class="field"><label>Buscar RAL</label><input id="ralSearch" placeholder="Ej. 7016" oninput="LDH_RAL_renderChart()"></div><div id="ralFamilyTabs" class="ral-family-tabs">${familyButtons()}</div></div>
+      <div id="ralChart" class="ral-chart"></div>
+      <div class="ral-selected-panel">
+        <div id="ralPreview" class="ral-preview"><div id="ralPreviewCode" class="ral-preview-code">Selecciona un RAL</div><div id="ralPreviewName" class="ral-preview-name">Vista previa de etiqueta</div><div id="ralPreviewHex" class="ral-preview-hex"></div></div>
+        <div class="ral-fields">
+          <span class="ral-source-pill">RAL Classic · muestra visual</span>
+          <div class="grid2"><div class="field"><label>RAL seleccionado</label><input id="ralCode" readonly placeholder="Selecciona en la carta"></div><div class="field"><label>Nombre / descripción</label><input id="ralDesc" placeholder="Ej. gris cuarzo" oninput="LDH_RAL_updatePreview()"></div></div>
+          <div class="field"><label>Color visual de la etiqueta</label><div class="ral-hex-row"><input id="ralHex" type="color" value="#334155" oninput="LDH_RAL_updatePreview()"><input id="ralHexText" readonly value="Se guarda la muestra seleccionada"></div><div class="ral-muted">Puedes ajustar visualmente la muestra antes de crear la ficha. El HEX queda guardado en la ficha del material y no afecta a cantidades ni movimientos.</div></div>
+          <div class="grid3"><div class="field"><label>Familia</label><input id="ralFamily" value="Pintura base solvente"></div><div class="field"><label>Unidad interna</label><input id="ralUnit" value="botes 4L"></div><div class="field"><label>Mínimo</label><input id="ralMin" type="number" min="0" step="0.01" value="0"></div></div>
+          <div class="grid2"><div class="field"><label>Stock inicial · botes eq. 4 L</label><input id="ralInitial" type="number" min="0" step="0.01" value="0"></div><div class="field"><label>Ubicación</label><input id="ralLocation" value="Cabina pintura"></div></div>
+        </div>
+      </div>
+    </div>`;
+    const foot='<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn" onclick="LDH_RAL_openClassicPaint()">Pintura sin RAL</button><button class="btn ok" onclick="LDH_RAL_savePaint()">Crear ficha RAL</button>';
+    openModal('Crear pintura desde carta RAL',body,foot);
+    document.querySelectorAll('[data-ral-family]').forEach(b=>b.addEventListener('click',()=>LDH_RAL_setFamily(b.dataset.ralFamily)));
+    const desc=document.getElementById('ralDesc');if(desc)desc.addEventListener('input',()=>{state.autoDesc=false;});
+    const hex=document.getElementById('ralHex');if(hex)hex.addEventListener('input',()=>{const t=document.getElementById('ralHexText');if(t)t.value=hex.value.toUpperCase();});
+    window.LDH_RAL_renderChart();window.LDH_RAL_updatePreview();
+  };
+  window.LDH_RAL_savePaint=function(){
+    const code=String(document.getElementById('ralCode')?.value||'').trim();
+    if(!code||!RAL_CLASSIC[code])return alert('Selecciona primero un color de la carta RAL.');
+    const hex=String(document.getElementById('ralHex')?.value||RAL_CLASSIC[code]).toUpperCase();if(!validHex(hex))return alert('El color visual no es válido.');
+    if(!activeCompany)return alert('Selecciona una empresa antes de crear la pintura.');
+    const duplicate=(db.stock||[]).some(s=>String(s.companyId)===String(activeCompany)&&materialRalCode(materialById(s.materialId))===code);
+    if(duplicate)return alert('Esta empresa ya tiene una ficha de pintura RAL '+code+'. Edita la existente en lugar de crear otra.');
+    const desc=String(document.getElementById('ralDesc')?.value||'').trim();
+    const alias=desc||RAL_ALIASES[code]||'';
+    const name=alias?('pintura base solvente color '+alias+' RAL: '+code):('pintura base solvente color RAL: '+code);
+    const family=String(document.getElementById('ralFamily')?.value||'Pintura base solvente').trim()||'Pintura base solvente';
+    const unit=String(document.getElementById('ralUnit')?.value||'botes 4L').trim()||'botes 4L';
+    const min=Math.max(0,Number(document.getElementById('ralMin')?.value||0));
+    const initial=Math.max(0,Number(document.getElementById('ralInitial')?.value||0));
+    const location=String(document.getElementById('ralLocation')?.value||'Cabina pintura').trim();
+    const id=uid('mat');
+    db.materials.push({id,name,type:'pintura',family,unit,ralCode:code,ral:code,ralHex:hex,visualHex:hex,ralName:alias,ralCatalog:'RAL Classic',labelTextColor:textColor(hex),labelColorSource:'stock_ral_configurator_v64',createdAt:new Date().toISOString()});
+    db.stock.push({id:uid('st'),companyId:activeCompany,materialId:id,min,location});
+    if(initial>0)db.movements.push(mv(activeCompany,id,'entrada',initial,'Stock inicial · pintura RAL '+code));
+    save();closeModal();setType('pintura');render();
+    try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){}
+    alert('Pintura RAL '+code+' creada. La muestra visual '+hex+' queda guardada en la ficha.');
+  };
+  window.LDH_RAL_CLASSIC=RAL_CLASSIC;
+  window.LDH_RAL_STATE=state;
+  window.openMaterialModal=function(){return String(activeType)==='pintura'?window.LDH_openRalPaintConfigurator():baseOpenMaterialModal();};
+  if(typeof baseSetType==='function')window.setType=function(t){const r=baseSetType(t);setTimeout(updateNewButton,0);return r;};
+  const init=()=>{updateNewButton();};if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else setTimeout(init,0);
+})();
+</script>
+<!-- /LDH_STOCK_RAL_CONFIGURATOR_V64_20260824 -->
 
 </body>
 </html>
