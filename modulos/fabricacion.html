@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · empresas desde Stock vivo · filtro V3 · recuperación Agenda V6</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · empresas desde Stock vivo · filtro V3 · recuperación Agenda V7 · borrado obsoleto protegido</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -1009,7 +1009,7 @@ const firebaseConfig = {
 };
 
 const {initializeApp,getApps} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
-const {getFirestore,collection,doc,getDoc,getDocs,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+const {getFirestore,collection,doc,getDoc,getDocs,setDoc,deleteDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
 
 // V4: este proyecto ya no depende de Auth anonimo. La Informativa lee este
 // mismo documento sin login; Fabricacion usa el mismo acceso directo y deja
@@ -1482,6 +1482,36 @@ async function deleteRefPermanently(ref){
   publish(true);
   status("Pedido eliminado · nube actualizada","ok");
 }
+
+// V7: una marca deleted solo se retira automaticamente cuando existe una
+// confirmacion de actividad posterior a la propia marca. Asi un borrado actual
+// nunca se deshace por el mero hecho de que Agenda aun conserve datos antiguos.
+async function restoreDeletedRef(ref,confirmedActiveAtMs){
+  ref = String(ref || "").trim();
+  const activeAtMs = Number(confirmedActiveAtMs || 0);
+  if(!ref || !Number.isFinite(activeAtMs) || activeAtMs <= 0) return false;
+  if(!deleteSyncReady){
+    try{ await loadDeletedRefs(); }catch(error){
+      console.warn("No se pudo comprobar el borrado antes de recuperar",ref,error);
+      return false;
+    }
+  }
+  if(!deletedRefs.has(ref)) return false;
+
+  const markerSnap = await getDoc(doc(DELETED_COL,deletedDocId(ref)));
+  if(!markerSnap.exists()) return false;
+  const marker = markerSnap.data() || {};
+  const deletedAtMs = Number(marker.deletedAtMs || 0);
+  // Sin fecha fiable no se recupera automaticamente: criterio conservador.
+  if(!Number.isFinite(deletedAtMs) || deletedAtMs <= 0 || activeAtMs <= deletedAtMs) return false;
+
+  await deleteDoc(doc(DELETED_COL,deletedDocId(ref)));
+  deletedRefs.delete(ref);
+  cleanupStaleDeletedMarkers();
+  applyKnownDeletedRefs();
+  status("Borrado antiguo retirado · trabajo activo recuperado","ok");
+  return true;
+}
 function hookApp(){
   const appObj = window.App;
   if(!appObj || appObj.__LDH_CLOUD_HOOKED) return false;
@@ -1510,6 +1540,7 @@ function hookApp(){
 window.LDH_fabricacionPublishNow = () => publish(true);
 window.LDH_fabricacionRestoreCloudNow = restoreIfRemoteBetter;
 window.LDH_fabricacionDeleteRef = deleteRefPermanently;
+window.LDH_fabricacionRestoreDeletedRef = restoreDeletedRef;
 
 async function startLegacyCloudSyncV4(){
   // Firestore se prueba directamente. No se espera ni se solicita Auth anonimo.
@@ -1756,6 +1787,65 @@ setTimeout(hookApp, 1500);
       if(!code) return null;
       return items.find(item=>canonicalWorkCode(item && (item.ref || item.referencia))===code) || null;
     }
+    function prepMetaIsWorkshopActive(meta){
+      if(!meta || meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return false;
+      const phase=String(meta.fase || meta.estado || meta.status || '').trim().toLowerCase();
+      if(phase){
+        if(phase.includes('entreg') || phase.includes('almacen') || phase.includes('elimin')) return false;
+        if(phase.includes('fabric') || phase.includes('pint')) return true;
+      }
+      return !!(meta.en_fabricacion || meta.en_pintura);
+    }
+    function fabricacionItemIsWorkshopActive(item){
+      if(!item) return false;
+      const flow=item.flow&&typeof item.flow==='object'?item.flow:{};
+      return Number(flow.fab ?? flow.fabricacion ?? 0)>0 || Number(flow.pintura||0)>0;
+    }
+    function agendaLastWorkshopActivationMs(order){
+      let value=Number(order && order.workflowUpdatedAtMs || 0) || 0;
+      const history=Array.isArray(order && order.workflowHistoryV2)?order.workflowHistoryV2:[];
+      history.forEach(row=>{
+        const flow=cleanFlow(row && row.phaseFlowV2 || {});
+        const st=String(row && row.state || '').trim().toLowerCase();
+        const active=flow.fabricacion>0 || flow.pintura>0 || ['fabrication','fabricacion','painting','pintura','en_fabricacion','en_pintura'].includes(st);
+        if(active) value=Math.max(value,Number(row && row.atMs || 0)||0);
+      });
+      return value;
+    }
+    async function restoreStaleDeletedMarkerForActiveOrder(order){
+      // Se necesitan dos evidencias: Agenda activa y otra fuente del propio flujo
+      // (fila de Fabricacion o meta de Preparacion). Ademas, la confirmacion de
+      // Agenda debe ser posterior al deleted. Esto evita deshacer borrados reales.
+      if(!agendaIsWorkshopActive(order)) return false;
+      const prep=prepMetaForAgendaOrder(order);
+      const existing=findFabricacionItemForAgenda(order);
+      const corroborated = fabricacionItemIsWorkshopActive(existing) || !!(prep && prepMetaIsWorkshopActive(prep.meta));
+      if(!corroborated) return false;
+      if(typeof window.LDH_fabricacionRestoreDeletedRef !== 'function') return false;
+
+      const activeAtMs=agendaLastWorkshopActivationMs(order);
+      if(activeAtMs<=0) return false;
+      const candidates=[];
+      [prep && prep.ref, existing && (existing.ref || existing.referencia), order.reference, order.ref].forEach(value=>{
+        const ref=String(value||'').trim();
+        if(ref && !candidates.includes(ref)) candidates.push(ref);
+      });
+      for(const ref of candidates){
+        let isDeleted=false;
+        try{ isDeleted=!!(window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(_){ }
+        if(!isDeleted) continue;
+        try{
+          const restored=await window.LDH_fabricacionRestoreDeletedRef(ref,activeAtMs);
+          if(restored){
+            console.warn('[Fabricacion] recuperada marca deleted obsoleta',ref,'actividad posterior',activeAtMs);
+            return true;
+          }
+        }catch(error){
+          console.warn('[Fabricacion] no se pudo retirar deleted obsoleto',ref,error);
+        }
+      }
+      return false;
+    }
     function buildFabricacionItemFromAgenda(order){
       const prep=prepMetaForAgendaOrder(order);
       const meta=prep && prep.meta || {};
@@ -1812,20 +1902,22 @@ setTimeout(hookApp, 1500);
         let recovered = 0;
         agendaTerminalRefs.clear();
 
-        // V6: Agenda es autoritativa para saber que una OT sigue activa en taller.
-        // Si Fabricacion perdio la fila por una restauracion parcial, se reconstruye.
-        rows.forEach(order=>{
-          if(!agendaIsWorkshopActive(order)) return;
-          if(findFabricacionItemForAgenda(order)) return;
+        // V7: Agenda + Preparacion son autoritativas cuando ambas coinciden en que
+        // una OT sigue activa. Antes de reconstruir, se retira cualquier marca deleted
+        // antigua que contradiga simultaneamente a esas dos fuentes.
+        for(const order of rows){
+          if(!agendaIsWorkshopActive(order)) continue;
+          if(await restoreStaleDeletedMarkerForActiveOrder(order)) changed = true;
+          if(findFabricacionItemForAgenda(order)) continue;
           const item=buildFabricacionItemFromAgenda(order);
-          if(!item.ref) return;
+          if(!item.ref) continue;
           try{
-            if(window.LDH_isFabricacionDeletedRef && (window.LDH_isFabricacionDeletedRef(item.ref) || window.LDH_isFabricacionDeletedRef(String(order.reference||'')))) return;
+            if(window.LDH_isFabricacionDeletedRef && (window.LDH_isFabricacionDeletedRef(item.ref) || window.LDH_isFabricacionDeletedRef(String(order.reference||'')))) continue;
           }catch(_){ }
           window.App.upsertEveryPool(item);
           recovered += 1;
           changed = true;
-        });
+        }
 
         // Tras recuperar las ausentes, Agenda tambien sigue siendo autoritativa
         // para retirar de la vista las que ya son terminales.
