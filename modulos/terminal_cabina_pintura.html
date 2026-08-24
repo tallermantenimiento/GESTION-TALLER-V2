@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V47-RAL-FICHA-COLOR-VISUAL-20260824">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V48-BLINDAJE-RENDER-TRABAJOS-20260824">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -143,7 +143,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V47 &middot; Las fichas RAL claras usan directamente su muestra visual guardada &middot; carta RAL Classic compatible &middot; fases en vivo mantenidas.</div>
+      <div class="sub">V48 &middot; Blindaje de visualizaci&oacute;n: un trabajo activo nunca puede quedar oculto por un fallo temporal al agrupar pintura/Stock &middot; RAL visual y fases en vivo mantenidas.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -302,7 +302,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V47-RAL-FICHA-COLOR-VISUAL-20260824';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V48-BLINDAJE-RENDER-TRABAJOS-20260824';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1487,6 +1487,28 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       };
     });
   }
+  function safeWorkFallbackHtml(work){
+    const w=work&&typeof work==='object'?work:{};
+    const ref=text(w.ref)||'Trabajo sin referencia';
+    const company=text(w.company)||'Sin empresa';
+    const concept=text(w.concept)||'Sin concepto';
+    const flow=w.flow&&typeof w.flow==='object'?w.flow:{fab:0,pintura:0,almacen:0,entregado:0};
+    return '<article class="work work-fallback-card" style="border-color:#38bdf855;background:#0b1d38">'+
+      '<div class="work-top"><div><div class="company">'+esc(company)+'</div><div class="ref">'+esc(ref)+'</div><div class="concept">'+esc(concept)+'</div><div class="meta">Vista segura del trabajo activo</div></div></div>'+
+      '<div class="phase-grid">'+
+        '<div class="phase"><b>'+fmt(flow.fab)+'</b><span>FAB</span></div>'+
+        '<div class="phase paint"><b>'+fmt(flow.pintura)+'</b><span>PINT</span></div>'+
+        '<div class="phase store"><b>'+fmt(flow.almacen)+'</b><span>ALM</span></div>'+
+        '<div class="phase"><b>'+fmt(flow.entregado)+'</b><span>ENT</span></div>'+
+      '</div>'+
+      '<div class="actions">'+
+        '<button class="btn good paint-one" data-paint-one="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>✅ PINTADO +1</button>'+
+        '<button class="btn good" data-move-store="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button>'+
+        '<button class="btn warn" data-fix-phase="'+encodeURIComponent(ref)+'">Corregir descuadre</button>'+
+      '</div>'+
+    '</article>';
+  }
+
   function renderWorks(){
     state.works=workRowsFromPackage(state.flowPackage);
     renderWorkCompanies();
@@ -1498,23 +1520,26 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
     const root=$('workList');
     const forceOpen=!!norm($('workSearch').value)||!!text($('workCompany').value);
+    /* V48: primero dejamos una representación mínima y totalmente independiente de
+       Stock/RAL. Así, si cualquier dato de pintura llega temporalmente incompleto o
+       mal formado, los KPI y la lista nunca pueden quedar desincronizados visualmente. */
+    const safeHtml=rows.map(safeWorkFallbackHtml).join('');
+    root.innerHTML=safeHtml;
     try{
       const groups=buildWorkGroups(rows);
       if(!groups.length)throw new Error('Agrupacion vacia con '+rows.length+' trabajos activos');
-      root.innerHTML=groups.map(group=>companyAccordionHtml(group,forceOpen,'works')).join('');
+      const groupedHtml=groups.map(group=>companyAccordionHtml(group,forceOpen,'works')).join('');
+      if(!groupedHtml.trim())throw new Error('El render agrupado devolvio HTML vacio');
+      root.innerHTML=groupedHtml;
     }catch(groupError){
-      /* Nunca volver a ocultar trabajos reales por un fallo de pintura/Stock.
-         Los KPI ya prueban que existen: se muestran en una lista de seguridad. */
+      /* El fallo anterior volvía a llamar a workColorInfo/workRal dentro del propio
+         fallback. Si precisamente fallaba esa resolución, el fallback también fallaba
+         y workList quedaba vacío aunque los KPI ya mostrasen el trabajo. */
       console.error('Render agrupado de trabajos',groupError);
-      const safeEntries=rows.map(work=>{
-        let info;
-        try{info=workColorInfo(work);}catch(_){
-          const ral=workRal(work);
-          info={key:'safe|'+text(work.ref),kind:'unlinked',link:null,row:null,ral,paintName:ral?ralLabel(ral):'Pintura sin dato',required:null,calculation:null,own:0};
-        }
-        return {work,info};
-      });
-      root.innerHTML='<div class="note" style="margin-bottom:10px">Vista de seguridad: los trabajos siguen activos aunque haya fallado temporalmente su agrupaci&oacute;n por pintura.</div>'+safeEntries.map(workCardHtml).join('');
+      root.innerHTML='<div class="note" style="margin-bottom:10px">El trabajo est&aacute; activo. Se muestra en vista segura mientras se resuelve temporalmente su agrupaci&oacute;n por pintura.</div>'+safeHtml;
+    }
+    if(rows.length && !root.querySelector('.company-accordion,.work-fallback-card,.work-accordion')){
+      root.innerHTML='<div class="note" style="margin-bottom:10px">Trabajo activo recuperado en vista segura.</div>'+safeHtml;
     }
     bindAccordionState(root,'details[data-work-company-key]','details[data-work-color-key]',state.openWorkCompanies,state.openWorkColors);
     bindWorkJobState(root);
