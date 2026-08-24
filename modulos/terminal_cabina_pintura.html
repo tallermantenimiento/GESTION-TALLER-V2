@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V58-HISTORICO-AGRUPADO-OPERARIO-20260824">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V59-OPERARIOS-CATALOGO-PERSISTENTE-20260824">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -32,7 +32,7 @@ h1{font-size:24px;margin:0}.sub{color:var(--mut);font-size:13px;margin-top:5px}
 .badge.ok{border-color:#34d39966;color:#bbf7d0}.badge.warn{border-color:#fbbf2466;color:#fde68a}.badge.bad{border-color:#fb718566;color:#fecdd3}
 .card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:16px}
 .toolbar{display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,260px) auto;gap:10px;align-items:center;margin-bottom:12px}
-.operator-wrap{display:grid;grid-template-columns:120px minmax(160px,280px);gap:8px;align-items:center}
+.operator-wrap{display:grid;grid-template-columns:105px minmax(150px,1fr) minmax(150px,190px);gap:8px;align-items:center}
 .operator-label{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);font-weight:900}
 input,select,textarea{width:100%;border:1px solid #ffffff25;background:#07162e;color:var(--txt);border-radius:14px;outline:none}
 input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;resize:vertical}
@@ -159,7 +159,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V58 &middot; Operarios compartidos entre terminales, con nombre normalizado y primera letra en may&uacute;scula autom&aacute;ticamente.</div>
+      <div class="sub">V59 &middot; Cat&aacute;logo de operarios persistente: guardar a&ntilde;ade sin sustituir y la lista muestra todos los operarios guardados.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -172,8 +172,10 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     <div class="toolbar">
       <div class="operator-wrap">
         <div class="operator-label">Operario</div>
-        <input id="operator" list="operatorList" autocomplete="off" placeholder="Nombre del operario">
-        <datalist id="operatorList"></datalist>
+        <input id="operator" autocomplete="off" placeholder="Escribir nuevo operario">
+        <select id="operatorSaved" title="Operarios guardados">
+          <option value="">Operarios guardados...</option>
+        </select>
       </div>
       <div class="muted" style="font-size:12px">El operario queda registrado en correcciones y movimientos.</div>
       <button id="saveOperator" class="btn small" type="button">Guardar operario</button>
@@ -345,7 +347,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V58-HISTORICO-AGRUPADO-OPERARIO-20260824';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V59-OPERARIOS-CATALOGO-PERSISTENTE-20260824';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -417,7 +419,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   const stockAuth = getAuth(stockApp);
   const stockDb = getFirestore(stockApp);
   const stockMetaRef = doc(stockDb,'taller_data','stock');
-  const operatorConfigRef = doc(stockDb,'taller_data','terminal_cabina_pintura_config');
+  const OP_CATALOG_CLOUD_FIELD = 'terminalCabinaOperators';
 
   const ordersApp = appFor(ORDERS_CONFIG,'ldh-terminal-pintura-orders-v1');
   const ordersAuth = getAuth(ordersApp);
@@ -491,31 +493,45 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     });
     state.operatorCatalog=Array.from(byKey.values()).sort((a,b)=>a.localeCompare(b,'es',{sensitivity:'base'}));
     try{localStorage.setItem(OP_CATALOG_LOCAL_KEY,JSON.stringify(state.operatorCatalog));}catch(_){ }
-    const dl=$('operatorList');
-    if(dl)dl.innerHTML=state.operatorCatalog.map(name=>'<option value="'+esc(name)+'"></option>').join('');
+    const sel=$('operatorSaved');
+    if(sel){
+      const current=normalizeOperatorName($('operator')&&$('operator').value);
+      sel.innerHTML='<option value="">Operarios guardados...</option>'+state.operatorCatalog.map(name=>'<option value="'+esc(name)+'">'+esc(name)+'</option>').join('');
+      const match=state.operatorCatalog.find(name=>norm(name)===norm(current));
+      sel.value=match||'';
+    }
   }
   async function saveOperatorToCatalog(name){
     const op=normalizeOperatorName(name); if(!op)return {cloud:false};
     mergeOperatorCatalog([op]);
-    if(!state.stockAuthReady)return {cloud:false};
     try{
       await runTransaction(stockDb,async tx=>{
-        const snap=await tx.get(operatorConfigRef);
+        const snap=await tx.get(stockMetaRef);
         const data=snap.exists()?(snap.data()||{}):{};
-        const current=Array.isArray(data.operators)?data.operators:[];
+        const current=Array.isArray(data[OP_CATALOG_CLOUD_FIELD])?data[OP_CATALOG_CLOUD_FIELD]:[];
         const byKey=new Map();
-        [...current,op].forEach(v=>{const clean=normalizeOperatorName(v);const key=norm(clean);if(clean&&key&&!byKey.has(key))byKey.set(key,clean);});
-        tx.set(operatorConfigRef,{operators:Array.from(byKey.values()),updatedAtMs:Date.now(),source:'terminal_cabina_pintura'},{merge:true});
+        [...current,...operatorCatalogLocal(),...(state.operatorCatalog||[]),op].forEach(v=>{
+          const clean=normalizeOperatorName(v), key=norm(clean);
+          if(clean&&key&&!byKey.has(key))byKey.set(key,clean);
+        });
+        tx.set(stockMetaRef,{
+          [OP_CATALOG_CLOUD_FIELD]:Array.from(byKey.values()),
+          terminalCabinaOperatorsUpdatedAtMs:Date.now(),
+          terminalCabinaOperatorsSource:'terminal_cabina_pintura'
+        },{merge:true});
       });
       return {cloud:true};
-    }catch(e){console.warn('No se pudo guardar catálogo de operarios en nube',e);return {cloud:false,error:e};}
+    }catch(e){
+      console.warn('No se pudo compartir el catálogo de operarios; se conserva localmente',e);
+      return {cloud:false,error:e};
+    }
   }
   function startOperatorCatalogWatch(){
     if(operatorConfigUnsub)return;
-    operatorConfigUnsub=onSnapshot(operatorConfigRef,snap=>{
+    operatorConfigUnsub=onSnapshot(stockMetaRef,snap=>{
       const data=snap.exists()?(snap.data()||{}):{};
-      mergeOperatorCatalog(Array.isArray(data.operators)?data.operators:[]);
-    },e=>{console.warn('Catálogo operarios: lectura nube no disponible',e);mergeOperatorCatalog([]);});
+      mergeOperatorCatalog(Array.isArray(data[OP_CATALOG_CLOUD_FIELD])?data[OP_CATALOG_CLOUD_FIELD]:[]);
+    },e=>{console.warn('Catálogo operarios: lectura compartida no disponible',e);mergeOperatorCatalog([]);});
   }
   function requireOperator(){
     const op=operator();
@@ -3329,12 +3345,22 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const pos=el.selectionStart;
     const clean=normalizeOperatorName(el.value);
     if(clean!==el.value){el.value=clean;try{el.setSelectionRange(pos,pos);}catch(_){ }}
+    const sel=$('operatorSaved');if(sel)sel.value='';
+  });
+  $('operatorSaved').addEventListener('change',()=>{
+    const sel=$('operatorSaved');
+    const op=normalizeOperatorName(sel&&sel.value);
+    if(!op)return;
+    $('operator').value=op;
+    try{localStorage.setItem(OP_KEY,op);}catch(_){ }
   });
   $('saveOperator').onclick=async()=>{
     const op=operator();if(!op)return alert('Escribe el nombre del operario.');
     localStorage.setItem(OP_KEY,op);
     const result=await saveOperatorToCatalog(op);
-    toast(result.cloud?'Operario guardado y compartido.':'Operario guardado en este terminal; la nube no estaba disponible.');
+    mergeOperatorCatalog([op]);
+    const sel=$('operatorSaved');if(sel)sel.value=state.operatorCatalog.find(name=>norm(name)===norm(op))||'';
+    toast(result.cloud?'Operario añadido al catálogo compartido.':'Operario añadido al catálogo de este terminal; no se pudo compartir en nube.');
   };
   $('operator').value=normalizeOperatorName(localStorage.getItem(OP_KEY)||'');
   mergeOperatorCatalog($('operator').value?[$('operator').value]:[]);
@@ -3376,6 +3402,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   onAuthStateChanged(ordersAuth,user=>{state.ordersAuthReady=!!user;if(user)setTimeout(refreshOrderMetaForWorks,0);});
 
   await loadDeletedRefs();
+  startOperatorCatalogWatch();
   await ensureStockAuth();
   ensureOrdersAuth();
   setTab('works');
