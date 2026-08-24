@@ -417,6 +417,21 @@ table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(
   font-size:12px;
   font-weight:850;
 }
+
+.family-rename-btn{
+  margin-left:8px;
+  border:1px solid rgba(56,189,248,.34);
+  background:rgba(56,189,248,.10);
+  color:#dff6ff;
+  border-radius:9px;
+  padding:5px 8px;
+  font-size:10px;
+  font-weight:900;
+  line-height:1;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.family-rename-btn:hover{background:rgba(56,189,248,.18);border-color:rgba(56,189,248,.58)}
 .family-totals{
   display:flex;
   gap:8px;
@@ -1329,7 +1344,7 @@ html, body{
   }
 </style>
 
-  <meta name="ldh-stock-build" content="STOCK-V64-RAL-CONFIGURATOR-20260824">
+  <meta name="ldh-stock-build" content="STOCK-V65-RENOMBRAR-FAMILIAS-20260824">
 </head>
 <body>
 <div class="app">
@@ -3165,6 +3180,92 @@ function familyDrop(ev, targetKey){
   return false;
 }
 
+function LDH_sameFamilyName(a,b){
+  return String(a||'').trim().toLocaleLowerCase('es') === String(b||'').trim().toLocaleLowerCase('es');
+}
+
+function LDH_migrateFamilyOrderName(oldName,newName,type){
+  try{
+    const oldKey=familyKey(oldName), newKey=familyKey(newName);
+    if(!oldKey || !newKey || oldKey===newKey) return;
+    const wantedType=String(type||activeType||'').toLowerCase();
+    const migrateObject=(obj)=>{
+      if(!obj || typeof obj!=='object') return obj;
+      Object.keys(obj).forEach(k=>{
+        if(wantedType && !String(k).toLowerCase().endsWith('|'+wantedType)) return;
+        const arr=obj[k];
+        if(!Array.isArray(arr)) return;
+        const out=[];
+        arr.forEach(key=>{
+          const v=String(key||'');
+          const next=v===oldKey?newKey:v;
+          if(next && !out.includes(next)) out.push(next);
+        });
+        obj[k]=out;
+      });
+      return obj;
+    };
+    try{
+      window.__LDH_STOCK_FAMILY_ORDER_CACHE=migrateObject(window.__LDH_STOCK_FAMILY_ORDER_CACHE||{});
+    }catch(e){}
+    try{
+      const sess=JSON.parse(sessionStorage.getItem(FAMILY_ORDER_KEY)||'{}')||{};
+      sessionStorage.setItem(FAMILY_ORDER_KEY,JSON.stringify(migrateObject(sess)));
+    }catch(e){}
+    try{
+      const loc=JSON.parse(localStorage.getItem(FAMILY_ORDER_KEY)||'{}')||{};
+      localStorage.setItem(FAMILY_ORDER_KEY,JSON.stringify(migrateObject(loc)));
+    }catch(e){}
+  }catch(e){
+    console.warn('No se pudo migrar el orden de la familia renombrada',e);
+  }
+}
+
+function LDH_openRenameFamilyModal(currentName){
+  const oldName=String(currentName||'').trim();
+  if(!oldName) return;
+  const type=String(activeType||'').toLowerCase();
+  const affected=(db.materials||[]).filter(m=>m && String(m.type||'').toLowerCase()===type && LDH_sameFamilyName(m.family||m.familia,oldName));
+  const stockLinks=new Set();
+  affected.forEach(m=>{
+    (db.stock||[]).forEach(st=>{ if(st && String(st.materialId||'')===String(m.id||'')) stockLinks.add(String(st.companyId||'')); });
+  });
+  const body=`<div class="note" style="margin-bottom:12px">Se cambiará el nombre de esta familia en <b>${affected.length} material${affected.length===1?'':'es'}</b> del catálogo${stockLinks.size?` y quedará aplicado en <b>${stockLinks.size} empresa${stockLinks.size===1?'':'s'}</b>`:''}. No modifica cantidades, reservas, movimientos ni deudas. Si el nuevo nombre ya existe, ambas familias quedarán unificadas.</div>
+    <div class="field"><label>Familia actual</label><input value="${esc(oldName)}" readonly></div>
+    <div class="field"><label>Nuevo nombre</label><input id="LDH_familyRenameNew" value="${esc(oldName)}" autocomplete="off"></div>`;
+  const foot=`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ok" onclick="LDH_saveRenameFamily()">Guardar nombre</button>`;
+  window.__LDH_FAMILY_RENAME_CTX={oldName,type};
+  openModal('Renombrar familia',body,foot);
+  setTimeout(()=>{try{const el=document.getElementById('LDH_familyRenameNew');if(el){el.focus();el.select();el.addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();LDH_saveRenameFamily();}});}}catch(e){}},0);
+}
+
+function LDH_saveRenameFamily(){
+  const ctx=window.__LDH_FAMILY_RENAME_CTX||{};
+  const oldName=String(ctx.oldName||'').trim();
+  const type=String(ctx.type||activeType||'').toLowerCase();
+  const newName=String(document.getElementById('LDH_familyRenameNew')?.value||'').trim();
+  if(!oldName) return alert('No se ha podido identificar la familia original.');
+  if(!newName) return alert('Escribe el nuevo nombre de la familia.');
+  if(LDH_sameFamilyName(oldName,newName) && oldName===newName){ closeModal(); return; }
+
+  const affected=(db.materials||[]).filter(m=>m && String(m.type||'').toLowerCase()===type && LDH_sameFamilyName(m.family||m.familia,oldName));
+  if(!affected.length) return alert('No se han encontrado materiales de esa familia.');
+
+  affected.forEach(m=>{
+    m.family=newName;
+    if(Object.prototype.hasOwnProperty.call(m,'familia')) m.familia=newName;
+  });
+  LDH_migrateFamilyOrderName(oldName,newName,type);
+
+  try{ save(); }
+  catch(e){ console.error('Error guardando renombrado de familia',e); return alert('No se ha podido guardar el nuevo nombre.'); }
+
+  closeModal();
+  try{ if(typeof LDH_stockRenderKeepFamilies==='function') LDH_stockRenderKeepFamilies(); else render(); }
+  catch(e){ render(); }
+  alert('Familia renombrada: '+oldName+' → '+newName+'\n\nMateriales actualizados: '+affected.length);
+}
+
 function familiasHTML(rows){
   const groups=new Map();
   rows.forEach(({s,m})=>{
@@ -3204,6 +3305,7 @@ function familiaHTML(group){
           <span class="family-drag-handle" title="Arrastra para ordenar familias">☰</span>
           <span class="family-name">${esc(group.name)}</span>
           <span class="family-count">${group.items.length} materiales</span>
+          <button type="button" class="family-rename-btn" draggable="false" data-family="${esc(group.name)}" onmousedown="event.stopPropagation()" ondragstart="event.preventDefault();event.stopPropagation();return false" onclick="event.preventDefault();event.stopPropagation();LDH_openRenameFamilyModal(this.dataset.family)">✏ Renombrar familia</button>
         </span>
         <span class="family-totals"></span>
       </summary>
@@ -8726,5 +8828,6 @@ body{
 </script>
 <!-- /LDH_STOCK_RAL_CONFIGURATOR_V64_20260824 -->
 
+<!-- LDH_STOCK_FAMILY_RENAME_V65_20260824 -->
 </body>
 </html>
