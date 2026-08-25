@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V115-CONSUMO-SEGURO-AL-ENTRAR-FABRICACION-20260821" />
+<meta name="ldh-build" content="PREPARACION-V116-MIGRACION-SEGURA-ACCESORIO-LEGACY-20260825" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -4067,15 +4067,9 @@ function getLinkedMatIdForLine(line){
   const explicitV2 = LDH_validLinkedIdForLine(line, line && line.linked_matId);
   if(explicitV2) return explicitV2;
 
-  // Legacy solo como último recurso, para no romper pedidos antiguos sin ficha v2.
-  if(line.linked_matId && getMatById(line.linked_matId)) return line.linked_matId;
-  if(rec && rec.matId && getMatById(rec.matId)) return rec.matId;
-
-  const exactLegacy = LDH_findExactLegacyMaterialForLine(line);
-  if(exactLegacy){
-    return exactLegacy.id;
-  }
-
+  // V116: un ID del catálogo legacy NO se considera vínculo del Stock actual.
+  // Si existe una coincidencia legacy exacta, la recepción V116 puede migrarla de forma
+  // controlada; hasta entonces la UI debe mostrar que no hay vínculo actual.
   return null;
 }
 function setLinkForLine(index, matId){
@@ -20490,6 +20484,103 @@ function LDH_prepCommonAssignmentMatchesV96(row, aliases, companyId, materialId)
   return row.sharedStock === true || kind.includes("stock comun") || kind.includes("recepcion fisica stock comun");
 }
 
+
+/* V116 · MIGRACIÓN SEGURA DE ACCESORIOS LEGACY AL STOCK POR EMPRESA
+ * Solo se ejecuta al pulsar RECIBIDO y únicamente cuando:
+ * - no es barra/pletina/pintura/disolvente,
+ * - no existe ya una ficha actual por nombre exacto,
+ * - sí existe una ficha legacy con el MISMO nombre y unidad compatible.
+ * La ficha nueva nace con stock 0; la cantidad física se añade después mediante
+ * el movimiento normal de recepción V66. Nunca recupera cantidades históricas.
+ */
+function LDH_prepLegacyAccessoryCandidateV116(line) {
+  try {
+    if (!line || typeof line !== "object") return null;
+    const unitText = LDH_prepNormCloudV30(line.unit ?? line.unidad ?? "ud");
+    const nameText = LDH_prepNormCloudV30(LDH_prepLineNameV66(line));
+    if (!nameText) return null;
+    if (unitText.includes("barra") || unitText === "mm") return null;
+    if (/\b(?:pletina|planchuela|llanta)\b/.test(nameText)) return null;
+    if (/\b(?:pintura|disolvente|diluyente|thinner)\b/.test(nameText)) return null;
+    const legacy = (typeof LDH_findExactLegacyMaterialForLine === "function")
+      ? LDH_findExactLegacyMaterialForLine(line)
+      : null;
+    if (!legacy) return null;
+    const legacyName = String(legacy.name ?? legacy.nombre ?? legacy.material ?? "").trim();
+    if (!legacyName || LDH_prepNormCloudV30(legacyName) !== nameText) return null;
+    return legacy;
+  } catch (_) {
+    return null;
+  }
+}
+
+function LDH_prepCreateLegacyAccessoryMaterialV116(remoteDB, line) {
+  const legacy = LDH_prepLegacyAccessoryCandidateV116(line);
+  if (!legacy || !remoteDB || !Array.isArray(remoteDB.materials)) return null;
+  const targetName = LDH_prepNormCloudV30(LDH_prepLineNameV66(line));
+  const currentExact = remoteDB.materials.filter((row) => {
+    const rowName = LDH_prepNormCloudV30(row?.name ?? row?.nombre ?? row?.material ?? row?.mat ?? "");
+    return rowName && rowName === targetName;
+  });
+  if (currentExact.length === 1) return { material: currentExact[0], created: false, legacy };
+  if (currentExact.length > 1) {
+    throw new Error(`Hay varias fichas actuales con el nombre ${LDH_prepLineNameV66(line)}. Vincula manualmente antes de recibir.`);
+  }
+
+  const stamp = Date.now().toString(36);
+  const rnd = Math.random().toString(36).slice(2,10);
+  const id = `mat_${stamp}${rnd}`.slice(0,28);
+  const rawCat = String(legacy.cat ?? legacy.category ?? legacy.tipo ?? legacy.type ?? "").trim();
+  const type = LDH_prepNormCloudV30(rawCat).includes("pintur") ? "pintura" : "hierro";
+  const family = String(legacy.grp ?? legacy.group ?? legacy.family ?? legacy.familia ?? rawCat ?? "").trim();
+  const unit = String(legacy.unit ?? legacy.unidad ?? line?.unit ?? line?.unidad ?? "ud").trim() || "ud";
+  const legacyId = String(legacy.id ?? legacy.materialId ?? legacy.matId ?? "").trim();
+  const now = new Date().toISOString();
+  const material = {
+    id,
+    name: String(legacy.name ?? legacy.nombre ?? LDH_prepLineNameV66(line)).trim(),
+    type,
+    family,
+    unit,
+    legacyId,
+    aliasIds: legacyId ? [legacyId] : [],
+    createdFrom: "preparacion_migracion_legacy_segura_v116",
+    createdAt: now,
+    updatedAt: now
+  };
+  remoteDB.materials.push(material);
+  return { material, created: true, legacy };
+}
+
+function LDH_prepRememberConceptLinkV116(line, materialId) {
+  try {
+    const conceptName = String((window.metaActual ?? metaActual)?.concepto ?? (window.metaActual ?? metaActual)?.concept ?? "").trim();
+    const lineName = String(LDH_prepLineNameV66(line) || "").trim();
+    const id = String(materialId || "").trim();
+    if (!conceptName || !lineName || !id) return false;
+    const norm = (v) => String(v || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+    const raw = getAny("ldh_db");
+    if (!raw) return false;
+    const db = JSON.parse(raw);
+    if (!db || !Array.isArray(db.concepts)) return false;
+    const concept = db.concepts.find((c) => norm(c?.name) === norm(conceptName));
+    if (!concept) return false;
+    concept.stockLinks = concept.stockLinks && typeof concept.stockLinks === "object" ? concept.stockLinks : {};
+    concept.stockLinks.lines = concept.stockLinks.lines && typeof concept.stockLinks.lines === "object" ? concept.stockLinks.lines : {};
+    concept.stockLinks.units = concept.stockLinks.units && typeof concept.stockLinks.units === "object" ? concept.stockLinks.units : {};
+    const isBar = String(line?.unit ?? line?.unidad ?? "").toLowerCase().includes("barra");
+    const map = isBar ? concept.stockLinks.lines : concept.stockLinks.units;
+    const oldKey = Object.keys(map).find((k) => norm(k) === norm(lineName));
+    if (oldKey && oldKey !== lineName) delete map[oldKey];
+    map[lineName] = id;
+    setAny("ldh_db", JSON.stringify(db));
+    return true;
+  } catch (error) {
+    console.warn("[Preparación V116] No se pudo recordar el vínculo en Configuración", error);
+    return false;
+  }
+}
+
 async function LDH_prepReceivePhysicalCloudV66(line, index) {
   const reference = String(window.refActual ?? refActual ?? "").trim();
   if (!reference) throw new Error("El pedido no tiene referencia.");
@@ -20550,7 +20641,16 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
       const resolvedMaterialV98 = LDH_prepResolveCompanyMaterialV98(
         remoteDB, line, companyId, sharedStockReceipt
       );
-      const material = resolvedMaterialV98.material;
+      let material = resolvedMaterialV98.material;
+      let legacyMigrationV116 = null;
+      if (!material && !resolvedMaterialV98.isPaint && !sharedStockReceipt) {
+        legacyMigrationV116 = LDH_prepCreateLegacyAccessoryMaterialV116(remoteDB, line);
+        if (legacyMigrationV116?.material) {
+          material = legacyMigrationV116.material;
+          resolvedMaterialV98.material = material;
+          resolvedMaterialV98.reconciled = true;
+        }
+      }
       if (!material) {
         throw new Error(`No se encuentra ${LDH_prepLineNameV66(line)} en Stock.`);
       }
@@ -20777,6 +20877,8 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         materialId,
         materialName,
         materialReconciledV98: !!resolvedMaterialV98.reconciled,
+        materialCreatedFromLegacyV116: !!legacyMigrationV116?.created,
+        legacyMaterialIdV116: String(legacyMigrationV116?.legacy?.id ?? legacyMigrationV116?.legacy?.materialId ?? legacyMigrationV116?.legacy?.matId ?? ""),
         operationId,
         requested,
         qtyAdded: qtyToAdd,
@@ -20859,6 +20961,26 @@ window.LDH_marcarRecibidoCompleto = async function LDH_marcarRecibidoCompletoV66
     current.matId = result.materialId;
     current.linked_matName = result.materialName;
     current.stockLinkLabel = result.materialName;
+    if (result.materialCreatedFromLegacyV116) {
+      current.linkSource = "preparacion_migracion_legacy_segura_v116";
+      current.legacy_matId = result.legacyMaterialIdV116 || current.legacy_matId || "";
+      current.linkedManually = false;
+      try {
+        const k = linkKeyFor(current);
+        linkMap[k] = {
+          matId: result.materialId,
+          name: result.materialName,
+          cat: "Stock v2",
+          grp: "",
+          unit: current.unit || current.unidad || "ud",
+          source: "preparacion_migracion_legacy_segura_v116",
+          updatedAt: Date.now(),
+          v2: true
+        };
+        saveLinkMap();
+      } catch (_) {}
+      try { LDH_prepRememberConceptLinkV116(current, result.materialId); } catch (_) {}
+    }
     current.qty_recibida = requested;
     current.recibida = requested;
     current.aplicado_qty = requested;
@@ -27200,8 +27322,13 @@ console.info('[Preparación V107] Recepción física mientras vive en Preparaci�
     if(name==='chapa escalon') return false; // conserva su flujo específico ya probado
     if(unit==='barra' || isPletina(line)) return false;
     if(isPaintOrSolvent(line)) return false; // pintura/disolvente conservan su flujo de Stock
-    if(linkedId(line)) return false;          // si existe vínculo, se usa Stock/Ferretería normal
-    return true;                              // accesorio/unidad puntual sin ficha de Stock
+    if(linkedId(line)) return false;          // si existe vínculo actual, se usa Stock/Ferretería normal
+    try{
+      // V116: una ficha legacy exacta no es "sin Stock". Se migra al Stock por empresa
+      // únicamente cuando el usuario confirma RECIBIDO. Nunca arrastra cantidades antiguas.
+      if(typeof LDH_findExactLegacyMaterialForLine==='function' && LDH_findExactLegacyMaterialForLine(line)) return false;
+    }catch(_){ }
+    return true;                              // accesorio/unidad puntual realmente sin ficha de Stock
   }
 
   async function receiveWithoutStock(index){
@@ -27509,4 +27636,9 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
 </script>
 <!-- /LDH_PREP_V115_CONSUMO_SEGURO_AL_ENTRAR_FABRICACION_20260821 -->
 
+
+<script id="LDH_PREP_V116_MARKER">
+window.LDH_PREP_V116_MIGRACION_LEGACY='PREPARACION-V116-MIGRACION-SEGURA-ACCESORIO-LEGACY-20260825';
+console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock por empresa al confirmar RECIBIDO; sin arrastrar cantidades históricas.');
+</script>
 </body></html>
