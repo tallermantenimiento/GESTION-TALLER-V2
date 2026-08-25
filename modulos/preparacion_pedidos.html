@@ -3158,6 +3158,43 @@ try{
       });
   }
 }catch(e){}
+      // V123 · Si la MISMA OT vuelve a llegar desde Cálculo, no borrar una recepción/reserva
+      // ya confirmada de PINTURA/DISOLVENTE. El Stock físico y sus movimientos son
+      // autoritativos; reiniciar la línea a 0 podía hacer que RECIBIDO encontrase su
+      // movimiento idempotente anterior, no sumara nada y aun así la línea apareciera OK.
+      let __prevCabinaLinesV123 = [];
+      try{
+        const __rawPrevV123 = getAny(KP(ref));
+        const __parsedPrevV123 = __rawPrevV123 ? JSON.parse(__rawPrevV123) : [];
+        if(Array.isArray(__parsedPrevV123)) __prevCabinaLinesV123 = __parsedPrevV123;
+      }catch(_){ __prevCabinaLinesV123 = []; }
+      const __normCabinaV123 = v => String(v ?? '').trim().toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+        .replace(/[^a-z0-9]+/g,' ').trim();
+      const __idsCabinaV123 = x => [
+        x && x.linked_matId, x && x.linkedMatId, x && x.stockMatId, x && x.stock_matId,
+        x && x.stockLinkId, x && x.stockId, x && x.matId, x && x.v2MaterialId, x && x.stockMaterialId
+      ].map(v=>String(v||'').trim()).filter(Boolean);
+      const __isCabinaV123 = x => {
+        const t = __normCabinaV123([
+          x && x.mat, x && x.material, x && x.name, x && x.linked_matName, x && x.stockLinkLabel,
+          x && x.paintQuery, x && x.color, x && x.ral
+        ].filter(Boolean).join(' '));
+        return t.includes('pintur') || t.includes('disolvente') || t.includes('diluyente') || t.includes('thinner') || /\bral\s*[1-9]\d{3}\b/.test(t);
+      };
+      const __prevCabinaV123 = line => {
+        if(!__isCabinaV123(line)) return null;
+        const ids = __idsCabinaV123(line);
+        const name = __normCabinaV123(line && (line.mat||line.material||line.name||line.linked_matName||line.stockLinkLabel||''));
+        return __prevCabinaLinesV123.find(old=>{
+          if(!__isCabinaV123(old)) return false;
+          const oldIds=__idsCabinaV123(old);
+          if(ids.length && oldIds.length && ids.some(id=>oldIds.includes(id))) return true;
+          const oldName=__normCabinaV123(old && (old.mat||old.material||old.name||old.linked_matName||old.stockLinkLabel||''));
+          return !!(name && oldName && name===oldName);
+        }) || null;
+      };
+
       const materialesImport = (materialesSrc || []).map(l => {
         if(!l || typeof l !== 'object') return l;
         // normaliza cantidades mínimas esperadas por Preparación
@@ -3176,24 +3213,53 @@ try{
           if(l.stock_consumed_qty === undefined) l.stock_consumed_qty = q;
           l.ok = true;
         }else{
-          // Entrada desde Cálculo: nunca debe entrar como recibido/OK/en fabricación.
-          l.qty_recibida = 0;
-          l.recibida = 0;
-          l.aplicado_qty = 0;
-          l.aplicado = 0;
-          l.stock_consumed_qty = 0;
-          l.receipt_policy_explicit_v83 = true;
-          l.receipt_manual_v83 = false;
-          if(Array.isArray(l.trace)){
-            l.trace = l.trace.filter(t=>String(t && t.source || "") !== "stock_asignado_propio_sync");
+          const __prevV123 = __prevCabinaV123(l);
+          const __pedV123 = Math.max(0, Number(l.qty_pedida ?? l.qty ?? 0) || 0);
+          const __prevRecV123 = __prevV123 ? Math.max(0, Number(__prevV123.qty_recibida ?? __prevV123.recibida ?? 0) || 0) : 0;
+          if(__prevV123 && __prevRecV123 > 0){
+            // Misma OT + misma pintura/disolvente: conservar lo ya recibido/asignado.
+            // Si el cálculo aumenta, queda pendiente solo la diferencia; si disminuye, se
+            // limita la ficha al nuevo pedido sin borrar la entrada física ya existente.
+            const __recV123 = __pedV123 > 0 ? Math.min(__pedV123,__prevRecV123) : __prevRecV123;
+            l.qty_recibida = __recV123;
+            l.recibida = __recV123;
+            l.aplicado_qty = Math.min(__recV123, Math.max(0, Number(__prevV123.aplicado_qty ?? __prevV123.aplicado ?? __recV123) || 0));
+            l.aplicado = l.aplicado_qty;
+            l.stock_consumed_qty = 0;
+            l.stock_consumption_deferred_to_cabin = true;
+            l.receipt_policy_explicit_v83 = true;
+            l.receipt_manual_v83 = !!__prevV123.receipt_manual_v83;
+            l.trace = Array.isArray(__prevV123.trace) ? __prevV123.trace.map(x=>x&&typeof x==='object'?{...x}:x) : [];
+            ['_ldh_received_operation_v69','_ldh_received_confirmed_v69_at','_ldh_received_operation_v66','_ldh_received_confirmed_v66_at','_ldh_receipt_cycle_v74'].forEach(k=>{
+              if(__prevV123[k] !== undefined) l[k]=__prevV123[k];
+            });
+            l.ok = __pedV123 > 0 && __recV123 >= __pedV123;
+            l.completo = l.ok;
+            l.done = l.ok;
+            l.isDone = l.ok;
+            l.isCompleted = l.ok;
+            l.estado = l.ok ? 'completo' : 'pendiente';
+            l.status = l.ok ? 'completo' : 'pendiente';
+          }else{
+            // Entrada nueva desde Cálculo: arranca pendiente.
+            l.qty_recibida = 0;
+            l.recibida = 0;
+            l.aplicado_qty = 0;
+            l.aplicado = 0;
+            l.stock_consumed_qty = 0;
+            l.receipt_policy_explicit_v83 = true;
+            l.receipt_manual_v83 = false;
+            if(Array.isArray(l.trace)){
+              l.trace = l.trace.filter(t=>String(t && t.source || "") !== "stock_asignado_propio_sync");
+            }
+            l.ok = false;
+            l.completo = false;
+            l.done = false;
+            l.isDone = false;
+            l.isCompleted = false;
+            l.estado = "pendiente";
+            l.status = "pendiente";
           }
-          l.ok = false;
-          l.completo = false;
-          l.done = false;
-          l.isDone = false;
-          l.isCompleted = false;
-          l.estado = "pendiente";
-          l.status = "pendiente";
         }
 
         // normaliza el vínculo a stock
@@ -6767,7 +6833,7 @@ function renderTabla() {
             ? (pletinaDebeComprar
                 ? `<button type="button" class="btn-mini ldh-recibido-btn" onclick="LDH_marcarRecibidoCompleto(${index})" title="Registrar la recepción física de 1 barra completa y elegir si entra en la empresa del pedido o en STOCK COMÚN">Recibir 1 barra</button>`
                 : ``)
-            : `<button type="button" class="btn-mini ldh-recibido-btn${isComplete ? " disabled" : ""}" onclick="LDH_marcarRecibidoCompleto(${index})" ${isComplete ? "disabled" : ""} title="Completar automáticamente la cantidad recibida de esta fila">Recibido</button>`}
+            : `<button type="button" class="btn-mini ldh-recibido-btn${isComplete ? " disabled" : ""}" onclick="LDH_marcarRecibidoCompleto(${index})" ${isComplete ? "disabled" : ""} title="${isCabinaDeferredV122 ? "Registrar una entrada física de compra en Stock; no consume, el consumo será en Cabina" : "Completar automáticamente la cantidad recibida de esta fila"}">${isCabinaDeferredV122 ? "RECIBIR COMPRA" : "Recibido"}</button>`}
         </div>
       </td>
       <td>${btnHtml}${btnComprasInfo}${btnVincular}</td>
@@ -24340,14 +24406,21 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
       delete line._ldh_cleanup_tombstone_v62_ref;
       delete line._ldh_cleanup_tombstone_v62_material;
 
-      // Pintura + RECIBIDO = recepción física. Nunca depende de que ya exista stock libre:
-      // registra una ENTRADA en el Stock de la empresa receptora y después completa la línea.
+      // Pintura + RECIBIR COMPRA = recepción física. Nunca consume pintura:
+      // registra una ENTRADA en Stock y el consumo queda diferido a Cabina.
+      const cabinaReceiptV123 = isPaintReceiptLine(line) || /disolvente|diluyente|thinner/i.test(String(line?.mat||line?.material||line?.name||line?.linked_matName||line?.stockLinkLabel||''));
       const result = isPaintReceiptLine(line)
         ? await window.LDH_prepReceivePhysicalCloudV66(line, index)
         : (isFerreteriaLine(line)
           ? await receiveFerreteria(line, index)
           : await window.LDH_prepReceivePhysicalCloudV66(line, index));
       result.sourceKind = result.sourceKind || 'stock';
+
+      // Si no se añadió nada y tampoco existe una recepción física anterior exacta,
+      // no permitimos que la línea quede falsamente RECIBIDA/OK.
+      if(cabinaReceiptV123 && Number(result.qtyAdded||0) <= 0 && Number(result.priorPhysicalReceipt||0) <= 0){
+        throw new Error('RECIBIR COMPRA no añadió ninguna entrada física a Stock. La línea no se ha marcado como recibida.');
+      }
 
       const current = typeof window.LDH_prepFindCurrentLineV66 === 'function'
         ? window.LDH_prepFindCurrentLineV66(index, result.materialId, result.materialName)
@@ -24370,7 +24443,25 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
       if(typeof window.renderTabla === 'function') window.renderTabla();
       if(typeof window.cargarLista === 'function') window.cargarLista();
 
-      if(result.excessPriorReceipt > 0){
+      if(cabinaReceiptV123){
+        const addedV123 = Number(result.qtyAdded||0);
+        const priorV123 = Number(result.priorPhysicalReceipt||0);
+        const physicalV123 = Number(result.physical);
+        if(addedV123 > 0){
+          alert(
+            '✅ COMPRA RECIBIDA Y SUMADA A STOCK\n\n' +
+            `Entrada física: +${addedV123}\n` +
+            (Number.isFinite(physicalV123) ? `Físico tras la entrada: ${physicalV123}\n\n` : '\n') +
+            'No se ha consumido pintura. El consumo físico se hará en Cabina al pulsar PINTADO +1.'
+          );
+        }else if(priorV123 > 0){
+          alert(
+            'ℹ️ ESTA RECEPCIÓN YA ESTABA REGISTRADA EN STOCK\n\n' +
+            `Recepción física previa detectada para esta OT/línea: ${priorV123}.\n` +
+            'No se ha sumado de nuevo para evitar duplicar Stock. La línea se ha recuperado como recibida.'
+          );
+        }
+      }else if(result.excessPriorReceipt > 0){
         alert(
           'La recepcion ha quedado registrada sin sumar otra entrada.\n\n' +
           `Se detecto un exceso previo de ${result.excessPriorReceipt}. ` +
@@ -28798,6 +28889,14 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   window.LDH_PREP_V122_PINTURA_SOLO_CABINA='PREPARACION-V122-PINTURA-DISOLVENTE-RESERVA-SIN-CONSUMO-20260825';
   document.documentElement.dataset.ldhPrepBuild='V122';
   console.info('[Preparación V122] Pintura y disolvente: reservar/asignar en Preparación; consumo físico exclusivamente en Terminal Cabina.');
+})();
+</script>
+
+<script id="LDH_PREP_V123_RECIBIR_COMPRA_TRAZABLE_20260825">
+(function(){
+  window.LDH_PREP_V123_RECIBIR_COMPRA='PREPARACION-V123-RECIBIR-COMPRA-TRAZABLE-20260825';
+  document.documentElement.dataset.ldhPrepBuild='V123';
+  console.info('[Preparación V123] RECIBIR COMPRA suma Stock o informa si la recepción ya existía; reenvíos desde Cálculo conservan recepción de pintura/disolvente.');
 })();
 </script>
 </body></html>
