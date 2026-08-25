@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V59-OPERARIOS-CATALOGO-PERSISTENTE-20260824">
+<meta name="ldh-build" content="TERMINAL-CABINA-PINTURA-V60-REFERENCIA-UNICA-OT-20260825">
 <title>Terminal Cabina de Pintura</title>
 <style>
 :root{
@@ -159,7 +159,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V59 &middot; Cat&aacute;logo de operarios persistente: guardar a&ntilde;ade sin sustituir y la lista muestra todos los operarios guardados.</div>
+      <div class="sub">V60 &middot; Referencia &uacute;nica por OT: evita duplicados entre c&oacute;digo y c&oacute;digo + descripci&oacute;n. Cat&aacute;logo de operarios persistente mantenido.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -347,7 +347,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V59-OPERARIOS-CATALOGO-PERSISTENTE-20260824';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V60-REFERENCIA-UNICA-OT-20260825';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -401,7 +401,37 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   const nowISO = () => new Date().toISOString();
   const safeParse = (raw,fb) => { try{return raw ? JSON.parse(raw) : fb;}catch(_){return fb;} };
   const refOf = item => text(item && (item.ref || item.referencia));
-  const sameRef = (a,b) => text(a) === text(b);
+  // V60 · identidad única por código OT. Una referencia corta y la misma OT con
+  // descripción son aliases del MISMO trabajo; -A/-B/-C siguen siendo distintas.
+  const workIdentityKey = value => {
+    const raw=text(value); if(!raw)return '';
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+    if(m)return 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
+    return 'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  };
+  const sameRef = (a,b) => { const ka=workIdentityKey(a),kb=workIdentityKey(b); return !!ka&&ka===kb; };
+  const preferredWorkRef = (a,b) => {
+    a=text(a); b=text(b); if(!a)return b; if(!b)return a; if(!sameRef(a,b))return a;
+    return b.length>a.length?b:a;
+  };
+  const workUpdatedMs = item => {
+    for(const v of [item&&item.localFlowUpdatedAt,item&&item.updatedAt,item&&item.lastUpdate]){
+      const ms=Date.parse(text(v)); if(Number.isFinite(ms))return ms;
+    }
+    return 0;
+  };
+  const mergeAliasWork = (a,b) => {
+    a=a&&typeof a==='object'?a:{}; b=b&&typeof b==='object'?b:{};
+    const fa=flowOf(a),fb=flowOf(b);
+    const sa=num(fa.fab)+num(fa.pintura)*2+num(fa.almacen)*3+num(fa.entregado)*4;
+    const sb=num(fb.fab)+num(fb.pintura)*2+num(fb.almacen)*3+num(fb.entregado)*4;
+    const auth=(sa>sb||(sa===sb&&workUpdatedMs(a)>workUpdatedMs(b)))?a:b;
+    const out={...a,...b};
+    const pref=preferredWorkRef(refOf(a),refOf(b)); out.ref=pref; out.referencia=pref;
+    out.flow=canonicalFlow(flowOf(auth));
+    ['fase','estado','status','keepInFab','hideFromFab','archived','delivered'].forEach(k=>{if(auth[k]!==undefined)out[k]=auth[k];});
+    return out;
+  };
 
   function appFor(config,name){
     let app = getApps().find(a=>a.name===name);
@@ -576,17 +606,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const arr=Array.isArray(db[pool])?db[pool]:[];
       arr.forEach(raw=>{
         const ref=refOf(raw); if(!ref || state.deletedRefs.has(ref)) return;
-        const prev=map.get(ref)||{};
-        const merged={...prev,...raw};
-        merged.flow={...(prev.flow||{}),...(raw.flow||{})};
-        map.set(ref,merged);
+        const key=workIdentityKey(ref); if(!key)return;
+        const prev=map.get(key);
+        map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
       });
     });
     Object.keys(overrides).forEach(ref=>{
-      if(!map.has(ref) || state.deletedRefs.has(ref)) return;
+      const key=workIdentityKey(ref);
+      if(!key || !map.has(key) || state.deletedRefs.has(ref)) return;
       const ov=overrides[ref]||{};
-      const item=map.get(ref);
-      map.set(ref,{...item,...ov,flow:{...(item.flow||{}),...(ov.flow||{})}});
+      const item=map.get(key);
+      const merged={...item,...ov,ref:preferredWorkRef(refOf(item),ref),referencia:preferredWorkRef(refOf(item),ref),flow:{...(item.flow||{}),...(ov.flow||{})}};
+      map.set(key,merged);
     });
     return Array.from(map.values()).map(item=>{
       const flow=flowOf(item); const total=totalOf(item,flow);
@@ -3409,5 +3440,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   console.info('[Terminal Pintura]',BUILD);
 })();
 </script>
+<!-- LDH_TERMINAL_CABINA_REFERENCIA_UNICA_V60_20260825 -->
 </body>
 </html>
