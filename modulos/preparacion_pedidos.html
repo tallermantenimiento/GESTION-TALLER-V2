@@ -18253,7 +18253,21 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
   const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
     const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
     const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction, metaRef);
-    const sameRef = (value) => LDH_prepNormCloudV30(value) === LDH_prepNormCloudV30(reference);
+    // V124: la identidad de una OT es su codigo unico, no la descripcion que pueda
+    // venir concatenada a la referencia. Evita reparar/consumir dos veces si un
+    // movimiento antiguo usa "OT-xxxxxx-xxx" y la ficha actual usa
+    // "OT-xxxxxx-xxx + descripcion".
+    const canonicalRefV124 = (value) => {
+      const raw = String(value ?? "").trim();
+      const match = raw.match(/\bOT-\d{6}-\d{3}(?:-[A-Z0-9]+)?\b/i);
+      if (match) return String(match[0]).toUpperCase();
+      return LDH_prepNormCloudV30(raw);
+    };
+    const referenceKeyV124 = canonicalRefV124(reference);
+    const sameRef = (value) => {
+      const key = canonicalRefV124(value);
+      return !!key && key === referenceKeyV124;
+    };
 
     const existingMovement = remoteDB.movements.find((movement) =>
       String(movement?.materialId ?? movement?.matId ?? "") === materialId
@@ -28156,7 +28170,12 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
   function n(v){ const x=Number(String(v??0).replace(',', '.')); return Number.isFinite(x)?x:0; }
   function first(){ for(const v of arguments){ if(v!==undefined&&v!==null&&String(v).trim()!=='') return v; } return ''; }
   function norm(v){ return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,''); }
-  function sameRef(a,b){ return norm(a)===norm(b) && !!norm(a); }
+  function refKey(v){
+    const raw=String(v||'').trim();
+    const match=raw.match(/\bOT-\d{6}-\d{3}(?:-[A-Z0-9]+)?\b/i);
+    return match ? String(match[0]).toUpperCase() : norm(raw);
+  }
+  function sameRef(a,b){ const ka=refKey(a), kb=refKey(b); return !!ka && ka===kb; }
   function currentRef(){ return String((typeof refActual!=='undefined'&&refActual)||window.refActual||new URL(location.href).searchParams.get('openRef')||'').trim(); }
   function currentMeta(ref){
     try{
@@ -28243,7 +28262,8 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
   async function check(){
     if(checking) return;
     const ref=currentRef();
-    if(!ref||offered.has(ref)) return;
+    const offeredKey=refKey(ref);
+    if(!ref||offered.has(offeredKey)) return;
     // V118: si Fabricación pidió abrir una OT concreta, nunca ofrecer la
     // reparación sobre otra ficha que haya quedado abierta por datos antiguos.
     const requestedRef=String(window.__LDH_PREP_EXPLICIT_OPEN_REF_V118||'').trim();
@@ -28260,7 +28280,7 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     if(!candidates.length){ return; }
     if(typeof window.LDH_repararConsumoLibrePerdidoV117!=='function') return;
     checking=true;
-    offered.add(ref);
+    offered.add(offeredKey);
     try{
       const detail=candidates.map(c=>`• ${c.materialName}: ${c.qty}`).join('\n');
       const ok=confirm(
@@ -28897,6 +28917,14 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   window.LDH_PREP_V123_RECIBIR_COMPRA='PREPARACION-V123-RECIBIR-COMPRA-TRAZABLE-20260825';
   document.documentElement.dataset.ldhPrepBuild='V123';
   console.info('[Preparación V123] RECIBIR COMPRA suma Stock o informa si la recepción ya existía; reenvíos desde Cálculo conservan recepción de pintura/disolvente.');
+})();
+</script>
+
+<script id="LDH_PREP_V124_REFERENCIA_OT_UNICA_REPARACION_20260825">
+(function(){
+  window.LDH_PREP_V124_REFERENCIA_OT_UNICA_REPARACION='PREPARACION-V124-REPARACION-REF-OT-UNICA-20260825';
+  document.documentElement.dataset.ldhPrepBuild='V124';
+  console.info('[Preparación V124] Reparación histórica compara por código OT único y no puede duplicar consumo por referencia corta/larga.');
 })();
 </script>
 </body></html>
