@@ -72,11 +72,11 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · empresas desde Stock vivo · filtro V3 · recuperación Agenda V7 · borrado obsoleto protegido</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3</b>.</p>
     </section>
 
     <div class="toolbar">
-      <input id="q" class="search" placeholder="Buscar cualquier palabra del pedido (ej. parking)..." oninput="App.render()">
+      <input id="q" class="search" placeholder="Buscar referencia, concepto o empresa..." oninput="App.render()">
       <select id="companyFilter" onchange="App.render()"><option value="">Todas las empresas</option></select>
       <select id="stageFilter" onchange="App.render()">
         <option value="">Fabricación y pintura</option>
@@ -164,43 +164,77 @@
   function n(v){ const x = Number(String(v ?? 0).replace(",", ".")); return Number.isFinite(x) ? x : 0; }
   function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
-  function searchTextDeep(value, out, seen, depth){
-    out = out || [];
-    seen = seen || new WeakSet();
-    depth = depth || 0;
-    if(value === null || value === undefined || depth > 5 || out.length > 1200) return out;
-    const type = typeof value;
-    if(type === "string" || type === "number"){
-      const text = String(value);
-      if(text && text.length <= 4000 && !/^data:/i.test(text)) out.push(text);
-      return out;
-    }
-    if(type !== "object") return out;
-    if(seen.has(value)) return out;
-    seen.add(value);
-    if(Array.isArray(value)){
-      value.slice(0,300).forEach(v => searchTextDeep(v,out,seen,depth+1));
-      return out;
-    }
-    Object.keys(value).slice(0,300).forEach(key => {
-      if(/^(foto|photo|image|imagen|base64|blob|html)$/i.test(key)) return;
-      searchTextDeep(value[key],out,seen,depth+1);
+
+  // V8 · Una OT tiene una sola identidad aunque una copia antigua guarde
+  // solo el código (OT-xxxxxx-xxx) y otra guarde código + descripción.
+  // Los sufijos -A/-B/-C forman parte de la identidad y nunca se mezclan.
+  function workIdentityKey(value){
+    const raw = String(value || "").trim();
+    if(!raw) return "";
+    const m = raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+    if(m) return "OT-" + m[1] + "-" + m[2] + (m[3] ? "-" + m[3] : "");
+    return "REF:" + norm(raw).replace(/\s+/g," ");
+  }
+  function sameWorkRef(a,b){
+    const ka = workIdentityKey(a), kb = workIdentityKey(b);
+    return !!ka && ka === kb;
+  }
+  function preferredWorkRef(a,b){
+    a = String(a || "").trim(); b = String(b || "").trim();
+    if(!a) return b; if(!b) return a;
+    if(!sameWorkRef(a,b)) return a;
+    // Conservamos la referencia más informativa para no romper las claves antiguas
+    // de Preparación/Stock, pero la identidad real sigue siendo únicamente el código OT.
+    return b.length > a.length ? b : a;
+  }
+  function rawFlowProgress(item){
+    const f = item && item.flow && typeof item.flow === "object" ? item.flow : {};
+    const fab = Math.max(0,n(f.fab ?? f.fabricacion ?? item?.fab ?? item?.enFabricacion));
+    const pint = Math.max(0,n(f.pintura ?? f.paint ?? item?.pintura ?? item?.enPintura));
+    const alm = Math.max(0,n(f.almacen ?? f.alm ?? item?.almacen ?? item?.enAlmacen));
+    const ent = Math.max(0,n(f.entregado ?? item?.delivered ?? item?.entregado));
+    return fab + pint*2 + alm*3 + ent*4;
+  }
+  function itemUpdatedMs(item){
+    const values = [item?.localFlowUpdatedAt,item?.updatedAt,item?.lastUpdate,item?.fabricacion_ts,item?.pintura_ts,item?.almacen_ts];
+    for(const value of values){ const ms = Date.parse(String(value || "")); if(Number.isFinite(ms)) return ms; }
+    return 0;
+  }
+  function mergeRawAliasRows(oldRow,newRow){
+    oldRow = oldRow && typeof oldRow === "object" ? oldRow : {};
+    newRow = newRow && typeof newRow === "object" ? newRow : {};
+    const oldScore = rawFlowProgress(oldRow), newScore = rawFlowProgress(newRow);
+    let authoritative = newRow;
+    if(oldScore > newScore) authoritative = oldRow;
+    else if(oldScore === newScore && itemUpdatedMs(oldRow) > itemUpdatedMs(newRow)) authoritative = oldRow;
+    const out = {...oldRow,...newRow};
+    const pref = preferredWorkRef(oldRow.ref || oldRow.referencia || oldRow.jobRef, newRow.ref || newRow.referencia || newRow.jobRef);
+    if(pref){ out.ref = pref; out.referencia = pref; }
+    if(authoritative.flow && typeof authoritative.flow === "object") out.flow = {...authoritative.flow};
+    ["fase","estado","status","keepInFab","hideFromFab","archived","delivered"].forEach(k=>{
+      if(authoritative[k] !== undefined) out[k] = authoritative[k];
     });
     return out;
   }
-  function matchesWordSearch(item, query){
-    const terms = norm(query).split(/\s+/).filter(Boolean);
-    if(!terms.length) return true;
-    const hay = norm(searchTextDeep(item,[],new WeakSet(),0).join(" "));
-    return terms.every(term => hay.includes(term));
+  function dedupeLdhByIdentity(db){
+    db = db && typeof db === "object" && !Array.isArray(db) ? {...db} : {};
+    ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+      const rows = Array.isArray(db[pool]) ? db[pool] : [];
+      const map = new Map(); const loose = [];
+      rows.forEach(row=>{
+        const ref = String(row && (row.ref || row.referencia || row.jobRef) || "").trim();
+        const key = workIdentityKey(ref);
+        if(!key){ loose.push(row); return; }
+        map.set(key, map.has(key) ? mergeRawAliasRows(map.get(key),row) : row);
+      });
+      db[pool] = [...map.values(),...loose];
+    });
+    return db;
   }
+  window.LDH_fabricacionCanonicalizeLdh = dedupeLdhByIdentity;
   function isCloudDeleted(refOrItem){
     const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
     try{ return !!(ref && window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(e){ return false; }
-  }
-  function isAgendaTerminal(refOrItem){
-    const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
-    try{ return !!(ref && window.LDH_isAgendaTerminalRef && window.LDH_isAgendaTerminalRef(ref)); }catch(e){ return false; }
   }
   function fmtDate(v){ if(!v) return ""; const s = String(v); const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : s; }
   function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -214,8 +248,7 @@
       this.load();
       this.mergeInbox();
       this.mergePrepMeta();
-      // Abrir Fabricacion no crea una revision nueva por si solo.
-      this.save(false, false);
+      this.save(false);
       this.loadCompanies();
       this.render();
       window.addEventListener("storage", ev=>{
@@ -238,14 +271,15 @@
 
     load(){
       const db = parse(getStore(DB_KEY), {}) || {};
-      this.state = db;
+      // V8: limpiar aliases corta/larga desde la propia carga, incluso si vienen de nube.
+      this.state = dedupeLdhByIdentity(db);
       ["deliveries","fabricacion","fab","trabajos","deliveryCompanies"].forEach(k=>{
         if(!Array.isArray(this.state[k])) this.state[k] = [];
       });
     },
 
-    save(showError=true, touchRevision=true){
-      if(touchRevision !== false) this.state.updatedAt = new Date().toISOString();
+    save(showError=true){
+      this.state.updatedAt = new Date().toISOString();
       const ok = setStore(DB_KEY, JSON.stringify(this.state));
       if(!ok && showError) alert("No se pudo guardar Fabricación porque el almacenamiento del navegador está lleno.");
       return ok;
@@ -267,22 +301,11 @@
         const meta = parse(getStore(k), null);
         if(!ref || !meta) return;
         if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return;
-        // La fase/estado actual es autoritativa. Los *_ts son solo historico y
-        // nunca deben resucitar un trabajo que ya avanzo a otra fase.
         const fase = norm(meta.fase || meta.estado || meta.status);
-        const hasCurrentPhase = !!fase;
-        const isEnt = hasCurrentPhase
-          ? fase.includes("entreg")
-          : !!(meta.entregado || meta.en_entregado);
-        const enAlm = !isEnt && (hasCurrentPhase
-          ? fase.includes("almacen")
-          : !!meta.en_almacen);
-        const enPint = !isEnt && !enAlm && (hasCurrentPhase
-          ? fase.includes("pint")
-          : !!meta.en_pintura);
-        const enFab = !isEnt && !enAlm && !enPint && (hasCurrentPhase
-          ? fase.includes("fabric")
-          : !!meta.en_fabricacion);
+        const enFab = !!(meta.en_fabricacion || meta.fabricacion_ts || fase.includes("fabric"));
+        const enPint = !!(meta.en_pintura || meta.pintura_ts || fase.includes("pint"));
+        const enAlm = !!(meta.en_almacen || meta.almacen_ts || fase.includes("almacen"));
+        const isEnt = !!(meta.entregado || meta.en_entregado || meta.entregado_ts || fase.includes("entreg"));
         if((!enFab && !enPint && !enAlm) || isEnt) return;
 
         const units = Math.max(1, n(meta.unidades || meta.uds || meta.total || meta.cantidad || 1) || 1);
@@ -322,6 +345,10 @@
         const old = this.findByRef(ref);
         if(!old){
           this.upsertEveryPool(item);
+        }else{
+          // V8: si Preparación usa la referencia larga y Agenda/Fabricación la corta,
+          // se consolidan como la misma OT sin crear una segunda tarjeta.
+          this.upsertEveryPool(this.mergeItem(old,item));
         }
       });
     },
@@ -337,7 +364,12 @@
     applyOverride(item){
       if(!item || !item.ref) return item;
       const ref = String(item.ref).trim();
-      const ov = this.overrides()[ref];
+      const map = this.overrides();
+      let ov = map[ref];
+      if(!ov){
+        const aliasKey = Object.keys(map).find(key => sameWorkRef(key, ref));
+        if(aliasKey) ov = map[aliasKey];
+      }
       if(!ov) return item;
 
       // Un borrado solo es válido mientras exista su documento en la subcolección deleted.
@@ -365,6 +397,8 @@
       const ref = String(item.ref || item.referencia || "").trim();
       if(!ref) return false;
       const map = this.overrides();
+      // Una misma OT no puede conservar overrides paralelos con referencia corta/larga.
+      Object.keys(map).forEach(key=>{ if(key !== ref && sameWorkRef(key,ref)) delete map[key]; });
       map[ref] = {
         flow:{
           fab:n(f.fab),
@@ -390,9 +424,14 @@
         if(!ref) return;
         let inbox = parse(getStore(INBOX_KEY), []) || [];
         if(!Array.isArray(inbox)) inbox = [];
-        const idx = inbox.findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
         const rec = this.normalizeItem(item);
-        if(idx >= 0) inbox[idx] = rec; else inbox.push(rec);
+        const matches = [];
+        inbox.forEach((x,i)=>{ if(sameWorkRef(String(x && (x.ref || x.referencia) || "").trim(), ref)) matches.push(i); });
+        if(matches.length){
+          const first = matches[0];
+          inbox[first] = rec;
+          for(let j=matches.length-1;j>=1;j--) inbox.splice(matches[j],1);
+        }else inbox.push(rec);
         setStore(INBOX_KEY, JSON.stringify(inbox.slice(-200)));
       }catch(e){}
     },
@@ -418,11 +457,15 @@
     findByRef(ref){
       ref = String(ref||"").trim();
       const pools = ["deliveries","fabricacion","fab","trabajos"];
+      let found = null;
       for(const k of pools){
-        const found = (this.state[k] || []).find(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
-        if(found) return this.applyOverride(this.normalizeItem(found));
+        for(const row of (this.state[k] || [])){
+          const rowRef = String(row && (row.ref || row.referencia) || "").trim();
+          if(!sameWorkRef(rowRef,ref)) continue;
+          found = found ? this.mergeItem(found,row) : row;
+        }
       }
-      return null;
+      return found ? this.applyOverride(this.normalizeItem(found)) : null;
     },
 
     upsertEveryPool(item){
@@ -431,9 +474,18 @@
       ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
         if(!Array.isArray(this.state[k])) this.state[k] = [];
         const arr = this.state[k];
-        const idx = arr.findIndex(x => String(x && (x.ref || x.referencia) || "").trim() === item.ref);
-        if(idx >= 0){
-          arr[idx] = this.mergeItem(arr[idx], item);
+        const matches = [];
+        arr.forEach((x,i)=>{
+          const rowRef = String(x && (x.ref || x.referencia) || "").trim();
+          if(sameWorkRef(rowRef,item.ref)) matches.push(i);
+        });
+        if(matches.length){
+          let merged = item;
+          matches.forEach(i=>{ merged = this.mergeItem(arr[i],merged); });
+          const first = matches[0];
+          arr[first] = merged;
+          // Elimina físicamente aliases duplicados de la MISMA OT en este pool.
+          for(let j=matches.length-1;j>=1;j--) arr.splice(matches[j],1);
         }else{
           arr.push({...item});
         }
@@ -441,10 +493,21 @@
     },
 
     mergeItem(old, incoming){
-      old = old && typeof old === "object" ? old : {};
-      incoming = incoming && typeof incoming === "object" ? incoming : {};
+      old = old && typeof old === "object" ? this.normalizeItem(old) : {};
+      incoming = incoming && typeof incoming === "object" ? this.normalizeItem(incoming) : {};
+      const oldScore = rawFlowProgress(old), incomingScore = rawFlowProgress(incoming);
+      let authoritative = incoming;
+      if(oldScore > incomingScore) authoritative = old;
+      else if(oldScore === incomingScore && itemUpdatedMs(old) > itemUpdatedMs(incoming)) authoritative = old;
+
       const out = {...old, ...incoming};
-      out.flow = {...(old.flow || {}), ...(incoming.flow || {})};
+      const prefRef = preferredWorkRef(old.ref || old.referencia, incoming.ref || incoming.referencia);
+      out.ref = prefRef; out.referencia = prefRef;
+      out.flow = {...(authoritative.flow || {})};
+      ["fase","estado","status","keepInFab","hideFromFab","archived","delivered"].forEach(k=>{
+        if(authoritative[k] !== undefined) out[k] = authoritative[k];
+      });
+      // No sumamos duplicados: elegimos la copia que refleja mayor avance por fases.
       return this.normalizeItem(out);
     },
 
@@ -480,61 +543,28 @@
     },
 
     loadCompanies(){
-      // FUENTE AUTORITATIVA: la base viva del modulo Stock.
-      // Asi el desplegable refleja exactamente las empresas que existen AHORA
-      // y no conserva nombres procedentes de pedidos, entregas o maestros antiguos.
       const names = new Set();
-      const companyNorm = value => String(value ?? "")
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim();
-      const isCommonStock = company => {
-        if(!company) return false;
-        if(company && typeof company === "object" && (company.sharedStock === true || company.sharedPool === true || company.isSharedStock === true)) return true;
-        const values = company && typeof company === "object"
-          ? [company.id,company.companyId,company.empresaId,company.name,company.nombre,company.company,company.empresa,company.code,company.codigo,company.label]
-          : [company];
-        return values.map(companyNorm).filter(Boolean).some(v =>
-          v === "stock comun" || v === "stock comun global" || v === "almacen comun" ||
-          v.includes("stock comun") || v.includes("almacen comun")
-        );
-      };
-      const pushConfigured = value => {
-        if(!value || isCommonStock(value)) return;
-        const name = String(value && typeof value === "object"
-          ? (value.name || value.nombre || value.company || value.empresa || value.code || value.codigo || "")
-          : value).trim();
-        if(!name || isCommonStock(name)) return;
-        names.add(name);
+      const push = v => {
+        const name = String(v && (v.name || v.nombre || v.company || v.empresa || v.id || v) || "").trim();
+        if(name) names.add(name);
       };
 
-      let liveCompanies = null;
+      (this.state.deliveryCompanies || []).forEach(push);
+      (this.state.deliveries || []).forEach(x => push(x.company || x.empresa));
       try{
-        const liveStock = parse(getStore("ldh_v2_company_stock_v1"), null);
-        if(liveStock && Array.isArray(liveStock.companies)) liveCompanies = liveStock.companies;
+        const master = parse(getStore("ldh_company_master_v1"), null);
+        if(master && Array.isArray(master.companies)) master.companies.forEach(push);
       }catch(e){}
-
-      // Solo si el Stock vivo aun no esta disponible usamos el maestro como respaldo.
-      if(Array.isArray(liveCompanies)){
-        liveCompanies.forEach(pushConfigured);
-      }else{
-        try{
-          const master = parse(getStore("ldh_company_master_v1"), null);
-          if(master && Array.isArray(master.companies)) master.companies.forEach(pushConfigured);
-        }catch(e){}
-      }
 
       const sel = document.getElementById("companyFilter");
       const current = sel.value;
       const arr = Array.from(names).sort((a,b)=>a.localeCompare(b,"es",{sensitivity:"base"}));
       sel.innerHTML = '<option value="">Todas las empresas</option>' + arr.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join("");
       if(arr.includes(current)) sel.value = current;
-      else sel.value = "";
     },
 
     counters(items){
-      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted && !isCloudDeleted(x) && !isAgendaTerminal(x));
+      const all = (items || this.allItems()).filter(x=>!x.archived && !x.deleted && !isCloudDeleted(x));
       return all.reduce((a,it)=>{
         const f=this.ensureFlow(it);
         a.fab += n(f.fab);
@@ -551,8 +581,9 @@
         (this.state[k] || []).forEach(raw=>{
           const it = this.normalizeItem(raw);
           if(!it.ref) return;
-          const old = map.get(it.ref);
-          map.set(it.ref, old ? this.mergeItem(old,it) : it);
+          const key = workIdentityKey(it.ref);
+          const old = map.get(key);
+          map.set(key, old ? this.mergeItem(old,it) : it);
         });
       });
       return Array.from(map.values()).map(it => this.applyOverride(this.normalizeItem(it)));
@@ -563,7 +594,7 @@
       const companyFilter = document.getElementById("companyFilter").value;
       const stage = document.getElementById("stageFilter").value;
       return this.allItems()
-        .filter(it=>!it.archived && !it.deleted && !isCloudDeleted(it) && !isAgendaTerminal(it))
+        .filter(it=>!it.archived && !it.deleted && !isCloudDeleted(it))
         .filter(it=>{
           const f=this.ensureFlow(it);
           if(stage === "fab") return n(f.fab) > 0;
@@ -579,12 +610,14 @@
           return activeWorkshop > 0;
         })
         .filter(it => !companyFilter || String(it.company || it.empresa || "") === companyFilter)
-        .filter(it => !q || matchesWordSearch(it,q));
+        .filter(it => {
+          if(!q) return true;
+          const hay = [it.ref,it.referencia,it.concept,it.concepto,it.company,it.empresa,it.notes].join(" ");
+          return norm(hay).includes(q);
+        });
     },
 
     render(){
-      const rawQuery = String(document.getElementById("q").value || "").trim();
-      const searching = !!norm(rawQuery);
       const items = this.visibleItems();
       const all = this.allItems();
       const totals = this.counters(all);
@@ -592,7 +625,7 @@
       document.getElementById("kPint").textContent = totals.pintura;
       document.getElementById("kAlm").textContent = totals.almacen;
       document.getElementById("kEnt").textContent = totals.entregado;
-      document.getElementById("status").textContent = searching ? `${items.length} coincidencias` : `${items.length} trabajos visibles`;
+      document.getElementById("status").textContent = `${items.length} trabajos visibles`;
 
       const list = document.getElementById("list");
       list.querySelectorAll("details.company[data-company]").forEach(detail=>{
@@ -602,9 +635,7 @@
         else this.openCompanies.delete(company);
       });
       if(!items.length){
-        list.innerHTML = searching
-          ? `<div class="empty">No hay trabajos que contengan "${esc(rawQuery)}".</div>`
-          : `<div class="empty">No hay trabajos activos en Fabricación.</div>`;
+        list.innerHTML = `<div class="empty">No hay trabajos activos en Fabricación.</div>`;
         return;
       }
 
@@ -617,7 +648,7 @@
 
       list.innerHTML = Array.from(groups.entries())
         .sort((a,b)=>a[0].localeCompare(b[0],"es",{sensitivity:"base"}))
-        .map(([company, arr]) => this.companyHTML(company, arr, searching))
+        .map(([company, arr]) => this.companyHTML(company, arr))
         .join("");
 
       list.querySelectorAll("details.company[data-company]").forEach(detail=>{
@@ -630,14 +661,14 @@
       });
     },
 
-    companyHTML(company, arr, forceOpen=false){
+    companyHTML(company, arr){
       const totals = this.counters(arr);
       const rows = arr
         .sort((a,b)=>String(a.ref||"").localeCompare(String(b.ref||""),"es",{sensitivity:"base"}))
         .map(it=>this.rowHTML(it))
         .join("");
       return `
-        <details class="company" data-company="${esc(company)}"${(forceOpen || this.openCompanies.has(company)) ? " open" : ""}>
+        <details class="company" data-company="${esc(company)}"${this.openCompanies.has(company) ? " open" : ""}>
           <summary>
             <span class="fold"></span>
             <span class="company-name">${esc(company)}</span>
@@ -699,7 +730,7 @@
 
     itemByRef(refEnc){
       const ref = decodeURIComponent(refEnc || "");
-      const item = this.allItems().find(x => String(x && (x.ref || x.referencia) || "").trim() === ref);
+      const item = this.allItems().find(x => sameWorkRef(String(x && (x.ref || x.referencia) || "").trim(), ref));
       return item ? this.applyOverride(this.normalizeItem(item)) : null;
     },
 
@@ -714,7 +745,7 @@
       return qty;
     },
 
-    async move(refEnc, from, to){
+    move(refEnc, from, to){
       const item = this.itemByRef(refEnc);
       if(!item){
         alert("No encuentro el trabajo para mover.");
@@ -726,33 +757,6 @@
       const labels = {fab:"Fabricación", pintura:"Pintura", almacen:"Almacén", entregado:"Entregado"};
       const qty = this.askQty(`${labels[from] || from} → ${labels[to] || to}`, max);
       if(qty === null) return;
-
-      /*
-       * V8 · Cierre autoritativo de Stock antes de avanzar FAB → PINTURA.
-       * El hierro reservado/asignado debe haber quedado consumido al entrar en
-       * Fabricación. Para trabajos antiguos que aún conservan una asignación viva,
-       * regularizamos primero Stock en Firebase y solo después cambiamos la fase.
-       */
-      if(from === "fab" && to === "pintura"){
-        if(typeof window.LDH_fabricacionCerrarStockAlPasarAPintura !== "function"){
-          alert("Stock nube todavía no está preparado. Espera unos segundos y vuelve a pulsar A pintura.");
-          return;
-        }
-        try{
-          await window.LDH_fabricacionCerrarStockAlPasarAPintura(
-            String(item.ref || item.referencia || ""),
-            {phase:"pintura"}
-          );
-        }catch(error){
-          console.error("No se pudo cerrar el Stock antes de pasar a Pintura", error);
-          alert(
-            "No se ha pasado el trabajo a Pintura.\n\n" +
-            "No se pudo confirmar el cierre del material reservado en Stock.\n\n" +
-            String(error && (error.code || error.message) || error || "Error de sincronización")
-          );
-          return;
-        }
-      }
 
       if(from === "fab"){
         f.fab = Math.max(0, n(f.fab ?? f.fabricacion) - qty);
@@ -1009,7 +1013,7 @@ const firebaseConfig = {
 };
 
 const {initializeApp,getApps} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
-const {getFirestore,collection,doc,getDoc,getDocs,setDoc,deleteDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+const {getFirestore,collection,doc,getDoc,getDocs,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
 
 // V4: este proyecto ya no depende de Auth anonimo. La Informativa lee este
 // mismo documento sin login; Fabricacion usa el mismo acceso directo y deja
@@ -1118,7 +1122,13 @@ function activeRefSetFromDB(ldh){
   const deleted = localDeletedRefSet();
   const addRef = r => {
     r = String(r||"").trim();
-    if(r && !deleted.has(r)) set.add(r);
+    if(!r || deleted.has(r)) return;
+    let key = r;
+    try{
+      const m=r.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+      if(m) key='OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
+    }catch(e){}
+    set.add(key);
   };
   ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
     const arr = Array.isArray(ldh && ldh[pool]) ? ldh[pool] : [];
@@ -1133,8 +1143,11 @@ function activeRefSetFromDB(ldh){
   return set;
 }
 function localPackage(){
-  const ldhRaw = getStore(DB_KEY);
-  const ldh = parse(ldhRaw, {}) || {};
+  const storedRaw = getStore(DB_KEY);
+  let ldh = parse(storedRaw, {}) || {};
+  // V8: nunca publicar a nube dos filas que sean la misma OT (código vs código+descripción).
+  try{ if(window.LDH_fabricacionCanonicalizeLdh) ldh = window.LDH_fabricacionCanonicalizeLdh(ldh); }catch(e){}
+  const ldhRaw = JSON.stringify(ldh);
   const refs = activeRefSetFromDB(ldh);
   const prepMeta = {};
   const prepRecepcion = {};
@@ -1207,74 +1220,16 @@ function isAlmacenAuthoritative(remote){
 }
 function remoteShouldReplaceLocal(remote){
   if(isAlmacenAuthoritative(remote)) return true;
-  // La nube/local se decide por REVISION, nunca por cantidad de referencias.
-  // Un PC antiguo puede tener mas trabajos precisamente porque conserva historicos.
-  const rRev = packageRevisionMs(remote);
-  const lRev = localRevisionMs();
-  if(rRev > 0 && lRev <= 0) return true;
-  if(rRev <= 0) return false;
-  return rRev > lRev;
+  const rScore = localScore(remote);
+  const lScore = localScore();
+  if(rScore > lScore) return true;
+  if(rScore < lScore) return false;
+  return packageRevisionMs(remote) > localRevisionMs();
 }
 function withoutDeletedRefs(pkg){
   // Conserva el paquete completo. Las referencias borradas se ocultan por la subcolección
   // deleted, pero no se destruyen dentro de ldh_db; así pueden recuperarse con seguridad.
   return pkg;
-}
-function fabPoolItemKey(item){
-  if(!item || typeof item !== "object") return "";
-  const ref = refValue(item);
-  if(ref) return "ref:" + ref;
-  const id = String(item.id || item.pedido_uid || item.pedido_id || item.orderId || item.agendaOrderId || "").trim();
-  return id ? "id:" + id : "";
-}
-function mergeFabricacionPoolPreserveRefs(localRows, remoteRows){
-  const out = [];
-  const index = new Map();
-  const add = (row, remoteWins) => {
-    if(!row || typeof row !== "object") return;
-    const key = fabPoolItemKey(row);
-    if(key && index.has(key)){
-      const pos = index.get(key);
-      const previous = out[pos] || {};
-      const merged = remoteWins ? {...previous, ...row} : {...row, ...previous};
-      merged.flow = remoteWins
-        ? {...(previous.flow || {}), ...(row.flow || {})}
-        : {...(row.flow || {}), ...(previous.flow || {})};
-      out[pos] = merged;
-      return;
-    }
-    if(key) index.set(key, out.length);
-    out.push({...row, flow: row.flow && typeof row.flow === "object" ? {...row.flow} : row.flow});
-  };
-  (Array.isArray(localRows) ? localRows : []).forEach(row=>add(row,false));
-  // Para una referencia presente en ambos lados, la revision remota aceptada manda.
-  // Las referencias que solo existen localmente se conservan: una nube parcial nunca
-  // puede hacer desaparecer un trabajo activo por simple ausencia del paquete remoto.
-  (Array.isArray(remoteRows) ? remoteRows : []).forEach(row=>add(row,true));
-  return out;
-}
-function mergeFabricacionInbox(localRaw, remoteRaw){
-  const localRows = parse(localRaw, []) || [];
-  const remoteRows = parse(remoteRaw, []) || [];
-  return JSON.stringify(mergeFabricacionPoolPreserveRefs(localRows, remoteRows));
-}
-function mergeFabricacionOverrides(localRaw, remoteRaw){
-  const localMap = parse(localRaw, {}) || {};
-  const remoteMap = parse(remoteRaw, {}) || {};
-  // La nube aceptada manda en referencias coincidentes, pero no borra overrides
-  // locales de referencias que la copia remota no contiene.
-  return JSON.stringify({...localMap, ...remoteMap});
-}
-function dbPoolRefs(ldh){
-  const refs = new Set();
-  ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
-    const rows = Array.isArray(ldh && ldh[pool]) ? ldh[pool] : [];
-    rows.forEach(row=>{
-      const ref = refValue(row);
-      if(ref) refs.add(ref);
-    });
-  });
-  return refs;
 }
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
@@ -1282,40 +1237,12 @@ function applyRemotePackage(pkg){
   const appliedStamp = String(pkg.updatedAtISO || "");
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
+  setStore(DB_KEY, pkg.ldh_db);
+  setStore(INBOX_KEY, pkg.inbox || "[]");
+  setStore(OVERRIDE_KEY, pkg.overrides || "{}");
 
-  // V6: restauracion por FUSION, nunca por sustitucion destructiva.
-  // Fabricacion comparte ldh_db con otros modulos y, ademas, un paquete remoto
-  // puede ser parcial. Por eso se conservan referencias locales ausentes en nube.
-  const remoteDb = parse(pkg.ldh_db, {}) || {};
-  const localDb = parse(getStore(DB_KEY), {}) || {};
-  const localRefsBefore = dbPoolRefs(localDb);
-  const remoteRefs = dbPoolRefs(remoteDb);
-  const localOnlyRefs = Array.from(localRefsBefore).filter(ref=>!remoteRefs.has(ref) && !deletedRefs.has(ref));
-
-  const mergedDb = {...localDb};
-  ["deliveries","fabricacion","fab","trabajos"].forEach(k=>{
-    mergedDb[k] = mergeFabricacionPoolPreserveRefs(localDb[k], remoteDb[k]);
-  });
-  if(Array.isArray(remoteDb.deliveryCompanies) || Array.isArray(localDb.deliveryCompanies)){
-    const seen = new Set();
-    mergedDb.deliveryCompanies = [];
-    [...(Array.isArray(localDb.deliveryCompanies)?localDb.deliveryCompanies:[]), ...(Array.isArray(remoteDb.deliveryCompanies)?remoteDb.deliveryCompanies:[])].forEach(value=>{
-      const key = typeof value === "object" ? JSON.stringify(value) : String(value);
-      if(seen.has(key)) return;
-      seen.add(key);
-      mergedDb.deliveryCompanies.push(value);
-    });
-  }
-
-  // Se alinea revision con el paquete remoto aplicado. Si hemos conservado refs
-  // locales que faltaban en nube, despues se republica la fusion completa.
-  mergedDb.updatedAt = appliedStamp || remoteDb.updatedAt || mergedDb.updatedAt || new Date().toISOString();
-  setStore(DB_KEY, JSON.stringify(mergedDb));
-  setStore(INBOX_KEY, mergeFabricacionInbox(getStore(INBOX_KEY), pkg.inbox || "[]"));
-  setStore(OVERRIDE_KEY, mergeFabricacionOverrides(getStore(OVERRIDE_KEY), pkg.overrides || "{}"));
-
-  // prep_meta_* y prep_recepcion_* pertenecen a Preparacion. Fabricacion los
-  // puede leer, pero nunca debe rebobinarlos con una copia historica de su nube.
+  Object.entries(pkg.prepMeta || {}).forEach(([ref, raw])=>setStore("prep_meta_" + ref, raw));
+  Object.entries(pkg.prepRecepcion || {}).forEach(([ref, raw])=>setStore("prep_recepcion_" + ref, raw));
 
   setTimeout(()=>{
     try{
@@ -1323,11 +1250,6 @@ function applyRemotePackage(pkg){
       if(window.App && window.App.reload) window.App.reload(false);
     }catch(e){}
     ignorePublish = false;
-    if(localOnlyRefs.length){
-      // La nube recibio una copia parcial. Publicamos la union para que los trabajos
-      // preservados no vuelvan a faltar en otro PC.
-      setTimeout(()=>{ try{ publish(true); }catch(e){} }, 350);
-    }
   }, 200);
   return true;
 }
@@ -1363,12 +1285,9 @@ async function publish(force=false){
       if(snap.exists()){
         const remote = withoutDeletedRefs(snap.data() || {});
         const remoteStamp = String(remote.updatedAtISO || "");
+        const remoteScore = localScore(remote);
         const authoritativePending = isAlmacenAuthoritative(remote) && (!remoteStamp || remoteStamp !== lastRemoteUpdated);
-        const remoteRev = packageRevisionMs(remote);
-        const localRev = localRevisionMs();
-        // Nunca se publica encima de una revision remota mas reciente.
-        // Se elimina expresamente el criterio antiguo de "mas refs = mejor copia".
-        if(authoritativePending || (remoteRev > 0 && (localRev <= 0 || remoteRev > localRev))){
+        if(authoritativePending || remoteScore > score || (remoteScore === score && packageRevisionMs(remote) > localRevisionMs())){
           applyRemotePackage(remote);
           status("Nube restaurada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
           return;
@@ -1482,36 +1401,6 @@ async function deleteRefPermanently(ref){
   publish(true);
   status("Pedido eliminado · nube actualizada","ok");
 }
-
-// V7: una marca deleted solo se retira automaticamente cuando existe una
-// confirmacion de actividad posterior a la propia marca. Asi un borrado actual
-// nunca se deshace por el mero hecho de que Agenda aun conserve datos antiguos.
-async function restoreDeletedRef(ref,confirmedActiveAtMs){
-  ref = String(ref || "").trim();
-  const activeAtMs = Number(confirmedActiveAtMs || 0);
-  if(!ref || !Number.isFinite(activeAtMs) || activeAtMs <= 0) return false;
-  if(!deleteSyncReady){
-    try{ await loadDeletedRefs(); }catch(error){
-      console.warn("No se pudo comprobar el borrado antes de recuperar",ref,error);
-      return false;
-    }
-  }
-  if(!deletedRefs.has(ref)) return false;
-
-  const markerSnap = await getDoc(doc(DELETED_COL,deletedDocId(ref)));
-  if(!markerSnap.exists()) return false;
-  const marker = markerSnap.data() || {};
-  const deletedAtMs = Number(marker.deletedAtMs || 0);
-  // Sin fecha fiable no se recupera automaticamente: criterio conservador.
-  if(!Number.isFinite(deletedAtMs) || deletedAtMs <= 0 || activeAtMs <= deletedAtMs) return false;
-
-  await deleteDoc(doc(DELETED_COL,deletedDocId(ref)));
-  deletedRefs.delete(ref);
-  cleanupStaleDeletedMarkers();
-  applyKnownDeletedRefs();
-  status("Borrado antiguo retirado · trabajo activo recuperado","ok");
-  return true;
-}
 function hookApp(){
   const appObj = window.App;
   if(!appObj || appObj.__LDH_CLOUD_HOOKED) return false;
@@ -1533,14 +1422,12 @@ function hookApp(){
     return res;
   };
 
-  // No publicar una copia completa solo por abrir la pagina. Las acciones reales
-  // siguen publicando; esto evita que un PC antiguo contamine la nube al arrancar.
+  publish(true);
   return true;
 }
 window.LDH_fabricacionPublishNow = () => publish(true);
 window.LDH_fabricacionRestoreCloudNow = restoreIfRemoteBetter;
 window.LDH_fabricacionDeleteRef = deleteRefPermanently;
-window.LDH_fabricacionRestoreDeletedRef = restoreDeletedRef;
 
 async function startLegacyCloudSyncV4(){
   // Firestore se prueba directamente. No se espera ni se solicita Auth anonimo.
@@ -1557,8 +1444,7 @@ async function startLegacyCloudSyncV4(){
   await restoreIfRemoteBetter();
   applyKnownDeletedRefs();
   hookApp();
-  // Sin publicacion automatica al arrancar. Se espera a una accion real o a
-  // la reconciliacion segura con Agenda.
+  publish(true);
 
   onSnapshot(DOC_REF, snap=>{
     if(!snap.exists()) return;
@@ -1573,9 +1459,6 @@ async function startLegacyCloudSyncV4(){
     if(remoteShouldReplaceLocal(remote)){
       applyRemotePackage(remote);
       status("Nube actualizada · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
-      setTimeout(()=>{
-        try{ window.LDH_reconcileFabricacionWithAgenda && window.LDH_reconcileFabricacionWithAgenda(false); }catch(e){}
-      }, 350);
     }
   }, err=>{
     console.warn("snapshot fabricacion error", err);
@@ -1669,295 +1552,10 @@ setTimeout(hookApp, 1500);
     const auth=getAuth(app), db=getFirestore(app);
     const ordersCol=collection(db,'taller_data','work_orders','orders');
     let authReady=false;
-    const agendaTerminalRefs = new Set();
-    window.LDH_isAgendaTerminalRef = ref => agendaTerminalRefs.has(String(ref || '').trim());
-
-    function agendaState(order){
-      return String(order && (order.workflowStateV2 || order.workflowState || order.workState || order.orderState) || '')
-        .trim().toLowerCase().replace(/[\s-]+/g,'_');
-    }
-    function agendaIsTerminal(order){
-      const status = String(order && order.status || '').trim().toLowerCase();
-      if(status && status !== 'pending') return true;
-      const st = agendaState(order);
-      return ['finished','terminado','finalizado','almacen','en_almacen','delivered','entregado','cancelled','canceled','anulado','cancelado'].includes(st);
-    }
-    function agendaFlow(order){
-      const f = order && order.phaseFlowV2 && typeof order.phaseFlowV2 === 'object' ? order.phaseFlowV2 : {};
-      return cleanFlow(f);
-    }
-    function baseReference(ref){
-      const value = String(ref || '').trim();
-      const m = value.match(/^(OT-\d{6}-\d{3})/i);
-      return m ? m[1].toUpperCase() : value;
-    }
-    function newest(rows){
-      return (rows || []).slice().sort((a,b)=>Number(b.updatedAtMs||b.completedAtMs||0)-Number(a.updatedAtMs||a.completedAtMs||0))[0] || null;
-    }
-    function applyAgendaTerminalToLocal(ref, order){
-      const appObj = window.App;
-      if(!appObj || !ref) return false;
-      const central = agendaFlow(order);
-      let changed = false;
-      let representative = null;
-      ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
-        const arr = Array.isArray(appObj.state && appObj.state[pool]) ? appObj.state[pool] : [];
-        arr.forEach(item=>{
-          const itemRef = String(item && (item.ref || item.referencia) || '').trim();
-          if(itemRef !== ref) return;
-          const f = appObj.ensureFlow(item);
-          if(Number(f.fab||f.fabricacion||0) > 0 || Number(f.pintura||0) > 0 || !item.hideFromFab || item.keepInFab){
-            changed = true;
-          }
-          f.fab = 0;
-          f.fabricacion = 0;
-          f.pintura = 0;
-          // Solo se completan ALM/ENT con valores centrales positivos; nunca se
-          // inventan cantidades ni se reduce lo ya confirmado localmente.
-          if(Number(central.almacen||0) > Number(f.almacen||0)) f.almacen = Number(central.almacen||0);
-          if(Number(central.entregado||0) > Number(f.entregado||0)) f.entregado = Number(central.entregado||0);
-          item.flow = f;
-          item.hideFromFab = true;
-          item.keepInFab = false;
-          if(Number(f.almacen||0) > 0){ item.fase='almacen'; item.estado='almacen'; }
-          else if(Number(f.entregado||0) > 0){ item.fase='entregado'; item.estado='entregado'; }
-          else { item.fase='finalizado'; item.estado='finalizado'; }
-          representative = item;
-        });
-      });
-      if(representative){
-        appObj.writeOverride(representative);
-        appObj.updateInbox(representative);
-      }
-      return changed;
-    }
-    function canonicalWorkCode(ref){
-      const value = String(ref || '').trim();
-      const m = value.match(/^(OT-\d{6}-\d{3}(?:-[A-Z])?)/i);
-      return m ? m[1].toUpperCase() : value.toUpperCase();
-    }
-    function readBrowserStore(key){
-      try{ const v=localStorage.getItem(key); if(v!==null) return v; }catch(_){ }
-      try{ const v=sessionStorage.getItem(key); if(v!==null) return v; }catch(_){ }
-      return '';
-    }
-    function prepMetaForAgendaOrder(order){
-      const orderId = String(order && order.id || '').trim();
-      const wantedCode = canonicalWorkCode(order && (order.reference || order.ref));
-      const keys = [];
-      const addStore = store => {
-        try{
-          for(let i=0;i<store.length;i++){
-            const key=store.key(i)||'';
-            if(key.startsWith('prep_meta_') && !keys.includes(key)) keys.push(key);
-          }
-        }catch(_){ }
-      };
-      addStore(localStorage); addStore(sessionStorage);
-      let byCode = null;
-      for(const key of keys){
-        const fullRef = key.replace(/^prep_meta_/,'').trim();
-        let meta = null;
-        try{ meta=JSON.parse(readBrowserStore(key)||'null'); }catch(_){ meta=null; }
-        if(!meta || meta.deleted || meta.eliminado || meta.eliminado_modulos) continue;
-        const metaOrderId = String(meta.agenda_order_id || meta.orderId || meta.workOrderId || '').trim();
-        const candidate = {ref:fullRef,meta};
-        if(orderId && metaOrderId && metaOrderId===orderId) return candidate;
-        if(wantedCode && canonicalWorkCode(fullRef)===wantedCode && !byCode) byCode=candidate;
-      }
-      return byCode;
-    }
-    function agendaIsWorkshopActive(order){
-      if(!order || agendaIsTerminal(order)) return false;
-      const f=agendaFlow(order);
-      if(Number(f.fabricacion||0)>0 || Number(f.pintura||0)>0) return true;
-      const st=agendaState(order);
-      return ['fabrication','fabricacion','en_fabricacion','painting','pintura','en_pintura'].includes(st);
-    }
-    function findFabricacionItemForAgenda(order){
-      const appObj=window.App;
-      if(!appObj) return null;
-      const items=appObj.allItems ? appObj.allItems() : [];
-      const orderId=String(order && order.id || '').trim();
-      if(orderId){
-        const byId=items.find(item=>String(item && (item.agendaOrderId || item.orderId || '')).trim()===orderId);
-        if(byId) return byId;
-      }
-      const code=canonicalWorkCode(order && (order.reference || order.ref));
-      if(!code) return null;
-      return items.find(item=>canonicalWorkCode(item && (item.ref || item.referencia))===code) || null;
-    }
-    function prepMetaIsWorkshopActive(meta){
-      if(!meta || meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return false;
-      const phase=String(meta.fase || meta.estado || meta.status || '').trim().toLowerCase();
-      if(phase){
-        if(phase.includes('entreg') || phase.includes('almacen') || phase.includes('elimin')) return false;
-        if(phase.includes('fabric') || phase.includes('pint')) return true;
-      }
-      return !!(meta.en_fabricacion || meta.en_pintura);
-    }
-    function fabricacionItemIsWorkshopActive(item){
-      if(!item) return false;
-      const flow=item.flow&&typeof item.flow==='object'?item.flow:{};
-      return Number(flow.fab ?? flow.fabricacion ?? 0)>0 || Number(flow.pintura||0)>0;
-    }
-    function agendaLastWorkshopActivationMs(order){
-      let value=Number(order && order.workflowUpdatedAtMs || 0) || 0;
-      const history=Array.isArray(order && order.workflowHistoryV2)?order.workflowHistoryV2:[];
-      history.forEach(row=>{
-        const flow=cleanFlow(row && row.phaseFlowV2 || {});
-        const st=String(row && row.state || '').trim().toLowerCase();
-        const active=flow.fabricacion>0 || flow.pintura>0 || ['fabrication','fabricacion','painting','pintura','en_fabricacion','en_pintura'].includes(st);
-        if(active) value=Math.max(value,Number(row && row.atMs || 0)||0);
-      });
-      return value;
-    }
-    async function restoreStaleDeletedMarkerForActiveOrder(order){
-      // Se necesitan dos evidencias: Agenda activa y otra fuente del propio flujo
-      // (fila de Fabricacion o meta de Preparacion). Ademas, la confirmacion de
-      // Agenda debe ser posterior al deleted. Esto evita deshacer borrados reales.
-      if(!agendaIsWorkshopActive(order)) return false;
-      const prep=prepMetaForAgendaOrder(order);
-      const existing=findFabricacionItemForAgenda(order);
-      const corroborated = fabricacionItemIsWorkshopActive(existing) || !!(prep && prepMetaIsWorkshopActive(prep.meta));
-      if(!corroborated) return false;
-      if(typeof window.LDH_fabricacionRestoreDeletedRef !== 'function') return false;
-
-      const activeAtMs=agendaLastWorkshopActivationMs(order);
-      if(activeAtMs<=0) return false;
-      const candidates=[];
-      [prep && prep.ref, existing && (existing.ref || existing.referencia), order.reference, order.ref].forEach(value=>{
-        const ref=String(value||'').trim();
-        if(ref && !candidates.includes(ref)) candidates.push(ref);
-      });
-      for(const ref of candidates){
-        let isDeleted=false;
-        try{ isDeleted=!!(window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(_){ }
-        if(!isDeleted) continue;
-        try{
-          const restored=await window.LDH_fabricacionRestoreDeletedRef(ref,activeAtMs);
-          if(restored){
-            console.warn('[Fabricacion] recuperada marca deleted obsoleta',ref,'actividad posterior',activeAtMs);
-            return true;
-          }
-        }catch(error){
-          console.warn('[Fabricacion] no se pudo retirar deleted obsoleto',ref,error);
-        }
-      }
-      return false;
-    }
-    function buildFabricacionItemFromAgenda(order){
-      const prep=prepMetaForAgendaOrder(order);
-      const meta=prep && prep.meta || {};
-      const reference=String(prep && prep.ref || order.reference || order.ref || '').trim();
-      const central=agendaFlow(order);
-      let fab=Number(central.fabricacion||0), pintura=Number(central.pintura||0);
-      let almacen=Number(central.almacen||0), entregado=Number(central.entregado||0);
-      const total=Math.max(1,
-        Number(order.quantity||order.cantidad||order.unidades||order.uds||0)||0,
-        Number(meta.unidades||meta.uds||meta.total||meta.cantidad||0)||0,
-        fab+pintura+almacen+entregado
-      );
-      if(fab+pintura<=0){
-        const st=agendaState(order);
-        if(st.includes('paint') || st.includes('pint')) pintura=total;
-        else fab=total;
-      }
-      const phase=pintura>0 && fab<=0 ? 'pintura' : 'fabricacion';
-      return {
-        id: String(meta.pedido_uid || meta.pedido_id || order.id || ('AGENDA-'+reference)),
-        agendaOrderId:String(order.id||''), orderId:String(order.id||''),
-        ref:reference, referencia:reference,
-        concept:String(meta.concepto || meta.concept || order.description || order.concept || order.concepto || 'Sin concepto'),
-        concepto:String(meta.concepto || meta.concept || order.description || order.concept || order.concepto || 'Sin concepto'),
-        company:String(meta.empresa || meta.company || order.companyName || order.company || order.empresa || ''),
-        empresa:String(meta.empresa || meta.company || order.companyName || order.company || order.empresa || ''),
-        total, unidades:total, delivered:entregado,
-        status:'pendiente', estado:phase, fase:phase, tipo:'fabricacion',
-        keepInFab:true, hideFromFab:false, archived:false,
-        datePed:String(order.entryDate || meta.fecha_pedido || meta.datePed || '').trim(),
-        datePrev:String(order.deliveryDate || meta.fecha_entrega || meta.datePrev || '').trim(),
-        flow:{fab,fabricacion:fab,pintura,almacen,entregado},
-        unassignedBorrow:meta.unassignedBorrow || meta.unassigned_borrow || null,
-        notes:'Recuperado desde Agenda activa',
-        recoveredFromAgenda:true,
-        agendaUpdatedAtMs:Number(order.updatedAtMs||order.workflowUpdatedAtMs||0)||Date.now()
-      };
-    }
-    async function reconcileAgendaTerminalStates(publishClean=true){
-      if(!authReady || !window.App) return false;
-      try{
-        const snap = await getDocs(ordersCol);
-        const rows = snap.docs.map(d=>({id:d.id,...(d.data()||{})}));
-        const byId = new Map(rows.map(row=>[String(row.id||''),row]));
-        const byRef = new Map();
-        rows.forEach(row=>{
-          const r = String(row.reference || row.ref || '').trim();
-          if(!r) return;
-          if(!byRef.has(r)) byRef.set(r,[]);
-          byRef.get(r).push(row);
-        });
-
-        let changed = false;
-        let recovered = 0;
-        agendaTerminalRefs.clear();
-
-        // V7: Agenda + Preparacion son autoritativas cuando ambas coinciden en que
-        // una OT sigue activa. Antes de reconstruir, se retira cualquier marca deleted
-        // antigua que contradiga simultaneamente a esas dos fuentes.
-        for(const order of rows){
-          if(!agendaIsWorkshopActive(order)) continue;
-          if(await restoreStaleDeletedMarkerForActiveOrder(order)) changed = true;
-          if(findFabricacionItemForAgenda(order)) continue;
-          const item=buildFabricacionItemFromAgenda(order);
-          if(!item.ref) continue;
-          try{
-            if(window.LDH_isFabricacionDeletedRef && (window.LDH_isFabricacionDeletedRef(item.ref) || window.LDH_isFabricacionDeletedRef(String(order.reference||'')))) continue;
-          }catch(_){ }
-          window.App.upsertEveryPool(item);
-          recovered += 1;
-          changed = true;
-        }
-
-        // Tras recuperar las ausentes, Agenda tambien sigue siendo autoritativa
-        // para retirar de la vista las que ya son terminales.
-        const currentItems = window.App.allItems ? window.App.allItems() : [];
-        currentItems.forEach(item=>{
-          const ref = String(item && (item.ref||item.referencia) || '').trim();
-          if(!ref) return;
-          const id = String(item.agendaOrderId || item.orderId || '').trim();
-          let order = id ? byId.get(id) : null;
-          if(!order) order = newest(byRef.get(ref));
-          if(!order){
-            const code=canonicalWorkCode(ref);
-            order=rows.filter(row=>canonicalWorkCode(row.reference||row.ref)===code).sort((a,b)=>Number(b.updatedAtMs||0)-Number(a.updatedAtMs||0))[0] || null;
-          }
-          if(!order || !agendaIsTerminal(order)) return;
-          agendaTerminalRefs.add(ref);
-          if(applyAgendaTerminalToLocal(ref,order)) changed = true;
-        });
-
-        if(window.App.save) window.App.save(false, changed);
-        if(window.App.render) window.App.render();
-        if(recovered>0){
-          const el=document.getElementById('cloudStatus');
-          if(el){ el.textContent='Agenda recuperada · '+recovered+' trabajo'+(recovered===1?'':'s'); el.classList.add('ok'); }
-        }
-        if(changed && publishClean && window.LDH_fabricacionPublishNow){
-          setTimeout(()=>{ try{ window.LDH_fabricacionPublishNow(); }catch(e){} },300);
-        }
-        return changed;
-      }catch(error){
-        console.warn('[Fabricacion] reconciliacion activa/terminal con Agenda',error);
-        return false;
-      }
-    }
-    window.LDH_reconcileFabricacionWithAgenda = reconcileAgendaTerminalStates;
-    onAuthStateChanged(auth,async user=>{
+    onAuthStateChanged(auth,user=>{
       if(user){
         authReady=true;
         readyResolve(true);
-        await reconcileAgendaTerminalStates(true);
         const reconcile=delay=>setTimeout(()=>{
           try{ window.App?.syncAllWorkflow?.('fabricacion_reconciliacion'); }
           catch(error){ console.warn('[Workflow V2] reconciliación',error); }
@@ -1997,13 +1595,6 @@ setTimeout(hookApp, 1500);
       const flow=cleanFlow(payload.phaseFlowV2||payload.flow||current.phaseFlowV2||{});
       const preserveState=payload.preserveState===true;
       const currentState=String(current.workflowStateV2||current.workflowState||'').trim();
-      const currentStatus=String(current.status||'').trim().toLowerCase();
-      const currentStateNorm=currentState.toLowerCase().replace(/[\s-]+/g,'_');
-      const terminalCurrent=(currentStatus && currentStatus!=='pending') || ['finished','terminado','finalizado','almacen','en_almacen','delivered','entregado','cancelled','canceled','anulado','cancelado'].includes(currentStateNorm);
-      if(preserveState && terminalCurrent && (flow.fabricacion>0 || flow.pintura>0)){
-        console.warn('[Workflow V2] Se ignora reconciliacion antigua sobre orden terminal', reference);
-        return true;
-      }
       const state=preserveState && currentState
         ? currentState
         : stateFromFlow(flow,payload.state||payload.workflowStateV2||currentState);
@@ -2041,407 +1632,6 @@ setTimeout(hookApp, 1500);
 <!-- LDH_FAB_ENTREGA_SINCRONIZADA_V2_20260803 -->
 <!-- LDH_FABRICACION_ALMACEN_AUTORITATIVO_V3_20260803 -->
 
-<!-- LDH_FABRICACION_NO_RESUCITA_POR_TS_V1_20260810 -->
-<!-- LDH_FABRICACION_AGENDA_TERMINAL_AUTORITATIVA_V1_20260810 -->
-<!-- LDH_FABRICACION_SYNC_REVISION_SAFE_V5_20260810 -->
-<!-- LDH_FAB_COMPANY_FILTER_MASTER_ONLY_20260813 -->
-
-<script id="LDH_FAB_COMPANY_FILTER_NO_COMMON_V3_20260813">
-(function(){
-  const BUILD = 'FAB-COMPANY-FILTER-NO-STOCK-COMUN-V3-20260813';
-  function canon(v){
-    return String(v == null ? '' : v)
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g,' ')
-      .trim();
-  }
-  function isCommon(v){
-    const x = canon(v);
-    return x === 'stock comun' || x === 'stock comun global' || x === 'almacen comun' ||
-           x.includes('stock comun') || x.includes('almacen comun');
-  }
-  function purge(){
-    const sel = document.getElementById('companyFilter');
-    if(!sel) return;
-    let changed = false;
-    Array.from(sel.options || []).forEach(opt => {
-      if(isCommon(opt.value) || isCommon(opt.textContent)){
-        if(opt.selected) sel.value = '';
-        opt.remove();
-        changed = true;
-      }
-    });
-    if(isCommon(sel.value)){
-      sel.value = '';
-      changed = true;
-    }
-    sel.dataset.ldhCompanyFilterBuild = BUILD;
-    if(changed && window.App && typeof window.App.render === 'function'){
-      try{ window.App.render(); }catch(_){ }
-    }
-  }
-  function install(){
-    purge();
-    const sel = document.getElementById('companyFilter');
-    if(sel && window.MutationObserver){
-      const obs = new MutationObserver(() => purge());
-      obs.observe(sel,{childList:true,subtree:true,characterData:true});
-      window.__LDH_FAB_COMPANY_FILTER_OBSERVER__ = obs;
-    }
-    // Blindaje por si algun script sustituye el selector completo mas tarde.
-    let lastSel = sel;
-    window.__LDH_FAB_COMPANY_FILTER_GUARD__ = setInterval(()=>{
-      const current = document.getElementById('companyFilter');
-      if(current !== lastSel){
-        lastSel = current;
-        purge();
-        if(current && window.MutationObserver){
-          try{ window.__LDH_FAB_COMPANY_FILTER_OBSERVER__?.disconnect(); }catch(_){ }
-          const obs = new MutationObserver(() => purge());
-          obs.observe(current,{childList:true,subtree:true,characterData:true});
-          window.__LDH_FAB_COMPANY_FILTER_OBSERVER__ = obs;
-        }
-      }else{
-        purge();
-      }
-    },1200);
-    document.documentElement.dataset.ldhFabCompanyFilterBuild = BUILD;
-    console.info('[Fabricacion]', BUILD, 'STOCK COMUN excluido del selector');
-  }
-  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',install,{once:true});
-  else install();
-})();
-</script>
-<!-- LDH_FAB_COMPANY_FILTER_NO_COMMON_V3_20260813 -->
-<!-- LDH_FAB_RECUPERA_AGENDA_ACTIVA_V6_20260813 -->
-
-
-<script type="module" id="LDH_FAB_STOCK_CLOSE_ON_PAINT_V8_20260817">
-(async function(){
-  'use strict';
-  const BUILD = 'FAB-STOCK-CLOSE-ON-PAINT-V8-20260817';
-  const STOCK_KEY = 'ldh_v2_company_stock_v1';
-  const CHUNK_SIZE = 350000;
-  const firebaseConfig = {
-    apiKey: 'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',
-    authDomain: 'gestion-taller-stock.firebaseapp.com',
-    projectId: 'gestion-taller-stock',
-    storageBucket: 'gestion-taller-stock.firebasestorage.app',
-    messagingSenderId: '164944519480',
-    appId: '1:164944519480:web:bfa9173d22f88a3b56e1cd'
-  };
-
-  const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
-  const {getAuth,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-  const {getFirestore,doc,runTransaction,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
-
-  const APP_NAME = 'ldh-fabricacion-stock-close-v8';
-  let app = getApps().find(candidate => candidate && candidate.name === APP_NAME);
-  if(!app) app = initializeApp(firebaseConfig, APP_NAME);
-  const auth = getAuth(app);
-  const db = getFirestore(app);
-
-  function norm(value){
-    return String(value ?? '')
-      .toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/ø/g,'o')
-      .replace(/[^\w]+/g,' ')
-      .replace(/\s+/g,' ')
-      .trim();
-  }
-  function num(value){
-    const n = Number.parseFloat(String(value ?? 0).replace(',','.'));
-    return Number.isFinite(n) ? n : 0;
-  }
-  function parseStock(raw){
-    let value = raw;
-    for(let pass=0; pass<4; pass+=1){
-      if(typeof value === 'string'){
-        const s = value.trim();
-        if(!s) return null;
-        try{ value = JSON.parse(s); }catch(_){ return null; }
-        continue;
-      }
-      if(value && typeof value === 'object' && value[STOCK_KEY] != null){
-        value = value[STOCK_KEY];
-        continue;
-      }
-      break;
-    }
-    return value && typeof value === 'object' ? value : null;
-  }
-  function chunks(text){
-    const out=[];
-    for(let i=0;i<text.length;i+=CHUNK_SIZE) out.push(text.slice(i,i+CHUNK_SIZE));
-    return out.length ? out : [''];
-  }
-  function assignmentRef(row){
-    return String(row?.consumerRef ?? row?.jobRef ?? row?.ref ?? row?.reference ?? '').trim();
-  }
-  function sameRef(a,b){ return !!norm(a) && norm(a) === norm(b); }
-  function isLoan(row){
-    const type = norm(row?.assignmentType ?? row?.reason ?? row?.source ?? '');
-    if(row?.debtExempt === true || row?.returnRequired === false || type.includes('donacion')) return false;
-    return type.includes('otra empresa') || !!row?.toCompanyId;
-  }
-  function isCommon(row){
-    if(row?.sharedStock === true) return true;
-    const type = norm(row?.assignmentType ?? row?.reason ?? row?.source ?? '');
-    return type === 'stock comun' || type.includes('asignado desde stock comun') || type.includes('preparacion pedidos stock comun');
-  }
-  function isHardware(row){
-    return norm(row?.assignmentType ?? row?.reason ?? row?.source ?? '').includes('ferreteria');
-  }
-  function isActiveOperational(row){
-    if(!row || typeof row !== 'object') return false;
-    const status = norm(row.status ?? row.estado ?? 'activa');
-    const phase = norm(row.phase ?? row.fase ?? 'preparacion');
-    const closed = [
-      'consumida','consumido','liberada','liberado','cancelada','cancelado',
-      'anulada','anulado','cerrada','cerrado','devuelta','devuelto',
-      'consolidada','consolidado','cancelada prueba','cancelada_prueba'
-    ].includes(status);
-    return !closed && (phase === 'preparacion' || phase === 'fabricacion' || !phase);
-  }
-  function safeId(value){ return String(value ?? '').replace(/[^a-zA-Z0-9_-]+/g,'_'); }
-  function assignmentId(row, reference){
-    return String(row?.id ?? row?.assignmentId ?? `${row?.companyId ?? row?.empresaId ?? ''}_${row?.materialId ?? row?.matId ?? ''}_${reference}`);
-  }
-  function movementIsPhysicalOut(row){
-    const type = norm(row?.type ?? row?.tipo ?? '');
-    return ['salida','out','consumo','consumo terminal','prestamo','baja','retirada'].includes(type);
-  }
-  function alreadyConsumedByMovement(movements, row, reference, expectedMovementId){
-    const aId = assignmentId(row, reference);
-    const storedMovementId = String(row?.movementId ?? '').trim();
-    return (movements || []).some(m => {
-      const mid = String(m?.id ?? m?.movementId ?? '').trim();
-      if(expectedMovementId && mid === expectedMovementId) return true;
-      if(storedMovementId && mid === storedMovementId) return true;
-      const linkedAssignment = String(m?.assignmentId ?? '').trim();
-      if(linkedAssignment && linkedAssignment === aId && movementIsPhysicalOut(m)) return true;
-      return false;
-    });
-  }
-
-  async function ensureAuth(){
-    if(!auth.currentUser) await signInAnonymously(auth);
-    if(!auth.currentUser) throw new Error('Stock nube todavía no está autenticado.');
-    return true;
-  }
-
-  async function readRemoteStock(transaction, metaRef){
-    const metaSnap = await transaction.get(metaRef);
-    if(!metaSnap.exists()) throw new Error('No existe taller_data/stock.');
-    const meta = metaSnap.data() || {};
-    const total = Math.max(0, Number(meta.totalChunks || 0) || 0);
-    let packed = '';
-    if(total > 0){
-      for(let index=0; index<total; index+=1){
-        const chunkRef = doc(db,'taller_data','stock','chunks',String(index));
-        const chunkSnap = await transaction.get(chunkRef);
-        if(!chunkSnap.exists()) throw new Error(`Falta chunk remoto ${index}.`);
-        const chunk = chunkSnap.data() || {};
-        packed += String(chunk.part ?? chunk.data ?? chunk.payload ?? chunk.content ?? '');
-      }
-    }else{
-      const direct = meta[STOCK_KEY] ?? meta.payload ?? meta.data ?? meta.stock;
-      if(direct != null) packed = typeof direct === 'string' ? direct : JSON.stringify({[STOCK_KEY]:direct});
-    }
-    if(!packed) throw new Error('El paquete remoto de Stock está vacío.');
-    const outer = JSON.parse(packed);
-    const raw = outer?.[STOCK_KEY] ?? outer?.payload ?? outer?.data ?? outer?.stock ?? outer;
-    const stockDB = parseStock(raw);
-    if(!stockDB) throw new Error('El Stock remoto no tiene un formato válido.');
-    return stockDB;
-  }
-
-  async function closeAssignments(reference, options={}){
-    reference = String(reference ?? '').trim();
-    if(!reference) throw new Error('El trabajo no tiene referencia.');
-    await ensureAuth();
-    const targetPhase = options.phase === 'pintura' ? 'pintura' : 'fabricacion';
-
-    const result = await runTransaction(db, async transaction => {
-      const metaRef = doc(db,'taller_data','stock');
-      const remoteDB = await readRemoteStock(transaction, metaRef);
-      remoteDB.assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
-      remoteDB.movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
-      remoteDB.stock = Array.isArray(remoteDB.stock) ? remoteDB.stock : [];
-
-      const now = new Date().toISOString();
-      let consumedAssignments = 0;
-      let consumedQty = 0;
-      let movementsAdded = 0;
-
-      remoteDB.assignments.forEach(assignment => {
-        if(!sameRef(assignmentRef(assignment), reference)) return;
-        if(!isActiveOperational(assignment)) return;
-        if(isLoan(assignment) || isHardware(assignment)) return;
-
-        const qty = Math.max(0, num(assignment.qty ?? assignment.cantidad ?? assignment.asignado ?? 0));
-        if(qty <= 0) return;
-        const aId = assignmentId(assignment, reference);
-        const common = isCommon(assignment);
-        const expectedMovementId = (common ? 'mov_stock_comun_fabricacion_' : 'mov_stock_propio_fabricacion_') + safeId(aId);
-        const hasPhysicalMovement = alreadyConsumedByMovement(remoteDB.movements, assignment, reference, expectedMovementId);
-
-        if(!hasPhysicalMovement){
-          const companyId = String(assignment.companyId ?? assignment.empresaId ?? assignment.company ?? assignment.empresa ?? '');
-          const materialId = String(assignment.materialId ?? assignment.matId ?? assignment.material_id ?? '');
-
-          /* Pletina por milímetros: además del movimiento, se reduce el saldo físico explícito. */
-          const lengthRow = remoteDB.stock.find(row =>
-            String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? '') === companyId &&
-            String(row?.materialId ?? row?.matId ?? row?.material_id ?? '') === materialId &&
-            String(row?.lengthMode ?? '').toLowerCase() === 'mm'
-          );
-          if(lengthRow){
-            const before = Math.max(0, num(lengthRow.lengthPhysicalMm));
-            if(qty > before + 0.000001){
-              throw new Error(`Stock insuficiente para cerrar la pletina de ${reference}: ${before} mm físicos, ${qty} mm asignados.`);
-            }
-            lengthRow.lengthPhysicalMm = Math.max(0, before - qty);
-            lengthRow.lengthMode = 'mm';
-            lengthRow.lengthSource = 'pletina_mm_global';
-            lengthRow.lengthSchemaVersion = 64;
-            lengthRow.updatedAt = now;
-          }
-
-          remoteDB.movements.push({
-            id: expectedMovementId,
-            companyId,
-            materialId,
-            type:'salida',
-            tipo:'salida',
-            qty,
-            cantidad:qty,
-            date:now,
-            createdAt:now,
-            ref:reference,
-            jobRef:reference,
-            concept:assignment.concept ?? '',
-            reason:common ? 'consumo_stock_comun_al_mandar_fabricacion' : 'consumo_stock_propio_al_mandar_fabricacion',
-            source:'fabricacion_regulariza_stock_v8',
-            assignmentId:aId,
-            debtExempt:true,
-            returnRequired:false
-          });
-          movementsAdded += 1;
-          consumedQty += qty;
-        }
-
-        assignment.status = 'consumida';
-        assignment.estado = 'consumida';
-        assignment.phase = targetPhase;
-        assignment.fase = targetPhase;
-        assignment.consumedQty = qty;
-        assignment.consumedAt = assignment.consumedAt || now;
-        assignment.closedAt = now;
-        assignment.updatedAt = now;
-        assignment.movementId = expectedMovementId;
-        assignment.closedReason = targetPhase === 'pintura'
-          ? 'cierre_hierro_al_pasar_a_pintura_v8'
-          : 'regularizacion_hierro_en_fabricacion_v8';
-        consumedAssignments += 1;
-      });
-
-      if(!consumedAssignments){
-        return {remoteDB, consumedAssignments:0, consumedQty:0, movementsAdded:0};
-      }
-
-      remoteDB.updatedAt = now;
-      const packageObj = {
-        [STOCK_KEY]: JSON.stringify(remoteDB),
-        updatedAt: now,
-        schema:'ldh_stock_chunked_v2_full'
-      };
-      const parts = chunks(JSON.stringify(packageObj));
-      for(let index=0; index<parts.length; index+=1){
-        transaction.set(doc(db,'taller_data','stock','chunks',String(index)),{
-          part:parts[index],
-          index,
-          updatedAt:serverTimestamp()
-        });
-      }
-      transaction.set(metaRef,{
-        totalChunks:parts.length,
-        chunkSize:CHUNK_SIZE,
-        updatedAt:serverTimestamp(),
-        updatedAtISO:now,
-        key:STOCK_KEY,
-        rawCompanies:Array.isArray(remoteDB.companies) ? remoteDB.companies.length : 0,
-        rawMaterials:Array.isArray(remoteDB.materials) ? remoteDB.materials.length : 0,
-        rawStock:Array.isArray(remoteDB.stock) ? remoteDB.stock.length : 0,
-        rawMovements:remoteDB.movements.length,
-        rawReservations:Array.isArray(remoteDB.reservations) ? remoteDB.reservations.length : 0,
-        rawAssignments:remoteDB.assignments.length,
-        source:'fabricacion_regulariza_stock_v8'
-      },{merge:true});
-
-      return {remoteDB, consumedAssignments, consumedQty, movementsAdded};
-    });
-
-    if(result.consumedAssignments > 0){
-      const raw = JSON.stringify(result.remoteDB);
-      try{ localStorage.setItem(STOCK_KEY, raw); }catch(_){ }
-      try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(_){ }
-      try{ window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated')); }catch(_){ }
-      console.info('[Fabricación]', BUILD, reference, result);
-    }
-    return result;
-  }
-
-  window.LDH_fabricacionCerrarStockAlPasarAPintura = closeAssignments;
-
-  /*
-   * Regularización idempotente de trabajos que ya estaban en Fabricación/Pintura
-   * antes de instalar V8. Corrige reservas huérfanas como OT-260731-001 sin
-   * necesidad de volver a mover manualmente el pedido.
-   */
-  async function reconcileExisting(){
-    try{
-      await ensureAuth();
-      if(!window.App || typeof window.App.allItems !== 'function') return;
-      const refs = [];
-      const phases = new Map();
-      (window.App.allItems() || []).forEach(item => {
-        if(!item || item.deleted || item.archived) return;
-        const ref = String(item.ref || item.referencia || '').trim();
-        if(!ref || refs.includes(ref)) return;
-        const f = window.App.ensureFlow ? window.App.ensureFlow(item) : (item.flow || {});
-        const fab = num(f?.fab ?? f?.fabricacion);
-        const pint = num(f?.pintura);
-        if(fab + pint <= 0) return;
-        refs.push(ref);
-        phases.set(ref, pint > 0 && fab <= 0 ? 'pintura' : 'fabricacion');
-      });
-      let repaired = 0;
-      for(const ref of refs){
-        try{
-          const r = await closeAssignments(ref,{phase:phases.get(ref)});
-          repaired += Number(r?.consumedAssignments || 0);
-        }catch(error){
-          console.warn('[Fabricación] No se pudo regularizar Stock de', ref, error);
-        }
-      }
-      if(repaired > 0) console.info('[Fabricación]', BUILD, 'asignaciones regularizadas:', repaired);
-    }catch(error){
-      console.warn('[Fabricación] Regularización inicial de Stock no disponible', error);
-    }
-  }
-
-  document.documentElement.dataset.ldhFabStockCloseBuild = BUILD;
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded',()=>setTimeout(reconcileExisting,1800),{once:true});
-  }else{
-    setTimeout(reconcileExisting,1800);
-  }
-})();
-</script>
-<!-- LDH_FAB_STOCK_CLOSE_ON_PAINT_V8_20260817 -->
-
+<!-- LDH_FABRICACION_REFERENCIA_UNICA_V8_20260825 -->
 </body>
 </html>
