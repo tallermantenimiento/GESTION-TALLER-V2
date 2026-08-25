@@ -72,7 +72,7 @@
   <main class="wrap">
     <section class="hero">
       <h1><span class="head-icon" aria-hidden="true">🏭</span>Agenda de Fabricación</h1>
-      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3</b>.</p>
+      <p>Trabajos en fabricación y pintura. Grupos cerrados por defecto. <b>Build movimiento persistente · entrega sincronizada V3 · sync Cabina V9</b>.</p>
     </section>
 
     <div class="toolbar">
@@ -1633,5 +1633,204 @@ setTimeout(hookApp, 1500);
 <!-- LDH_FABRICACION_ALMACEN_AUTORITATIVO_V3_20260803 -->
 
 <!-- LDH_FABRICACION_REFERENCIA_UNICA_V8_20260825 -->
+<!-- LDH_FABRICACION_CABINA_SYNC_V9_20260825 -->
+
+<!-- LDH_FABRICACION_SYNC_REF_CABINA_V9_20260825 -->
+<script type="module" id="LDH_FABRICACION_SYNC_REF_CABINA_V9_20260825">
+(async function(){
+  'use strict';
+  if(window.__LDH_FAB_SYNC_REF_V9) return;
+  window.__LDH_FAB_SYNC_REF_V9 = true;
+
+  const FLOW_POOLS_V9=['deliveries','fabricacion','fab','trabajos'];
+  const DB_KEY_V9='ldh_db';
+  const OVERRIDE_KEY_V9='ldh_fabricacion_flow_overrides_v1';
+  const INBOX_KEY_V9='ldh_fabricacion_inbox_v1';
+  const firebaseConfigV9={
+    apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
+    authDomain:'gestion-taller-v2.firebaseapp.com',
+    projectId:'gestion-taller-v2',
+    storageBucket:'gestion-taller-v2.firebasestorage.app',
+    messagingSenderId:'888590823508',
+    appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'
+  };
+
+  const [{initializeApp,getApps},{getFirestore,doc,runTransaction,serverTimestamp}] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')
+  ]);
+  let app=getApps().find(a=>a&&a.options&&a.options.projectId===firebaseConfigV9.projectId);
+  if(!app) app=initializeApp(firebaseConfigV9,'ldh-fabricacion-ref-sync-v9');
+  const db=getFirestore(app);
+  const refDoc=doc(db,'taller_data','fabricacion');
+
+  const txt=v=>String(v==null?'':v).trim();
+  const n=v=>{const x=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const parse=(v,fb)=>{try{if(v&&typeof v==='object')return v;return v?JSON.parse(v):fb;}catch(_){return fb;}};
+  const refOf=o=>txt(o&&(o.ref||o.referencia||o.jobRef));
+  function key(value){
+    const raw=txt(value); if(!raw)return '';
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+    if(m)return 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
+    return 'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  }
+  const same=(a,b)=>{const ka=key(a),kb=key(b);return !!ka&&ka===kb;};
+  const prefRef=(a,b)=>{a=txt(a);b=txt(b);if(!a)return b;if(!b)return a;if(!same(a,b))return a;return b.length>a.length?b:a;};
+  function flow(o){
+    o=o&&typeof o==='object'?o:{}; const f=o.flow&&typeof o.flow==='object'?o.flow:{};
+    return {
+      fab:Math.max(0,n(f.fab??f.fabricacion??o.fab??o.enFabricacion)),
+      pintura:Math.max(0,n(f.pintura??f.paint??o.pintura??o.enPintura)),
+      almacen:Math.max(0,n(f.almacen??f.alm??o.almacen??o.enAlmacen)),
+      entregado:Math.max(0,n(f.entregado??o.delivered??o.entregado))
+    };
+  }
+  function canonical(f){f=f||{};return {fab:n(f.fab),fabricacion:n(f.fab),pintura:n(f.pintura),almacen:n(f.almacen),entregado:n(f.entregado)};}
+  function score(o){const f=flow(o);return f.fab+f.pintura*2+f.almacen*3+f.entregado*4;}
+  function phase(f){if(n(f.entregado)>0&&n(f.fab)+n(f.pintura)+n(f.almacen)<=0)return 'entregado';if(n(f.almacen)>0&&n(f.fab)+n(f.pintura)<=0)return 'almacen';if(n(f.pintura)>0)return 'pintura';return 'fabricacion';}
+  function localRows(){
+    try{return Array.isArray(window.App?.allItems?.())?window.App.allItems():[];}catch(_){return [];}
+  }
+  function bestLocal(reference){
+    const rows=localRows().filter(r=>same(refOf(r),reference)&&!r.deleted&&!r.archived);
+    if(!rows.length)return null;
+    return rows.slice().sort((a,b)=>score(b)-score(a))[0];
+  }
+  function allRemoteRows(ldh,reference){
+    const out=[];
+    FLOW_POOLS_V9.forEach(pool=>(Array.isArray(ldh&&ldh[pool])?ldh[pool]:[]).forEach(r=>{if(same(refOf(r),reference))out.push(r);}));
+    return out;
+  }
+  function bestRemote(ldh,reference){
+    const rows=allRemoteRows(ldh,reference); if(!rows.length)return null;
+    return rows.slice().sort((a,b)=>score(b)-score(a))[0];
+  }
+  function setPoolRef(ldh,pool,reference,local){
+    const arr=Array.isArray(ldh[pool])?ldh[pool].slice():[];
+    let merged=null; const keep=[];
+    for(const row of arr){
+      if(same(refOf(row),reference)){
+        if(!merged || score(row)>score(merged)) merged=row;
+      }else keep.push(row);
+    }
+    const chosen={...(merged||{}),...local};
+    const rr=prefRef(refOf(merged),refOf(local))||refOf(local)||reference;
+    const cf=canonical(flow(local));
+    chosen.ref=rr; chosen.referencia=rr; chosen.flow={...(chosen.flow||{}),...cf};
+    chosen.fase=phase(cf); chosen.estado=chosen.fase; chosen.status='pendiente'; chosen.archived=false;
+    chosen.keepInFab=cf.fab>0||cf.pintura>0; chosen.hideFromFab=!(cf.fab>0||cf.pintura>0);
+    chosen.updatedAt=new Date().toISOString();
+    keep.push(chosen); ldh[pool]=keep; return chosen;
+  }
+  function uniqueRefCount(ldh){
+    const ks=new Set(); FLOW_POOLS_V9.forEach(pool=>(Array.isArray(ldh[pool])?ldh[pool]:[]).forEach(r=>{const k=key(refOf(r));if(k)ks.add(k);}));return ks.size;
+  }
+  function readStore(k){
+    try{const v=localStorage.getItem(k);if(v!=null)return v;}catch(_){}
+    try{const v=sessionStorage.getItem(k);if(v!=null)return v;}catch(_){}
+    return '';
+  }
+  function localPrepFor(reference,prefix){
+    const stores=[localStorage,sessionStorage];
+    for(const st of stores){
+      try{
+        for(let i=0;i<st.length;i++){
+          const k=st.key(i)||''; if(!k.startsWith(prefix))continue;
+          const r=k.slice(prefix.length); if(same(r,reference)){const v=st.getItem(k);if(v)return {ref:r,raw:v};}
+        }
+      }catch(_){}
+    }
+    return null;
+  }
+  async function syncRef(reference,opts={}){
+    reference=txt(reference); if(!reference)return {changed:false,reason:'sin_ref'};
+    const local=bestLocal(reference); if(!local)return {changed:false,reason:'sin_local'};
+    const localScore=score(local);
+    return runTransaction(db,async tx=>{
+      const snap=await tx.get(refDoc);
+      const pkg=snap.exists()?{...(snap.data()||{})}:{};
+      const ldh=parse(pkg.ldh_db,{})||{}; FLOW_POOLS_V9.forEach(p=>{if(!Array.isArray(ldh[p]))ldh[p]=[];});
+      const remote=bestRemote(ldh,reference); const remoteScore=remote?score(remote):-1;
+      if(remote && remoteScore>=localScore-0.000001){
+        return {changed:false,reason:'remoto_igual_o_mas_avanzado',remoteScore,localScore};
+      }
+      let representative=null; FLOW_POOLS_V9.forEach(pool=>{representative=setPoolRef(ldh,pool,reference,local);});
+      ldh.updatedAt=new Date().toISOString();
+
+      let overrides=parse(pkg.overrides,{})||{};
+      Object.keys(overrides).forEach(r=>{if(same(r,reference))delete overrides[r];});
+      const rr=refOf(representative)||refOf(local)||reference; const cf=canonical(flow(local));
+      overrides[rr]={flow:cf,fase:phase(cf),estado:phase(cf),status:'pendiente',keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),archived:false,updatedAt:new Date().toISOString()};
+
+      let inbox=parse(pkg.inbox,[]); if(!Array.isArray(inbox))inbox=[];
+      inbox=inbox.filter(r=>!same(refOf(r),reference)); inbox.push(representative);
+
+      const prepMeta={...(pkg.prepMeta||{})}; const prepRecepcion={...(pkg.prepRecepcion||{})};
+      const pm=localPrepFor(reference,'prep_meta_'); if(pm)prepMeta[pm.ref]=pm.raw;
+      const pr=localPrepFor(reference,'prep_recepcion_'); if(pr)prepRecepcion[pr.ref]=pr.raw;
+      const at=new Date().toISOString();
+      const next={...pkg,ldh_db:JSON.stringify(ldh),overrides:JSON.stringify(overrides),inbox:JSON.stringify(inbox.slice(-200)),prepMeta,prepRecepcion,updatedAtISO:at,source:'fabricacion_ref_sync_v9'};
+      next.counts={refs:uniqueRefCount(ldh),deliveries:ldh.deliveries.length,fabricacion:ldh.fabricacion.length,fab:ldh.fab.length,trabajos:ldh.trabajos.length,prepMeta:Object.keys(prepMeta).length,prepRecepcion:Object.keys(prepRecepcion).length};
+      tx.set(refDoc,{...next,updatedAt:serverTimestamp()},{merge:false});
+      return {changed:true,reference:rr,remoteScore,localScore};
+    });
+  }
+
+  async function reconcilePainting(){
+    const refs=[];
+    for(const row of localRows()){
+      const r=refOf(row),f=flow(row); if(!r||row.deleted||row.archived||f.pintura<=0)continue;
+      const k=key(r); if(k&&!refs.some(x=>key(x)===k))refs.push(r);
+    }
+    let changed=0;
+    for(const r of refs){
+      try{const res=await syncRef(r,{startup:true});if(res&&res.changed)changed++;}
+      catch(e){console.warn('[Fabricación V9] reconciliar',r,e);}
+    }
+    if(changed){
+      try{window.App?.toast?.('Nube sincronizada con Cabina · '+changed+' trabajo'+(changed===1?'':'s'));}catch(_){}
+    }
+    return changed;
+  }
+
+  window.LDH_fabricacionSyncRefV9=syncRef;
+  window.LDH_fabricacionReconcileCabinaV9=reconcilePainting;
+
+  function hookMove(){
+    const app=window.App; if(!app||typeof app.move!=='function')return false;
+    if(app.__LDH_SYNC_REF_V9_HOOKED)return true;
+    const old=app.move;
+    app.move=function(refEnc,from,to){
+      let before=null; try{before=this.itemByRef(refEnc);}catch(_){}
+      const beforeFlow=before?JSON.stringify(canonical(flow(before))):'';
+      const out=old.apply(this,arguments);
+      let after=null; try{after=this.itemByRef(refEnc);}catch(_){}
+      const afterFlow=after?JSON.stringify(canonical(flow(after))):'';
+      if(after&&beforeFlow!==afterFlow){
+        const w={fab:1,pintura:2,almacen:3,entregado:4};
+        const fw=(from==='fab'?'fab':from),tw=(to==='fab'?'fab':to);
+        if((w[tw]||0)>(w[fw]||0)){
+          setTimeout(()=>syncRef(refOf(after)).catch(e=>console.warn('[Fabricación V9] sync movimiento',e)),120);
+          setTimeout(()=>syncRef(refOf(after)).catch(e=>console.warn('[Fabricación V9] reintento movimiento',e)),1500);
+        }
+      }
+      return out;
+    };
+    app.__LDH_SYNC_REF_V9_HOOKED=true;
+    return true;
+  }
+  if(!hookMove()){
+    const iv=setInterval(()=>{if(hookMove())clearInterval(iv);},120);
+    setTimeout(()=>clearInterval(iv),10000);
+  }
+
+  // Repara automáticamente trabajos que este PC ya muestra en Pintura pero el
+  // documento de Fabricación quedó un paso atrás. Nunca retrocede una OT remota.
+  setTimeout(()=>reconcilePainting().catch(e=>console.warn('[Fabricación V9] reconciliación inicial',e)),1400);
+  setTimeout(()=>reconcilePainting().catch(e=>console.warn('[Fabricación V9] reconciliación tardía',e)),4200);
+  console.info('[Fabricación V9] sincronización por OT hacia Cabina activa.');
+})();
+</script>
+
 </body>
 </html>

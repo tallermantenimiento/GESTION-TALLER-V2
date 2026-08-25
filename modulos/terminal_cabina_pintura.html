@@ -159,7 +159,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V62 &middot; PINTADO consume en Cabina; corregir un PINTADO devuelve la pieza a Pintura y restaura autom&aacute;ticamente pintura/disolvente en Stock. Referencia &uacute;nica por OT mantenida.</div>
+      <div class="sub">V63 &middot; PINTADO consume en Cabina; correcci&oacute;n devuelve pieza + consumibles. Si una OT nueva tarda en entrar en ldh_db, la terminal usa Inbox como respaldo y la rehidrata de forma segura. Referencia &uacute;nica por OT mantenida.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -351,7 +351,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V62-RETORNO-PINTURA-RESTAURA-STOCK-IDEMPOTENTE-20260825';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V63-RETORNO-PINTURA-RESTAURA-STOCK-IDEMPOTENTE-20260825';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -614,6 +614,16 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         const prev=map.get(key);
         map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
       });
+    });
+    // V63: el Inbox forma parte del paquete de Fabricacion y puede llegar antes
+    // que la copia de la misma OT dentro de ldh_db. No debe ocultarse una OT que
+    // ya tiene PINT > 0 solo por ese pequeño desfase de publicación.
+    const inboxFallback=safeParse(pkg.inbox,'[]');
+    (Array.isArray(inboxFallback)?inboxFallback:[]).forEach(raw=>{
+      const ref=refOf(raw); if(!ref || state.deletedRefs.has(ref)) return;
+      const key=workIdentityKey(ref); if(!key)return;
+      const prev=map.get(key);
+      map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
     });
     Object.keys(overrides).forEach(ref=>{
       const key=workIdentityKey(ref);
@@ -1846,12 +1856,15 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
   function currentFlowFromData(pkg,ldh,ref){
     const ov=safeParse(pkg.overrides,'{}')||{};
-    if(ov[ref] && ov[ref].flow) return flowOf({flow:ov[ref].flow});
+    const ovKey=Object.keys(ov).find(k=>sameRef(k,ref));
+    if(ovKey && ov[ovKey] && ov[ovKey].flow) return flowOf({flow:ov[ovKey].flow});
     for(const pool of FLOW_POOLS){
       const row=(Array.isArray(ldh[pool])?ldh[pool]:[]).find(x=>sameRef(refOf(x),ref));
       if(row) return flowOf(row);
     }
-    return null;
+    const inbox=safeParse(pkg.inbox,'[]');
+    const row=(Array.isArray(inbox)?inbox:[]).find(x=>sameRef(refOf(x),ref));
+    return row?flowOf(row):null;
   }
   function updateFlowRows(ldh,ref,nextFlow,meta){
     let representative=null;
@@ -1943,8 +1956,19 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const pkg={...(snap.data()||{})};
       const ldh=safeParse(pkg.ldh_db,'{}')||{};
       FLOW_POOLS.forEach(p=>{if(!Array.isArray(ldh[p]))ldh[p]=[];});
-      const current=currentFlowFromData(pkg,ldh,ref);
-      if(!current) throw new Error('No se encuentra la referencia en Fabricacion.');
+      let current=currentFlowFromData(pkg,ldh,ref);
+      if(current){
+        const existsInLdh=FLOW_POOLS.some(pool=>(Array.isArray(ldh[pool])?ldh[pool]:[]).some(x=>sameRef(refOf(x),ref)));
+        if(!existsInLdh){
+          const inbox=safeParse(pkg.inbox,'[]');
+          const seed=(Array.isArray(inbox)?inbox:[]).find(x=>sameRef(refOf(x),ref));
+          if(seed){
+            const seeded={...seed,ref:refOf(seed)||ref,referencia:refOf(seed)||ref,flow:canonicalFlow(flowOf(seed)),archived:false,deleted:false};
+            FLOW_POOLS.forEach(pool=>{if(!Array.isArray(ldh[pool]))ldh[pool]=[];ldh[pool].push({...seeded});});
+          }
+        }
+      }
+      if(!current) throw new Error('No se encuentra la referencia en Fabricacion ni en su Inbox de respaldo.');
       const before={...current};
       let next={...current}; let qty=0; let note=''; let type='';
       const reversalTargets=Array.isArray(payload&&payload.reversalTargets)?payload.reversalTargets.map(x=>({operationId:text(x&&x.operationId),qty:num(x&&x.qty)})).filter(x=>x.operationId&&x.qty>0):[];
@@ -3848,5 +3872,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 })();
 </script>
 <!-- LDH_TERMINAL_CABINA_V62_RETORNO_PINTURA_RESTAURA_STOCK_20260825 -->
+<!-- LDH_TERMINAL_CABINA_V63_INBOX_FALLBACK_20260825 -->
 </body>
 </html>
