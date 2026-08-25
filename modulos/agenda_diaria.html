@@ -1785,6 +1785,13 @@ body.ldh-module-standalone .wo-shell{
               <option value="">Cargando empresas de Stock…</option>
             </select>
           </div>
+          <div class="wo-field w6">
+            <label>Concepto para Cálculo <span style="color:#7dd3fc;font-size:10px;font-weight:900">· SOLO PC</span></label>
+            <select id="woCalculationConcept">
+              <option value="">— Selecciona concepto —</option>
+            </select>
+            <div style="color:#7f93b2;font-size:10px;margin-top:5px;line-height:1.25">Opcional. Si lo eliges, Cálculo se abrirá con este concepto y la cantidad ya preparados.</div>
+          </div>
           <div class="wo-field">
             <label>Cantidad a fabricar <span class="wo-required">*</span></label>
             <input type="number" id="woQuantity" min="1" step="1" value="1" required>
@@ -7917,6 +7924,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       companyId: normText(o.companyId),
       companyName: normText(o.companyName),
       quantity: Math.max(1, Number(o.quantity)||1),
+      calculationConcept: normText(o.calculationConcept || o.calcConcept),
       material: normText(o.material),
       description: normText(o.description),
       ironType: o.ironType === 'galvanizado' ? 'galvanizado' : 'negro',
@@ -8776,6 +8784,47 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return `OT-${code}-${String(max+1).padStart(3,'0')}`;
     },
 
+    calculationConceptNames(){
+      const names = [];
+      const add = rows => {
+        if(!Array.isArray(rows)) return;
+        rows.forEach(c=>{
+          const name = normText(c && (c.name || c.nombre));
+          if(name && !names.some(x=>normText(x).toLowerCase()===name.toLowerCase())) names.push(name);
+        });
+      };
+      try{ add(window.App && window.App.state && window.App.state.concepts); }catch(e){}
+      for(const key of ['ldh_db','TallerFlowDB']){
+        for(const storage of [localStorage,sessionStorage]){
+          try{
+            const raw = storage.getItem(key);
+            const db = raw ? JSON.parse(raw) : null;
+            if(db && Array.isArray(db.concepts)) add(db.concepts);
+          }catch(e){}
+        }
+      }
+      return names.sort((a,b)=>a.localeCompare(b,'es',{sensitivity:'base'}));
+    },
+
+    renderCalculationConceptOptions(selected){
+      const sel = document.getElementById('woCalculationConcept');
+      if(!sel) return;
+      const wanted = normText(selected);
+      const names = this.calculationConceptNames();
+      sel.innerHTML = '<option value="">— Selecciona concepto —</option>' +
+        names.map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join('');
+      if(wanted){
+        const hit = [...sel.options].find(o=>normText(o.value).toLowerCase()===wanted.toLowerCase());
+        if(hit) sel.value = hit.value;
+        else{
+          const option = new Option(wanted,wanted);
+          option.dataset.legacy = '1';
+          sel.add(option);
+          sel.value = wanted;
+        }
+      }
+    },
+
     openNew(){
       const entry = todayISO();
       document.getElementById('woEditId').value = '';
@@ -8784,6 +8833,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       document.getElementById('woDeliveryDate').value = entry;
       document.getElementById('woReference').value = this.previewReference(entry);
       document.getElementById('woQuantity').value = '1';
+      this.renderCalculationConceptOptions('');
       const nextPosition = this.sortedPending().length + 1;
       document.getElementById('woPriority').max = String(nextPosition);
       document.getElementById('woPriority').value = String(nextPosition);
@@ -8808,6 +8858,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       this.renderCompanyOptions(o.companyId,o.companyName);
       document.getElementById('woCompany').value = o.companyId;
       document.getElementById('woQuantity').value = String(o.quantity);
+      this.renderCalculationConceptOptions(o.calculationConcept || '');
       document.getElementById('woPriority').max = String(Math.max(1,this.sortedPending().length));
       document.getElementById('woPriority').value = String(o.priority);
       document.getElementById('woMaterial').value = o.material;
@@ -8878,6 +8929,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
         companyId:normText(companySelect?.value),
         companyName:normText(companyOption?.dataset?.name || companyOption?.textContent),
         quantity:Number(document.getElementById('woQuantity').value),
+        calculationConcept:normText(document.getElementById('woCalculationConcept')?.value),
         priority:Number(document.getElementById('woPriority').value),
         material:normText(document.getElementById('woMaterial').value),
         description:normText(document.getElementById('woDescription').value),
@@ -9081,6 +9133,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
       }
 
       const now = Date.now();
+      const simpleQty = Math.max(1,Math.round(Number(order.quantity)||1));
+      const simpleConcept = normText(order.calculationConcept);
       const payload = {
         version:1,
         source:'agenda_diaria',
@@ -9089,6 +9143,14 @@ window.ejecutarDevolucion = function(matId, maxQty){
         description:order.description,
         companyId:order.companyId,
         companyName:order.companyName,
+        // V20 PC -> Cálculo: la cantidad de la OT sí viaja siempre.
+        quantity:simpleQty,
+        cantidad:simpleQty,
+        unidades:simpleQty,
+        // Solo existe en Agenda PC. Informativa no necesita ni recibe este selector.
+        calculationConcept:simpleConcept,
+        concept:simpleConcept,
+        concepto:simpleConcept,
         createdAtMs:now,
         expiresAtMs:now + 24 * 60 * 60 * 1000
       };
@@ -10801,4 +10863,10 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 </script>
 
 <!-- LDH_AGENDA_FASES_DEDUP_Y_TOPE_V20_20260814 -->
+
+<!-- LDH_AGENDA_SIMPLE_CONCEPT_QTY_HANDOFF_V20_20260825 -->
+<script id="LDH_AGENDA_SIMPLE_CONCEPT_QTY_HANDOFF_V20_MARKER">
+window.LDH_AGENDA_SIMPLE_CONCEPT_QTY_HANDOFF_V20='AGENDA-PC-CONCEPTO-CANTIDAD-A-CALCULO-20260825';
+console.info('[Agenda V20] Órdenes simples: concepto opcional + cantidad viajan a Cálculo. Informativa no se modifica.');
+</script>
 </body></html>
