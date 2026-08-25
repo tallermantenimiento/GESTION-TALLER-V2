@@ -135,6 +135,16 @@
   .check input{width:auto;}
   .maint-stat{display:flex; gap:12px; margin-bottom:12px; padding:10px; background:rgba(245,158,11,.1); border:1px solid rgba(245,158,11,.3); border-radius:10px; color:#fbbf24; font-size:13px;}
 
+  .audit-note{padding:10px 12px;border:1px solid rgba(56,189,248,.28);background:rgba(14,116,144,.12);border-radius:10px;color:#cdeffc;font-size:12px;margin:10px 0}
+  .repair-case{border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.06);border-radius:12px;padding:10px;margin-top:8px}
+  .repair-case.closed{border-color:rgba(100,116,139,.28);background:rgba(51,65,85,.12)}
+  .repair-case .case-title{font-weight:800;margin-bottom:4px}
+  .kpi-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}
+  .kpi-card{border:1px solid var(--line);background:rgba(15,23,42,.78);border-radius:12px;padding:10px 12px;cursor:pointer;text-align:left;color:var(--txt)}
+  .kpi-card b{display:block;font-size:24px;line-height:1;margin-top:4px}.kpi-card small{color:var(--mut);font-size:11px}
+  .kpi-card.active{outline:2px solid rgba(34,197,94,.45)}
+  @media(max-width:900px){.kpi-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
   /* ===== MODO TABLET / TACTIL (NO AFECTA A PC) ===== */
   @media (hover: none) and (pointer: coarse) {
     body { -webkit-tap-highlight-color: transparent; }
@@ -240,7 +250,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Préstamos</h1>
+      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V15 · trazabilidad de compras, averías y bajas</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -258,6 +268,13 @@
 </header>
 
 <main>
+  <div class="kpi-strip" id="kpiStrip">
+    <button class="kpi-card" data-kpi="all"><small>Herramientas activas</small><b id="kpiAll">0</b></button>
+    <button class="kpi-card" data-kpi="inuse"><small>En uso</small><b id="kpiUse">0</b></button>
+    <button class="kpi-card" data-kpi="overdue"><small>Retrasadas</small><b id="kpiOverdue">0</b></button>
+    <button class="kpi-card" data-kpi="repair"><small>En reparación</small><b id="kpiRepair">0</b></button>
+    <button class="kpi-card" data-kpi="empty"><small>Sin unidades libres</small><b id="kpiEmpty">0</b></button>
+  </div>
   <div class="grid">
     <section class="card">
       <h2>Inventario</h2>
@@ -381,8 +398,8 @@ function processImage(file, callback) {
   reader.readAsDataURL(file);
 }
 
-let db = { tools: [], history: [], library: null, familyOrder: [], operators: [] }; 
-let cfg = { warnDays: 7, dangerDays: 30, familyOpen: {}, floatingPos: null };
+let db = { schemaVersion:15, tools: [], history: [], library: null, familyOrder: [], operators: [] };
+let cfg = { warnDays: 7, dangerDays: 30, familyOpen: {}, floatingPos: null, inventoryFilter:"all", historyHiddenBefore:"" };
 let selected = new Set();
 let dragSrcIndex = null; 
 let draggedIcon = null;  
@@ -533,79 +550,116 @@ const DEFAULT_LIB = {
   "Mis Iconos": []
 };
 
-function loadAll(){
-  try{ const raw = localStorage.getItem(DB_KEY); if(raw) db = JSON.parse(raw); }catch(_){ db = {tools:[],history:[], library:null}; }
+function dateMs(v){ const n=Date.parse(v||""); return Number.isFinite(n)?n:0; }
+function activeLoansOf(t){ return (t.loans||[]).filter(l=>String(l.status||"active")!=="closed" && Number(l.qty||0)>0); }
+function isLoanOverdue(l){
+  if(!l) return false;
+  if(l.dueAt){ const due=new Date(String(l.dueAt).slice(0,10)+"T23:59:59"); return Date.now()>due.getTime(); }
+  return daysSince(l.outAt) >= cfg.dangerDays;
+}
+function ensureOperatorName(name){
+  const n=normOp(name); if(!n) return "";
+  if(!Array.isArray(db.operators)) db.operators=[];
+  if(!db.operators.some(o=>normOp(o.name)===n)) db.operators.push({id:uid(),name:n,phone:"",dept:"",updatedAt:nowIso()});
+  return n;
+}
+function inferFamilyByIcon(icon){
+  const key=String(icon||"").trim();
+  if(!key) return "Sin familia";
+  for(const [fam,arr] of Object.entries(db.library||{})) if(Array.isArray(arr)&&arr.includes(key)) return fam;
+  return "Sin familia";
+}
+function recalcMaintenance(t){
+  const open=(t.repairCases||[]).filter(c=>String(c.status||"open")!=="closed" && Number(c.qty||((c.serials||[]).length)||0)>0);
+  if(t.mode==="serial"){
+    const set=new Set(); open.forEach(c=>(c.serials||[]).forEach(x=>set.add(x)));
+    t.maintSerials=[...set]; t.maintQty=0;
+  }else{
+    t.maintQty=open.reduce((a,c)=>a+Number(c.qty||0),0); t.maintSerials=[];
+  }
+}
+function familyOptionsHtml(selected){
+  const fams=[...new Set([...(db.familyOrder||[]),...Object.keys(db.library||{}),"Sin familia"])];
+  return fams.map(f=>`<option value="${esc(f)}" ${f===selected?'selected':''}>${esc(f)}</option>`).join('');
+}
+function eventAt(h){ return h?.inAt||h?.at||h?.outAt||h?.createdAt||""; }
+function historyTypeLabel(type){
+  return ({OUT:"Préstamo",IN:"Devolución",XFER:"Traspaso",REPAIR_IN:"A reparación",REPAIR_OUT:"Reparada",WRITE_OFF:"Baja / no reparable",STOCK_IN:"Entrada Compras",STOCK_ADJUST:"Ajuste stock",CREATE:"Alta",ARCHIVE:"Archivada",RESTORE:"Restaurada"})[type]||type||"Movimiento";
+}
 
-  if(!db || !Array.isArray(db.tools)) db = {tools:[],history:[], library:null};
+function loadAll(){
+  try{ const raw = localStorage.getItem(DB_KEY); if(raw) db = JSON.parse(raw); }catch(_){ db = {schemaVersion:15,tools:[],history:[],library:null,familyOrder:[],operators:[]}; }
+  if(!db || !Array.isArray(db.tools)) db = {schemaVersion:15,tools:[],history:[],library:null,familyOrder:[],operators:[]};
+  if(!Array.isArray(db.history)) db.history=[];
   if(!db.library) db.library = JSON.parse(JSON.stringify(DEFAULT_LIB));
   if(!db.library["Mis Iconos"]) db.library["Mis Iconos"] = [];
+  if(!Array.isArray(db.familyOrder)) db.familyOrder = [];
+  if(!Array.isArray(db.operators)) db.operators=[];
 
   for(const t of db.tools){
-    if(!Array.isArray(t.loans)) t.loans = [];
-    if(!Array.isArray(t.serials)) t.serials = [];
-    if(!Array.isArray(t.maintSerials)) t.maintSerials = [];
-    if(typeof t.maintQty !== 'number') t.maintQty = 0;
-    if(typeof t.stock !== 'number') t.stock = 0;
-    if(typeof t.archived !== 'boolean') t.archived = false;
-    for(const l of (t.loans||[])){
-      if(!l.operator) l.operator = "";
-      if(!l.pickupBy) l.pickupBy = l.operator;
+    if(!Array.isArray(t.loans)) t.loans=[];
+    if(!Array.isArray(t.serials)) t.serials=[];
+    if(!Array.isArray(t.maintSerials)) t.maintSerials=[];
+    if(!Array.isArray(t.repairCases)) t.repairCases=[];
+    if(typeof t.maintQty!=="number") t.maintQty=0;
+    if(typeof t.stock!=="number") t.stock=0;
+    if(typeof t.archived!=="boolean") t.archived=false;
+    if(!t.family) t.family=inferFamilyByIcon(t.icon);
+    if(!t.kind) t.kind="reparable";
+    const ts=t.updatedAt||t.createdAt||nowIso();
+    if(!t.createdAt) t.createdAt=ts;
+    if(!t.metaUpdatedAt) t.metaUpdatedAt=ts;
+    if(!t.stockUpdatedAt) t.stockUpdatedAt=ts;
+    for(const l of t.loans){
+      if(!l.operator) l.operator="";
+      if(!l.pickupBy) l.pickupBy=l.operator;
+      if(!l.status) l.status=Number(l.qty||0)>0?"active":"closed";
+      if(typeof l.originalQty!=="number") l.originalQty=Number(l.qty||0);
+      if(!Array.isArray(l.originalSerials)) l.originalSerials=(l.serials||[]).slice();
+      if(!l.updatedAt) l.updatedAt=l.closedAt||l.outAt||ts;
     }
+    if(t.repairCases.length===0){
+      const legacyQty=t.mode==="serial"?(t.maintSerials||[]).length:Number(t.maintQty||0);
+      if(legacyQty>0){
+        t.repairCases.push({id:"legacy_"+t.id,qty:legacyQty,serials:(t.maintSerials||[]).slice(),returnedBy:"",reason:"Reparación existente antes de la trazabilidad V15",openedAt:ts,updatedAt:ts,status:"open",legacy:true});
+      }
+    }
+    t.repairCases.forEach(c=>{ if(!c.status) c.status="open"; if(!c.updatedAt) c.updatedAt=c.closedAt||c.openedAt||ts; if(typeof c.qty!=="number") c.qty=(c.serials||[]).length; });
+    recalcMaintenance(t);
   }
 
-  if(!Array.isArray(db.familyOrder)) db.familyOrder = [];
+  if(db.operators.length===0){
+    const tempSet=new Set();
+    [...db.history,...db.tools.flatMap(t=>t.loans)].forEach(item=>{ [item.operator,item.pickupBy,item.returnedBy,item.toOperator,item.fromOperator,item.receivedBy,item.deliveredBy].forEach(n=>{ const x=normOp(n); if(x) tempSet.add(x); }); });
+    tempSet.forEach(name=>db.operators.push({id:uid(),name,phone:"",dept:"",updatedAt:nowIso()}));
+  }
+  db.schemaVersion=15;
   syncFamilyOrder();
-
-  if(!Array.isArray(db.operators)){
-      db.operators = [];
-      const tempSet = new Set();
-      [...db.history, ...db.tools.flatMap(t=>t.loans)].forEach(item => {
-          if(item.operator) tempSet.add(item.operator.trim());
-      });
-      tempSet.forEach(name => {
-         if(name) db.operators.push({ id: uid(), name: name, phone: "", dept: "" });
-      });
-  }
-
-  try{ const rawC = localStorage.getItem(CFG_KEY); if(rawC) cfg = {...cfg, ...JSON.parse(rawC)}; }catch(_){}
-  if(cfg.warnHours) { cfg.warnDays = 7; delete cfg.warnHours; }
-  if(cfg.dangerHours) { cfg.dangerDays = 30; delete cfg.dangerHours; }
+  try{ const rawC=localStorage.getItem(CFG_KEY); if(rawC) cfg={...cfg,...JSON.parse(rawC)}; }catch(_){}
+  if(cfg.warnHours){ cfg.warnDays=7; delete cfg.warnHours; }
+  if(cfg.dangerHours){ cfg.dangerDays=30; delete cfg.dangerHours; }
+  if(!cfg.inventoryFilter) cfg.inventoryFilter="all";
+  if(!cfg.historyHiddenBefore) cfg.historyHiddenBefore="";
 }
 
 function syncFamilyOrder(){
-    const currentKeys = Object.keys(db.library);
-    currentKeys.forEach(k => {
-        if(!db.familyOrder.includes(k)) db.familyOrder.push(k);
-    });
-    db.familyOrder = db.familyOrder.filter(k => currentKeys.includes(k) || k === "Sin familia");
+  const currentKeys=Object.keys(db.library||{});
+  currentKeys.forEach(k=>{ if(!db.familyOrder.includes(k)) db.familyOrder.push(k); });
+  db.familyOrder=db.familyOrder.filter(k=>currentKeys.includes(k)||k==="Sin familia");
 }
 
 function saveAll(){
-  localStorage.setItem(DB_KEY, JSON.stringify(db));
-  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+  db.schemaVersion=15;
+  db.updatedAt=nowIso();
+  localStorage.setItem(DB_KEY,JSON.stringify(db));
+  localStorage.setItem(CFG_KEY,JSON.stringify(cfg));
 }
 
-function toolsInUseCount(t){ return (t.loans||[]).reduce((a,l)=>a + (l.qty||0), 0); }
-function toolsInMaintCount(t){ 
-  if(t.mode==="serial") return (t.maintSerials||[]).length;
-  return (t.maintQty||0);
-}
-function toolsFreeQty(t){ 
-  const total = t.stock || 0;
-  const used = toolsInUseCount(t);
-  const maint = toolsInMaintCount(t);
-  return Math.max(0, total - used - maint); 
-}
-function isCritical(t){
-  const free = toolsFreeQty(t);
-  return free <= 0 || free <= Math.max(1, Math.floor((t.stock||0)*0.20));
-}
-
-function daysSince(iso){ 
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const days = diffMs / (1000 * 60 * 60 * 24);
-  return Math.max(0, days);
-}
+function toolsInUseCount(t){ return activeLoansOf(t).reduce((a,l)=>a+Number(l.qty||0),0); }
+function toolsInMaintCount(t){ recalcMaintenance(t); return t.mode==="serial"?(t.maintSerials||[]).length:Number(t.maintQty||0); }
+function toolsFreeQty(t){ return Math.max(0,Number(t.stock||0)-toolsInUseCount(t)-toolsInMaintCount(t)); }
+function isCritical(t){ const free=toolsFreeQty(t); return free<=0||free<=Math.max(1,Math.floor((t.stock||0)*0.20)); }
+function daysSince(iso){ const diffMs=Date.now()-new Date(iso).getTime(); const days=diffMs/(1000*60*60*24); return Math.max(0,Number.isFinite(days)?days:0); }
 
 function hydrateOperators(){
   dlOps.innerHTML = "";
@@ -624,20 +678,21 @@ function activeTools(){ return (db.tools||[]).filter(t=>!t.archived); }
 function archivedTools(){ return (db.tools||[]).filter(t=>t.archived); }
 
 function updateStatus(){
-  const total = activeTools().length;
-  const archivadas = archivedTools().length;
-  const activeLoans = activeTools().reduce((a,t)=>a + ((t.loans||[]).length), 0);
-  const inMaint = activeTools().reduce((a,t)=>a + toolsInMaintCount(t), 0);
-  statusPill.textContent = `Items: ${total} · Activos: ${activeLoans} · Reparación: ${inMaint}${archivadas ? ' · Archivadas: '+archivadas : ''}`;
+  const total=activeTools().length;
+  const archivadas=archivedTools().length;
+  const activeLoans=activeTools().reduce((a,t)=>a+activeLoansOf(t).length,0);
+  const inMaint=activeTools().reduce((a,t)=>a+toolsInMaintCount(t),0);
+  const overdue=activeTools().reduce((a,t)=>a+activeLoansOf(t).filter(isLoanOverdue).length,0);
+  const empty=activeTools().filter(t=>toolsFreeQty(t)<=0).length;
+  statusPill.textContent=`Items: ${total} · Activos: ${activeLoans} · Retrasados: ${overdue} · Reparación: ${inMaint}${archivadas?' · Archivadas: '+archivadas:''}`;
+  const map={kpiAll:total,kpiUse:activeLoans,kpiOverdue:overdue,kpiRepair:inMaint,kpiEmpty:empty};
+  Object.entries(map).forEach(([id,v])=>{const el=$(id); if(el) el.textContent=String(v);});
+  document.querySelectorAll('[data-kpi]').forEach(b=>b.classList.toggle('active',b.dataset.kpi===cfg.inventoryFilter));
 }
-
 function familyOfTool(t){
-  const icon=(t.icon||"").trim();
-  if(!icon) return "Sin familia";
-  for(const [fam, arr] of Object.entries(db.library||{})){
-    if(Array.isArray(arr) && arr.includes(icon)) return fam;
-  }
-  return "Sin familia";
+  const fam=normName(t&&t.family);
+  if(fam && (fam==="Sin familia" || Object.prototype.hasOwnProperty.call(db.library||{},fam))) return fam;
+  return inferFamilyByIcon(t&&t.icon);
 }
 
 function render(){
@@ -648,6 +703,7 @@ function render(){
   $("invEmpty").style.display = activeTools().length ? "none" : "block";
   const sort = $("sortInv").value;
   const search = normName($("invSearch").value).toLowerCase();
+  const invFilter = cfg.inventoryFilter || "all";
 
   let list = [];
   if (sort === "manual") {
@@ -663,9 +719,11 @@ function render(){
       });
   }
 
-  if(search) {
-      list = list.filter(t => t.name.toLowerCase().includes(search));
-  }
+  if(search) list=list.filter(t=>t.name.toLowerCase().includes(search));
+  if(invFilter==="inuse") list=list.filter(t=>toolsInUseCount(t)>0);
+  if(invFilter==="overdue") list=list.filter(t=>activeLoansOf(t).some(isLoanOverdue));
+  if(invFilter==="repair") list=list.filter(t=>toolsInMaintCount(t)>0);
+  if(invFilter==="empty") list=list.filter(t=>toolsFreeQty(t)<=0);
 
   invTools.innerHTML = "";
   const famBuckets = {};
@@ -749,16 +807,17 @@ function render(){
           <div style="flex:1;min-width:140px">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
               <div class="name">${esc(t.name)}</div>
-              <div class="kpis">${used?`<span class="pill warn">En uso ${used}</span>`:""}${maint?`<span class="pill danger">Reparación ${maint}</span>`:""}</div>
+              <div class="kpis">${t.kind==="consumable"?`<span class="pill">Consumible</span>`:""}${used?`<span class="pill warn">En uso ${used}</span>`:""}${maint?`<span class="pill danger">Reparación ${maint}</span>`:""}</div>
             </div>
             <div class="meta">Stock: <b>${t.stock}</b> · Libres: <b>${free}</b></div>
             <div class="bar ${barClass}"><i style="width:${pct}%;"></i></div>
           </div>
           <div class="row" style="gap:6px">
             <button class="btn primary" type="button" onclick="openToolFicha('${t.id}')">Ver</button>
-            <button class="btn" type="button" onclick="openEdit('${t.id}')">Editar</button>
+            <button class="btn" type="button" onclick="openPurchaseEntry('${t.id}')">+ Entrada</button>
             <button class="btn" type="button" onclick="openLoanAction('${t.id}')">Prestar</button>
-            <button class="btn" type="button" onclick="openMaintManager('${t.id}')">Reparación</button>
+            <button class="btn" type="button" onclick="openMaintManager('${t.id}')">Avería / reparación</button>
+            <button class="btn" type="button" onclick="openEdit('${t.id}')">Editar</button>
             <button class="btn danger" type="button" onclick="deleteTool('${t.id}')">Archivar</button>
           </div>
         </div>
@@ -775,7 +834,7 @@ function render(){
   let totalLoans = 0;
 
   activeTools().forEach(t => {
-    (t.loans||[]).forEach(l => {
+    activeLoansOf(t).forEach(l => {
       const op = normOp(l.operator) || "—";
       if(!opBuckets[op]) opBuckets[op] = [];
       opBuckets[op].push({tool:t, loan:l});
@@ -826,8 +885,9 @@ function render(){
     });
 
     for(const {tool, loan} of opBuckets[op]){
-      const d = daysSince(loan.outAt);
-      const st = (d >= cfg.dangerDays) ? "dang" : (d >= cfg.warnDays ? "warn" : "ok");
+      const d=daysSince(loan.outAt);
+      const overdue=isLoanOverdue(loan);
+      const st=overdue?"dang":(d>=cfg.warnDays?"warn":"ok");
       const titleEx = loan.variant ? `(${esc(loan.variant)})` : "";
       const pickup = normOp(loan.pickupBy || loan.operator);
       const pickupLine = pickup && pickup !== op ? ` · Recoge: <b>${esc(pickup)}</b>` : "";
@@ -839,7 +899,7 @@ function render(){
           <div class="sp">
             <div class="title">${renderIcon(tool.icon)} ${esc(tool.name)} ${titleEx} · <span class="mono">x${loan.qty}</span></div>
             <p class="sub">Para: <b>${esc(op)}</b>${pickupLine} · Zona: ${esc(loan.zone||"—")}</p>
-            <p class="sub">Salida: ${new Date(loan.outAt).toLocaleDateString()} · Antigüedad: ${d.toFixed(1)} días</p>
+            <p class="sub">Salida: ${new Date(loan.outAt).toLocaleDateString("es-ES")} · Antigüedad: ${d.toFixed(1)} días${loan.dueAt?` · Prevista: <b>${new Date(String(loan.dueAt).slice(0,10)+"T12:00:00").toLocaleDateString("es-ES")}</b>${overdue?" · ⚠️ RETRASADA":""}`:""}</p>
             ${loan.mode==="serial" ? `<p class="sub mono">Series: ${(loan.serials||[]).join(", ")}</p>` : ""}
             ${loan.notes ? `<p class="sub">📝 ${esc(loan.notes)}</p>` : ""}
           </div>
@@ -1015,6 +1075,8 @@ function handleToolDrop(e, targetId){
 
         if(srcIdx > -1 && tgtIdx > -1){
             const [item] = db.tools.splice(srcIdx, 1);
+            const targetTool = db.tools[Math.max(0, Math.min(tgtIdx, db.tools.length-1))];
+            if(targetTool && targetTool.family && item.family !== targetTool.family){ item.family = targetTool.family; item.metaUpdatedAt = nowIso(); item.updatedAt = item.metaUpdatedAt; }
             db.tools.splice(tgtIdx, 0, item);
             saveAll();
             render();
@@ -1025,70 +1087,55 @@ function handleToolDrop(e, targetId){
 function openNew(){
   showModal("Nueva herramienta", `
     <div class="form">
-      <div><label>Nombre</label><input id="tName" placeholder="Ej. Llave Fija"/></div>
+      <div><label>Nombre</label><input id="tName" placeholder="Ej. Taladro, broca Ø10, punta PH2..."/></div>
+      <div><label>Familia</label><select id="tFamily">${familyOptionsHtml("Sin familia")}</select></div>
       <div><label>Icono</label><div style="display:flex;gap:5px"><input id="tIcon" placeholder="Ej. 🔧" style="flex:1"/><button class="btn" type="button" id="btnPickIcon">📚</button></div></div>
-      <div><label>Stock Total</label><input id="tStock" inputmode="numeric" placeholder="Cantidad comprada"/></div>
+      <div><label>Gestión</label><select id="tKind"><option value="reparable">Herramienta reparable</option><option value="consumable">Consumible / desgaste</option></select></div>
+      <div><label>Stock inicial</label><input id="tStock" inputmode="numeric" placeholder="Cantidad disponible"/></div>
       <div><label>Modo</label><select id="tMode"><option value="qty">Cantidad</option><option value="serial">Por Serie</option></select></div>
-      <div><label>Series (si aplica)</label><textarea id="tSerials" placeholder="Una por línea" disabled></textarea></div>
+      <div style="grid-column:1/-1"><label>Series (si aplica)</label><textarea id="tSerials" placeholder="Una por línea" disabled></textarea></div>
     </div>
-  `, [
-    {text:"Cancelar", className:"btn", onClick: closeModal},
-    {text:"Guardar", className:"btn primary", onClick: ()=>{
-      const name = normName($("tName").value);
-      if(!name) return alert("Nombre obligatorio");
-      const icon = $("tIcon").value;
-      const mode = $("tMode").value;
-      let stock = clampInt($("tStock").value,0,9999);
-      let serials = [];
-      if(mode==="serial"){
-        serials = $("tSerials").value.split("\n").map(normName).filter(Boolean);
-        if(!serials.length) return alert("Indica las series");
-        stock = serials.length;
-      } else {
-        if(stock===null) return alert("Stock inválido");
-      }
-      db.tools.push({id:uid(), name, icon, stock, mode, serials, maintQty:0, maintSerials:[], notes:"", loans:[]});
+  `,[
+    {text:"Cancelar",className:"btn",onClick:closeModal},
+    {text:"Guardar",className:"btn primary",onClick:()=>{
+      const name=normName($("tName").value); if(!name) return alert("Nombre obligatorio");
+      const icon=$("tIcon").value; const mode=$("tMode").value; const family=$("tFamily").value||"Sin familia"; const kind=$("tKind").value||"reparable";
+      let stock=clampInt($("tStock").value,0,9999); let serials=[];
+      if(mode==="serial"){ serials=$("tSerials").value.split("\n").map(normName).filter(Boolean); serials=[...new Set(serials)]; if(!serials.length) return alert("Indica las series"); stock=serials.length; }
+      else if(stock===null) return alert("Stock inválido");
+      const at=nowIso(); const t={id:uid(),name,icon,family,kind,stock,mode,serials,maintQty:0,maintSerials:[],repairCases:[],notes:"",loans:[],createdAt:at,updatedAt:at,metaUpdatedAt:at,stockUpdatedAt:at};
+      db.tools.push(t); db.history.push({id:uid(),type:"CREATE",toolId:t.id,toolName:t.name,qty:stock,at,notes:"Alta de herramienta/material"});
       saveAll(); closeModal(); render();
     }}
   ]);
-  $("tMode").addEventListener("change", e => $("tSerials").disabled = (e.target.value!=="serial"));
-  setTimeout(()=>{
-      const btn = $("btnPickIcon");
-      if(btn) btn.onclick = () => openCatalogManager(true, (val) => { 
-        const inp = $("tIcon"); 
-        inp.value = (inp.value + " " + val).trim();
-      });
-  }, 100);
+  $("tMode").addEventListener("change",e=>$("tSerials").disabled=(e.target.value!=="serial"));
+  setTimeout(()=>{ const btn=$("btnPickIcon"); if(btn) btn.onclick=()=>openCatalogManager(true,(val,cat)=>{ $("tIcon").value=val; if(cat && [...$("tFamily").options].some(o=>o.value===cat)) $("tFamily").value=cat; }); },100);
 }
 
 function openEdit(id){
-  const t = db.tools.find(x=>x.id===id); if(!t) return;
+  const t=db.tools.find(x=>x.id===id); if(!t) return;
   showModal("Editar herramienta", `
     <div class="form">
       <div><label>Nombre</label><input id="eName" value="${esc(t.name)}"/></div>
+      <div><label>Familia</label><select id="eFamily">${familyOptionsHtml(familyOfTool(t))}</select></div>
       <div><label>Icono</label><div style="display:flex;gap:5px"><input id="eIcon" value='${t.icon||""}'/><button class="btn" type="button" id="btnPickIconEdit">📚</button></div></div>
+      <div><label>Gestión</label><select id="eKind"><option value="reparable" ${t.kind!=="consumable"?'selected':''}>Herramienta reparable</option><option value="consumable" ${t.kind==="consumable"?'selected':''}>Consumible / desgaste</option></select></div>
       <div><label>Stock Total</label><input id="eStock" value="${t.stock}" ${t.mode==='serial'?'disabled':''}/></div>
     </div>
-    <div class="small" style="margin-top:10px">Nota: No se puede cambiar el modo ni series masivamente.</div>
-  `, [
-    {text:"Cancelar", className:"btn", onClick: closeModal},
-    {text:"Guardar", className:"btn primary", onClick: ()=>{
-      const name = normName($("eName").value);
-      if(!name) return;
-      let stock = t.stock;
-      if(t.mode!=="serial") stock = clampInt($("eStock").value, toolsInUseCount(t)+toolsInMaintCount(t), 9999);
+    <div class="audit-note">Para entradas nuevas desde Compras usa <b>+ Entrada</b>. Si cambias aquí el stock total, el sistema guardará un movimiento de ajuste para mantener la trazabilidad.</div>
+  `,[
+    {text:"Cancelar",className:"btn",onClick:closeModal},
+    {text:"Guardar",className:"btn primary",onClick:()=>{
+      const name=normName($("eName").value); if(!name) return;
+      const at=nowIso(); const prevStock=Number(t.stock||0); let stock=prevStock;
+      if(t.mode!=="serial") stock=clampInt($("eStock").value,toolsInUseCount(t)+toolsInMaintCount(t),9999);
       if(stock===null) return alert("Stock inválido");
-      t.name = name; t.icon = $("eIcon").value; t.stock = stock;
+      t.name=name; t.icon=$("eIcon").value; t.family=$("eFamily").value||"Sin familia"; t.kind=$("eKind").value||"reparable"; t.metaUpdatedAt=at; t.updatedAt=at;
+      if(stock!==prevStock){ t.stock=stock; t.stockUpdatedAt=at; db.history.push({id:uid(),type:"STOCK_ADJUST",toolId:t.id,toolName:t.name,qty:stock-prevStock,stockBefore:prevStock,stockAfter:stock,at,notes:"Ajuste manual desde Editar"}); }
       saveAll(); closeModal(); render();
     }}
   ]);
-  setTimeout(()=>{
-      const btn = $("btnPickIconEdit");
-      if(btn) btn.onclick = () => openCatalogManager(true, (val) => { 
-        const inp = $("eIcon");
-        inp.value = (inp.value + " " + val).trim();
-      });
-  }, 100);
+  setTimeout(()=>{ const btn=$("btnPickIconEdit"); if(btn) btn.onclick=()=>openCatalogManager(true,(val,cat)=>{ $("eIcon").value=val; if(cat&&[...$("eFamily").options].some(o=>o.value===cat)) $("eFamily").value=cat; }); },100);
 }
 
 function toolHistory(toolId){
@@ -1141,75 +1188,103 @@ function openArchivedTools(){
   showModal("Herramientas archivadas", body, [{text:"Cerrar", className:"btn", onClick:closeModal}]);
 }
 
+function openPurchaseEntry(id){
+  const t=db.tools.find(x=>x.id===id); if(!t) return;
+  const serialMode=t.mode==="serial";
+  showModal(`Entrada de Compras · ${esc(t.name)}`, `
+    <div class="audit-note">Esta entrada aumenta el stock y queda registrada en el historial con fecha, cantidad y quién la recibe.</div>
+    <div class="form">
+      ${serialMode?`<div style="grid-column:1/-1"><label>Nuevas series (una por línea)</label><textarea id="pSerials" placeholder="Serie 001\nSerie 002"></textarea></div>`:`<div><label>Cantidad recibida</label><input id="pQty" type="number" min="1" value="1"/></div>`}
+      <div><label>Entregado por / Compras</label><input id="pDelivered" list="dlOps" placeholder="Nombre o Compras"/></div>
+      <div><label>Recibido por</label><input id="pReceived" list="dlOps" placeholder="Operario que recibe"/></div>
+      <div><label>Referencia pedido / albarán</label><input id="pRef" placeholder="Opcional"/></div>
+      <div style="grid-column:1/-1"><label>Observación</label><textarea id="pNote" placeholder="Ej. Caja de brocas nuevas, puntas PH2..."></textarea></div>
+    </div>`,[
+    {text:"Cancelar",className:"btn",onClick:closeModal},
+    {text:"Registrar entrada",className:"btn primary",onClick:()=>{
+      const at=nowIso(); let qty=0; let serials=[];
+      if(serialMode){ serials=$("pSerials").value.split("\n").map(normName).filter(Boolean); serials=[...new Set(serials)]; const existing=new Set(t.serials||[]); const dup=serials.find(x=>existing.has(x)); if(dup) return alert("La serie ya existe: "+dup); qty=serials.length; if(!qty) return alert("Indica al menos una serie"); t.serials.push(...serials); t.stock=t.serials.length; }
+      else { qty=clampInt($("pQty").value,1,9999); if(!qty) return alert("Cantidad inválida"); t.stock=Number(t.stock||0)+qty; }
+      const deliveredBy=ensureOperatorName($("pDelivered").value)||normName($("pDelivered").value); const receivedBy=ensureOperatorName($("pReceived").value);
+      t.stockUpdatedAt=at; t.updatedAt=at;
+      db.history.push({id:uid(),type:"STOCK_IN",toolId:t.id,toolName:t.name,qty,serials,deliveredBy,receivedBy,purchaseRef:normName($("pRef").value),at,stockAfter:t.stock,notes:normName($("pNote").value)});
+      saveAll(); closeModal(); render();
+    }}
+  ]);
+}
+
+function registerRepairCase(t,{qty=0,serials=[],returnedBy="",reason="",notes="",source="manual"}={}){
+  const at=nowIso(); const c={id:uid(),qty:Number(qty||serials.length||0),serials:(serials||[]).slice(),returnedBy:ensureOperatorName(returnedBy),reason:normName(reason),notes:normName(notes),openedAt:at,updatedAt:at,status:"open",source};
+  t.repairCases.push(c); recalcMaintenance(t); t.updatedAt=at;
+  db.history.push({id:uid(),type:"REPAIR_IN",repairCaseId:c.id,toolId:t.id,toolName:t.name,operator:c.returnedBy,returnedBy:c.returnedBy,qty:c.qty,serials:c.serials.slice(),at,notes:[c.reason,c.notes].filter(Boolean).join(" · ")});
+  return c;
+}
+function applyWriteOff(t,{qty=0,serials=[],returnedBy="",reason="",notes="",source="manual",repairCaseId=""}={}){
+  const at=nowIso(); qty=Number(qty||serials.length||0); if(qty<=0) return false;
+  const before=Number(t.stock||0);
+  if(t.mode==="serial"){ const set=new Set(serials||[]); t.serials=(t.serials||[]).filter(x=>!set.has(x)); t.stock=t.serials.length; }
+  else t.stock=Math.max(toolsInUseCount(t)+toolsInMaintCount(t), before-qty);
+  t.stockUpdatedAt=at; t.updatedAt=at;
+  db.history.push({id:uid(),type:"WRITE_OFF",repairCaseId,toolId:t.id,toolName:t.name,operator:ensureOperatorName(returnedBy),returnedBy:ensureOperatorName(returnedBy),qty,serials:(serials||[]).slice(),at,source,stockBefore:before,stockAfter:t.stock,notes:[normName(reason),normName(notes)].filter(Boolean).join(" · ")});
+  return true;
+}
+
 function openMaintManager(id){
-  const t = db.tools.find(x=>x.id===id); if(!t) return;
-  const inMaint = toolsInMaintCount(t);
-  const free = toolsFreeQty(t);
-  let content = `
-    <div class="maint-stat">
-      <div>Libres: <b>${free}</b></div>
-      <div>En Reparación: <b>${inMaint}</b></div>
-    </div>
-    <div class="grid">
-      <div style="background:rgba(0,0,0,0.2); padding:10px; border-radius:8px">
-        <label>Enviar a Reparación</label>
-        <button class="btn danger" id="btnToMaint" ${free<=0?'disabled':''}>⬇ Averiada</button>
-      </div>
-      <div style="background:rgba(0,0,0,0.2); padding:10px; border-radius:8px">
-        <label>Volver a Operativa</label>
-        <button class="btn primary" id="btnFromMaint" ${inMaint<=0?'disabled':''}>⬆ Reparada</button>
-      </div>
-    </div>
-  `;
-  showModal(`Reparación: ${esc(t.name)}`, content, [{text:"Cerrar", className:"btn", onClick:closeModal}]);
-  $("btnToMaint").onclick = () => doSendMaint(t);
-  $("btnFromMaint").onclick = () => doReturnMaint(t);
+  const t=db.tools.find(x=>x.id===id); if(!t) return;
+  recalcMaintenance(t); const inMaint=toolsInMaintCount(t); const free=toolsFreeQty(t); const openCases=(t.repairCases||[]).filter(c=>c.status!=="closed"&&Number(c.qty||0)>0);
+  const casesHtml=openCases.length?openCases.map(c=>`<div class="repair-case"><div class="case-title">${esc(t.name)} · x${esc(c.qty||0)} ${c.legacy?'<span class="badge">Anterior</span>':''}</div><div class="small">Entrada: ${new Date(c.openedAt).toLocaleString('es-ES')} · Devuelve/entrega: <b>${esc(c.returnedBy||'—')}</b></div>${c.serials?.length?`<div class="small mono">Series: ${c.serials.map(esc).join(', ')}</div>`:''}${c.reason?`<div class="small">Avería: ${esc(c.reason)}</div>`:''}${c.notes?`<div class="small">📝 ${esc(c.notes)}</div>`:''}<div class="actions"><button class="btn primary small" onclick="resolveRepairCase('${t.id}','${c.id}','repaired')">Reparada</button><button class="btn danger small" onclick="resolveRepairCase('${t.id}','${c.id}','writeoff')">No reparable / baja</button></div></div>`).join(''):'<div class="small">No hay reparaciones abiertas.</div>';
+  showModal(`Averías / reparación · ${esc(t.name)}`, `
+    <div class="maint-stat"><div>Libres: <b>${free}</b></div><div>En reparación: <b>${inMaint}</b></div><div>Stock total: <b>${t.stock||0}</b></div></div>
+    <div class="actions"><button class="btn danger" id="btnToMaint" ${free<=0?'disabled':''}>Registrar avería / baja</button><button class="btn primary" id="btnPurchaseHere">+ Entrada de Compras</button></div>
+    <div class="section-title">Reparaciones abiertas</div>${casesHtml}
+  `,[{text:"Cerrar",className:"btn",onClick:closeModal}]);
+  const a=$("btnToMaint"); if(a) a.onclick=()=>doSendMaint(t); const b=$("btnPurchaseHere"); if(b) b.onclick=()=>openPurchaseEntry(t.id);
 }
+
 function doSendMaint(t){
-  const free = toolsFreeQty(t);
-  if(t.mode === 'qty'){
-    showModal("Enviar a Reparación", `<label>Cantidad (Máx ${free})</label><input id="mqty" type="number" value="1" min="1" max="${free}"/>`, [
-      {text:"Cancelar", className:"btn", onClick: ()=>openMaintManager(t.id)}, 
-      {text:"Confirmar", className:"btn danger", onClick: ()=>{
-        const q = clampInt($("mqty").value, 1, free);
-        if(q) { t.maintQty += q; saveAll(); openMaintManager(t.id); render(); }
-      }}
-    ]);
-  } else {
-    const used = new Set(t.loans.flatMap(l=>l.serials));
-    const maint = new Set(t.maintSerials);
-    const available = t.serials.filter(s => !used.has(s) && !maint.has(s));
-    const checks = available.map(s => `<label class="check"><input type="checkbox" value="${esc(s)}"/> ${esc(s)}</label>`).join("");
-    showModal("Enviar a Reparación", `<div class="checks">${checks||"No hay libres"}</div>`, [
-      {text:"Cancelar", className:"btn", onClick: ()=>openMaintManager(t.id)},
-      {text:"Confirmar", className:"btn danger", onClick: ()=>{
-        const sel = [...document.querySelectorAll(".checks input:checked")].map(i=>i.value);
-        if(sel.length){ t.maintSerials.push(...sel); saveAll(); openMaintManager(t.id); render(); }
-      }}
-    ]);
-  }
+  const free=toolsFreeQty(t); if(free<=0) return alert("No hay unidades libres para registrar esta avería.");
+  const serialMode=t.mode==="serial"; const used=new Set(activeLoansOf(t).flatMap(l=>l.serials||[])); const maint=new Set(t.maintSerials||[]); const available=(t.serials||[]).filter(s=>!used.has(s)&&!maint.has(s));
+  showModal(`Registrar avería / baja · ${esc(t.name)}`, `
+    <div class="form">
+      ${serialMode?`<div style="grid-column:1/-1"><label>Series afectadas</label><div class="checks">${available.map(s=>`<label class="check"><input type="checkbox" value="${esc(s)}"/> ${esc(s)}</label>`).join('')||'No hay series libres'}</div></div>`:`<div><label>Cantidad (máx ${free})</label><input id="mqty" type="number" value="1" min="1" max="${free}"/></div>`}
+      <div><label>Quién la devuelve / entrega</label><input id="mReturned" list="dlOps" placeholder="Operario"/></div>
+      <div><label>Destino</label><select id="mDest"><option value="repair" ${t.kind!=="consumable"?'selected':''}>Enviar a reparación</option><option value="writeoff" ${t.kind==="consumable"?'selected':''}>No reparable / baja directa</option></select></div>
+      <div style="grid-column:1/-1"><label>Motivo / avería</label><input id="mReason" placeholder="Ej. batería no carga, broca gastada, punta rota..."/></div>
+      <div style="grid-column:1/-1"><label>Observación</label><textarea id="mNote"></textarea></div>
+    </div>`,[
+    {text:"Cancelar",className:"btn",onClick:()=>openMaintManager(t.id)},
+    {text:"Guardar",className:"btn danger",onClick:()=>{
+      let serials=[],qty=0; if(serialMode){ serials=[...document.querySelectorAll('.checks input:checked')].map(i=>i.value); qty=serials.length; } else qty=clampInt($("mqty").value,1,free)||0;
+      if(!qty) return alert("Indica la cantidad afectada"); const returnedBy=normOp($("mReturned").value); if(!returnedBy) return alert("Indica quién devuelve o entrega la herramienta"); const reason=normName($("mReason").value); if(!reason) return alert("Indica el motivo o avería");
+      const notes=normName($("mNote").value); const dest=$("mDest").value;
+      if(dest==="repair") registerRepairCase(t,{qty,serials,returnedBy,reason,notes,source:"manual"}); else applyWriteOff(t,{qty,serials,returnedBy,reason,notes,source:"baja_directa"});
+      saveAll(); openMaintManager(t.id); render();
+    }}
+  ]);
 }
-function doReturnMaint(t){
-  const inMaint = toolsInMaintCount(t);
-  if(t.mode === 'qty'){
-    showModal("Sacar de Reparación", `<label>Cantidad (Máx ${inMaint})</label><input id="umqty" type="number" value="1" min="1" max="${inMaint}"/>`, [
-      {text:"Cancelar", className:"btn", onClick: ()=>openMaintManager(t.id)},
-      {text:"Recuperar", className:"btn primary", onClick: ()=>{
-        const q = clampInt($("umqty").value, 1, inMaint);
-        if(q) { t.maintQty = Math.max(0, t.maintQty - q); saveAll(); openMaintManager(t.id); render(); }
-      }}
-    ]);
-  } else {
-    const checks = t.maintSerials.map(s => `<label class="check"><input type="checkbox" value="${esc(s)}"/> ${esc(s)}</label>`).join("");
-    showModal("Sacar de Reparación", `<div class="checks">${checks}</div>`, [
-      {text:"Cancelar", className:"btn", onClick: ()=>openMaintManager(t.id)},
-      {text:"Recuperar", className:"btn primary", onClick: ()=>{
-        const sel = [...document.querySelectorAll(".checks input:checked")].map(i=>i.value);
-        if(sel.length){ t.maintSerials = t.maintSerials.filter(s => !sel.includes(s)); saveAll(); openMaintManager(t.id); render(); }
-      }}
-    ]);
-  }
-}
+
+window.resolveRepairCase=function(toolId,caseId,outcome){
+  const t=db.tools.find(x=>x.id===toolId); const c=t&&(t.repairCases||[]).find(x=>x.id===caseId); if(!t||!c||c.status==="closed") return;
+  const serialMode=t.mode==="serial"; const max=Number(c.qty||0);
+  showAuxModal(outcome==="repaired"?"Cerrar reparación: reparada":"Cerrar reparación: no reparable", `
+    <div class="form">
+      ${serialMode?`<div style="grid-column:1/-1"><label>Series</label><div class="checks" id="rcChecks">${(c.serials||[]).map(s=>`<label class="check"><input type="checkbox" value="${esc(s)}" checked/> ${esc(s)}</label>`).join('')}</div></div>`:`<div><label>Cantidad (máx ${max})</label><input id="rcQty" type="number" min="1" max="${max}" value="${max}"/></div>`}
+      <div><label>Confirmado / recibido por</label><input id="rcBy" list="dlOps" placeholder="Operario"/></div>
+      <div><label>Coste reparación (€)</label><input id="rcCost" inputmode="decimal" placeholder="Opcional"/></div>
+      <div style="grid-column:1/-1"><label>Observación</label><textarea id="rcNote"></textarea></div>
+    </div>`,[
+    {text:"Cancelar",className:"btn",onClick:closeAuxModal},
+    {text:outcome==="repaired"?"Marcar reparada":"Dar de baja",className:outcome==="repaired"?"btn primary":"btn danger",onClick:()=>{
+      let serials=[],qty=0; if(serialMode){ serials=[...document.querySelectorAll('#rcChecks input:checked')].map(i=>i.value); qty=serials.length; } else qty=clampInt($("rcQty").value,1,max)||0; if(!qty) return alert("Indica cantidad");
+      const by=ensureOperatorName($("rcBy").value); const note=normName($("rcNote").value); const cost=Number(String($("rcCost").value||"").replace(',','.'))||0; const at=nowIso();
+      if(serialMode){ const set=new Set(serials); c.serials=(c.serials||[]).filter(x=>!set.has(x)); c.qty=c.serials.length; } else c.qty=Math.max(0,Number(c.qty||0)-qty);
+      c.updatedAt=at; c.lastOutcome=outcome; if(c.qty<=0){ c.status="closed"; c.closedAt=at; c.outcome=outcome; }
+      if(outcome==="repaired") db.history.push({id:uid(),type:"REPAIR_OUT",repairCaseId:c.id,toolId:t.id,toolName:t.name,operator:by,qty,serials,at,cost,notes:note||"Reparación completada"});
+      else applyWriteOff(t,{qty,serials,returnedBy:by,reason:"No reparable tras reparación",notes:note,source:"reparacion",repairCaseId:c.id});
+      recalcMaintenance(t); t.updatedAt=at; saveAll(); closeAuxModal(); openMaintManager(t.id); render();
+    }}
+  ]);
+};
 
 function openBatchLoan(){
   const para = normOp(fbOperario.value);
@@ -1223,7 +1298,7 @@ function openBatchLoan(){
   if(!list.length) return alert("Selecciona herramientas");
   const rows = list.map(t=>{
     const free = toolsFreeQty(t);
-    const usedS = new Set(t.loans.flatMap(l=>l.serials));
+    const usedS = new Set(activeLoansOf(t).flatMap(l=>l.serials||[]));
     const maintS = new Set(t.maintSerials);
     const availS = (t.serials||[]).filter(s => !usedS.has(s) && !maintS.has(s));
     let inputHtml = "";
@@ -1239,7 +1314,7 @@ function openBatchLoan(){
     <div class="form">
       <div><label>Para (operario destino)</label><input id="lPara" value="${esc(para)}"/></div>
       <div><label>Recoge (quién lo retira)</label><input id="lRecoge" value="${esc(recoge)}" placeholder="Si lo recoge el mismo, deja igual"/></div>
-      <div><label>Zona / Obra</label><input id="lZone"/></div>
+      <div><label>Zona / Obra</label><input id="lZone"/></div><div><label>Devolución prevista</label><input id="lDue" type="date"/></div>
       <div style="grid-column:1/-1"><label>Notas generales</label><textarea id="lNotes"></textarea></div>
     </div>
     <table style="margin-top:10px"><thead><tr><th>Item</th><th>Libre</th><th>Detalle/Medida</th><th>Selección</th></tr></thead><tbody>${rows}</tbody></table>
@@ -1251,6 +1326,7 @@ function openBatchLoan(){
       const recoge2 = normOp($("lRecoge").value) || para2;
       const zone = normName($("lZone").value);
       const notes = normName($("lNotes").value);
+      const dueAt = $("lDue").value || "";
       const items = [];
       document.querySelectorAll('tbody tr').forEach(tr => {
           const qtyInput = tr.querySelector('[data-type="qty"], [data-type="serial"]');
@@ -1270,36 +1346,38 @@ function openBatchLoan(){
       if(!items.length) return alert("No has seleccionado cantidades");
       const outAt = nowIso();
       items.forEach(({t, qty, serials, mode, variant}) => {
-          const l = {id:uid(), operator:para2, pickupBy:recoge2, zone, qty, mode, serials, outAt, notes, variant};
+          const l = {id:uid(), operator:ensureOperatorName(para2), pickupBy:ensureOperatorName(recoge2), zone, qty, originalQty:qty, mode, serials, originalSerials:serials.slice(), outAt, dueAt, notes, variant, status:"active", updatedAt:outAt};
           t.loans.push(l);
-          db.history.push({id:uid(), type:"OUT", toolId:t.id, toolName:t.name, operator:para2, pickupBy:recoge2, zone, qty, serials, outAt, notes, variant});
+          db.history.push({id:uid(), type:"OUT", toolId:t.id, toolName:t.name, operator:para2, pickupBy:recoge2, zone, qty, serials, outAt, dueAt, notes, variant});
       });
       fbOperario.value = ""; if(fbRecoge) fbRecoge.value = ""; selected.clear(); saveAll(); closeModal(); render();
     }}
   ]);
 }
 
-function openReturn(tid, lid){
-  const t = db.tools.find(x=>x.id===tid);
-  const l = t.loans.find(x=>x.id===lid);
-  if(!l) return;
+function openReturn(tid,lid){
+  const t=db.tools.find(x=>x.id===tid); const l=t&&activeLoansOf(t).find(x=>x.id===lid); if(!t||!l) return;
+  const serialMode=l.mode==="serial";
   showModal("Devolución", `
-    <div class="form"><div><label>Herramienta</label><input value="${esc(t.name)} ${l.variant?`(${esc(l.variant)})`:''}" disabled/></div><div><label>Operario</label><input value="${esc(l.operator)}" disabled/></div><div><label>Cant. a devolver (máx ${l.qty})</label><input id="rQty" type="number" value="${l.qty}" max="${l.qty}"/></div><div><label>Estado devuelto</label><select id="rSt"><option value="ok">OK (A stock)</option><option value="inc">Roto (A Reparación)</option></select></div><div style="grid-column:1/-1"><label>Notas</label><textarea id="rNote"></textarea></div></div>
-    ${l.mode==='serial' ? `<div class="small mono" style="margin-top:10px">Series: ${l.serials.join(", ")}</div>` : ''}
-  `, [
-    {text:"Cancelar", className:"btn", onClick:closeModal},
-    {text:"Confirmar", className:"btn primary", onClick: ()=>{
-       const q = clampInt($("rQty").value, 1, l.qty);
-       if(!q) return;
-       const status = $("rSt").value;
-       const note = $("rNote").value;
-       let retSerials = [];
-       if(l.mode === 'serial'){ retSerials = l.serials.slice(0, q); l.serials = l.serials.slice(q); }
-       l.qty -= q;
-       if(l.qty <= 0) t.loans = t.loans.filter(x=>x.id!==lid);
-       if(status === 'inc'){ if(t.mode==='serial') t.maintSerials.push(...retSerials); else t.maintQty += q; }
-       db.history.push({ id:uid(), type:"IN", toolId:t.id, toolName:t.name, operator:l.operator, qty:q, serials:retSerials, outAt:l.outAt, inAt:nowIso(), status, notes:note, variant:l.variant });
-       saveAll(); closeModal(); render();
+    <div class="form">
+      <div><label>Herramienta</label><input value="${esc(t.name)} ${l.variant?`(${esc(l.variant)})`:''}" disabled/></div>
+      <div><label>Asignada a</label><input value="${esc(l.operator)}" disabled/></div>
+      ${serialMode?`<div style="grid-column:1/-1"><label>Series que devuelve</label><div class="checks" id="retChecks">${(l.serials||[]).map(s=>`<label class="check"><input type="checkbox" value="${esc(s)}" checked/> ${esc(s)}</label>`).join('')}</div></div>`:`<div><label>Cantidad a devolver (máx ${l.qty})</label><input id="rQty" type="number" value="${l.qty}" max="${l.qty}" min="1"/></div>`}
+      <div><label>Quién la devuelve físicamente</label><input id="rReturnedBy" list="dlOps" value="${esc(l.operator||'')}"/></div>
+      <div><label>Estado devuelto</label><select id="rSt"><option value="ok">OK · vuelve disponible</option><option value="repair">Averiada · enviar a reparación</option><option value="writeoff">No sirve · baja directa</option></select></div>
+      <div style="grid-column:1/-1"><label>Motivo / notas</label><textarea id="rNote" placeholder="Obligatorio si vuelve averiada o se da de baja"></textarea></div>
+    </div>`,[
+    {text:"Cancelar",className:"btn",onClick:closeModal},
+    {text:"Confirmar",className:"btn primary",onClick:()=>{
+      let retSerials=[],q=0; if(serialMode){ retSerials=[...document.querySelectorAll('#retChecks input:checked')].map(i=>i.value); q=retSerials.length; } else q=clampInt($("rQty").value,1,l.qty)||0; if(!q) return alert("Indica lo que se devuelve");
+      const status=$("rSt").value; const note=normName($("rNote").value); if(status!=="ok"&&!note) return alert("Indica el motivo de la avería o baja");
+      const returnedBy=ensureOperatorName($("rReturnedBy").value)||ensureOperatorName(l.operator); const at=nowIso();
+      if(serialMode){ const set=new Set(retSerials); l.serials=(l.serials||[]).filter(x=>!set.has(x)); l.qty=l.serials.length; } else l.qty=Math.max(0,Number(l.qty||0)-q);
+      l.returnedQty=Number(l.returnedQty||0)+q; l.updatedAt=at; if(l.qty<=0){ l.status="closed"; l.closedAt=at; }
+      db.history.push({id:uid(),type:"IN",toolId:t.id,toolName:t.name,operator:l.operator,returnedBy,qty:q,serials:retSerials,outAt:l.outAt,inAt:at,status,notes:note,variant:l.variant});
+      if(status==="repair") registerRepairCase(t,{qty:q,serials:retSerials,returnedBy,reason:note,source:"devolucion"});
+      if(status==="writeoff") applyWriteOff(t,{qty:q,serials:retSerials,returnedBy,reason:note,source:"devolucion"});
+      t.updatedAt=at; saveAll(); closeModal(); render();
     }}
   ]);
 }
@@ -1307,7 +1385,7 @@ function openReturn(tid, lid){
 function openTransfer(tid, lid){
   const t = db.tools.find(x=>x.id===tid);
   if(!t) return;
-  const l = (t.loans||[]).find(x=>x.id===lid);
+  const l = activeLoansOf(t).find(x=>x.id===lid);
   if(!l) return;
 
   const curPara = normOp(l.operator);
@@ -1346,6 +1424,7 @@ function openTransfer(tid, lid){
 
       l.operator = newPara;
       l.pickupBy = newRecoge;
+      l.updatedAt = nowIso();
 
       db.history.push({
         id: uid(),
@@ -1375,18 +1454,18 @@ function openToolFicha(id){
   const used = toolsInUseCount(t);
   const maint = toolsInMaintCount(t);
   const hist = toolHistory(id).slice().reverse();
-  const activeLoans = (t.loans||[]).slice().sort((a,b)=>new Date(a.outAt)-new Date(b.outAt));
+  const activeLoans = activeLoansOf(t).slice().sort((a,b)=>new Date(a.outAt)-new Date(b.outAt));
 
   const loanRows = activeLoans.length ? activeLoans.map(l=>{
     const d = daysSince(l.outAt);
-    const oldCls = d >= cfg.dangerDays ? 'danger' : (d >= cfg.warnDays ? 'warn' : '');
-    return `<div class="loan ${d>=cfg.dangerDays?'dang':(d>=cfg.warnDays?'warn':'')}"><div class="top"><div class="sp"><div class="title">${esc(l.operator||'—')} · x${esc(l.qty||0)} ${l.variant?`(${esc(l.variant)})`:''}</div><p class="sub">Salida: ${new Date(l.outAt).toLocaleDateString()} · <span class="pill ${oldCls}">${d.toFixed(1)} días fuera</span></p>${l.notes?`<p class="sub">📝 ${esc(l.notes)}</p>`:''}</div><div class="row"><button class="btn small" onclick="openTransfer('${t.id}','${l.id}')">Cambiar operario</button><button class="btn small primary" onclick="openReturn('${t.id}','${l.id}')">Devolver</button></div></div></div>`;
+    const oldCls = isLoanOverdue(l) ? 'danger' : (d >= cfg.warnDays ? 'warn' : '');
+    return `<div class="loan ${isLoanOverdue(l)?'dang':(d>=cfg.warnDays?'warn':'')}"><div class="top"><div class="sp"><div class="title">${esc(l.operator||'—')} · x${esc(l.qty||0)} ${l.variant?`(${esc(l.variant)})`:''}</div><p class="sub">Salida: ${new Date(l.outAt).toLocaleDateString('es-ES')} · <span class="pill ${oldCls}">${d.toFixed(1)} días fuera</span>${l.dueAt?` · Prevista: ${new Date(String(l.dueAt).slice(0,10)+'T12:00:00').toLocaleDateString('es-ES')}`:''}</p>${l.notes?`<p class="sub">📝 ${esc(l.notes)}</p>`:''}</div><div class="row"><button class="btn small" onclick="openTransfer('${t.id}','${l.id}')">Cambiar operario</button><button class="btn small primary" onclick="openReturn('${t.id}','${l.id}')">Devolver</button></div></div></div>`;
   }).join('') : '<p class="small">Sin préstamos activos.</p>';
 
   const histRows = hist.length ? hist.slice(0,80).map(h=>{
     const date = new Date(h.type==='OUT' ? h.outAt : (h.inAt || h.at || Date.now())).toLocaleDateString();
     const op = h.operator || h.toOperator || h.fromOperator || '—';
-    return `<tr><td class="mono small">${date}</td><td><span class="badge ${h.type==='OUT'?'warn':'ok'}">${esc(h.type||'')}</span></td><td>${esc(op)} · x${esc(h.qty||0)}</td><td>${esc(h.variant||'')}</td><td>${esc(h.notes||'')} ${h.status==='inc'?'🚨':''}</td></tr>`;
+    return `<tr><td class="mono small">${date}</td><td><span class="badge ${h.type==='OUT'?'warn':(h.type==='WRITE_OFF'?'maint':'ok')}">${esc(historyTypeLabel(h.type))}</span></td><td>${esc(op)}${h.returnedBy?` · Devuelve: ${esc(h.returnedBy)}`:''} · x${esc(h.qty||0)}</td><td>${esc(h.variant||'')}</td><td>${esc(h.notes||'')} ${h.status==='inc'?'🚨':''}</td></tr>`;
   }).join('') : '<tr><td colspan="5" class="small">Sin historial.</td></tr>';
 
   showModal(`Ficha: ${t.name}`, `
@@ -1406,21 +1485,16 @@ function openToolFicha(id){
 }
 
 function openHistory(toolId=null){
-  const t = toolId ? db.tools.find(x=>x.id===toolId) : null;
-  const title = t ? `Historial · ${t.name}` : "Historial";
-  showModal(title, `<div style="margin-bottom:10px;display:flex;gap:10px"><input id="hSearch" placeholder="Filtrar..." style="flex:1"/><button class="btn danger" id="hClear">Limpiar</button></div><div style="max-height:60vh;overflow:auto"><table id="hTable"><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Nota</th></tr></thead><tbody id="hBody"></tbody></table></div>`, [{text:"Cerrar", className:"btn", onClick:closeModal}]);
-  const renderH = (filter) => {
-    const f = String(filter||"").toLowerCase();
-    const base = toolId ? toolHistory(toolId) : (db.history||[]);
-    const list = base.slice().reverse().filter(h => !f || (String(h.operator||"")+String(h.toOperator||"")+String(h.fromOperator||"")+String(h.toolName||"")+String(h.variant||"")+String(h.notes||"")).toLowerCase().includes(f));
-    $("hBody").innerHTML = list.map(h => `<tr><td class="mono small">${new Date(h.type==="OUT"?h.outAt:(h.inAt||h.at||Date.now())).toLocaleDateString()}</td><td><span class="badge ${h.type==='OUT'?'warn':'ok'}">${esc(h.type||'')}</span></td><td class="small"><b>${esc(h.toolName)}</b> ${h.variant?`<br>(${esc(h.variant)})`:''}<br>${esc(h.operator || h.toOperator || h.fromOperator || "—")} (x${h.qty||0})</td><td class="small">${esc(h.notes||"")} ${h.status==='inc'?'🚨':''}</td></tr>`).join("") || '<tr><td colspan="4" class="small">Sin resultados.</td></tr>';
+  const t=toolId?db.tools.find(x=>x.id===toolId):null; const title=t?`Historial · ${t.name}`:"Historial / trazabilidad";
+  const cleanup=toolId?"":`<div class="row" style="margin-top:8px"><label style="margin:0">Ocultar movimientos anteriores a</label><input id="hBefore" type="date" value="${esc(cfg.historyHiddenBefore||'')}" style="max-width:180px"/><button class="btn" id="hHideOld">Aplicar</button><button class="btn" id="hShowAll">Mostrar todo</button></div>`;
+  showModal(title, `<div class="audit-note">El historial incluye préstamos, devoluciones, reparaciones, bajas y entradas de Compras. Los movimientos no se borran: al limpiar solo se ocultan los antiguos para conservar la trazabilidad.</div><div style="margin-bottom:10px;display:flex;gap:10px"><input id="hSearch" placeholder="Filtrar por herramienta, operario, tipo, referencia..." style="flex:1"/></div>${cleanup}<div style="max-height:60vh;overflow:auto;margin-top:10px"><table id="hTable"><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Nota</th></tr></thead><tbody id="hBody"></tbody></table></div>`,[{text:"Cerrar",className:"btn",onClick:closeModal}]);
+  const renderH=(filter)=>{
+    const f=String(filter||"").toLowerCase(); const base=toolId?toolHistory(toolId):(db.history||[]); const hiddenMs=!toolId&&cfg.historyHiddenBefore?Date.parse(cfg.historyHiddenBefore+"T00:00:00"):0;
+    const list=base.slice().sort((a,b)=>dateMs(eventAt(b))-dateMs(eventAt(a))).filter(h=>(!hiddenMs||dateMs(eventAt(h))>=hiddenMs)&&(!f||[h.operator,h.returnedBy,h.pickupBy,h.toOperator,h.fromOperator,h.receivedBy,h.deliveredBy,h.toolName,h.variant,h.notes,h.purchaseRef,historyTypeLabel(h.type)].join(' ').toLowerCase().includes(f)));
+    $("hBody").innerHTML=list.map(h=>`<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td><span class="badge ${h.type==='OUT'?'warn':(h.type==='WRITE_OFF'?'maint':'ok')}">${esc(historyTypeLabel(h.type))}</span></td><td class="small"><b>${esc(h.toolName||'—')}</b>${h.variant?`<br>(${esc(h.variant)})`:''}<br>${esc(h.operator||h.toOperator||h.fromOperator||h.receivedBy||'—')}${h.returnedBy?` · Devuelve: <b>${esc(h.returnedBy)}</b>`:''}${h.deliveredBy?` · Entrega: ${esc(h.deliveredBy)}`:''} · x${esc(h.qty||0)}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')} ${h.status==='repair'?'🚨':''}</td></tr>`).join('')||'<tr><td colspan="4" class="small">Sin resultados.</td></tr>';
   };
-  renderH("");
-  $("hSearch").oninput = (e) => renderH(e.target.value);
-  $("hClear").onclick = () => {
-    if(toolId) return alert("Por seguridad, el historial filtrado de una herramienta no se borra desde aquí.");
-    if(confirm("¿Borrar todo el historial?")) { db.history=[]; saveAll(); closeModal(); }
-  };
+  renderH(""); $("hSearch").oninput=e=>renderH(e.target.value);
+  if(!toolId){ const hide=$("hHideOld"),show=$("hShowAll"); if(hide) hide.onclick=()=>{ cfg.historyHiddenBefore=$("hBefore").value||""; saveAll(); renderH($("hSearch").value); }; if(show) show.onclick=()=>{ cfg.historyHiddenBefore=""; $("hBefore").value=""; saveAll(); renderH($("hSearch").value); }; }
 }
 
 function openOperatorManager() {
@@ -1499,7 +1573,7 @@ function openOpForm(id = null){
     `, [
         {text:"Cancelar", className:"btn", onClick:closeAuxModal},
         {text:"Guardar", className:"btn primary", onClick:()=>{
-            const name = normName($("fOpName").value);
+            const name = normOp($("fOpName").value);
             if(!name) return alert("Nombre obligatorio");
 
             if(id){
@@ -1508,13 +1582,15 @@ function openOpForm(id = null){
                     target.name = name;
                     target.phone = $("fOpPhone").value.trim();
                     target.dept = $("fOpDept").value.trim();
+                    target.updatedAt = nowIso();
                 }
             } else {
                 db.operators.push({
                     id: uid(),
                     name: name,
                     phone: $("fOpPhone").value.trim(),
-                    dept: $("fOpDept").value.trim()
+                    dept: $("fOpDept").value.trim(),
+                    updatedAt: nowIso()
                 });
             }
             saveAll();
@@ -1619,6 +1695,7 @@ window.renameFamily = (oldName) => {
             else newLib[k] = v;
         }
         db.library = newLib;
+        db.tools.forEach(t=>{ if(t.family===oldName){ t.family=newName; t.metaUpdatedAt=nowIso(); t.updatedAt=t.metaUpdatedAt; } });
         const idx = db.familyOrder.indexOf(oldName);
         if(idx > -1) db.familyOrder[idx] = newName;
         else db.familyOrder.push(newName);
@@ -1632,6 +1709,7 @@ window.renameFamily = (oldName) => {
 window.deleteFamily = (name) => {
     if(confirm(`¿Eliminar familia "${name}" y todos sus iconos?`)){
         delete db.library[name];
+        db.tools.forEach(t=>{ if(t.family===name){ t.family="Sin familia"; t.metaUpdatedAt=nowIso(); t.updatedAt=t.metaUpdatedAt; } });
         db.familyOrder = db.familyOrder.filter(n => n !== name);
         saveAll();
         const isAux = $("auxModal").classList.contains("show");
@@ -1642,7 +1720,7 @@ window.deleteFamily = (name) => {
 
 window.selectIcon = (cat, idx) => {
     if(window.isPickerActive && window.currentSelectCb) {
-        window.currentSelectCb(db.library[cat][idx]);
+        window.currentSelectCb(db.library[cat][idx], cat);
         closeAuxModal();
     } else {
         if(confirm("¿Eliminar este icono?")){
@@ -1830,11 +1908,9 @@ $("btnCatalogo").onclick = () => openCatalogManager(false);
 
 function boot(){
   loadAll();
-  if(!cfg.familyOpen) cfg.familyOpen = {};
-  cfg.familyOpen = {};
-  saveAll();
-  render();
-  setupFloatingDrag();
+  if(!cfg.familyOpen) cfg.familyOpen={};
+  saveAll(); render(); setupFloatingDrag();
+  document.querySelectorAll('[data-kpi]').forEach(btn=>btn.addEventListener('click',()=>{ cfg.inventoryFilter=btn.dataset.kpi||"all"; saveAll(); render(); }));
 }
 boot();
 </script>
@@ -2065,12 +2141,43 @@ boot();
     return JSON.stringify(m);
   }
 
+  function chooseNewer(a,b,fields){
+    if(!a) return b; if(!b) return a;
+    const ta=Math.max(...fields.map(f=>Date.parse(a[f]||"")||0)); const tb=Math.max(...fields.map(f=>Date.parse(b[f]||"")||0));
+    return tb>=ta?Object.assign({},a,b):Object.assign({},b,a);
+  }
+  function mergeToolRecord(r,l){
+    if(!r) return l; if(!l) return r;
+    const base=chooseNewer(r,l,["updatedAt","metaUpdatedAt","stockUpdatedAt","archiveUpdatedAt","createdAt"]);
+    const out=Object.assign({},r,l,base);
+    const meta=chooseNewer(r,l,["metaUpdatedAt","updatedAt","createdAt"]);
+    ["name","icon","family","kind","notes"].forEach(k=>{ if(meta&&meta[k]!==undefined) out[k]=meta[k]; });
+    const stock=chooseNewer(r,l,["stockUpdatedAt","updatedAt","createdAt"]);
+    if(stock){ out.stock=stock.stock; out.serials=Array.isArray(stock.serials)?stock.serials.slice():[]; out.stockUpdatedAt=stock.stockUpdatedAt||stock.updatedAt||stock.createdAt; }
+    const arch=chooseNewer(r,l,["archiveUpdatedAt","archivedAt","restoredAt","updatedAt"]); if(arch){ out.archived=!!arch.archived; out.archivedAt=arch.archivedAt||""; out.restoredAt=arch.restoredAt||""; }
+    out.loans=mergeArrayByIdentity(r.loans,l.loans,x=>x.id).map(x=>x);
+    const loanMap=new Map(); [...(r.loans||[]),...(l.loans||[])].forEach(x=>{ if(!x||!x.id)return; const prev=loanMap.get(x.id); loanMap.set(x.id,chooseNewer(prev,x,["updatedAt","closedAt","outAt"])); }); out.loans=[...loanMap.values()];
+    const repMap=new Map(); [...(r.repairCases||[]),...(l.repairCases||[])].forEach(x=>{ if(!x||!x.id)return; const prev=repMap.get(x.id); repMap.set(x.id,chooseNewer(prev,x,["updatedAt","closedAt","openedAt"])); }); out.repairCases=[...repMap.values()];
+    const open=out.repairCases.filter(c=>String(c.status||"open")!=="closed"&&Number(c.qty||((c.serials||[]).length)||0)>0);
+    if(out.mode==="serial"){ const ss=new Set(); open.forEach(c=>(c.serials||[]).forEach(v=>ss.add(v))); out.maintSerials=[...ss]; out.maintQty=0; } else { out.maintQty=open.reduce((a,c)=>a+Number(c.qty||0),0); out.maintSerials=[]; }
+    return out;
+  }
+  function mergeToolsPayload(remoteRaw,localRaw){
+    const r=parseSafeJSON(remoteRaw,null), l=parseSafeJSON(localRaw,null); if(!r&&!l) return localRaw||remoteRaw||null; if(!r) return localRaw; if(!l) return remoteRaw;
+    const m=Object.assign({},r,l); const map=new Map(); [...(r.tools||[]),...(l.tools||[])].forEach(t=>{ if(!t||!t.id)return; map.set(t.id,mergeToolRecord(map.get(t.id),t)); }); m.tools=[...map.values()];
+    m.history=mergeArrayByIdentity(r.history,l.history,x=>x.id||[x.type,x.toolId,x.at,x.inAt,x.outAt,x.qty].join("|"));
+    m.operators=mergeArrayByIdentity(r.operators,l.operators,x=>normKey(x.name)||x.id).map(x=>x);
+    m.familyOrder=[...new Set([...(l.familyOrder||[]),...(r.familyOrder||[])])];
+    m.library=Object.assign({},r.library||{},l.library||{}); m.schemaVersion=Math.max(Number(r.schemaVersion||0),Number(l.schemaVersion||0),15); m.updatedAt=(String(l.updatedAt||"")>String(r.updatedAt||""))?l.updatedAt:r.updatedAt;
+    return JSON.stringify(m);
+  }
+
   function mergeLocalIntoRemoteStorage(remoteAll, localAll){
     const merged = Object.assign({}, remoteAll || {}, localAll || {});
-    const stockKeys = ["ldh_v2_company_stock_v1", "taller_stock_v3_data"];
-    stockKeys.forEach(k=>{
-      if((remoteAll && remoteAll[k]) || (localAll && localAll[k])) merged[k] = mergeStockPayload(remoteAll && remoteAll[k], localAll && localAll[k]);
-    });
+    const stockKeys=["ldh_v2_company_stock_v1","taller_stock_v3_data"];
+    stockKeys.forEach(k=>{ if((remoteAll&&remoteAll[k])||(localAll&&localAll[k])) merged[k]=mergeStockPayload(remoteAll&&remoteAll[k],localAll&&localAll[k]); });
+    const toolsKey="tool_loans_db_v14_lib";
+    if((remoteAll&&remoteAll[toolsKey])||(localAll&&localAll[toolsKey])) merged[toolsKey]=mergeToolsPayload(remoteAll&&remoteAll[toolsKey],localAll&&localAll[toolsKey]);
     return merged;
   }
 
@@ -2158,7 +2265,7 @@ boot();
         totalChunks: total,
         totalBytes: json.length,
         totalKeys: Object.keys(all).length,
-        mode: "GESTION_TALLER_V2_LIVE_SYNC_V4_MERGE_STOCK"
+        mode: "GESTION_TALLER_V2_LIVE_SYNC_V5_MERGE_STOCK_Y_HERRAMIENTAS"
       }, { merge:false });
       lastHash = hash;
       localDirty = false;
@@ -2329,7 +2436,7 @@ boot();
       setInterval(()=>{ if(started && localDirty) liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync periodic ERROR", e)); }, 3000);
     }catch(e){}
 
-    console.log("🔁 LiveSync v4 merge stock: activo", firebaseConfig.projectId);
+    console.log("🔁 LiveSync v5 merge stock + herramientas: activo", firebaseConfig.projectId);
   }
 
   function stopLiveSync(){
