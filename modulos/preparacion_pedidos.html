@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V117-ASIGNAR-LIBRE-CLOUD-CONFIRMADO-20260825" />
+<meta name="ldh-build" content="PREPARACION-V118-OPENREF-PRIORIDAD-20260825" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -2908,10 +2908,38 @@ function saveLinkMap(){
     }
   }
 
+  /*
+   * V118 · Si Fabricación abre Preparación con ?openRef=..., esa referencia
+   * es autoritativa. Un snapshot transitorio antiguo (latest_materials_v1,
+   * prep_materiales, etc.) nunca puede sustituir el pedido solicitado.
+   */
+  let explicitOpenRefV118 = '';
+  try{
+    const uq = new URLSearchParams(window.location.search || '');
+    explicitOpenRefV118 = String(uq.get('openRef') || uq.get('ref') || uq.get('referencia') || '').trim();
+    if(!explicitOpenRefV118){
+      const hh = String(window.location.hash || '').replace(/^#/, '');
+      if(hh.startsWith('openRef=')) explicitOpenRefV118 = decodeURIComponent(hh.slice(8));
+      else if(hh.startsWith('ref=')) explicitOpenRefV118 = decodeURIComponent(hh.slice(4));
+    }
+  }catch(_){ explicitOpenRefV118 = ''; }
+  try{ window.__LDH_PREP_EXPLICIT_OPEN_REF_V118 = explicitOpenRefV118 || ''; }catch(_){ }
+
+  if(snap && explicitOpenRefV118){
+    try{
+      const snapRefV118 = String((snap && (snap.referencia || snap.ref || snap.composite_part_reference)) || '').trim();
+      const normV118 = v => String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'');
+      if(snapRefV118 && normV118(snapRefV118) !== normV118(explicitOpenRefV118)){
+        console.info('[Preparación V118] Se ignora snapshot transitorio antiguo porque openRef es autoritativo:', snapRefV118, '!=', explicitOpenRefV118);
+        snap = null;
+      }
+    }catch(_){ }
+  }
+
   if (snap) {
     try {
-      const incomingRef = (typeof getFocusRef==="function") ? getFocusRef() : null;
-      const refCandidate = String((snap && (snap.referencia || snap.ref)) || incomingRef || '').trim();
+      const incomingRef = explicitOpenRefV118 || ((typeof getFocusRef==="function") ? getFocusRef() : null);
+      const refCandidate = String(incomingRef || (snap && (snap.referencia || snap.ref)) || '').trim();
       if (!refCandidate) {
         console.warn('[PREP] Snap sin referencia: se ignora para evitar pedidos SIN_REF.');
         try { removeAny("prep_open_ts"); } catch(_) {}
@@ -28036,6 +28064,10 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     if(checking) return;
     const ref=currentRef();
     if(!ref||offered.has(ref)) return;
+    // V118: si Fabricación pidió abrir una OT concreta, nunca ofrecer la
+    // reparación sobre otra ficha que haya quedado abierta por datos antiguos.
+    const requestedRef=String(window.__LDH_PREP_EXPLICIT_OPEN_REF_V118||'').trim();
+    if(requestedRef && !sameRef(ref,requestedRef)) return;
     const lines=Array.isArray(window.estadoMateriales)?window.estadoMateriales:(typeof estadoMateriales!=='undefined'&&Array.isArray(estadoMateriales)?estadoMateriales:[]);
     if(!lines.length) return;
     const meta=currentMeta(ref);
@@ -28080,6 +28112,10 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
 <script id="LDH_PREP_V117_MARKER">
 window.LDH_PREP_V117_ASIGNAR_LIBRE_CLOUD='PREPARACION-V117-ASIGNAR-LIBRE-CLOUD-CONFIRMADO-20260825';
 console.info('[Preparación V117] ASIGNAR LIBRE sigue siendo manual y solo completa la línea tras confirmación transaccional de Firebase Stock.');
+</script>
+<script id="LDH_PREP_V118_MARKER">
+window.LDH_PREP_V118_OPENREF_PRIORITY='PREPARACION-V118-OPENREF-PRIORIDAD-20260825';
+console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre snapshots transitorios antiguos.');
 </script>
 
 </body></html>
