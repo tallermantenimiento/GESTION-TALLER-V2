@@ -3788,6 +3788,15 @@ function guardarTipoHierro(){
 
 /* ========= AUTO-CIERRE POR RECEPCIÓN (AHORA: ENVÍA A FABRICACIÓN ANTES) ========= */
 async function autoCerrarSiCompletoPorRecepcion(){
+  /* V121 · Si una OT completa se abre expresamente desde Fabricación para
+     revisar/reparar su consumo, no puede autocerrarse mientras el usuario la
+     está inspeccionando. El bloqueo afecta solo a esa referencia concreta. */
+  try{
+    const holdRef = String(window.__LDH_PREP_REPAIR_HOLD_REF_V121 || '').trim();
+    const current = String((typeof refActual !== 'undefined' ? refActual : window.refActual) || '').trim();
+    const normHold = v => String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+    if(holdRef && current && normHold(holdRef) === normHold(current)) return false;
+  }catch(_){ }
   const totalLines = estadoMateriales.length;
   if(totalLines === 0) return;
 
@@ -26704,6 +26713,13 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   // podía borrar prep_recepcion_ sin pasar por V106.
   const finalizingV114=new Set();
   async function finalizeAndRemoveFromPreparation(ref){
+    /* V121 · No retirar automáticamente la OT que Fabricación acaba de abrir
+       para revisión/reparación. El resto de pedidos conserva exactamente el
+       cierre V114/V115 existente. */
+    try{
+      const holdRef=String(window.__LDH_PREP_REPAIR_HOLD_REF_V121||'').trim();
+      if(holdRef && sameRef(holdRef,ref)) return false;
+    }catch(_){ }
     const info=closeInfo(ref);
     if(!info || finalizingV114.has(ref)) return false;
     const consumeFn=window.LDH_consumirStockAsignadoAlMandarFabricacion
@@ -28027,14 +28043,49 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     if(!line||!remoteDB) return null;
     const received=Math.max(0,n(first(line.qty_recibida,line.recibida,line.aplicado_qty)));
     if(received<=0) return null;
+
+    // V121: esta reparación es solo para stock propio por unidades/barras.
+    // Las pletinas en mm y STOCK COMÚN siguen su circuito específico.
+    const lineName=String(first(line.mat,line.material,line.name,line.linked_matName,line.stockLinkLabel)).toLowerCase();
+    const lineUnit=String(first(line.unit,line.unidad)).toLowerCase();
+    if(lineUnit==='mm' || lineUnit.includes('milimet') || (lineName.includes('pletina') && lineUnit.includes('mm'))) return null;
+
     const traces=Array.isArray(line.trace)?line.trace:[];
-    const freeTrace=[...traces].reverse().find(t=>String(t&&t.source||'').toLowerCase().startsWith('libre:') && !String(t&&t.source||'').toLowerCase().includes('ferreteria'));
-    if(!freeTrace) return null;
-    const materialId=String(first(line.stockMatId,line.matId,line.linked_matId,line.stockLinkId,line.stockId,line.materialId,freeTrace.materialId)).trim();
+    const freeTrace=[...traces].reverse().find(t=>{
+      const src=String(t&&t.source||'').toLowerCase();
+      return src.startsWith('libre:') && !src.includes('ferreteria');
+    }) || null;
+
+    const materialId=String(first(
+      line.stockMatId,line.matId,line.linked_matId,line.stockLinkId,line.stockId,line.materialId,
+      freeTrace&&freeTrace.materialId
+    )).trim();
     if(!materialId) return null;
+
+    const assignments=Array.isArray(remoteDB.assignments)?remoteDB.assignments:[];
+    const ownFreeAssignment=assignments.find(a=>{
+      if(String(first(a.materialId,a.matId))!==materialId) return false;
+      if(!sameRef(first(a.consumerRef,a.jobRef,a.ref),ref)) return false;
+      if(!['', 'activa','activo','active'].includes(norm(first(a.status,a.estado,'activa')))) return false;
+      const kind=norm(first(a.assignmentType,a.reason,a.source));
+      if(a.sharedStock===true || a.debtExempt===true && kind.includes('stock_comun')) return false;
+      if(kind.includes('stock_comun') || kind.includes('stock_comun_global') || kind.includes('ferreteria') || kind.includes('otra_empresa') || kind.includes('prestamo')) return false;
+      return kind.includes('libre') || norm(first(a.assignmentType))==='libre';
+    }) || null;
+
+    // Históricos V48/V50 pueden haber perdido la traza de Preparación al
+    // rehidratarse desde Fabricación. Una asignación propia activa y exacta de
+    // esta misma OT es evidencia suficiente; nunca reparamos sin una de las dos.
+    if(!freeTrace && !ownFreeAssignment) return null;
+
     let exact=null; try{ if(typeof LDH_exactResolveStockLine==='function') exact=LDH_exactResolveStockLine(line); }catch(_){ }
-    const companyId=String(first(freeTrace.companyId,exact&&exact.companyId)).trim();
+    const companyId=String(first(
+      freeTrace&&freeTrace.companyId,
+      ownFreeAssignment&&first(ownFreeAssignment.companyId,ownFreeAssignment.empresaId),
+      exact&&exact.companyId
+    )).trim();
     if(!companyId) return null;
+
     const movements=Array.isArray(remoteDB.movements)?remoteDB.movements:[];
     const already=movements.some(m=>
       String(first(m.materialId,m.matId))===materialId &&
@@ -28042,8 +28093,8 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
       ['salida','consumo','out'].includes(norm(first(m.type,m.tipo)))
     );
     if(already) return null;
-    const assignments=Array.isArray(remoteDB.assignments)?remoteDB.assignments:[];
-    const activeAssignment=assignments.find(a=>
+
+    const activeAssignment=ownFreeAssignment || assignments.find(a=>
       String(first(a.materialId,a.matId))===materialId &&
       String(first(a.companyId,a.empresaId))===companyId &&
       sameRef(first(a.consumerRef,a.jobRef,a.ref),ref) &&
@@ -28056,8 +28107,8 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
       materialName:String(first(line.linked_matName,line.stockLinkLabel,line.mat,line.material,line.name,materialId)),
       qty:received,
       lineIndex:index,
-      assignmentId:String((activeAssignment&&(activeAssignment.id||activeAssignment.assignmentId))||freeTrace.assignmentId||''),
-      createdAt:String(freeTrace.at||'')
+      assignmentId:String((activeAssignment&&(activeAssignment.id||activeAssignment.assignmentId))||(freeTrace&&freeTrace.assignmentId)||''),
+      createdAt:String((freeTrace&&freeTrace.at)||(activeAssignment&&activeAssignment.createdAt)||'')
     };
   }
   async function check(){
@@ -28075,7 +28126,9 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     const remoteDB=window.__LDH_PREP_STOCK_CLOUD_DB;
     if(!remoteDB||typeof remoteDB!=='object') return;
     const candidates=lines.map((line,index)=>candidateForLine(line,index,ref,remoteDB)).filter(Boolean);
-    if(!candidates.length){ offered.add(ref); return; }
+    // V121: si la ficha o Stock nube aún se están estabilizando, no la marcamos
+    // como revisada. Los siguientes intentos podrán detectar la asignación perdida.
+    if(!candidates.length){ return; }
     if(typeof window.LDH_repararConsumoLibrePerdidoV117!=='function') return;
     checking=true;
     offered.add(ref);
@@ -28103,7 +28156,7 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     }finally{ checking=false; }
   }
   document.addEventListener('DOMContentLoaded',()=>{
-    [700,1400,2500,4000,6500].forEach(ms=>setTimeout(check,ms));
+    [700,1400,2500,4000,6500,9000,12000,18000].forEach(ms=>setTimeout(check,ms));
   });
   window.LDH_comprobarConsumoLibrePerdidoV117=check;
 })();
@@ -28582,4 +28635,123 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 })();
 </script>
 <!-- /LDH_PREP_V120_ABRE_COMPLETADO_DESDE_FABRICACION_20260825 -->
+
+
+<!-- LDH_PREP_V121_MODO_REVISION_FABRICACION_20260825 -->
+<script id="LDH_PREP_V121_MODO_REVISION_FABRICACION_20260825">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V121_REPAIR_HOLD__) return;
+  window.__LDH_PREP_V121_REPAIR_HOLD__=true;
+
+  function s(v){ return String(v==null?'':v).trim(); }
+  function norm(v){ return s(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
+  function same(a,b){ return !!norm(a) && norm(a)===norm(b); }
+  function rawKey(k){
+    try{ const v=sessionStorage.getItem(k); if(v) return s(v); }catch(_){ }
+    try{ const v=localStorage.getItem(k); if(v) return s(v); }catch(_){ }
+    return '';
+  }
+
+  // La referencia ya resuelta por V120 es la más fiable. Si no existe, usamos
+  // la referencia pedida por Fabricación antes de que V120 limpie la llave.
+  const TARGET=s(
+    window.__LDH_PREP_EXPLICIT_OPEN_REF_RESOLVED_V120 ||
+    window.__LDH_PREP_DIRECT_OPEN_REF_V120 ||
+    window.__LDH_PREP_EXPLICIT_OPEN_REF_RESOLVED_V119 ||
+    rawKey('ldh_open_prep_after_init_ref') || ''
+  );
+  if(!TARGET) return;
+
+  window.__LDH_PREP_REPAIR_HOLD_REF_V121=TARGET;
+  window.__LDH_PREP_REPAIR_HOLD_STARTED_V121=Date.now();
+
+  function holdActive(ref){
+    const hold=s(window.__LDH_PREP_REPAIR_HOLD_REF_V121||'');
+    return !!hold && same(hold,ref||hold);
+  }
+  window.LDH_prepRepairHoldActiveV121=holdActive;
+
+  // Capa final: además de los dos puntos internos parcheados arriba, envolvemos
+  // las funciones públicas por si otra capa posterior intenta autocerrar.
+  function installGuards(){
+    try{
+      const fn=window.autoCerrarSiCompletoPorRecepcion;
+      if(typeof fn==='function' && !fn.__ldhV121Hold){
+        const wrapped=async function(){
+          const ref=s((typeof refActual!=='undefined'&&refActual)||window.refActual||'');
+          if(holdActive(ref)) return false;
+          return fn.apply(this,arguments);
+        };
+        wrapped.__ldhV121Hold=true;
+        wrapped.__ldhV121Base=fn;
+        window.autoCerrarSiCompletoPorRecepcion=wrapped;
+      }
+    }catch(_){ }
+    try{
+      const fn=window.LDH_finalizarPreparacionV114;
+      if(typeof fn==='function' && !fn.__ldhV121Hold){
+        const wrapped=async function(ref){
+          if(holdActive(s(ref))) return false;
+          return fn.apply(this,arguments);
+        };
+        wrapped.__ldhV121Hold=true;
+        wrapped.__ldhV121Base=fn;
+        window.LDH_finalizarPreparacionV114=wrapped;
+      }
+    }catch(_){ }
+  }
+  installGuards();
+  [50,150,400,900,1800,3500,7000,12000].forEach(ms=>setTimeout(installGuards,ms));
+
+  // La detección V117 puede ejecutarse antes de que la ficha y Stock nube estén
+  // totalmente cargados. La volvemos a lanzar varias veces mientras el usuario
+  // permanece en la OT; es idempotente porque V117 controla qué referencia ofreció.
+  function retryRepairCheck(){
+    try{
+      const ref=s((typeof refActual!=='undefined'&&refActual)||window.refActual||'');
+      if(ref && holdActive(ref) && typeof window.LDH_comprobarConsumoLibrePerdidoV117==='function'){
+        window.LDH_comprobarConsumoLibrePerdidoV117();
+      }
+    }catch(_){ }
+  }
+  [900,1600,2800,4500,7000,10000,15000,22000].forEach(ms=>setTimeout(retryRepairCheck,ms));
+
+  function clearHold(){
+    try{ delete window.__LDH_PREP_REPAIR_HOLD_REF_V121; }catch(_){ window.__LDH_PREP_REPAIR_HOLD_REF_V121=''; }
+  }
+  window.LDH_prepClearRepairHoldV121=clearHold;
+
+  // Al volver a la lista termina el modo revisión y se recupera el cierre normal.
+  function installBackWrapper(){
+    try{
+      const fn=window.volverLista;
+      if(typeof fn!=='function' || fn.__ldhV121ClearHold) return;
+      const wrapped=function(){ clearHold(); return fn.apply(this,arguments); };
+      wrapped.__ldhV121ClearHold=true;
+      wrapped.__ldhV121Base=fn;
+      window.volverLista=wrapped;
+    }catch(_){ }
+  }
+  installBackWrapper();
+  [100,350,900,1800,4000].forEach(ms=>setTimeout(installBackWrapper,ms));
+
+  function markBuild(){
+    window.LDH_PREP_V121_REPAIR_REVIEW='PREPARACION-V121-REVISION-FAB-SIN-AUTOCIERRE-20260825';
+    document.documentElement.dataset.ldhPrepBuild='V121';
+    const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];
+    for(const selector of selectors){
+      const el=document.querySelector(selector);
+      if(!el) continue;
+      const base=s(el.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();
+      el.textContent=(base||'Preparación')+' · V121';
+      break;
+    }
+  }
+  markBuild(); [300,1000,2500,5000,10000].forEach(ms=>setTimeout(markBuild,ms));
+  console.info('[Preparación V121] modo revisión desde Fabricación activo; autocierre suspendido solo para:',TARGET);
+})();
+</script>
+<!-- /LDH_PREP_V121_MODO_REVISION_FABRICACION_20260825 -->
+
 </body></html>
