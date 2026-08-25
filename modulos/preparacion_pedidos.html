@@ -6633,6 +6633,8 @@ function renderTabla() {
 
     const diff = recibida - yaAplicada;
     const falta = Math.max(0, pedida - recibida);
+    const _cabinaTextV122 = String(getLineText(linea) || linea.mat || linea.material || '').toLowerCase();
+    const isCabinaDeferredV122 = !!(isPaintLine(linea) || _cabinaTextV122.includes('disolvente') || _cabinaTextV122.includes('diluyente') || _cabinaTextV122.includes('thinner'));
     const pletinaBuyInfo = (isPletinaMm && typeof window.LDH_pletinaCompraInfo === "function")
       ? window.LDH_pletinaCompraInfo(linea)
       : null;
@@ -6675,14 +6677,24 @@ function renderTabla() {
           btnHtml += `<button class="btn-mini disabled" style="border-color:#f59e0b;color:#fde68a">🛒 Falta ${Math.round(pBuy.deficitMm).toLocaleString("es-ES")} mm · pedir ${pBuy.barsToBuy} ${pBuy.barsToBuy===1?'barra':'barras'}</button>`;
         }
       }else{
-        btnHtml += `<button class="btn-mini" onclick="LDH_consumirReservado(${index})">Consumir reservado (-${falta})</button>`;
-        btnHtml += `<button class="btn-mini" onclick="LDH_asignarLibreSeguro(${index})">Asignar libre (-${falta})</button>`;
-        if(stockComunInfo.ok && stockComunInfo.free > 0){
-          btnHtml += `<button class="btn-mini stock-comun" onclick="LDH_asignarStockComunSeguro(${index})">Usar STOCK COMÚN (-${Math.min(falta,stockComunInfo.free)})</button>`;
+        if(isCabinaDeferredV122){
+          btnHtml += `<button class="btn-mini" onclick="LDH_consumirReservado(${index})">Usar reserva · sin consumir (-${falta})</button>`;
+          btnHtml += `<button class="btn-mini" onclick="LDH_asignarLibreSeguro(${index})">Reservar libre (-${falta})</button>`;
+          if(stockComunInfo.ok && stockComunInfo.free > 0){
+            btnHtml += `<button class="btn-mini stock-comun" onclick="LDH_asignarStockComunSeguro(${index})">Reservar STOCK COMÚN (-${Math.min(falta,stockComunInfo.free)})</button>`;
+          }
+          btnHtml += isPaintLine(linea)
+            ? `<button class="btn-mini btn-paint-borrow unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">PINTURA: reservar otra empresa</button>`
+            : `<button class="btn-mini unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">DISOLVENTE: reservar otra empresa</button>`;
+          btnHtml += `<button class="btn-mini disabled" style="border-color:#a855f7;color:#e9d5ff">Consumo físico: CABINA</button>`;
+        }else{
+          btnHtml += `<button class="btn-mini" onclick="LDH_consumirReservado(${index})">Consumir reservado (-${falta})</button>`;
+          btnHtml += `<button class="btn-mini" onclick="LDH_asignarLibreSeguro(${index})">Asignar libre (-${falta})</button>`;
+          if(stockComunInfo.ok && stockComunInfo.free > 0){
+            btnHtml += `<button class="btn-mini stock-comun" onclick="LDH_asignarStockComunSeguro(${index})">Usar STOCK COMÚN (-${Math.min(falta,stockComunInfo.free)})</button>`;
+          }
+          btnHtml += `<button class="btn-mini unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">Asignar de otra empresa</button>`;
         }
-        btnHtml += isPaintLine(linea)
-          ? `<button class="btn-mini btn-paint-borrow unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">PINTURA: otra empresa</button>`
-          : `<button class="btn-mini unassigned" onclick="LDH_asignarOtraEmpresaSeguro(${index})">Asignar de otra empresa</button>`;
       }
     }
 
@@ -7550,7 +7562,9 @@ async function LDH_stockComunAplicar(index, qty){
   line.qty_recibida = nuevaRecibida;
   line.recibida = nuevaRecibida;
   line.aplicado_qty = Math.min(pedida || (toNum(line.aplicado_qty)+qty), toNum(line.aplicado_qty)+qty);
-  line.stock_consumed_qty = Math.min(pedida || (toNum(line.stock_consumed_qty)+qty), toNum(line.stock_consumed_qty)+qty);
+  const cabinaDeferredV122 = /pintur|disolvente|diluyente|thinner|\bral\s*[1-9]\d{3}\b/i.test(String(line.mat||line.material||line.name||line.linked_matName||line.stockLinkLabel||''));
+  line.stock_consumed_qty = cabinaDeferredV122 ? 0 : Math.min(pedida || (toNum(line.stock_consumed_qty)+qty), toNum(line.stock_consumed_qty)+qty);
+  if(cabinaDeferredV122) line.stock_consumption_deferred_to_cabin = true;
   line.ok = pedida > 0 && nuevaRecibida >= pedida;
   line.completo = line.ok;
   line.done = line.ok;
@@ -10470,7 +10484,9 @@ init();
     // Esta cantidad viene de material ya existente: reserva / libre / otra empresa.
     // No debe aparecer después como "Añadir a stock".
     ctx.line.aplicado_qty = n(ctx.line.aplicado_qty) + n(qty);
-    ctx.line.stock_consumed_qty = n(ctx.line.stock_consumed_qty) + n(qty);
+    const cabinaDeferred = /pintur|disolvente|diluyente|thinner|\bral\s*[1-9]\d{3}\b/i.test(String(ctx.line.mat||ctx.line.material||ctx.line.name||ctx.line.linked_matName||ctx.line.stockLinkLabel||''));
+    ctx.line.stock_consumed_qty = cabinaDeferred ? 0 : (n(ctx.line.stock_consumed_qty) + n(qty));
+    if(cabinaDeferred) ctx.line.stock_consumption_deferred_to_cabin = true;
 
     ctx.line.ok = n(ctx.line.qty_recibida) >= n(ctx.line.qty_pedida);
     if(!Array.isArray(ctx.line.trace)) ctx.line.trace = [];
@@ -16296,7 +16312,9 @@ function LDH_prepVolverMenu(){
 
     // Asignar libre usa stock existente. No debe aparecer luego como "Añadir a stock".
     line.aplicado_qty = n(line.aplicado_qty) + n(qty);
-    line.stock_consumed_qty = n(line.stock_consumed_qty) + n(qty);
+    const cabinaDeferred = /pintur|disolvente|diluyente|thinner|\bral\s*[1-9]\d{3}\b/i.test(String(line.mat||line.material||line.name||line.linked_matName||line.stockLinkLabel||''));
+    line.stock_consumed_qty = cabinaDeferred ? 0 : (n(line.stock_consumed_qty) + n(qty));
+    if(cabinaDeferred) line.stock_consumption_deferred_to_cabin = true;
 
     line.ok = ped > 0 && n(line.qty_recibida) >= ped;
     line.completo = line.ok;
@@ -18479,6 +18497,23 @@ function LDH_prepCommonAssignmentActiveV32(row) {
   return !closed && (phase === "preparacion" || phase === "fabricacion" || !phase);
 }
 
+/* V122 · PINTURA Y DISOLVENTE SE CONSUMEN EXCLUSIVAMENTE EN CABINA.
+ * Preparación puede reservar/asignar estas líneas para calcular faltantes y Compras,
+ * pero nunca convierte sus asignaciones en salidas físicas al pasar a Fabricación. */
+function LDH_prepDeferredCabinAssignmentV122(assignment, remoteDB) {
+  try{
+    const aid=String(assignment?.materialId ?? assignment?.matId ?? assignment?.material_id ?? '').trim();
+    const mats=Array.isArray(remoteDB?.materials)?remoteDB.materials:[];
+    const mat=aid ? mats.find(m=>String(m?.id ?? m?.materialId ?? m?.matId ?? m?.material_id ?? '').trim()===aid) : null;
+    const raw=[
+      assignment?.materialName,assignment?.material,assignment?.mat,assignment?.name,
+      mat?.name,mat?.nombre,mat?.material,mat?.family,mat?.familia,mat?.type,mat?.tipo
+    ].filter(Boolean).join(' ').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,' ');
+    return raw.includes('pintur') || /\bral\s*[1-9]\d{3}\b/.test(raw) ||
+      raw.includes('disolvente') || raw.includes('diluyente') || raw.includes('thinner');
+  }catch(_){ return false; }
+}
+
 /*
  * Convierte de forma atómica las asignaciones propias activas del trabajo en
  * movimientos físicos de salida CUANDO el trabajo abandona definitivamente
@@ -18555,6 +18590,7 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
     assignments.forEach((assignment) => {
       if (!sameReference(assignment)) return;
       if (LDH_prepAssignmentIsFerreteriaV115(assignment)) return;
+      if (LDH_prepDeferredCabinAssignmentV122(assignment, remoteDB)) return;
       const match = LDH_prepAssignmentGroupV115(assignment, currentScopeV115);
       if (!match) return;
       const assignmentId = String(assignment?.id ?? assignment?.assignmentId ?? "");
@@ -18572,6 +18608,7 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
     assignments.forEach((assignment) => {
       if (!sameReference(assignment)) return;
       if (LDH_prepAssignmentIsFerreteriaV115(assignment)) return;
+      if (LDH_prepDeferredCabinAssignmentV122(assignment, remoteDB)) return;
       if (!LDH_prepCommonAssignmentActiveV32(assignment)) return;
       const qty = Math.max(0, Number(assignment?.qty ?? assignment?.cantidad ?? 0) || 0);
       if (qty <= 0) return;
@@ -27892,7 +27929,7 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
 
     if(!confirm(
       `Mandar a FABRICACIÓN:\nUnidades: ${units}\n\n` +
-      'El material ya recibido/asignado se descontará ahora del Stock físico.\n' +
+      'El material ya recibido/asignado se descontará ahora del Stock físico, EXCEPTO pintura y disolvente.\nPintura y disolvente quedan reservados hasta confirmar PINTADO en cabina.\n' +
       'Si todavía falta material, el trabajo seguirá también en Preparación hasta completar la recepción.'
     )) return;
 
@@ -27945,7 +27982,7 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
       }else{
         alert(
           '✅ Enviado a Fabricación.\n\n' +
-          'El material ya recibido/asignado se ha descontado del Stock físico.\n' +
+          'El material ya recibido/asignado se ha descontado del Stock físico, excepto pintura y disolvente, que siguen reservados hasta Cabina.\n' +
           'La OT seguirá en Preparación porque todavía falta material.'
         );
         try{ if(typeof cargarLista==='function') cargarLista(); }catch(_){ }
@@ -28048,6 +28085,7 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     // Las pletinas en mm y STOCK COMÚN siguen su circuito específico.
     const lineName=String(first(line.mat,line.material,line.name,line.linked_matName,line.stockLinkLabel)).toLowerCase();
     const lineUnit=String(first(line.unit,line.unidad)).toLowerCase();
+    if(lineName.includes('pintur') || /\bral\s*[1-9]\d{3}\b/.test(lineName) || lineName.includes('disolvente') || lineName.includes('diluyente') || lineName.includes('thinner')) return null;
     if(lineUnit==='mm' || lineUnit.includes('milimet') || (lineName.includes('pletina') && lineUnit.includes('mm'))) return null;
 
     const traces=Array.isArray(line.trace)?line.trace:[];
@@ -28754,4 +28792,12 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 </script>
 <!-- /LDH_PREP_V121_MODO_REVISION_FABRICACION_20260825 -->
 
+
+<script id="LDH_PREP_V122_PINTURA_CONSUMO_SOLO_CABINA_20260825">
+(function(){
+  window.LDH_PREP_V122_PINTURA_SOLO_CABINA='PREPARACION-V122-PINTURA-DISOLVENTE-RESERVA-SIN-CONSUMO-20260825';
+  document.documentElement.dataset.ldhPrepBuild='V122';
+  console.info('[Preparación V122] Pintura y disolvente: reservar/asignar en Preparación; consumo físico exclusivamente en Terminal Cabina.');
+})();
+</script>
 </body></html>

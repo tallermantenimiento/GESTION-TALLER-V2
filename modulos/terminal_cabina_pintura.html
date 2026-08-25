@@ -347,7 +347,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <script type="module">
 (async function(){
   'use strict';
-  const BUILD = 'TERMINAL-CABINA-PINTURA-V60-REFERENCIA-UNICA-OT-20260825';
+  const BUILD = 'TERMINAL-CABINA-PINTURA-V61-CONSUMO-CABINA-IDEMPOTENTE-20260825';
   const FLOW_CONFIG = {
     apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
     authDomain:'gestion-taller-v2.firebaseapp.com',
@@ -1824,6 +1824,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     root.querySelectorAll('[data-move-store]').forEach(b=>b.onclick=()=>movePaintToStore(decodeURIComponent(b.dataset.moveStore||'')));
     root.querySelectorAll('[data-fix-phase]').forEach(b=>b.onclick=()=>openPhaseModal(decodeURIComponent(b.dataset.fixPhase||'')));
     setTimeout(refreshOrderMetaForWorks,0);
+    schedulePendingCabinConsumptionRepair();
   }
 
   async function loadDeletedRefs(){
@@ -1866,7 +1867,10 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         row.hideFromFab=finishedInFab;
         row.keepInFab=!finishedInFab;
         row.history=Array.isArray(row.history)?row.history.slice():[];
-        row.history.push({id:uid('hist'),type:meta.type,qty:num(meta.qty),date:meta.at,operator:meta.operator,note:meta.note,source:'terminal_cabina_pintura'});
+        const histRow={id:uid('hist'),type:meta.type,qty:num(meta.qty),date:meta.at,operator:meta.operator,note:meta.note,source:'terminal_cabina_pintura'};
+        if(meta.operationId) histRow.operationId=meta.operationId;
+        if(meta.type==='terminal_pintura_to_almacen') histRow.stockConsumptionExpected=true;
+        row.history.push(histRow);
         row.updatedAt=meta.at;
         arr[i]=row;
         representative=row;
@@ -1910,6 +1914,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     renderWorks();
     renderControl();
     renderStock();
+    schedulePendingCabinConsumptionRepair();
     return true;
   }
   function acceptIncomingFlowPackage(pkg){
@@ -1923,6 +1928,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function mutateWorkFlow(ref,mode,payload){
     const op=requireOperator(); if(!op) throw new Error('Operario obligatorio');
     const at=nowISO();
+    const operationId=mode==='to_store'?uid('cabina_pintado_v61'):'';
     return runTransaction(flowDb,async tx=>{
       const snap=await tx.get(flowRef);
       if(!snap.exists()) throw new Error('No existe taller_data/fabricacion.');
@@ -1931,6 +1937,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       FLOW_POOLS.forEach(p=>{if(!Array.isArray(ldh[p]))ldh[p]=[];});
       const current=currentFlowFromData(pkg,ldh,ref);
       if(!current) throw new Error('No se encuentra la referencia en Fabricacion.');
+      const before={...current};
       let next={...current}; let qty=0; let note=''; let type='';
       if(mode==='to_store'){
         qty=num(payload.qty);
@@ -1946,7 +1953,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         const reason=text(payload.reason); if(!reason) throw new Error('Indica el motivo de la correccion.');
         type='terminal_pintura_ajuste_fases'; note='Regularizacion de fases · '+reason+' · '+op;
       }else throw new Error('Operacion no soportada.');
-      const representative=updateFlowRows(ldh,ref,next,{type,qty,at,operator:op,note});
+      const representative=updateFlowRows(ldh,ref,next,{type,qty,at,operator:op,note,operationId});
       if(!representative) throw new Error('La referencia no existe en los pools de Fabricacion.');
       ldh.updatedAt=at;
       pkg.ldh_db=JSON.stringify(ldh);
@@ -1954,7 +1961,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       pkg.counts={...(pkg.counts||{}),...countsForLdh(ldh),prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:num(pkg.counts&&pkg.counts.prepMeta),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:num(pkg.counts&&pkg.counts.prepRecepcion)};
       pkg.updatedAtISO=at;
       tx.set(flowRef,{...pkg,updatedAt:serverTimestamp(),source:'terminal_cabina_pintura.html'},{merge:false});
-      return {flow:next,representative,note,package:pkg,commitMs:Date.parse(at)||Date.now()};
+      return {flow:next,before,operationId,representative,note,package:pkg,commitMs:Date.parse(at)||Date.now()};
     });
   }
 
@@ -2028,27 +2035,32 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
 
   async function moveOnePaintToStore(ref,button){
-    const work=state.works.find(w=>w.ref===ref); if(!work) return alert('Trabajo no encontrado.');
+    const work=state.works.find(w=>sameRef(w.ref,ref)); if(!work) return alert('Trabajo no encontrado.');
     if(num(work.flow.pintura)<1) return alert('No queda ninguna unidad completa en Pintura.');
     const originalText='✅ PINTADO +1';
-    if(button){button.disabled=true;button.textContent='Guardando +1...';}
+    if(button){button.disabled=true;button.textContent='Comprobando Stock...';}
     try{
-      /* El guardado autoritativo es Fabricacion. En cuanto termina esta transaccion,
-         la unidad ya esta movida y el boton no debe depender de la sincronizacion
-         secundaria con Agenda para volver a su estado normal. */
-      const result=await mutateWorkFlow(ref,'to_store',{qty:1});
+      // V61: antes de confirmar la unidad verificamos que pintura/disolvente pueden
+      // resolverse en Stock. La salida física se ejecuta SOLO después del PINTADO.
+      await assertCabinConsumptionReady(work,1);
+      if(button&&button.isConnected)button.textContent='Guardando +1...';
 
-      /* La transaccion ya nos devuelve exactamente el paquete que acaba de escribir.
-         Lo aplicamos a la terminal en el mismo instante: no esperamos a onSnapshot ni
-         a una lectura posterior para bajar PINT y subir ALM. */
+      const result=await mutateWorkFlow(ref,'to_store',{qty:1});
       applyCommittedFlowResult(result);
 
-      if(button&&button.isConnected){
-        button.textContent='✓ Guardado';
+      let stockOk=true;
+      try{
+        const stockResult=await consumeCabinConsumablesForPaintMove(work,1,result.operationId,{silent:false});
+        stockOk=!!stockResult;
+      }catch(stockErr){
+        stockOk=false;
+        console.error('Consumo Stock pendiente tras PINTADO +1',stockErr);
+        alert('✅ La unidad ha quedado PINTADA y enviada a Almacén.\n\n⚠️ El consumo de pintura/disolvente no pudo confirmarse en Stock y queda PENDIENTE de reintento automático.\n\n'+String(stockErr&&stockErr.message||stockErr));
+        schedulePendingCabinConsumptionRepair();
       }
 
-      /* Reconciliacion secundaria: solo aceptamos la lectura si no es anterior al
-         paquete que acabamos de confirmar. */
+      if(button&&button.isConnected)button.textContent=stockOk?'✓ Pintado + Stock':'✓ Pintado · Stock pendiente';
+
       try{
         const snap=await getDoc(flowRef);
         if(snap.exists()&&acceptIncomingFlowPackage(snap.data()||{})){
@@ -2057,28 +2069,20 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
           renderControl();
           renderStock();
         }
-      }catch(refreshErr){
-        console.warn('Reconciliacion tras PINTADO +1',refreshErr);
-      }
+      }catch(refreshErr){ console.warn('Reconciliacion tras PINTADO +1',refreshErr); }
 
-      /* Agenda es una sincronizacion secundaria. No dejamos el boton bloqueado si
-         esa consulta tarda. A los 4 s continuamos; la escritura principal ya esta hecha. */
       let agendaOk=false;
       try{
         agendaOk=await Promise.race([
           syncOrderWorkflow(ref,result.flow,result.note),
           new Promise(resolve=>setTimeout(()=>resolve(false),4000))
         ]);
-      }catch(syncErr){
-        console.warn('Agenda tras PINTADO +1',syncErr);
-      }
-      toast('✅ 1 unidad pintada enviada a Almacén'+(agendaOk?' · Agenda sincronizada':'')+'.');
+      }catch(syncErr){ console.warn('Agenda tras PINTADO +1',syncErr); }
+      toast('✅ 1 unidad pintada enviada a Almacén'+(stockOk?' · Stock descontado':' · Stock pendiente')+(agendaOk?' · Agenda sincronizada':'')+'.');
     }catch(e){
       console.error(e);
       alert('No se pudo mover +1: '+String(e&&e.message||e));
     }finally{
-      /* Restablecer tanto el boton original como el que pueda haber sido recreado
-         por renderWorks() durante la sincronizacion. */
       if(button&&button.isConnected){
         const current=state.works.find(w=>sameRef(w.ref,ref));
         button.disabled=current?num(current.flow.pintura)<1:false;
@@ -2086,7 +2090,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       }
       try{
         document.querySelectorAll('[data-paint-one]').forEach(btn=>{
-          if(decodeURIComponent(btn.dataset.paintOne||'')!==ref)return;
+          if(!sameRef(decodeURIComponent(btn.dataset.paintOne||''),ref))return;
           const current=state.works.find(w=>sameRef(w.ref,ref));
           btn.disabled=current?num(current.flow.pintura)<1:false;
           btn.textContent=originalText;
@@ -2096,16 +2100,26 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
 
   async function movePaintToStore(ref){
-    const work=state.works.find(w=>w.ref===ref); if(!work) return alert('Trabajo no encontrado.');
+    const work=state.works.find(w=>sameRef(w.ref,ref)); if(!work) return alert('Trabajo no encontrado.');
     const raw=prompt('Pintura -> Almacen\nDisponibles en Pintura: '+fmt(work.flow.pintura)+'\nCantidad a mover:',fmt(work.flow.pintura));
     if(raw===null) return; const qty=num(raw);
-    if(qty<=0 || qty>work.flow.pintura) return alert('Cantidad no valida.');
-    if(!confirm('Mover '+fmt(qty)+' uds de PINTURA a ALMACEN para '+ref+'?')) return;
+    if(qty<=0 || qty>work.flow.pintura || Math.abs(qty-Math.round(qty))>0.000001) return alert('La cantidad debe ser un número entero de unidades disponible en Pintura.');
+    if(!confirm('Mover '+fmt(qty)+' uds de PINTURA a ALMACEN para '+ref+'?\n\nSe descontarán ahora del Stock la pintura y el disolvente correspondientes a esas unidades.')) return;
     try{
+      await assertCabinConsumptionReady(work,qty);
       const result=await mutateWorkFlow(ref,'to_store',{qty});
       applyCommittedFlowResult(result);
+      let stockOk=true;
+      try{
+        await consumeCabinConsumablesForPaintMove(work,qty,result.operationId,{silent:false});
+      }catch(stockErr){
+        stockOk=false;
+        console.error('Consumo Stock pendiente tras mover varias',stockErr);
+        alert('✅ Las unidades se han movido a Almacén.\n\n⚠️ El consumo de pintura/disolvente queda PENDIENTE de reintento automático.\n\n'+String(stockErr&&stockErr.message||stockErr));
+        schedulePendingCabinConsumptionRepair();
+      }
       const agendaOk=await syncOrderWorkflow(ref,result.flow,result.note);
-      toast('Movimiento guardado'+(agendaOk?' y Agenda sincronizada.':'. Agenda no vinculada.'));
+      toast('Movimiento guardado · '+(stockOk?'Stock descontado':'Stock pendiente')+(agendaOk?' · Agenda sincronizada':'')+'.');
     }catch(e){console.error(e);alert('No se pudo mover: '+String(e&&e.message||e));}
   }
 
@@ -2694,6 +2708,206 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(!packed)throw new Error('Paquete Stock vacio.'); const outer=JSON.parse(packed); const raw=outer&&outer[STOCK_KEY]!=null?outer[STOCK_KEY]:(outer.payload??outer.data??outer.stock??outer); let db=raw; for(let p=0;p<4&&typeof db==='string';p++)db=JSON.parse(db); if(!db||typeof db!=='object')throw new Error('Formato Stock no valido.'); return db;
   }
   function chunkString(str){const out=[];for(let i=0;i<str.length;i+=CHUNK_SIZE)out.push(str.slice(i,i+CHUNK_SIZE));return out.length?out:[''];}
+
+  /* V61 · CONSUMO DIFERIDO DE CABINA
+   * Preparación solo reserva pintura/disolvente. El consumo físico se registra aquí
+   * cuando PINT pasa a ALM. Cada operación usa un id estable procedente del movimiento
+   * de flujo, por lo que reintentos/refrescos no pueden descontar dos veces. */
+  const cabinConsumptionRepairDone=new Set();
+  const cabinConsumptionRepairBusy=new Set();
+  let cabinConsumptionRepairTimer=null;
+
+  function cabinSafeId(value){return text(value).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,110)||'x';}
+  function cabinIsSolventLine(line){const n=norm(workMaterialName(line));return n.includes('disolvente')||n.includes('diluyente')||n.includes('thinner');}
+  function cabinIsPaintLine(line){const n=norm(workMaterialName(line));return !cabinIsSolventLine(line)&&(n.includes('pintur')||/\bral\s*[1-9]\d{3}\b/.test(n));}
+  function cabinTotalUnits(work){const f=flowOf(work);return Math.max(0,num(work&&work.total)||num(work&&work.unidades)||num(work&&work.cantidad)||(f.fab+f.pintura+f.almacen+f.entregado));}
+  function cabinActiveStatus(row){const s=norm(row&&(row.status||row.estado||'activa'));return !['consumida','consumido','liberada','liberado','cancelada','cancelado','anulada','anulado','cerrada','cerrado','devuelta','devuelto'].includes(s);}
+  function cabinAssignmentRef(row){return text(row&&(row.consumerRef||row.jobRef||row.ref||row.reference||row.usedByRef||row.refConsumidor));}
+  function cabinMaterialNameFromDb(db,materialId){const m=(db.materials||[]).find(x=>text(x&&(x.id||x.materialId||x.matId))===text(materialId));return text(m&&(m.name||m.nombre||m.material));}
+  function cabinMaterialMatches(row,materialId,materialName){
+    const rid=text(row&&(row.materialId||row.matId||row.material_id));
+    if(materialId&&rid&&rid===text(materialId))return true;
+    const rn=norm(row&&(row.materialName||row.material||row.mat||row.name||row.nombre));
+    const wanted=norm(materialName);
+    return !!(rn&&wanted&&(rn===wanted||rn.includes(wanted)||wanted.includes(rn)));
+  }
+  function cabinAssignedSource(db,work,materialId,materialName){
+    const rows=(Array.isArray(db&&db.assignments)?db.assignments:[]).filter(cabinActiveStatus)
+      .filter(a=>sameRef(cabinAssignmentRef(a),work&&work.ref))
+      .filter(a=>cabinMaterialMatches(a,materialId,materialName))
+      .filter(a=>num(a&&(a.qty??a.cantidad??a.pendingQty??a.qtyPending))>0);
+    if(!rows.length)return null;
+    rows.sort((a,b)=>{
+      const ae=text(a&&(a.materialId||a.matId))===text(materialId)?1:0;
+      const be=text(b&&(b.materialId||b.matId))===text(materialId)?1:0;
+      if(ae!==be)return be-ae;
+      return num(b&&(b.qty??b.cantidad))-num(a&&(a.qty??a.cantidad));
+    });
+    const a=rows[0];
+    return {companyId:text(a&&(a.companyId||a.empresaId)),materialId:text(a&&(a.materialId||a.matId))||text(materialId),assignment:a};
+  }
+  function cabinStockRowBySource(db,companyId,materialId){return (db.stock||[]).find(s=>stockRowCompanyId(s)===text(companyId)&&stockRowMaterialId(s)===text(materialId))||null;}
+  function cabinResolveLineRow(db,work,line){
+    let materialId=workMaterialId(line);
+    const materialName=workMaterialName(line);
+    const assigned=cabinAssignedSource(db,work,materialId,materialName);
+    if(assigned){const sr=cabinStockRowBySource(db,assigned.companyId,assigned.materialId);if(sr)return {row:sr,companyId:assigned.companyId,materialId:assigned.materialId,materialName:cabinMaterialNameFromDb(db,assigned.materialId)||materialName};}
+    let rows=(db.stock||[]).filter(s=>!materialId||stockRowMaterialId(s)===materialId);
+    if(!rows.length&&materialName){
+      const mids=(db.materials||[]).filter(m=>norm(m&&(m.name||m.nombre||m.material))===norm(materialName)).map(m=>text(m&&(m.id||m.materialId||m.matId))).filter(Boolean);
+      rows=(db.stock||[]).filter(s=>mids.includes(stockRowMaterialId(s)));
+      if(rows.length&&!materialId)materialId=stockRowMaterialId(rows[0]);
+    }
+    const sourceLabel=norm(line&&(line.stockLinkEmpresa||line.stockCompany||line.company||line.empresa));
+    if(sourceLabel.includes('stock comun')||sourceLabel.includes('almacen comun')){
+      const common=rows.filter(s=>{const c=companyRecord(db,stockRowCompanyId(s));return c&&isCommonCompany(c);});
+      if(common.length)rows=common;
+    }else{
+      const wanted=norm(work&&work.company);
+      const own=rows.filter(s=>norm(companyLabelForStockRow(db,s))===wanted);
+      if(own.length)rows=own;
+    }
+    if(!rows.length)return null;
+    rows.sort((a,b)=>stockPhysical(db,stockRowCompanyId(b),stockRowMaterialId(b))-stockPhysical(db,stockRowCompanyId(a),stockRowMaterialId(a)));
+    const sr=rows[0];
+    return {row:sr,companyId:stockRowCompanyId(sr),materialId:stockRowMaterialId(sr),materialName:cabinMaterialNameFromDb(db,stockRowMaterialId(sr))||materialName};
+  }
+  function cabinPaintPlan(db,work){
+    let link=null;try{link=paintLinkForWork(work);}catch(_){ }
+    let row=link&&link.kind==='linked'?link.row:null;
+    if(!row){
+      const line=workMaterialLines(work).find(cabinIsPaintLine);
+      if(line){const resolved=cabinResolveLineRow(db,work,line);if(resolved)row={stockRow:resolved.row,companyId:resolved.companyId,mat:{id:resolved.materialId,name:resolved.materialName}};}
+    }
+    if(!row)throw new Error('No se puede resolver la pintura de esta OT contra Stock. Revisa vínculo/empresa/RAL.');
+    const effectiveLink=link&&link.kind==='linked'?link:{kind:'linked',ral:workRal(work),row,ownReserved:0,via:'cabina_v61'};
+    const calc=workPaintTotalCalculation(work,effectiveLink);
+    const totalUnits=Math.max(0,num(calc&&calc.totalUnits)||cabinTotalUnits(work));
+    const totalBotes=Math.max(0,num(calc&&calc.totalBotes));
+    if(totalUnits<=0||totalBotes<=0)throw new Error('No hay cálculo de pintura válido para esta OT. Guarda el cálculo antes de confirmar PINTADO.');
+    const materialId=text(row&&row.mat&&row.mat.id), materialName=text(row&&row.mat&&(row.mat.name||row.mat.nombre));
+    const assigned=cabinAssignedSource(db,work,materialId,materialName);
+    if(assigned){const sr=cabinStockRowBySource(db,assigned.companyId,assigned.materialId);if(sr)return {kind:'paint',companyId:assigned.companyId,materialId:assigned.materialId,materialName:cabinMaterialNameFromDb(db,assigned.materialId)||materialName,total:totalBotes,perUnit:totalBotes/totalUnits};}
+    return {kind:'paint',companyId:text(row.companyId),materialId,total:totalBotes,perUnit:totalBotes/totalUnits,materialName};
+  }
+  function cabinConsumptionPlans(db,work){
+    const plans=[cabinPaintPlan(db,work)];
+    const totalUnits=cabinTotalUnits(work);
+    if(totalUnits<=0)throw new Error('La OT no tiene unidades totales válidas.');
+    workMaterialLines(work).filter(cabinIsSolventLine).forEach(line=>{
+      const total=Math.max(0,workMaterialRequested(line));if(total<=0)return;
+      const resolved=cabinResolveLineRow(db,work,line);if(!resolved)throw new Error('No se puede resolver el disolvente "'+workMaterialName(line)+'" contra Stock.');
+      plans.push({kind:'solvent',companyId:resolved.companyId,materialId:resolved.materialId,materialName:resolved.materialName||workMaterialName(line),total,perUnit:total/totalUnits});
+    });
+    const byKey=new Map();
+    plans.forEach(p=>{const k=p.kind+'|'+p.companyId+'|'+p.materialId;const old=byKey.get(k);if(old){old.total+=p.total;old.perUnit+=p.perUnit;}else byKey.set(k,{...p});});
+    return Array.from(byKey.values());
+  }
+  function cabinQtyLabel(plan,qty){return plan.kind==='paint'?fmt(qty)+' botes eq de 4 L':fmt(qty)+' '+(text((state.stock&&state.stock.materials||[]).find(m=>text(m&&(m.id||m.materialId||m.matId))===plan.materialId)?.unit)||'ud');}
+
+  async function assertCabinConsumptionReady(work,qty){
+    qty=num(qty);if(qty<=0||Math.abs(qty-Math.round(qty))>0.000001)throw new Error('La cantidad pintada debe ser un número entero de unidades.');
+    if(!state.stock)throw new Error('Stock de pintura todavía no está cargado.');
+    const plans=cabinConsumptionPlans(state.stock,work);
+    for(const plan of plans){
+      const needed=plan.perUnit*qty;
+      const physical=stockPhysical(state.stock,plan.companyId,plan.materialId);
+      if(needed>physical+0.000001)throw new Error('Stock insuficiente de '+(plan.materialName||'consumible')+': disponibles '+fmt(physical)+', consumo '+fmt(needed)+'.');
+    }
+    return plans;
+  }
+
+  function cabinConsumeOperationalRows(db,plan,amount,ref,at,operationId){
+    const updateList=(list,isAssignment)=>{
+      let remaining=Math.max(0,num(amount));
+      (Array.isArray(list)?list:[]).filter(cabinActiveStatus)
+        .filter(r=>sameRef(isAssignment?cabinAssignmentRef(r):reservationRef(r),ref))
+        .filter(r=>text(r&&(r.companyId||r.empresaId))===plan.companyId)
+        .filter(r=>cabinMaterialMatches(r,plan.materialId,plan.materialName))
+        .forEach(r=>{
+          if(remaining<=0)return;
+          const q=Math.max(0,num(r&&(r.qty??r.cantidad??r.pendingQty??r.qtyPending)));if(q<=0)return;
+          const take=Math.min(q,remaining),left=Math.max(0,q-take);
+          if(r.originalAssignedQty===undefined&&isAssignment)r.originalAssignedQty=q;
+          r.qty=left;r.cantidad=left;r.pendingQty=left;r.qtyPending=left;r.updatedAt=at;
+          r.cabinaConsumedQty=num(r.cabinaConsumedQty)+take;r.lastCabinConsumptionOperationId=operationId;
+          if(left<=0){r.status='consumida';r.estado='consumida';r.phase='pintura';r.fase='pintura';r.consumedAt=at;}
+          remaining-=take;
+        });
+    };
+    updateList(db.assignments,true);updateList(db.reservations,false);
+  }
+
+  async function consumeCabinConsumablesForPaintMove(work,qty,operationId,options){
+    options=options||{};qty=num(qty);operationId=text(operationId);
+    if(!operationId)throw new Error('Falta identificador seguro de la operación PINTADO.');
+    const op=operator()||'cabina';const at=nowISO();
+    const result=await runTransaction(stockDb,async tx=>{
+      const db=await readStockInTransaction(tx);db.movements=Array.isArray(db.movements)?db.movements:[];db.stock=Array.isArray(db.stock)?db.stock:[];db.materials=Array.isArray(db.materials)?db.materials:[];db.assignments=Array.isArray(db.assignments)?db.assignments:[];db.reservations=Array.isArray(db.reservations)?db.reservations:[];
+      const plans=cabinConsumptionPlans(db,work);const existingIds=new Set(db.movements.map(m=>text(m&&(m.id||m.movementId))).filter(Boolean));
+      const consumed=[];
+      for(const plan of plans){
+        const amount=Math.max(0,plan.perUnit*qty);if(amount<=0)continue;
+        const srow=cabinStockRowBySource(db,plan.companyId,plan.materialId);if(!srow)throw new Error('La ficha Stock de '+(plan.materialName||plan.materialId)+' ya no existe.');
+        const movementId='mov_cabina_v61_'+cabinSafeId(operationId)+'_'+cabinSafeId(plan.companyId)+'_'+cabinSafeId(plan.materialId);
+        if(existingIds.has(movementId)){consumed.push({plan,amount,already:true});continue;}
+        const currentMovs=db.movements.filter(m=>stockRowCompanyId(m)===plan.companyId&&stockRowMaterialId(m)===plan.materialId);
+        let before=stockPhysical(db,plan.companyId,plan.materialId);
+        if(!currentMovs.length&&before>0){
+          const baselineId='mov_cabina_base_v61_'+cabinSafeId(plan.companyId)+'_'+cabinSafeId(plan.materialId);
+          if(!existingIds.has(baselineId)){
+            db.movements.push({id:baselineId,movementId:baselineId,companyId:plan.companyId,materialId:plan.materialId,matId:plan.materialId,material:plan.materialName,materialName:plan.materialName,type:'entrada',tipo:'entrada',qty:before,cantidad:before,date:at,fecha:at,source:'terminal_cabina_pintura_baseline_v61',origen:'terminal_cabina_pintura_baseline_v61',note:'Base física preservada antes del primer consumo automático de Cabina.'});existingIds.add(baselineId);
+          }
+          before=stockPhysical(db,plan.companyId,plan.materialId);
+        }
+        if(amount>before+0.000001)throw new Error('Stock insuficiente de '+(plan.materialName||plan.materialId)+': '+fmt(before)+' disponible, '+fmt(amount)+' a consumir.');
+        const after=Math.max(0,before-amount);
+        db.movements.push({id:movementId,movementId,companyId:plan.companyId,materialId:plan.materialId,matId:plan.materialId,material:plan.materialName,materialName:plan.materialName,type:'consumo',tipo:'consumo',qty:amount,cantidad:amount,date:at,fecha:at,source:'terminal_cabina_pintura_consumo_v61',origen:'terminal_cabina_pintura_consumo_v61',operator:op,operario:op,ref:text(work&&work.ref),jobRef:text(work&&work.ref),operationId,paintedUnits:qty,consumableKind:plan.kind,beforeQty:before,afterQty:after,note:'Consumo Cabina al confirmar PINTADO · '+text(work&&work.ref)+' · '+fmt(qty)+' uds · '+cabinQtyLabel(plan,amount)});existingIds.add(movementId);
+        srow.qty=after;srow.cantidad=after;srow.physicalQty=after;srow.updatedAt=at;
+        if(plan.kind==='paint'){
+          srow.physicalCountMode='equivalente_4l';srow.physicalLiters=litersFromBotes(after);srow.equivalent4LBotes=after;srow.physicalPackageBreakdown=[];srow.packageBreakdown=[];srow.packageBreakdownText='';
+        }
+        cabinConsumeOperationalRows(db,plan,amount,text(work&&work.ref),at,operationId);
+        const mat=db.materials.find(m=>text(m&&(m.id||m.materialId||m.matId))===plan.materialId)||{};
+        const mirrorId=text(srow.id||(plan.companyId+'_'+plan.materialId)).replace(/[\/#?\[\]]/g,'_');
+        const mirror={id:mirrorId,stockId:text(srow.id||mirrorId),companyId:plan.companyId,materialId:plan.materialId,name:text(mat.name||mat.nombre||plan.materialName),family:text(mat.family||mat.familia||'Sin familia'),type:text(mat.type||mat.tipo||(plan.kind==='paint'?'pintura':'consumible')),unit:text(mat.unit||mat.unidad||'ud'),location:text(srow.location||srow.ubicacion),min:num(srow.min||mat.min),qty:after,updatedAt:serverTimestamp(),source:'terminal_cabina_pintura_consumo_v61'};
+        if(plan.kind==='paint')Object.assign(mirror,{physicalCountMode:'equivalente_4l',physicalLiters:litersFromBotes(after),equivalent4LBotes:after,physicalPackageBreakdown:[],packageBreakdown:[],packageBreakdownText:''});
+        tx.set(doc(stockDb,'stock_materials',mirrorId),mirror,{merge:true});
+        consumed.push({plan,amount,before,after,already:false});
+      }
+      const changed=consumed.some(x=>!x.already);
+      if(changed){
+        db.updatedAt=at;const raw=JSON.stringify(db),pack={[STOCK_KEY]:raw,updatedAt:at,schema:'ldh_stock_chunked_v2_full'},parts=chunkString(JSON.stringify(pack));
+        for(let i=0;i<parts.length;i++)tx.set(doc(stockDb,'taller_data','stock','chunks',String(i)),{part:parts[i],index:i,updatedAt:serverTimestamp()},{merge:false});
+        tx.set(stockMetaRef,{totalChunks:parts.length,chunkSize:CHUNK_SIZE,updatedAt:serverTimestamp(),updatedAtISO:at,key:STOCK_KEY,rawCompanies:Array.isArray(db.companies)?db.companies.length:0,rawMaterials:db.materials.length,rawStock:db.stock.length,rawMovements:db.movements.length,rawReservations:db.reservations.length,rawAssignments:db.assignments.length,source:'terminal_cabina_pintura_consumo_v61'},{merge:true});
+      }
+      return {db,consumed,changed};
+    });
+    state.stock=result.db;state.stockReady=true;state.stockError='';state.stockMirrorOnly=false;cacheStockLocally(result.db);rerenderAfterStockLoad();cabinConsumptionRepairDone.add(operationId);
+    if(!options.silent){
+      const fresh=result.consumed.filter(x=>!x.already);if(fresh.length)toast('Stock consumido: '+fresh.map(x=>(x.plan.materialName||x.plan.materialId)+' − '+cabinQtyLabel(x.plan,x.amount)).join(' · '));
+    }
+    return result;
+  }
+
+  function schedulePendingCabinConsumptionRepair(){clearTimeout(cabinConsumptionRepairTimer);cabinConsumptionRepairTimer=setTimeout(()=>{retryPendingCabinConsumptions().catch(e=>console.warn('Reintento consumo cabina',e));},500);}
+  async function retryPendingCabinConsumptions(){
+    if(!state.stock||!state.flowPackage||cabinConsumptionRepairBusy.has('scan'))return;
+    cabinConsumptionRepairBusy.add('scan');
+    try{
+      const ldh=safeParse(state.flowPackage.ldh_db,'{}')||{},seen=new Set(),events=[];
+      for(const pool of FLOW_POOLS){for(const raw of (Array.isArray(ldh[pool])?ldh[pool]:[])){for(const h of (Array.isArray(raw&&raw.history)?raw.history:[])){
+        const operationId=text(h&&h.operationId);if(!operationId||seen.has(operationId)||cabinConsumptionRepairDone.has(operationId))continue;
+        if(text(h&&h.type)!=='terminal_pintura_to_almacen'||text(h&&h.source)!=='terminal_cabina_pintura')continue;
+        seen.add(operationId);events.push({work:raw,qty:num(h.qty),operationId,date:text(h.date)});
+      }}}
+      events.sort((a,b)=>(Date.parse(a.date)||0)-(Date.parse(b.date)||0));
+      for(const e of events.slice(-100)){
+        try{await consumeCabinConsumablesForPaintMove(e.work,e.qty,e.operationId,{silent:true});cabinConsumptionRepairDone.add(e.operationId);}catch(err){console.warn('Consumo Cabina aún pendiente',e.operationId,e.work&&e.work.ref,err);}
+      }
+    }finally{cabinConsumptionRepairBusy.delete('scan');}
+  }
+
   async function regularizeStock(companyId,materialId,target,reason,note,packageDetail){
     const op=requireOperator(); if(!op)throw new Error('Operario obligatorio'); const at=nowISO();
     const result=await runTransaction(stockDb,async tx=>{
@@ -3017,6 +3231,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       jobs.forEach(([name,fn])=>{try{fn();}catch(e){console.error('Render tardio '+name+' despues de cargar Stock',e);}});
       try{reconcileVisiblePaintStock();}catch(e){console.error('Reconciliacion visual tardia de Stock',e);}
     },delay));
+    schedulePendingCabinConsumptionRepair();
   }
   function applyLoadedStock(db,source,mirrorOnly,statusText,statusClass){
     state.stock=db;state.stockReady=true;state.stockError='';state.stockSource=source;state.stockMirrorOnly=!!mirrorOnly;
