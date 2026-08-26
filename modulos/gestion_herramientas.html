@@ -277,7 +277,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Herramientas</h1><span class="pill">V25 · Protecciones con entrega directa por línea</span>
+      <h1>🛠️ Gestión de Herramientas</h1><span class="pill">V26 · préstamo directo por línea + prestar varias herramientas</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -320,6 +320,7 @@
             <option value="name">Orden: Nombre</option>
             <option value="free">Orden: Cantidad Libre</option>
           </select>
+          <button class="btn primary" id="btnLoanMultiple" type="button">Prestar varias herramientas</button>
         </div>
         <div id="invEmpty" class="small" style="display:none">No hay herramientas. Usa “📦 Catálogo” o “+ Herramienta”.</div>
         <div id="invTools" class="tools"></div>
@@ -857,10 +858,9 @@ function render(){
           tool.ondrop = (e) => handleToolDrop(e, t.id);
       }
 
-      tool.onclick = (e)=>{
-        if(e.target.closest(".btn") || e.target.closest("input") || e.target.closest("select")) return;
-        toggleSelect(t.id);
-      };
+      // V26: ya no se seleccionan herramientas pulsando la tarjeta.
+      // "Prestar" actúa solo sobre su línea y "Prestar varias herramientas" abre el formulario múltiple.
+      tool.onclick = null;
 
       tool.innerHTML = `
         <div class="row">
@@ -1347,73 +1347,104 @@ window.resolveRepairCase=function(toolId,caseId,outcome){
   ]);
 };
 
-function openBatchLoan(){
-  const para = normOp(fbOperario.value);
-  const recoge0 = normOp((fbRecoge && fbRecoge.value) || "");
-  const recoge = recoge0 || para;
-  if(!para) {
-      if(selected.size > 0) alert("Escribe 'Para' (operario destino) en la barra flotante");
-      return;
-  }
-  const list = activeTools().filter(t=>selected.has(t.id));
-  if(!list.length) return alert("Selecciona herramientas");
+function openLoanForm(preselectedId=''){
+  const all = activeTools();
+  if(!all.length) return alert('No hay herramientas activas.');
+
+  const selectedTool = preselectedId ? all.find(t=>String(t.id)===String(preselectedId)) : null;
+  if(preselectedId && !selectedTool) return alert('No se encuentra esta herramienta.');
+  if(selectedTool && toolsFreeQty(selectedTool)<=0) return alert('No hay unidades libres de esta herramienta.');
+
+  const list = (selectedTool ? [selectedTool] : all.slice())
+    .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es'));
+
   const rows = list.map(t=>{
     const free = toolsFreeQty(t);
     const usedS = new Set(activeLoansOf(t).flatMap(l=>l.serials||[]));
-    const maintS = new Set(t.maintSerials);
+    const maintS = new Set(t.maintSerials||[]);
     const availS = (t.serials||[]).filter(s => !usedS.has(s) && !maintS.has(s));
-    let inputHtml = "";
-    if(t.mode==="serial"){
-       const opts = availS.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join("");
-       inputHtml = `<select multiple data-id="${t.id}" data-type="serial" size="${Math.min(5,availS.length||1)}" style="min-width:150px">${opts}</select>`;
+    let inputHtml = '';
+    if(t.mode==='serial'){
+      const opts = availS.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      inputHtml = `<select multiple data-id="${t.id}" data-type="serial" size="${Math.min(5,availS.length||1)}" style="min-width:150px" ${availS.length?'':'disabled'}>${opts}</select>`;
     } else {
-       inputHtml = `<input type="number" data-id="${t.id}" data-type="qty" min="0" max="${free}" placeholder="0"/>`;
+      const defaultQty = selectedTool && Number(free)>0 ? 1 : 0;
+      inputHtml = `<input type="number" data-id="${t.id}" data-type="qty" min="0" max="${Math.max(0,free)}" value="${defaultQty}" ${free<=0?'disabled':''}/>`;
     }
-    return `<tr><td>${renderIcon(t.icon)} ${t.name}</td><td>${free}</td><td><input data-id="${t.id}" data-type="variant" placeholder="Ej: 13, Pared 12..." style="font-size:12px"/></td><td>${inputHtml}</td></tr>`;
-  }).join("");
-  showModal("Confirmar Préstamo", `
+    return `<tr class="loanFormRow" data-tool-id="${t.id}"><td>${renderIcon(t.icon)} <b>${esc(t.name)}</b></td><td><b>${esc(free)}</b></td><td><input data-id="${t.id}" data-type="variant" placeholder="Ej: 13, Pared 12..." style="font-size:12px"/></td><td>${inputHtml}</td></tr>`;
+  }).join('');
+
+  const title = selectedTool ? `Prestar · ${esc(selectedTool.name||'Herramienta')}` : 'Prestar varias herramientas';
+  showModal(title, `
+    <div class="audit-note">${selectedTool
+      ? 'Este botón presta <b>solo esta herramienta</b>.'
+      : 'Indica cantidad únicamente en las herramientas que quieras prestar. Puedes registrar varias en una sola operación.'}</div>
     <div class="form">
-      <div><label>Para (operario destino)</label><input id="lPara" value="${esc(para)}"/></div>
-      <div><label>Recoge (quién lo retira)</label><input id="lRecoge" value="${esc(recoge)}" placeholder="Si lo recoge el mismo, deja igual"/></div>
+      <div><label>Para (operario destino)</label><input id="lPara" list="dlOps" placeholder="Operario destino"/></div>
+      <div><label>Recoge (quién lo retira)</label><input id="lRecoge" list="dlOps" placeholder="Si lo recoge el mismo, puede quedar vacío"/></div>
       <div><label>Zona / Obra</label><input id="lZone"/></div><div><label>Devolución prevista</label><input id="lDue" type="date"/></div>
       <div style="grid-column:1/-1"><label>Notas generales</label><textarea id="lNotes"></textarea></div>
     </div>
-    <table style="margin-top:10px"><thead><tr><th>Item</th><th>Libre</th><th>Detalle/Medida</th><th>Selección</th></tr></thead><tbody>${rows}</tbody></table>
+    <div style="overflow:auto;max-height:48vh;margin-top:10px">
+      <table><thead><tr><th>Herramienta</th><th>Libre</th><th>Detalle/Medida</th><th>${selectedTool?'Cantidad / serie':'Cantidad / series'}</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>
   `, [
-    {text:"Cancelar", className:"btn", onClick: closeModal},
-    {text:"Prestar", className:"btn primary", onClick: ()=>{
-      const para2 = normOp($("lPara").value);
+    {text:'Cancelar', className:'btn', onClick: closeModal},
+    {text:'Confirmar préstamo', className:'btn primary', onClick: ()=>{
+      const para2 = normOp($('lPara').value);
       if(!para2) return alert("Falta 'Para' (operario destino)");
-      const recoge2 = normOp($("lRecoge").value) || para2;
-      const zone = normName($("lZone").value);
-      const notes = normName($("lNotes").value);
-      const dueAt = $("lDue").value || "";
+      const recoge2 = normOp($('lRecoge').value) || para2;
+      const zone = normName($('lZone').value);
+      const notes = normName($('lNotes').value);
+      const dueAt = $('lDue').value || '';
       const items = [];
-      document.querySelectorAll('tbody tr').forEach(tr => {
-          const qtyInput = tr.querySelector('[data-type="qty"], [data-type="serial"]');
-          const varInput = tr.querySelector('[data-type="variant"]');
-          const tid = qtyInput.getAttribute("data-id");
-          const type = qtyInput.getAttribute("data-type");
-          const t = db.tools.find(x=>x.id===tid);
-          const variant = normName(varInput.value);
-          if(type==="qty"){
-            const q = parseInt(qtyInput.value);
-            if(q>0) items.push({t, qty:q, serials:[], mode:'qty', variant});
-          } else {
-            const s = [...qtyInput.selectedOptions].map(o=>o.value);
-            if(s.length) items.push({t, qty:s.length, serials:s, mode:'serial', variant});
-          }
+
+      document.querySelectorAll('#mBody .loanFormRow').forEach(tr=>{
+        const qtyInput = tr.querySelector('[data-type="qty"], [data-type="serial"]');
+        const varInput = tr.querySelector('[data-type="variant"]');
+        if(!qtyInput) return;
+        const tid = qtyInput.getAttribute('data-id');
+        const type = qtyInput.getAttribute('data-type');
+        const t = db.tools.find(x=>String(x.id)===String(tid));
+        if(!t) return;
+        const variant = normName(varInput?.value||'');
+        if(type==='qty'){
+          const q = parseInt(qtyInput.value,10)||0;
+          if(q>0) items.push({t, qty:q, serials:[], mode:'qty', variant});
+        } else {
+          const serials = [...qtyInput.selectedOptions].map(o=>o.value);
+          if(serials.length) items.push({t, qty:serials.length, serials, mode:'serial', variant});
+        }
       });
-      if(!items.length) return alert("No has seleccionado cantidades");
+
+      if(!items.length) return alert('No has seleccionado cantidades ni series.');
+
+      for(const item of items){
+        const freeNow = toolsFreeQty(item.t);
+        if(item.mode==='qty' && item.qty>freeNow) return alert(`${item.t.name}: solo quedan ${freeNow} unidades libres.`);
+        if(item.mode==='serial'){
+          const usedNow = new Set(activeLoansOf(item.t).flatMap(l=>l.serials||[]));
+          const maintNow = new Set(item.t.maintSerials||[]);
+          const unavailable = item.serials.find(s=>usedNow.has(s)||maintNow.has(s));
+          if(unavailable) return alert(`${item.t.name}: la serie ${unavailable} ya no está disponible.`);
+        }
+      }
+
       const outAt = nowIso();
-      items.forEach(({t, qty, serials, mode, variant}) => {
-          const l = {id:uid(), operator:ensureOperatorName(para2), pickupBy:ensureOperatorName(recoge2), zone, qty, originalQty:qty, mode, serials, originalSerials:serials.slice(), outAt, dueAt, notes, variant, status:"active", updatedAt:outAt};
-          t.loans.push(l);
-          db.history.push({id:uid(), type:"OUT", toolId:t.id, toolName:t.name, operator:para2, pickupBy:recoge2, zone, qty, serials, outAt, dueAt, notes, variant});
+      items.forEach(({t,qty,serials,mode,variant})=>{
+        const l={id:uid(),operator:ensureOperatorName(para2),pickupBy:ensureOperatorName(recoge2),zone,qty,originalQty:qty,mode,serials,originalSerials:serials.slice(),outAt,dueAt,notes,variant,status:'active',updatedAt:outAt};
+        t.loans.push(l);
+        db.history.push({id:uid(),type:'OUT',toolId:t.id,toolName:t.name,operator:para2,pickupBy:recoge2,zone,qty,serials,outAt,dueAt,notes,variant});
       });
-      fbOperario.value = ""; if(fbRecoge) fbRecoge.value = ""; selected.clear(); saveAll(); closeModal(); render();
+      selected.clear();
+      saveAll(); closeModal(); render();
     }}
   ]);
+}
+
+function openBatchLoan(){
+  // Compatibilidad con el flujo antiguo: desde V26 abre directamente el préstamo múltiple.
+  openLoanForm('');
 }
 
 function openReturn(tid,lid){
@@ -1913,7 +1944,7 @@ function openProtectionCenter(tab='stock'){
       <div class="spacer"></div>
       <button class="btn" id="ppeArchived" type="button">Archivadas</button>
       <button class="btn primary" id="ppeNewItem" type="button">+ Nueva protección</button>
-      <button class="btn primary" id="ppeNewDelivery" type="button">+ Nueva entrega</button>
+      <button class="btn primary" id="ppeNewDelivery" type="button">Entregar varios EPIs</button>
     </div>
     ${tab==='stock' ? `<div class="row" style="margin-bottom:10px"><input id="ppeStockSearch" placeholder="Buscar protección, talla o modelo..." style="flex:1"/></div><div id="ppeStockTable">${renderProtectionStockTable('')}</div>` : protectionDeliveriesMarkup()}
   `;
@@ -2062,7 +2093,7 @@ function openProtectionDeliveryForm(preselectedId=''){
   const selected=preselectedId?all.find(p=>p.id===preselectedId):null;
   const list=selected?[selected]:all;
   const rows=list.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es')).map(p=>`<tr><td>${renderIcon(p.icon||'🦺')} <b>${esc(p.name||'—')}</b>${p.variant?`<div class="small">${esc(p.variant)}</div>`:''}</td><td><b>${esc(p.stock||0)}</b></td><td><input class="ppeGiveQty" data-ppe-id="${p.id}" type="number" min="0" max="${Math.max(0,Number(p.stock||0))}" value="${selected&&p.id===selected.id&&Number(p.stock||0)>0?1:0}" ${Number(p.stock||0)<=0?'disabled':''}/></td></tr>`).join('');
-  showAuxModal(selected?`Entregar · ${esc(protectionLabel(selected))}`:'Nueva entrega de protecciones',`
+  showAuxModal(selected?`Entregar · ${esc(protectionLabel(selected))}`:'Entregar varios EPIs',`
     <div class="audit-note">Las protecciones entregadas <b>no se devuelven</b>. Al confirmar, las cantidades se descuentan inmediatamente del stock y quedan registradas a nombre del operario.</div>
     <div class="form">
       <div><label>Entregar a · Operario *</label><input id="ppeGiveTo" list="dlOps" placeholder="Operario"/></div>
@@ -2317,6 +2348,8 @@ $("sortInv").onchange = render;
 $("invSearch").oninput = render;
 $("btnPrestarSel").onclick = openBatchLoan;
 $("btnCancelSel").onclick = ()=>{ selected.clear(); render(); };
+const __btnLoanMultiple=$("btnLoanMultiple");
+if(__btnLoanMultiple) __btnLoanMultiple.onclick=()=>openLoanForm('');
 
 function openCatalogManager(isPickerMode = false, onSelect = null) {
   const renderManager = () => {
@@ -2596,11 +2629,8 @@ function openUploadModal(parentRefreshCb) {
 }
 
 function openLoanAction(id){
-  if(!selected.has(id)) {
-      selected.add(id);
-      render();
-  }
-  setTimeout(() => openBatchLoan(), 10);
+  // V26: el botón de la línea presta exclusivamente esta herramienta.
+  openLoanForm(id);
 }
 
 $("btnCatalogo").onclick = () => openCatalogManager(false);
@@ -2611,6 +2641,7 @@ if(__btnSectionPPE) __btnSectionPPE.onclick=()=>openProtectionCenter('stock');
 
 function boot(){
   loadAll();
+  selected.clear();
   // V21: al entrar, todos los grupos comienzan cerrados. La búsqueda puede abrirlos temporalmente.
   cfg.familyOpen = {};
   saveAll(); render(); setupFloatingDrag();
@@ -3182,5 +3213,7 @@ window.LDH_TOOLS_V20_PROTECCIONES='HERRAMIENTAS-V20-PROTECCIONES-20260826';
 window.LDH_TOOLS_V21_CLOSED_FAMILIES='HERRAMIENTAS-V21-FAMILIAS-CERRADAS-AL-ENTRAR-20260826';
 window.LDH_TOOLS_V22_DEFAULT_PPE_DELIVERER='HERRAMIENTAS-V22-RESPONSABLE-ENTREGA-ROMAN-DEL-HIERROS-20260826';
 </script>
+
+<!-- LDH_HERRAMIENTAS_V26_PRESTAR_VARIAS_20260826 -->
 </body>
 </html>
