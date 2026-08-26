@@ -251,7 +251,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V18 · estadística de consumibles · últimos 30 días</span>
+      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V19 · historial borrable seguro + estadística consumibles</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -1460,7 +1460,92 @@ function historyEventDbIndex(h){
   return (db.history||[]).indexOf(h);
 }
 
-function openHistoryEventByIndex(dbIndex){
+function historyStockAffecting(h){
+  return !!h && (h.type==='WRITE_OFF' || h.type==='STOCK_IN' || h.type==='STOCK_ADJUST' || h.stockBefore!==undefined || h.stockAfter!==undefined);
+}
+
+function sameHistoryTool(h,t){
+  if(!h || !t) return false;
+  return String(h.toolId||'')===String(t.id||'') || (!h.toolId && String(h.toolName||'')===String(t.name||''));
+}
+
+function refreshHistoryParentV19(context){
+  const ctx=String(context||'');
+  if(ctx.startsWith('ficha:')) return openToolFicha(ctx.slice(6));
+  if(ctx.startsWith('hist:')){
+    const id=ctx.slice(5);
+    return openHistory(id||null);
+  }
+  render();
+}
+
+function deleteHistoryEventByIndex(dbIndex, returnContext=''){
+  const idx=Number(dbIndex);
+  const h=(db.history||[])[idx];
+  if(!h) return alert('No se encuentra este movimiento en el historial.');
+  const t=(db.tools||[]).find(x=>String(x.id||'')===String(h.toolId||'')) || (db.tools||[]).find(x=>String(x.name||'')===String(h.toolName||''));
+  const label=historyTypeLabel(h.type);
+  const qty=Number(h.qty||0);
+  const affectsStock=historyStockAffecting(h) && t && Number.isFinite(Number(h.stockBefore)) && Number.isFinite(Number(h.stockAfter));
+  let undoStock=false;
+  let undoReason='';
+
+  if(affectsStock){
+    const hMs=dateMs(eventAt(h));
+    const newerStock=(db.history||[]).some((x,i)=>i!==idx && sameHistoryTool(x,t) && historyStockAffecting(x) && dateMs(eventAt(x))>hMs);
+    const currentStock=Number(t.stock||0);
+    const expectedAfter=Number(h.stockAfter);
+    if(!newerStock && Math.abs(currentStock-expectedAfter)<1e-9){
+      undoStock=true;
+    }else{
+      undoReason=newerStock
+        ? 'Hay movimientos de Stock posteriores para esta herramienta.'
+        : `El Stock actual (${currentStock}) ya no coincide con el Stock posterior a este movimiento (${expectedAfter}).`;
+    }
+  }
+
+  let msg=`¿Eliminar definitivamente este movimiento del historial?\n\n${label} · ${h.toolName||'Herramienta'} · x${qty}`;
+  if(undoStock){
+    msg+=`\n\nEste movimiento modificó Stock de ${h.stockBefore} a ${h.stockAfter}.\nAl eliminarlo se restaurará automáticamente el Stock a ${h.stockBefore}.`;
+  }else if(affectsStock){
+    msg+=`\n\nATENCIÓN: ${undoReason}\nPor seguridad se eliminará SOLO el registro del historial y NO se modificará el Stock actual.`;
+  }else{
+    msg+='\n\nSe eliminará solo el registro histórico. No se modifican préstamos, reparaciones ni otros estados actuales.';
+  }
+  msg+='\n\nEsta acción no se puede deshacer.';
+  if(!confirm(msg)) return;
+
+  if(undoStock){
+    const before=Number(h.stockBefore);
+    if(t.mode==='serial' && Array.isArray(h.serials) && h.serials.length){
+      if(h.type==='WRITE_OFF'){
+        const set=new Set(t.serials||[]);
+        h.serials.forEach(sn=>set.add(sn));
+        t.serials=[...set];
+        t.stock=t.serials.length;
+      }else if(h.type==='STOCK_IN'){
+        const remove=new Set(h.serials||[]);
+        t.serials=(t.serials||[]).filter(sn=>!remove.has(sn));
+        t.stock=t.serials.length;
+      }else{
+        t.stock=before;
+      }
+    }else{
+      t.stock=before;
+    }
+    t.stockUpdatedAt=nowIso();
+    t.updatedAt=t.stockUpdatedAt;
+  }
+
+  db.history.splice(idx,1);
+  saveAll();
+  closeAuxModal();
+  render();
+  setTimeout(()=>refreshHistoryParentV19(returnContext),0);
+}
+window.deleteHistoryEventByIndex=deleteHistoryEventByIndex;
+
+function openHistoryEventByIndex(dbIndex, returnContext=''){
   const h=(db.history||[])[Number(dbIndex)];
   if(!h) return alert('No se encuentra este movimiento en el historial.');
   const date=eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—';
@@ -1489,7 +1574,10 @@ function openHistoryEventByIndex(dbIndex){
     </div>
     <div class="section-title">Nota / observación</div>
     <div class="audit-note" style="white-space:pre-wrap">${esc(h.notes||'Sin observaciones.')}</div>
-  `,[{text:'Cerrar',className:'btn',onClick:closeAuxModal}]);
+  `,[
+    {text:'Eliminar movimiento',className:'btn danger',onClick:()=>deleteHistoryEventByIndex(dbIndex,returnContext)},
+    {text:'Cerrar',className:'btn',onClick:closeAuxModal}
+  ]);
 }
 window.openHistoryEventByIndex=openHistoryEventByIndex;
 
@@ -1537,7 +1625,7 @@ function openToolFicha(id){
     const date = eventAt(h)?new Date(eventAt(h)).toLocaleDateString('es-ES'):'—';
     const op = historyEventOperator(h);
     const dbIndex=historyEventDbIndex(h);
-    return `<tr><td class="mono small">${esc(date)}</td><td><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></td><td>${esc(op)}${h.returnedBy&&h.returnedBy!==op?` · Devuelve: ${esc(h.returnedBy)}`:''} · x${esc(h.qty||0)}</td><td>${esc(h.variant||'')}</td><td>${esc(h.notes||'')} ${h.status==='inc'?'🚨':''}</td><td style="white-space:nowrap"><button class="btn small" type="button" onclick="openHistoryEventByIndex(${dbIndex})">Ver</button></td></tr>`;
+    return `<tr><td class="mono small">${esc(date)}</td><td><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></td><td>${esc(op)}${h.returnedBy&&h.returnedBy!==op?` · Devuelve: ${esc(h.returnedBy)}`:''} · x${esc(h.qty||0)}</td><td>${esc(h.variant||'')}</td><td>${esc(h.notes||'')} ${h.status==='inc'?'🚨':''}</td><td style="white-space:nowrap"><button class="btn small" type="button" onclick="openHistoryEventByIndex(${dbIndex},'ficha:${t.id}')">Ver</button></td></tr>`;
   }).join('') : '<tr><td colspan="6" class="small">Sin historial.</td></tr>';
 
   showModal(`Ficha: ${t.name}`, `
@@ -1622,7 +1710,7 @@ function openHistory(toolId=null){
     const shown=list.slice(start,start+PAGE_SIZE);
     $('hBody').innerHTML=shown.map(h=>{
       const dbIndex=historyEventDbIndex(h);
-      return `<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></td><td class="small"><b>${esc(h.toolName||'—')}</b>${h.variant?`<br>(${esc(h.variant)})`:''}<br>${esc(historyEventOperator(h))} · x${esc(h.qty||0)}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')} ${h.status==='repair'?'🚨':''}</td><td style="white-space:nowrap"><button class="btn small" type="button" onclick="openHistoryEventByIndex(${dbIndex})">Ver</button></td></tr>`;
+      return `<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></td><td class="small"><b>${esc(h.toolName||'—')}</b>${h.variant?`<br>(${esc(h.variant)})`:''}<br>${esc(historyEventOperator(h))} · x${esc(h.qty||0)}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')} ${h.status==='repair'?'🚨':''}</td><td style="white-space:nowrap"><button class="btn small" type="button" onclick="openHistoryEventByIndex(${dbIndex},'hist:${toolId||''}')">Ver</button></td></tr>`;
     }).join('')||'<tr><td colspan="5" class="small">Sin resultados.</td></tr>';
     $('hPageInfo').textContent=`Página ${page} de ${totalPages}`;
     $('hResultInfo').textContent=list.length?`Mostrando ${start+1}-${Math.min(start+PAGE_SIZE,list.length)} de ${list.length} movimientos`:'0 movimientos';
