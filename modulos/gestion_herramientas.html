@@ -250,7 +250,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V15 · trazabilidad de compras, averías y bajas</span>
+      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V16 · historial paginado y consulta individual</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -1447,13 +1447,58 @@ function openTransfer(tid, lid){
   ]);
 }
 
+function historyBadgeClass(type){
+  return type==='OUT'?'warn':(type==='WRITE_OFF'?'maint':'ok');
+}
+
+function historyEventOperator(h){
+  return h.operator || h.toOperator || h.fromOperator || h.receivedBy || h.returnedBy || h.pickupBy || h.deliveredBy || '—';
+}
+
+function historyEventDbIndex(h){
+  return (db.history||[]).indexOf(h);
+}
+
+function openHistoryEventByIndex(dbIndex){
+  const h=(db.history||[])[Number(dbIndex)];
+  if(!h) return alert('No se encuentra este movimiento en el historial.');
+  const date=eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—';
+  const people=[
+    h.operator?`Operario: <b>${esc(h.operator)}</b>`:'',
+    h.pickupBy?`Recoge: <b>${esc(h.pickupBy)}</b>`:'',
+    h.returnedBy?`Devuelve: <b>${esc(h.returnedBy)}</b>`:'',
+    h.receivedBy?`Recibe: <b>${esc(h.receivedBy)}</b>`:'',
+    h.deliveredBy?`Entrega: <b>${esc(h.deliveredBy)}</b>`:'',
+    h.fromOperator?`De: <b>${esc(h.fromOperator)}</b>`:'',
+    h.toOperator?`A: <b>${esc(h.toOperator)}</b>`:''
+  ].filter(Boolean).join('<br>') || '—';
+  const serials=Array.isArray(h.serials)&&h.serials.length?h.serials.map(esc).join(', '):'';
+  const stockInfo=(h.stockBefore!==undefined||h.stockAfter!==undefined)
+    ? `<div class="card"><div class="content"><b>Stock</b><div class="small" style="margin-top:8px">Antes: <b>${esc(h.stockBefore??'—')}</b> · Después: <b>${esc(h.stockAfter??'—')}</b></div></div></div>`:'';
+  showAuxModal(`Movimiento · ${historyTypeLabel(h.type)}`, `
+    <div class="grid">
+      <div class="card"><div class="content"><b>Fecha</b><div class="small" style="margin-top:8px">${esc(date)}</div></div></div>
+      <div class="card"><div class="content"><b>Herramienta</b><div class="small" style="margin-top:8px">${esc(h.toolName||'—')}</div></div></div>
+      <div class="card"><div class="content"><b>Tipo</b><div style="margin-top:8px"><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></div></div></div>
+      <div class="card"><div class="content"><b>Cantidad</b><div class="small" style="margin-top:8px">x${esc(h.qty??0)}</div></div></div>
+      <div class="card"><div class="content"><b>Personas</b><div class="small" style="margin-top:8px;line-height:1.6">${people}</div></div></div>
+      <div class="card"><div class="content"><b>Detalle</b><div class="small" style="margin-top:8px;line-height:1.6">${h.variant?`Medida / variante: <b>${esc(h.variant)}</b><br>`:''}${h.purchaseRef?`Ref. pedido / albarán: <b>${esc(h.purchaseRef)}</b><br>`:''}${serials?`Series: <span class="mono">${serials}</span><br>`:''}${h.zone?`Zona / obra: <b>${esc(h.zone)}</b><br>`:''}${h.status?`Estado: <b>${esc(h.status)}</b>`:'—'}</div></div></div>
+      ${stockInfo}
+      ${h.cost!==undefined&&Number(h.cost)>0?`<div class="card"><div class="content"><b>Coste reparación</b><div class="small" style="margin-top:8px">${esc(h.cost)} €</div></div></div>`:''}
+    </div>
+    <div class="section-title">Nota / observación</div>
+    <div class="audit-note" style="white-space:pre-wrap">${esc(h.notes||'Sin observaciones.')}</div>
+  `,[{text:'Cerrar',className:'btn',onClick:closeAuxModal}]);
+}
+window.openHistoryEventByIndex=openHistoryEventByIndex;
+
 function openToolFicha(id){
   const t = db.tools.find(x=>x.id===id);
   if(!t) return;
   const free = toolsFreeQty(t);
   const used = toolsInUseCount(t);
   const maint = toolsInMaintCount(t);
-  const hist = toolHistory(id).slice().reverse();
+  const hist = toolHistory(id).slice().sort((a,b)=>dateMs(eventAt(b))-dateMs(eventAt(a)));
   const activeLoans = activeLoansOf(t).slice().sort((a,b)=>new Date(a.outAt)-new Date(b.outAt));
 
   const loanRows = activeLoans.length ? activeLoans.map(l=>{
@@ -1462,11 +1507,13 @@ function openToolFicha(id){
     return `<div class="loan ${isLoanOverdue(l)?'dang':(d>=cfg.warnDays?'warn':'')}"><div class="top"><div class="sp"><div class="title">${esc(l.operator||'—')} · x${esc(l.qty||0)} ${l.variant?`(${esc(l.variant)})`:''}</div><p class="sub">Salida: ${new Date(l.outAt).toLocaleDateString('es-ES')} · <span class="pill ${oldCls}">${d.toFixed(1)} días fuera</span>${l.dueAt?` · Prevista: ${new Date(String(l.dueAt).slice(0,10)+'T12:00:00').toLocaleDateString('es-ES')}`:''}</p>${l.notes?`<p class="sub">📝 ${esc(l.notes)}</p>`:''}</div><div class="row"><button class="btn small" onclick="openTransfer('${t.id}','${l.id}')">Cambiar operario</button><button class="btn small primary" onclick="openReturn('${t.id}','${l.id}')">Devolver</button></div></div></div>`;
   }).join('') : '<p class="small">Sin préstamos activos.</p>';
 
-  const histRows = hist.length ? hist.slice(0,80).map(h=>{
-    const date = new Date(h.type==='OUT' ? h.outAt : (h.inAt || h.at || Date.now())).toLocaleDateString();
-    const op = h.operator || h.toOperator || h.fromOperator || '—';
-    return `<tr><td class="mono small">${date}</td><td><span class="badge ${h.type==='OUT'?'warn':(h.type==='WRITE_OFF'?'maint':'ok')}">${esc(historyTypeLabel(h.type))}</span></td><td>${esc(op)}${h.returnedBy?` · Devuelve: ${esc(h.returnedBy)}`:''} · x${esc(h.qty||0)}</td><td>${esc(h.variant||'')}</td><td>${esc(h.notes||'')} ${h.status==='inc'?'🚨':''}</td></tr>`;
-  }).join('') : '<tr><td colspan="5" class="small">Sin historial.</td></tr>';
+  const recent=hist.slice(0,5);
+  const histRows = recent.length ? recent.map(h=>{
+    const date = eventAt(h)?new Date(eventAt(h)).toLocaleDateString('es-ES'):'—';
+    const op = historyEventOperator(h);
+    const dbIndex=historyEventDbIndex(h);
+    return `<tr><td class="mono small">${esc(date)}</td><td><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></td><td>${esc(op)}${h.returnedBy&&h.returnedBy!==op?` · Devuelve: ${esc(h.returnedBy)}`:''} · x${esc(h.qty||0)}</td><td>${esc(h.variant||'')}</td><td>${esc(h.notes||'')} ${h.status==='inc'?'🚨':''}</td><td style="white-space:nowrap"><button class="btn small" type="button" onclick="openHistoryEventByIndex(${dbIndex})">Ver</button></td></tr>`;
+  }).join('') : '<tr><td colspan="6" class="small">Sin historial.</td></tr>';
 
   showModal(`Ficha: ${t.name}`, `
     <div class="grid">
@@ -1475,26 +1522,104 @@ function openToolFicha(id){
     </div>
     <div class="section-title">Préstamos activos</div>
     ${loanRows}
-    <div class="section-title">Historial de esta herramienta</div>
-    <div style="max-height:40vh;overflow:auto"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>Operario</th><th>Detalle</th><th>Nota</th></tr></thead><tbody>${histRows}</tbody></table></div>
+    <div class="section-title">Últimos movimientos <span class="small">(${Math.min(5,hist.length)} de ${hist.length})</span></div>
+    <div style="overflow:auto"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>Operario</th><th>Detalle</th><th>Nota</th><th></th></tr></thead><tbody>${histRows}</tbody></table></div>
   `, [
     {text:"Cerrar", className:"btn", onClick:closeModal},
-    {text:"Historial completo", className:"btn", onClick:()=>openHistory(t.id)},
+    {text:`Ver historial (${hist.length})`, className:"btn", onClick:()=>openHistory(t.id)},
     ...(t.archived ? [{text:"Restaurar", className:"btn primary", onClick:()=>restoreTool(t.id)}] : [{text:"Editar", className:"btn primary", onClick:()=>openEdit(t.id)}])
   ]);
 }
 
 function openHistory(toolId=null){
-  const t=toolId?db.tools.find(x=>x.id===toolId):null; const title=t?`Historial · ${t.name}`:"Historial / trazabilidad";
-  const cleanup=toolId?"":`<div class="row" style="margin-top:8px"><label style="margin:0">Ocultar movimientos anteriores a</label><input id="hBefore" type="date" value="${esc(cfg.historyHiddenBefore||'')}" style="max-width:180px"/><button class="btn" id="hHideOld">Aplicar</button><button class="btn" id="hShowAll">Mostrar todo</button></div>`;
-  showModal(title, `<div class="audit-note">El historial incluye préstamos, devoluciones, reparaciones, bajas y entradas de Compras. Los movimientos no se borran: al limpiar solo se ocultan los antiguos para conservar la trazabilidad.</div><div style="margin-bottom:10px;display:flex;gap:10px"><input id="hSearch" placeholder="Filtrar por herramienta, operario, tipo, referencia..." style="flex:1"/></div>${cleanup}<div style="max-height:60vh;overflow:auto;margin-top:10px"><table id="hTable"><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Nota</th></tr></thead><tbody id="hBody"></tbody></table></div>`,[{text:"Cerrar",className:"btn",onClick:closeModal}]);
-  const renderH=(filter)=>{
-    const f=String(filter||"").toLowerCase(); const base=toolId?toolHistory(toolId):(db.history||[]); const hiddenMs=!toolId&&cfg.historyHiddenBefore?Date.parse(cfg.historyHiddenBefore+"T00:00:00"):0;
-    const list=base.slice().sort((a,b)=>dateMs(eventAt(b))-dateMs(eventAt(a))).filter(h=>(!hiddenMs||dateMs(eventAt(h))>=hiddenMs)&&(!f||[h.operator,h.returnedBy,h.pickupBy,h.toOperator,h.fromOperator,h.receivedBy,h.deliveredBy,h.toolName,h.variant,h.notes,h.purchaseRef,historyTypeLabel(h.type)].join(' ').toLowerCase().includes(f)));
-    $("hBody").innerHTML=list.map(h=>`<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td><span class="badge ${h.type==='OUT'?'warn':(h.type==='WRITE_OFF'?'maint':'ok')}">${esc(historyTypeLabel(h.type))}</span></td><td class="small"><b>${esc(h.toolName||'—')}</b>${h.variant?`<br>(${esc(h.variant)})`:''}<br>${esc(h.operator||h.toOperator||h.fromOperator||h.receivedBy||'—')}${h.returnedBy?` · Devuelve: <b>${esc(h.returnedBy)}</b>`:''}${h.deliveredBy?` · Entrega: ${esc(h.deliveredBy)}`:''} · x${esc(h.qty||0)}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')} ${h.status==='repair'?'🚨':''}</td></tr>`).join('')||'<tr><td colspan="4" class="small">Sin resultados.</td></tr>';
+  const t=toolId?db.tools.find(x=>x.id===toolId):null;
+  const title=t?`Historial · ${t.name}`:'Historial / trazabilidad';
+  const base=toolId?toolHistory(toolId):(db.history||[]);
+  const typeValues=[...new Set(base.map(h=>String(h.type||'')).filter(Boolean))].sort((a,b)=>historyTypeLabel(a).localeCompare(historyTypeLabel(b),'es'));
+  const operatorValues=[...new Set(base.flatMap(h=>[h.operator,h.returnedBy,h.pickupBy,h.toOperator,h.fromOperator,h.receivedBy,h.deliveredBy]).map(normOp).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'es'));
+  const cleanup=toolId?'':`<div class="row" style="margin-top:8px"><label style="margin:0">Ocultar movimientos anteriores a</label><input id="hBefore" type="date" value="${esc(cfg.historyHiddenBefore||'')}" style="max-width:180px"/><button class="btn" id="hHideOld">Aplicar límite</button><button class="btn" id="hClearBefore">Quitar límite</button></div>`;
+  const typeOptions=typeValues.map(v=>`<option value="${esc(v)}">${esc(historyTypeLabel(v))}</option>`).join('');
+  const opOptions=operatorValues.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
+
+  showModal(title, `
+    <div class="audit-note">El historial conserva toda la trazabilidad, pero ahora se muestra <b>20 movimientos por página</b>. Usa los filtros para localizar una entrega, préstamo, devolución, reparación o entrada de Compras sin desplegar todo a la vez.</div>
+    <div class="form" style="margin-bottom:10px">
+      <div style="grid-column:1/-1"><label>Buscar</label><input id="hSearch" placeholder="Herramienta, operario, referencia, nota..."/></div>
+      <div><label>Tipo</label><select id="hType"><option value="">Todos los tipos</option>${typeOptions}</select></div>
+      <div><label>Operario</label><select id="hOperator"><option value="">Todos los operarios</option>${opOptions}</select></div>
+      <div><label>Desde</label><input id="hFrom" type="date"/></div>
+      <div><label>Hasta</label><input id="hTo" type="date"/></div>
+    </div>
+    <div class="row" style="margin-bottom:10px"><button class="btn" id="hClearFilters" type="button">Limpiar filtros</button><span class="small" id="hResultInfo"></span></div>
+    ${cleanup}
+    <div style="overflow:auto;margin-top:10px"><table id="hTable"><thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Nota</th><th></th></tr></thead><tbody id="hBody"></tbody></table></div>
+    <div class="row" style="justify-content:center;margin-top:12px"><button class="btn" id="hPrev" type="button">← Anterior</button><span class="pill" id="hPageInfo">Página 1</span><button class="btn" id="hNext" type="button">Siguiente →</button></div>
+  `,[{text:'Cerrar',className:'btn',onClick:closeModal}]);
+
+  const PAGE_SIZE=20;
+  let page=1;
+
+  const selectedOperatorMatches=(h,selected)=>{
+    if(!selected) return true;
+    return [h.operator,h.returnedBy,h.pickupBy,h.toOperator,h.fromOperator,h.receivedBy,h.deliveredBy].map(normOp).includes(selected);
   };
-  renderH(""); $("hSearch").oninput=e=>renderH(e.target.value);
-  if(!toolId){ const hide=$("hHideOld"),show=$("hShowAll"); if(hide) hide.onclick=()=>{ cfg.historyHiddenBefore=$("hBefore").value||""; saveAll(); renderH($("hSearch").value); }; if(show) show.onclick=()=>{ cfg.historyHiddenBefore=""; $("hBefore").value=""; saveAll(); renderH($("hSearch").value); }; }
+
+  const filteredList=()=>{
+    const q=String($('hSearch')?.value||'').trim().toLowerCase();
+    const type=String($('hType')?.value||'');
+    const operator=String($('hOperator')?.value||'');
+    const fromRaw=String($('hFrom')?.value||'');
+    const toRaw=String($('hTo')?.value||'');
+    const fromMs=fromRaw?Date.parse(fromRaw+'T00:00:00'):0;
+    const toMs=toRaw?Date.parse(toRaw+'T23:59:59'):0;
+    const hiddenMs=!toolId&&cfg.historyHiddenBefore?Date.parse(cfg.historyHiddenBefore+'T00:00:00'):0;
+    return base.slice().sort((a,b)=>dateMs(eventAt(b))-dateMs(eventAt(a))).filter(h=>{
+      const ms=dateMs(eventAt(h));
+      if(hiddenMs && ms<hiddenMs) return false;
+      if(fromMs && ms<fromMs) return false;
+      if(toMs && ms>toMs) return false;
+      if(type && String(h.type||'')!==type) return false;
+      if(!selectedOperatorMatches(h,operator)) return false;
+      if(q){
+        const hay=[h.operator,h.returnedBy,h.pickupBy,h.toOperator,h.fromOperator,h.receivedBy,h.deliveredBy,h.toolName,h.variant,h.notes,h.purchaseRef,h.zone,historyTypeLabel(h.type)].join(' ').toLowerCase();
+        if(!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  };
+
+  const renderH=()=>{
+    const list=filteredList();
+    const totalPages=Math.max(1,Math.ceil(list.length/PAGE_SIZE));
+    page=Math.min(Math.max(1,page),totalPages);
+    const start=(page-1)*PAGE_SIZE;
+    const shown=list.slice(start,start+PAGE_SIZE);
+    $('hBody').innerHTML=shown.map(h=>{
+      const dbIndex=historyEventDbIndex(h);
+      return `<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td><span class="badge ${historyBadgeClass(h.type)}">${esc(historyTypeLabel(h.type))}</span></td><td class="small"><b>${esc(h.toolName||'—')}</b>${h.variant?`<br>(${esc(h.variant)})`:''}<br>${esc(historyEventOperator(h))} · x${esc(h.qty||0)}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')} ${h.status==='repair'?'🚨':''}</td><td style="white-space:nowrap"><button class="btn small" type="button" onclick="openHistoryEventByIndex(${dbIndex})">Ver</button></td></tr>`;
+    }).join('')||'<tr><td colspan="5" class="small">Sin resultados.</td></tr>';
+    $('hPageInfo').textContent=`Página ${page} de ${totalPages}`;
+    $('hResultInfo').textContent=list.length?`Mostrando ${start+1}-${Math.min(start+PAGE_SIZE,list.length)} de ${list.length} movimientos`:'0 movimientos';
+    $('hPrev').disabled=page<=1;
+    $('hNext').disabled=page>=totalPages;
+  };
+
+  const resetAndRender=()=>{ page=1; renderH(); };
+  ['hSearch','hType','hOperator','hFrom','hTo'].forEach(id=>{
+    const el=$(id); if(!el) return;
+    el.addEventListener(id==='hSearch'?'input':'change',resetAndRender);
+  });
+  $('hClearFilters').onclick=()=>{
+    $('hSearch').value=''; $('hType').value=''; $('hOperator').value=''; $('hFrom').value=''; $('hTo').value=''; resetAndRender();
+  };
+  $('hPrev').onclick=()=>{ if(page>1){page--;renderH();} };
+  $('hNext').onclick=()=>{ const pages=Math.max(1,Math.ceil(filteredList().length/PAGE_SIZE)); if(page<pages){page++;renderH();} };
+  if(!toolId){
+    const hide=$('hHideOld'),clear=$('hClearBefore');
+    if(hide) hide.onclick=()=>{ cfg.historyHiddenBefore=$('hBefore').value||''; saveAll(); resetAndRender(); };
+    if(clear) clear.onclick=()=>{ cfg.historyHiddenBefore=''; $('hBefore').value=''; saveAll(); resetAndRender(); };
+  }
+  renderH();
 }
 
 function openOperatorManager() {
