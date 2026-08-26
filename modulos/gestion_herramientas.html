@@ -267,7 +267,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V20 · protecciones / EPIs + historial de entregas</span>
+      <h1>🛠️ Gestión de Préstamos</h1><span class="pill">V23 · protecciones con miniaturas por arrastrar / pegar</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -1896,30 +1896,106 @@ window.openProtectionCenter=openProtectionCenter;
 
 function openProtectionForm(id=''){
   const p=id?(db.protections||[]).find(x=>x.id===id):null;
+  let ppeIconValue=(p&&p.icon)?p.icon:'🦺';
+
+  const cleanupPpeImagePaste=()=>{
+    if(window.__PPE_FORM_PASTE_HANDLER){
+      document.removeEventListener('paste',window.__PPE_FORM_PASTE_HANDLER,true);
+      window.__PPE_FORM_PASTE_HANDLER=null;
+    }
+  };
+  cleanupPpeImagePaste();
+
   showAuxModal(p?'Editar protección':'Nueva protección',`
     <div class="form">
       <div><label>Nombre *</label><input id="ppeName" value="${esc(p?.name||'')}" placeholder="Ej. Guantes anticorte"/></div>
       <div><label>Talla / modelo</label><input id="ppeVariant" value="${esc(p?.variant||'')}" placeholder="Ej. Talla 9, FFP2, transparente..."/></div>
-      <div><label>Icono</label><input id="ppeIcon" value="${esc(p?.icon||'🦺')}" placeholder="Ej. 🧤 🥽 😷"/></div>
+
+      <div style="grid-column:1/-1">
+        <label>Miniatura / icono</label>
+        <div style="display:grid;grid-template-columns:90px 1fr;gap:12px;align-items:stretch">
+          <div id="ppeIconPreview" style="min-height:88px;border:1px solid var(--line);border-radius:12px;background:rgba(2,6,23,.35);display:flex;align-items:center;justify-content:center;font-size:40px;overflow:hidden">${renderIcon(ppeIconValue)}</div>
+          <div class="drop-zone" id="ppeIconDrop" style="margin:0;min-height:88px;display:flex;align-items:center;justify-content:center;flex-direction:column">
+            <b>📂 Click, arrastra o pega una imagen</b>
+            <span class="small" style="margin-top:4px">Se guarda como miniatura, igual que los iconos de Herramientas.</span>
+          </div>
+        </div>
+        <input type="file" id="ppeIconFile" accept="image/*" style="display:none"/>
+        <div class="row" style="margin-top:8px">
+          <input id="ppeEmojiIcon" value="${String(ppeIconValue||'').startsWith('data:image')?'':esc(ppeIconValue||'🦺')}" placeholder="O usa un emoji: 🧤 🥽 😷" style="flex:1;min-width:180px"/>
+          <button class="btn" id="ppeUseEmoji" type="button">Usar emoji</button>
+          <button class="btn" id="ppeClearImage" type="button">Quitar miniatura</button>
+        </div>
+      </div>
+
       ${p?'':`<div><label>Stock inicial</label><input id="ppeInitialStock" type="number" min="0" value="0"/></div>`}
       <div style="grid-column:1/-1"><label>Observación</label><textarea id="ppeNotes">${esc(p?.notes||'')}</textarea></div>
     </div>
     ${p?'<div class="audit-note">El stock no se modifica desde Editar. Usa <b>+ Entrada</b> para añadir unidades y conserva así la trazabilidad.</div>':''}
   `,[
-    {text:'Cancelar',className:'btn',onClick:closeAuxModal},
+    {text:'Cancelar',className:'btn',onClick:()=>{cleanupPpeImagePaste();closeAuxModal();}},
     {text:'Guardar',className:'btn primary',onClick:()=>{
       const name=normName($('ppeName').value); if(!name) return alert('Nombre obligatorio');
       const at=nowIso();
-      if(p){ p.name=name; p.variant=normName($('ppeVariant').value); p.icon=$('ppeIcon').value||'🦺'; p.notes=normName($('ppeNotes').value); p.metaUpdatedAt=at; p.updatedAt=at; }
+      if(p){ p.name=name; p.variant=normName($('ppeVariant').value); p.icon=ppeIconValue||'🦺'; p.notes=normName($('ppeNotes').value); p.metaUpdatedAt=at; p.updatedAt=at; }
       else{
         const stock=clampInt($('ppeInitialStock').value,0,99999); if(stock===null) return alert('Stock inicial inválido');
-        const n={id:uid(),name,variant:normName($('ppeVariant').value),icon:$('ppeIcon').value||'🦺',stock,notes:normName($('ppeNotes').value),archived:false,createdAt:at,updatedAt:at,metaUpdatedAt:at,stockUpdatedAt:at};
+        const n={id:uid(),name,variant:normName($('ppeVariant').value),icon:ppeIconValue||'🦺',stock,notes:normName($('ppeNotes').value),archived:false,createdAt:at,updatedAt:at,metaUpdatedAt:at,stockUpdatedAt:at};
         db.protections.push(n);
         protectionRecordHistory('PPE_CREATE',n,{qty:stock,stockBefore:0,stockAfter:stock,notes:'Alta de protección / EPI',at});
       }
-      saveAll(); closeAuxModal(); openProtectionCenter('stock');
+      cleanupPpeImagePaste(); saveAll(); closeAuxModal(); openProtectionCenter('stock');
     }}
   ]);
+
+  const preview=()=>{
+    const el=$('ppeIconPreview');
+    if(el) el.innerHTML=renderIcon(ppeIconValue||'🦺');
+  };
+  const handlePpeIconFile=(file)=>{
+    if(!file || !String(file.type||'').startsWith('image/')) return alert('Selecciona una imagen válida.');
+    processImage(file,(base64)=>{
+      ppeIconValue=base64;
+      const emoji=$('ppeEmojiIcon'); if(emoji) emoji.value='';
+      preview();
+    });
+  };
+
+  const dz=$('ppeIconDrop'), fi=$('ppeIconFile');
+  if(dz&&fi){
+    dz.onclick=()=>fi.click();
+    fi.onchange=e=>{const f=e.target.files&&e.target.files[0]; if(f) handlePpeIconFile(f);};
+    dz.ondragover=e=>{e.preventDefault();dz.classList.add('dragover');};
+    dz.ondragleave=()=>dz.classList.remove('dragover');
+    dz.ondrop=e=>{e.preventDefault();dz.classList.remove('dragover');const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)handlePpeIconFile(f);};
+  }
+
+  const useEmoji=$('ppeUseEmoji');
+  if(useEmoji) useEmoji.onclick=()=>{
+    const v=String($('ppeEmojiIcon')?.value||'').trim();
+    ppeIconValue=v||'🦺';
+    preview();
+  };
+  const clearImage=$('ppeClearImage');
+  if(clearImage) clearImage.onclick=()=>{
+    ppeIconValue='🦺';
+    if($('ppeEmojiIcon')) $('ppeEmojiIcon').value='🦺';
+    preview();
+  };
+
+  const pasteHandler=e=>{
+    const aux=$('auxModal');
+    if(!aux||!aux.classList.contains('show')||!$('ppeIconDrop')) return;
+    const items=(e.clipboardData&&e.clipboardData.items)||[];
+    for(const item of items){
+      if(item.kind==='file'&&String(item.type||'').startsWith('image/')){
+        const f=item.getAsFile();
+        if(f){ e.preventDefault(); handlePpeIconFile(f); return; }
+      }
+    }
+  };
+  window.__PPE_FORM_PASTE_HANDLER=pasteHandler;
+  document.addEventListener('paste',pasteHandler,true);
 }
 window.openProtectionForm=openProtectionForm;
 
@@ -1952,7 +2028,7 @@ function openProtectionDeliveryForm(){
     <div class="audit-note">Las protecciones entregadas <b>no se devuelven</b>. Al confirmar, las cantidades se descuentan inmediatamente del stock y quedan registradas a nombre del operario.</div>
     <div class="form">
       <div><label>Entregar a · Operario *</label><input id="ppeGiveTo" list="dlOps" placeholder="Operario"/></div>
-      <div><label>Entrega realizada por *</label><input id="ppeGivenBy" list="dlOps" value="${esc(cfg.lastPpeDeliveredBy||'')}" placeholder="Responsable que entrega"/></div>
+      <div><label>Entrega realizada por *</label><input id="ppeGivenBy" list="dlOps" value="Roman Del Hierros" placeholder="Responsable que entrega"/></div>
       <div><label>Motivo</label><select id="ppeReason"><option value="alta">Alta / incorporación</option><option value="reposicion" selected>Reposición</option><option value="desgaste">Desgaste</option><option value="rotura">Rotura</option><option value="perdida">Pérdida</option><option value="otro">Otro</option></select></div>
       <div style="grid-column:1/-1"><label>Observación</label><textarea id="ppeGiveNote"></textarea></div>
     </div>
@@ -2494,7 +2570,8 @@ $("btnProtecciones").onclick = () => openProtectionCenter("stock");
 
 function boot(){
   loadAll();
-  if(!cfg.familyOpen) cfg.familyOpen={};
+  // V21: al entrar, todos los grupos comienzan cerrados. La búsqueda puede abrirlos temporalmente.
+  cfg.familyOpen = {};
   saveAll(); render(); setupFloatingDrag();
   document.querySelectorAll('[data-kpi]').forEach(btn=>btn.addEventListener('click',()=>{ cfg.inventoryFilter=btn.dataset.kpi||"all"; saveAll(); render(); }));
 }
@@ -3060,6 +3137,8 @@ boot();
 
 <script>
 window.LDH_TOOLS_V20_PROTECCIONES='HERRAMIENTAS-V20-PROTECCIONES-20260826';
+window.LDH_TOOLS_V21_CLOSED_FAMILIES='HERRAMIENTAS-V21-FAMILIAS-CERRADAS-AL-ENTRAR-20260826';
+window.LDH_TOOLS_V22_DEFAULT_PPE_DELIVERER='HERRAMIENTAS-V22-RESPONSABLE-ENTREGA-ROMAN-DEL-HIERROS-20260826';
 </script>
 </body>
 </html>
