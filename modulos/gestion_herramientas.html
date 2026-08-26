@@ -293,7 +293,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Herramientas</h1><span class="pill">V27 · EPIs ordenables + buscador claro de operarios</span>
+      <h1>🛠️ Gestión de Herramientas</h1><span class="pill">V28 · control de entregas por operario/artículo + borrado seguro</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -454,7 +454,7 @@ function processImage(file, callback) {
   reader.readAsDataURL(file);
 }
 
-let db = { schemaVersion:15, tools: [], history: [], library: null, familyOrder: [], operators: [], protections: [], protectionOrder: [], protectionOrderUpdatedAt: "", protectionDeliveries: [], protectionHistory: [], protectionDeletedIds: [] };
+let db = { schemaVersion:15, tools: [], history: [], library: null, familyOrder: [], operators: [], protections: [], protectionOrder: [], protectionOrderUpdatedAt: "", protectionDeliveries: [], protectionHistory: [], protectionDeletedIds: [], protectionHistoryDeletedIds: [] };
 let cfg = { warnDays: 7, dangerDays: 30, familyOpen: {}, floatingPos: null, inventoryFilter:"all", historyHiddenBefore:"" };
 let selected = new Set();
 let dragSrcIndex = null; 
@@ -769,6 +769,7 @@ function loadAll(){
   if(!Array.isArray(db.protectionDeliveries)) db.protectionDeliveries=[];
   if(!Array.isArray(db.protectionHistory)) db.protectionHistory=[];
   if(!Array.isArray(db.protectionDeletedIds)) db.protectionDeletedIds=[];
+  if(!Array.isArray(db.protectionHistoryDeletedIds)) db.protectionHistoryDeletedIds=[];
 
   for(const ppe of db.protections){
     if(!ppe.id) ppe.id=uid();
@@ -2119,9 +2120,123 @@ function setMainSection(section='loans'){
 }
 window.setMainSection=setMainSection;
 
+function protectionActiveDeliveryRows(){
+  const deleted=new Set(db.protectionDeletedIds||[]);
+  const rows=[];
+  for(const d of (db.protectionDeliveries||[])){
+    if(!d || deleted.has(d.id) || String(d.status||'active')==='cancelled') continue;
+    const operator=normOp(d.operator)||'Sin operario';
+    const at=protectionDeliveryAt(d);
+    for(const item of (d.items||[])){
+      rows.push({
+        operator,
+        deliveredBy:d.deliveredBy||'',
+        reason:d.reason||'',
+        notes:d.notes||'',
+        at,
+        deliveryId:d.id,
+        protectionId:item.protectionId||'',
+        name:item.name||'Protección',
+        variant:item.variant||'',
+        icon:item.icon||'🦺',
+        qty:Number(item.qty||0)
+      });
+    }
+  }
+  return rows;
+}
+
+function protectionAverageIntervalDays(events){
+  const times=(events||[]).map(e=>dateMs(e.at)).filter(Boolean).sort((a,b)=>a-b);
+  if(times.length<2) return null;
+  let total=0;
+  for(let i=1;i<times.length;i++) total+=(times[i]-times[i-1]);
+  return total/(times.length-1)/86400000;
+}
+
+function protectionIntervalText(days){
+  if(days===null || days===undefined || !Number.isFinite(days)) return '—';
+  if(days<1) return '< 1 día';
+  if(days<10) return `${days.toFixed(1)} días`;
+  return `${Math.round(days)} días`;
+}
+
+function protectionControlMarkup(){
+  return `
+    <div class="audit-note">Control de consumo agrupado por <b>operario → artículo</b>. Para cada protección puedes ver cuántas veces se ha entregado, cuántas unidades lleva, la última fecha y el intervalo medio entre entregas. Así se detecta rápidamente si un operario pide, por ejemplo, guantes con demasiada frecuencia.</div>
+    <div class="row" style="margin:10px 0"><input id="ppeControlSearch" placeholder="Buscar operario, protección, talla o modelo..." style="flex:1"/></div>
+    <div id="ppeControlBody"></div>`;
+}
+
+function bindProtectionControlView(){
+  const input=$('ppeControlSearch'), host=$('ppeControlBody');
+  if(!host) return;
+  const draw=()=>{
+    const q=String(input?.value||'').trim().toLowerCase();
+    const all=protectionActiveDeliveryRows();
+    const operators=new Map();
+    for(const e of all){
+      if(!operators.has(e.operator)) operators.set(e.operator,new Map());
+      const map=operators.get(e.operator);
+      const key=e.protectionId||[e.name,e.variant].join('|');
+      if(!map.has(key)) map.set(key,{key,protectionId:e.protectionId,name:e.name,variant:e.variant,icon:e.icon,events:[]});
+      map.get(key).events.push(e);
+    }
+    const detailRecords=[];
+    let html='';
+    const opNames=[...operators.keys()].sort((a,b)=>a.localeCompare(b,'es'));
+    for(const op of opNames){
+      const items=[...operators.get(op).values()].sort((a,b)=>String(a.name).localeCompare(String(b.name),'es')||String(a.variant).localeCompare(String(b.variant),'es'));
+      const opMatch=op.toLowerCase().includes(q);
+      const shown=q&&!opMatch?items.filter(r=>[r.name,r.variant].join(' ').toLowerCase().includes(q)):items;
+      if(!shown.length) continue;
+      const opDeliveries=new Set(shown.flatMap(r=>r.events.map(e=>e.deliveryId))).size;
+      const opQty=shown.reduce((a,r)=>a+r.events.reduce((s,e)=>s+e.qty,0),0);
+      const rows=shown.map(rec=>{
+        const ev=rec.events.slice().sort((a,b)=>dateMs(b.at)-dateMs(a.at));
+        const qty=ev.reduce((a,e)=>a+e.qty,0);
+        const avg=protectionAverageIntervalDays(ev);
+        const last=ev[0]?.at?new Date(ev[0].at).toLocaleDateString('es-ES'):'—';
+        const cutoff=Date.now()-30*86400000;
+        const last30=ev.filter(e=>dateMs(e.at)>=cutoff);
+        const latestDates=ev.slice(0,3).map(e=>`${new Date(e.at).toLocaleDateString('es-ES')} · x${e.qty}`).join('<br>');
+        const idx=detailRecords.push({operator:op,...rec,events:ev})-1;
+        let freqClass='';
+        if(avg!==null && ev.length>=2){ if(avg<=7) freqClass='danger'; else if(avg<=14) freqClass='warn'; }
+        return `<tr><td><div class="ppe-item-name"><span class="ppe-icon">${renderIcon(rec.icon||'🦺')}</span><span><b>${esc(rec.name)}</b>${rec.variant?`<div class="small">${esc(rec.variant)}</div>`:''}</span></div></td><td><b>${ev.length}</b></td><td><b>${qty}</b></td><td>${last}</td><td><span class="badge ${freqClass}">${protectionIntervalText(avg)}</span></td><td class="small">${last30.length} entregas · ${last30.reduce((a,e)=>a+e.qty,0)} uds</td><td class="small">${latestDates||'—'}</td><td><button class="btn small" type="button" data-ppe-control-detail="${idx}">Ver fechas</button></td></tr>`;
+      }).join('');
+      html+=`<details class="card" ${q?'open':''} style="margin-bottom:10px"><summary style="cursor:pointer;padding:12px 14px;font-weight:800">${esc(op)} <span class="pill" style="margin-left:8px">${opDeliveries} entregas</span> <span class="pill" style="margin-left:6px">${opQty} uds</span></summary><div class="content" style="padding-top:0"><div style="overflow:auto"><table><thead><tr><th>Artículo</th><th>Entregas</th><th>Uds.</th><th>Última</th><th>Intervalo medio</th><th>Últimos 30 días</th><th>Últimas fechas</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div></details>`;
+    }
+    host.innerHTML=html||'<div class="small" style="padding:12px">No hay entregas que coincidan.</div>';
+    window.__PPE_CONTROL_DETAIL_RECORDS=detailRecords;
+    host.querySelectorAll('[data-ppe-control-detail]').forEach(btn=>btn.onclick=()=>openProtectionControlDetail(Number(btn.dataset.ppeControlDetail)));
+  };
+  if(input) input.oninput=draw;
+  draw();
+}
+
+function openProtectionControlDetail(index){
+  const r=(window.__PPE_CONTROL_DETAIL_RECORDS||[])[Number(index)];
+  if(!r) return alert('No se encuentra este control.');
+  const avg=protectionAverageIntervalDays(r.events);
+  const rows=r.events.map(e=>`<tr><td class="mono small">${e.at?new Date(e.at).toLocaleString('es-ES'):'—'}</td><td>x${esc(e.qty)}</td><td>${esc(protectionReasonLabel(e.reason))}</td><td>${esc(e.deliveredBy||'—')}</td><td class="small">${esc(e.notes||'')}</td><td><button class="btn small" type="button" onclick="openProtectionDeliveryDetail('${e.deliveryId}')">Ver entrega</button></td></tr>`).join('');
+  showAuxModal(`Control · ${esc(r.operator)}`,`
+    <div class="grid">
+      <div class="card"><div class="content"><b>Artículo</b><div style="margin-top:8px">${renderIcon(r.icon||'🦺')} <b>${esc(r.name)}</b>${r.variant?` · ${esc(r.variant)}`:''}</div></div></div>
+      <div class="card"><div class="content"><b>Resumen</b><div class="small" style="margin-top:8px">${r.events.length} entregas · ${r.events.reduce((a,e)=>a+e.qty,0)} unidades · intervalo medio <b>${protectionIntervalText(avg)}</b></div></div></div>
+    </div>
+    <div class="section-title">Fechas de entrega</div>
+    <div style="max-height:52vh;overflow:auto"><table><thead><tr><th>Fecha</th><th>Cantidad</th><th>Motivo</th><th>Entrega</th><th>Nota</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="6">Sin entregas.</td></tr>'}</tbody></table></div>
+  `,[{text:'Cerrar',className:'btn',onClick:closeAuxModal}]);
+}
+window.openProtectionControlDetail=openProtectionControlDetail;
+
 function openProtectionCenter(tab='stock'){
   closeAuxModal();
   setMainSection('ppe');
+  const content=tab==='stock'
+    ? `<div class="row" style="margin-bottom:10px"><input id="ppeStockSearch" placeholder="Buscar protección, talla o modelo..." style="flex:1"/></div><div id="ppeStockTable">${renderProtectionStockTable('')}</div>`
+    : (tab==='control' ? protectionControlMarkup() : protectionDeliveriesMarkup());
   const body=`
     <div class="ppe-kpis">
       <div class="ppe-kpi"><small>Protecciones activas</small><b>${activeProtections().length}</b></div>
@@ -2132,22 +2247,25 @@ function openProtectionCenter(tab='stock'){
     <div class="ppe-toolbar">
       <button class="btn ${tab==='stock'?'active-tab':''}" id="ppeTabStock" type="button">Stock protecciones</button>
       <button class="btn ${tab==='deliveries'?'active-tab':''}" id="ppeTabDeliveries" type="button">Entregas realizadas</button>
+      <button class="btn ${tab==='control'?'active-tab':''}" id="ppeTabControl" type="button">Control por operario</button>
       <div class="spacer"></div>
       <button class="btn" id="ppeArchived" type="button">Archivadas</button>
       <button class="btn primary" id="ppeNewItem" type="button">+ Nueva protección</button>
       <button class="btn primary" id="ppeNewDelivery" type="button">Entregar varios EPIs</button>
     </div>
-    ${tab==='stock' ? `<div class="row" style="margin-bottom:10px"><input id="ppeStockSearch" placeholder="Buscar protección, talla o modelo..." style="flex:1"/></div><div id="ppeStockTable">${renderProtectionStockTable('')}</div>` : protectionDeliveriesMarkup()}
+    ${content}
   `;
   const host=$('ppePageBody');
   if(!host) return alert('No se encuentra el apartado de Protecciones.');
   host.innerHTML=body;
   $('ppeTabStock').onclick=()=>openProtectionCenter('stock');
   $('ppeTabDeliveries').onclick=()=>openProtectionCenter('deliveries');
+  $('ppeTabControl').onclick=()=>openProtectionCenter('control');
   $('ppeNewItem').onclick=()=>openProtectionForm();
   $('ppeNewDelivery').onclick=()=>openProtectionDeliveryForm();
   $('ppeArchived').onclick=openArchivedProtections;
   if(tab==='stock') $('ppeStockSearch').oninput=e=>{ $('ppeStockTable').innerHTML=renderProtectionStockTable(e.target.value); };
+  else if(tab==='control') bindProtectionControlView();
   else bindProtectionDeliveriesView();
 }
 window.openProtectionCenter=openProtectionCenter;
@@ -2360,13 +2478,14 @@ function cancelProtectionDelivery(id){
 }
 window.cancelProtectionDelivery=cancelProtectionDelivery;
 
-function deleteProtectionTestDelivery(id){
+function deleteProtectionTestDelivery(id,returnProtectionId=''){
   const d=(db.protectionDeliveries||[]).find(x=>x.id===id); if(!d) return;
   const active=String(d.status||'active')!=='cancelled';
-  let msg='¿ELIMINAR ESTA ENTREGA DE PRUEBA?\n\nSe borrará del historial de protecciones.';
-  if(active) msg+='\nComo sigue activa, las unidades se devolverán al stock antes de borrar el registro.';
-  else msg+='\nComo ya estaba anulada, no se volverá a modificar el stock.';
-  msg+='\n\nEsta acción es solo para pruebas y no se puede deshacer.';
+  const summary=(d.items||[]).map(x=>`• ${x.name||'Protección'}${x.variant?` · ${x.variant}`:''}: x${Number(x.qty||0)}`).join('\n');
+  let msg='¿ELIMINAR ESTA ENTREGA?\n\nOperario: '+(d.operator||'—')+(summary?'\n\n'+summary:'');
+  if(active) msg+='\n\nLa entrega sigue activa: se devolverán al stock todas las unidades de esta entrega antes de borrarla.';
+  else msg+='\n\nLa entrega ya estaba anulada: no se modificará otra vez el stock.';
+  msg+='\n\nSe eliminarán también sus movimientos del historial. Esta acción no se puede deshacer.';
   if(!confirm(msg)) return;
   if(active){
     for(const item of (d.items||[])){
@@ -2377,16 +2496,67 @@ function deleteProtectionTestDelivery(id){
   db.protectionDeliveries=(db.protectionDeliveries||[]).filter(x=>x.id!==id);
   db.protectionHistory=(db.protectionHistory||[]).filter(h=>h.deliveryId!==id);
   if(!db.protectionDeletedIds.includes(id)) db.protectionDeletedIds.push(id);
-  saveAll(); closeAuxModal(); openProtectionCenter('deliveries');
+  saveAll(); closeAuxModal();
+  if(returnProtectionId) openProtectionItemHistory(returnProtectionId);
+  else openProtectionCenter('deliveries');
 }
 window.deleteProtectionTestDelivery=deleteProtectionTestDelivery;
+
+function deleteProtectionStockHistoryMovement(historyId,protectionId){
+  const h=(db.protectionHistory||[]).find(x=>x.id===historyId);
+  const p=(db.protections||[]).find(x=>x.id===protectionId);
+  if(!h||!p||h.type!=='PPE_STOCK_IN') return alert('No se encuentra esta entrada de stock.');
+  const hMs=dateMs(eventAt(h));
+  const later=(db.protectionHistory||[]).filter(x=>x.protectionId===protectionId&&x.id!==historyId&&x.stockBefore!==undefined&&dateMs(eventAt(x))>hMs);
+  if(later.length){
+    return alert('No se puede eliminar esta entrada automáticamente porque existen movimientos posteriores de esta protección.\n\nPara no descuadrar el stock, elimina primero los movimientos posteriores o corrige el stock desde una operación controlada.');
+  }
+  const current=Number(p.stock||0), expected=Number(h.stockAfter||0), before=Number(h.stockBefore||0);
+  if(Math.abs(current-expected)>1e-9){
+    return alert(`No se puede eliminar automáticamente porque el stock actual (${current}) ya no coincide con el stock que dejó esta entrada (${expected}).`);
+  }
+  if(!confirm(`¿Eliminar esta entrada de stock de prueba?\n\nStock: ${current} → ${before}\n\nSe borrará el movimiento y se restaurará el stock anterior.`)) return;
+  p.stock=before; protectionTouch(p,{stock:true});
+  db.protectionHistory=(db.protectionHistory||[]).filter(x=>x.id!==historyId);
+  if(!Array.isArray(db.protectionHistoryDeletedIds)) db.protectionHistoryDeletedIds=[];
+  if(!db.protectionHistoryDeletedIds.includes(historyId)) db.protectionHistoryDeletedIds.push(historyId);
+  saveAll(); closeAuxModal(); openProtectionItemHistory(protectionId);
+}
+window.deleteProtectionStockHistoryMovement=deleteProtectionStockHistoryMovement;
 
 function openProtectionItemHistory(id){
   const p=(db.protections||[]).find(x=>x.id===id); if(!p) return;
   const labels={PPE_CREATE:'Alta',PPE_STOCK_IN:'Entrada de stock',PPE_DELIVERY:'Entrega a operario',PPE_DELIVERY_CANCEL:'Anulación / devolución a stock'};
-  const list=(db.protectionHistory||[]).filter(h=>h.protectionId===id).slice().sort((a,b)=>dateMs(eventAt(b))-dateMs(eventAt(a))).slice(0,100);
-  const rows=list.map(h=>`<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td>${esc(labels[h.type]||h.type||'Movimiento')}</td><td>${h.operator?esc(h.operator):'—'}</td><td>x${esc(h.qty||0)}</td><td class="small">${h.stockBefore!==undefined?`${esc(h.stockBefore)} → ${esc(h.stockAfter)}`:'—'}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')}</td></tr>`).join('')||'<tr><td colspan="6">Sin movimientos.</td></tr>';
-  showAuxModal(`Historial · ${esc(protectionLabel(p))}`,`<div class="audit-note">Últimos ${Math.min(100,list.length)} movimientos de esta protección.</div><div style="max-height:58vh;overflow:auto"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>Operario</th><th>Cant.</th><th>Stock</th><th>Nota</th></tr></thead><tbody>${rows}</tbody></table></div>`,[{text:'Cerrar',className:'btn',onClick:closeAuxModal}]);
+  const list=(db.protectionHistory||[]).filter(h=>h.protectionId===id).slice().sort((a,b)=>dateMs(eventAt(b))-dateMs(eventAt(a))).slice(0,200);
+
+  const usage=protectionActiveDeliveryRows().filter(e=>e.protectionId===id);
+  const opMap=new Map();
+  for(const e of usage){ if(!opMap.has(e.operator)) opMap.set(e.operator,[]); opMap.get(e.operator).push(e); }
+  const opRows=[...opMap.entries()].sort((a,b)=>a[0].localeCompare(b[0],'es')).map(([op,events])=>{
+    const ev=events.slice().sort((a,b)=>dateMs(b.at)-dateMs(a.at));
+    const qty=ev.reduce((a,e)=>a+e.qty,0);
+    const avg=protectionAverageIntervalDays(ev);
+    const dates=ev.slice(0,6).map(e=>`${new Date(e.at).toLocaleDateString('es-ES')} · x${e.qty}`).join('<br>');
+    return `<tr><td><b>${esc(op)}</b></td><td>${ev.length}</td><td>${qty}</td><td>${ev[0]?.at?new Date(ev[0].at).toLocaleDateString('es-ES'):'—'}</td><td><span class="badge ${avg!==null&&avg<=7?'danger':(avg!==null&&avg<=14?'warn':'')}">${protectionIntervalText(avg)}</span></td><td class="small">${dates||'—'}${ev.length>6?`<br>+ ${ev.length-6} más`:''}</td></tr>`;
+  }).join('')||'<tr><td colspan="6">Todavía no hay entregas activas a operarios.</td></tr>';
+
+  const rows=list.map(h=>{
+    let action='';
+    if((h.type==='PPE_DELIVERY'||h.type==='PPE_DELIVERY_CANCEL')&&h.deliveryId){
+      action=`<button class="btn small danger" type="button" onclick="deleteProtectionTestDelivery('${h.deliveryId}','${p.id}')">Eliminar entrega</button>`;
+    }else if(h.type==='PPE_STOCK_IN'){
+      action=`<button class="btn small danger" type="button" onclick="deleteProtectionStockHistoryMovement('${h.id}','${p.id}')">Eliminar entrada</button>`;
+    }
+    return `<tr><td class="mono small">${eventAt(h)?new Date(eventAt(h)).toLocaleString('es-ES'):'—'}</td><td>${esc(labels[h.type]||h.type||'Movimiento')}</td><td>${h.operator?esc(h.operator):'—'}</td><td>x${esc(h.qty||0)}</td><td class="small">${h.stockBefore!==undefined?`${esc(h.stockBefore)} → ${esc(h.stockAfter)}`:'—'}${h.purchaseRef?`<br>Ref: ${esc(h.purchaseRef)}`:''}</td><td class="small">${esc(h.notes||'')}</td><td>${action}</td></tr>`;
+  }).join('')||'<tr><td colspan="7">Sin movimientos.</td></tr>';
+
+  showAuxModal(`Historial · ${esc(protectionLabel(p))}`,`
+    <div class="audit-note"><b>Control por operario:</b> muestra a quién se ha entregado esta protección, en qué fechas y cada cuánto tiempo la vuelve a pedir. Las entregas anuladas o eliminadas no cuentan en esta frecuencia.</div>
+    <div class="section-title">Entregas agrupadas por operario</div>
+    <div style="overflow:auto"><table><thead><tr><th>Operario</th><th>Entregas</th><th>Uds.</th><th>Última</th><th>Intervalo medio</th><th>Fechas recientes</th></tr></thead><tbody>${opRows}</tbody></table></div>
+    <div class="section-title">Movimientos de esta protección</div>
+    <div style="max-height:42vh;overflow:auto"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>Operario</th><th>Cant.</th><th>Stock</th><th>Nota</th><th>Acción</th></tr></thead><tbody>${rows}</tbody></table></div>
+  `,[{text:'Cerrar',className:'btn',onClick:closeAuxModal}]);
 }
 window.openProtectionItemHistory=openProtectionItemHistory;
 
@@ -3114,8 +3284,9 @@ boot();
       m.protectionOrderUpdatedAt=(lTs>=rTs?(l.protectionOrderUpdatedAt||''):(r.protectionOrderUpdatedAt||''));
     }
     const deletedPpe=new Set([...(r.protectionDeletedIds||[]),...(l.protectionDeletedIds||[])]); m.protectionDeletedIds=[...deletedPpe];
+    const deletedPpeHistory=new Set([...(r.protectionHistoryDeletedIds||[]),...(l.protectionHistoryDeletedIds||[])]); m.protectionHistoryDeletedIds=[...deletedPpeHistory];
     const delMap=new Map(); [...(r.protectionDeliveries||[]),...(l.protectionDeliveries||[])].forEach(x=>{ if(!x||!x.id||deletedPpe.has(x.id))return; const prev=delMap.get(x.id); delMap.set(x.id,chooseNewer(prev,x,["updatedAt","cancelledAt","at","createdAt"])); }); m.protectionDeliveries=[...delMap.values()];
-    m.protectionHistory=mergeArrayByIdentity(r.protectionHistory,l.protectionHistory,x=>x.id||[x.type,x.protectionId,x.deliveryId,x.at,x.qty].join("|")).filter(h=>!h.deliveryId||!deletedPpe.has(h.deliveryId));
+    m.protectionHistory=mergeArrayByIdentity(r.protectionHistory,l.protectionHistory,x=>x.id||[x.type,x.protectionId,x.deliveryId,x.at,x.qty].join("|")).filter(h=>(!h.deliveryId||!deletedPpe.has(h.deliveryId)) && !deletedPpeHistory.has(h.id));
     m.familyOrder=[...new Set([...(l.familyOrder||[]),...(r.familyOrder||[])])];
     m.library=Object.assign({},r.library||{},l.library||{}); m.schemaVersion=Math.max(Number(r.schemaVersion||0),Number(l.schemaVersion||0),15); m.updatedAt=(String(l.updatedAt||"")>String(r.updatedAt||""))?l.updatedAt:r.updatedAt;
     return JSON.stringify(m);
@@ -3413,6 +3584,8 @@ window.LDH_TOOLS_V21_CLOSED_FAMILIES='HERRAMIENTAS-V21-FAMILIAS-CERRADAS-AL-ENTR
 window.LDH_TOOLS_V22_DEFAULT_PPE_DELIVERER='HERRAMIENTAS-V22-RESPONSABLE-ENTREGA-ROMAN-DEL-HIERROS-20260826';
 </script>
 
+<!-- LDH_HERRAMIENTAS_V28_CONTROL_ENTREGAS_OPERARIO_ARTICULO_BORRADO_20260826 -->
+<script>window.LDH_HERRAMIENTAS_V28='V28-CONTROL-OPERARIO-ARTICULO-BORRADO-SEGURO-20260826';</script>
 <!-- LDH_HERRAMIENTAS_V27_DRAG_EPIS_BUSCADOR_OPERARIOS_20260826 -->
 </body>
 </html>
