@@ -295,7 +295,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
 <div id="paintLinkModal" class="backdrop" aria-hidden="true">
   <div class="modal">
-    <h2>Vincular pintura</h2>
+    <h2 id="paintLinkTitle">Vincular pintura</h2>
     <div id="paintLinkSub" class="subm"></div>
     <div class="field"><label>Pintura existente en Stock de esta empresa</label>
       <select id="paintLinkSelect"><option value="">Selecciona pintura...</option></select>
@@ -510,6 +510,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     activePhaseRef:'',
     activePaintCalcRef:'',
     activePaintLinkRef:'',
+    activePaintLinkMode:'link',
     manualCalcLocalByRef:Object.create(null),
     activeStock:null,
     openWorkCompanies:new Set(),
@@ -1562,9 +1563,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const editable=(required===null||manual);
     const totalSaved=calc&&num(calc.totalBotes)>0?inputNum(calc.totalBotes):'';
     const action=editable?'<div class="inline-calc-edit"><div class="inline-calc-field"><label>C&aacute;lculo total del pedido &middot; botes de 4 L</label><input class="inline-calc-input" type="text" inputmode="decimal" autocomplete="off" data-inline-calc-input="'+encodeURIComponent(entry.work.ref)+'" value="'+esc(totalSaved)+'" placeholder="Ej. 5"></div><button class="btn warn small inline-calc-save" type="button" data-inline-calc-save="'+encodeURIComponent(entry.work.ref)+'">Guardar c&aacute;lculo</button><div class="inline-calc-hint">Escribe la necesidad total del pedido. El valor sustituye al anterior: 5 = 5 botes, no 5 + stock.</div></div>':'';
-    const linkAction=info.kind!=='linked'&&info.kind!=='loading'&&info.kind!=='stock_error'&&state.stock
-      ? '<div style="margin-top:10px"><button class="btn good small" type="button" data-paint-link-open="'+encodeURIComponent(entry.work.ref)+'">🔗 Vincular pintura</button></div>'
-      : '';
+    const linkButton=manualPaintLinkButtonHtml(entry.work,text(info.kind));
+    const linkAction=linkButton?'<div style="margin-top:10px">'+linkButton+'</div>':'';
     return '<div class="job-paint-strip'+(required===null?' missing':'')+'">'+
       '<div><div class="job-paint-title">'+esc(text(info.paintName)||ralLabel(info.ral||workRal(entry.work))||'Pintura')+sourceBadge+'</div><div class="job-paint-sub">'+detail+'</div>'+action+linkAction+'</div>'+ 
       '<div class="job-paint-value"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Necesidad sin dato':esc(fmtLiters(required))+' necesarios')+'</small></div>'+ 
@@ -1581,8 +1581,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const pendingUnits=workPendingPaintUnits(w);
     const open=state.openWorkJobs.has(jobKey);
     const linkKind=text(entry&&entry.info&&entry.info.kind);
-    const canManualLink=linkKind&&linkKind!=='linked'&&linkKind!=='loading'&&linkKind!=='stock_error'&&!!state.stock;
-    const manualLinkButton=canManualLink?'<button class="btn good small" type="button" data-paint-link-open="'+encodeURIComponent(w.ref)+'">🔗 Vincular pintura</button>':'';
+    const manualLinkButton=manualPaintLinkButtonHtml(w,linkKind);
     let workStyle='';
     try{workStyle=workThemeStyle(ral,entry&&entry.info&&entry.info.paintName ? entry.info.paintName : (p||ral));}catch(themeError){console.warn('Tema visual trabajo',w&&w.ref,themeError);}
     return '<details class="work work-accordion" style="'+workStyle+'" data-work-job-key="'+esc(encodeURIComponent(jobKey))+'"'+(open?' open':'')+'>'+ 
@@ -2715,23 +2714,59 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const m=label.match(/(?:ral\s*)?([1-9]\d{3})/i);
     return m?m[1]:'';
   }
+  function isTerminalManualPaintLink(work){
+    try{
+      const meta=paintMetaForWork(work)||{};
+      return norm(meta.paintLinkSource)==='terminal cabina pintura manual';
+    }catch(_){ return false; }
+  }
+  function paintRelinkBlockReason(work){
+    const flow=work&&work.flow&&typeof work.flow==='object'?work.flow:{};
+    const delivered=Math.max(0,num(flow.entregado));
+    const stored=Math.max(0,num(flow.almacen));
+    if(delivered>0){
+      return 'No se puede cambiar la pintura vinculada porque este trabajo ya tiene '+fmt(delivered)+' unidad'+(Math.abs(delivered-1)<0.000001?'':'es')+' ENTREGADA'+(Math.abs(delivered-1)<0.000001?'':'S')+'.\n\nEntregado no se rectifica desde la Terminal de Pintura. Revisa el caso desde el PC antes de cambiar el vínculo.';
+    }
+    if(stored>0){
+      return 'Este trabajo ya tiene '+fmt(stored)+' unidad'+(Math.abs(stored-1)<0.000001?'':'es')+' PINTADA'+(Math.abs(stored-1)<0.000001?'':'S')+' en Almacén.\n\nAntes de cambiar el RAL, pulsa «Rectificar PINTADO» hasta que ALM quede en 0. La rectificación devolverá también la pintura y el disolvente consumidos. Después podrás usar «Cambiar vínculo».';
+    }
+    return '';
+  }
+  function manualPaintLinkButtonHtml(work,linkKind){
+    const ref=encodeURIComponent(text(work&&work.ref));
+    if(!ref||!state.stock)return '';
+    if(linkKind&&linkKind!=='linked'&&linkKind!=='loading'&&linkKind!=='stock_error'){
+      return '<button class="btn good small" type="button" data-paint-link-open="'+ref+'">🔗 Vincular pintura</button>';
+    }
+    if(linkKind==='linked'&&isTerminalManualPaintLink(work)){
+      const blocked=!!paintRelinkBlockReason(work);
+      return '<button class="btn '+(blocked?'warn':'ghost')+' small" type="button" data-paint-link-open="'+ref+'">🔗 Cambiar vínculo</button>';
+    }
+    return '';
+  }
   async function saveManualPaintLink(ref,materialId){
     const op=requireOperator(); if(!op)return false;
     const w=state.works.find(x=>sameRef(x.ref,ref)); if(!w){alert('Trabajo no encontrado.');return false;}
+    const changing=state.activePaintLinkMode==='change'||isTerminalManualPaintLink(w);
+    if(changing){
+      const reason=paintRelinkBlockReason(w);
+      if(reason){alert(reason);return false;}
+    }
     const companyIds=stockCompanyIdsForWork(w,paintMetaForWork(w));
     if(!companyIds.length){alert('No encuentro la empresa del trabajo en Stock.');return false;}
     const row=paintRows().find(r=>companyIds.includes(text(r.companyId))&&text(r.mat.id)===text(materialId));
     if(!row){alert('La pintura seleccionada ya no existe en el Stock de esta empresa.');return false;}
     const resolvedRal=ralFromPaintRow(row)||workRal(w);
     const name=text(row.mat.name||row.mat.nombre);
-    if(!confirm('Vincular '+ref+' a '+name+(resolvedRal?' (RAL '+resolvedRal+')':'')+'?\n\nEsto solo guarda el vínculo de pintura de la OT. No cambia fases ni stock físico.'))return false;
+    const actionLabel=changing?'Cambiar el vínculo de '+ref+' a ':'Vincular '+ref+' a ';
+    if(!confirm(actionLabel+name+(resolvedRal?' (RAL '+resolvedRal+')':'')+'?\n\nEsto solo guarda el vínculo de pintura de la OT. No cambia fases ni stock físico.'))return false;
     try{
       const orderId=(state.orderMetaByRef[text(ref)]||{}).orderId || await findOrderId(ref);
       if(!orderId)throw new Error('No encuentro la orden en Agenda.');
       await setDoc(doc(ordersCol,orderId),{paintStockMaterialId:text(row.mat.id),paintStockCompanyId:row.companyId,paintStockMaterialName:name,paintRalResolved:resolvedRal,paintLinkSource:'terminal_cabina_pintura_manual',paintLinkOperator:op,paintLinkUpdatedAtMs:Date.now()},{merge:true});
       const prev=state.orderMetaByRef[text(ref)]||{};
       state.orderMetaByRef[text(ref)]={...prev,_loaded:true,orderId,paintStockMaterialId:text(row.mat.id),paintStockCompanyId:row.companyId,paintStockMaterialName:name,paintRalResolved:resolvedRal,paintLinkSource:'terminal_cabina_pintura_manual',paintLinkOperator:op};
-      toast('Pintura vinculada: '+name+(resolvedRal?' · RAL '+resolvedRal:''));
+      toast((changing?'Vínculo de pintura cambiado: ':'Pintura vinculada: ')+name+(resolvedRal?' · RAL '+resolvedRal:''));
       renderWorks(); renderControl();
       return true;
     }catch(e){console.error(e);alert('No se pudo guardar el vínculo: '+String(e&&e.message||e));return false;}
@@ -2764,17 +2799,30 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const w=state.works.find(x=>sameRef(x.ref,ref));
     if(!w)return alert('Trabajo no encontrado.');
     if(!state.stock)return alert('El Stock de pintura todav&iacute;a no est&aacute; disponible.');
+    const changing=isTerminalManualPaintLink(w);
+    if(changing){
+      const reason=paintRelinkBlockReason(w);
+      if(reason)return alert(reason);
+    }
     const rows=paintLinkCandidatesForWork(w);
     if(!rows.length)return alert('No hay fichas de pintura disponibles en Stock para '+(w.company||'esta empresa')+'.');
     state.activePaintLinkRef=w.ref;
-    $('paintLinkSub').innerHTML='<b>'+esc(w.ref)+'</b> &middot; '+esc(w.company||'Sin empresa')+' &middot; '+esc(ralLabel(workRal(w)))+'. Selecciona la ficha correcta de pintura.';
+    state.activePaintLinkMode=changing?'change':'link';
+    if($('paintLinkTitle'))$('paintLinkTitle').textContent=changing?'Cambiar vínculo de pintura':'Vincular pintura';
+    $('paintLinkSave').textContent=changing?'Cambiar vínculo':'Vincular pintura';
+    $('paintLinkSub').innerHTML='<b>'+esc(w.ref)+'</b> &middot; '+esc(w.company||'Sin empresa')+' &middot; '+esc(ralLabel(workRal(w)))+'. '+(changing?'Selecciona la nueva ficha de pintura. No se modificará Stock.':'Selecciona la ficha correcta de pintura.');
     $('paintLinkSelect').innerHTML='<option value="">Selecciona pintura...</option>'+rows.map(r=>{
       const name=text(r.mat.name||r.mat.nombre);
       const ral=ralFromPaintRow(r);
       return '<option value="'+esc(text(r.mat.id))+'">'+esc(name)+(ral?' · RAL '+esc(ral):'')+' · '+esc(fmtBotesEq(Math.max(0,num(r.physical))))+' disponibles</option>';
     }).join('');
-    const exact=rows.filter(r=>paintMatchesRal(r,workRal(w)));
-    if(exact.length===1)$('paintLinkSelect').value=text(exact[0].mat.id);
+    const meta=paintMetaForWork(w)||{};
+    const currentId=changing?text(meta.paintStockMaterialId||meta.paintMaterialId||meta.paintMatId):'';
+    if(currentId&&rows.some(r=>text(r.mat.id)===currentId))$('paintLinkSelect').value=currentId;
+    else{
+      const exact=rows.filter(r=>paintMatchesRal(r,workRal(w)));
+      if(exact.length===1)$('paintLinkSelect').value=text(exact[0].mat.id);
+    }
     updatePaintLinkInfo();
     openModal('paintLinkModal');
   }
@@ -2797,8 +2845,11 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const button=$('paintLinkSave');button.disabled=true;button.textContent='Vinculando...';
     try{
       const ok=await saveManualPaintLink(ref,materialId);
-      if(ok){closeModal('paintLinkModal');state.activePaintLinkRef='';}
-    }finally{button.disabled=false;button.textContent='Vincular pintura';}
+      if(ok){closeModal('paintLinkModal');state.activePaintLinkRef='';state.activePaintLinkMode='link';}
+    }finally{
+      button.disabled=false;
+      button.textContent=state.activePaintLinkMode==='change'?'Cambiar vínculo':'Vincular pintura';
+    }
   };
 
   async function clearManualPaintLink(ref){
