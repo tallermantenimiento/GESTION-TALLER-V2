@@ -18284,17 +18284,112 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       && sameRef(assignment?.consumerRef ?? assignment?.jobRef ?? assignment?.ref ?? "")
     );
 
-    let availableForRepair = LDH_prepFreeRemoteV45(remoteDB, companyId, materialId);
-    if (existingAssignment && LDH_prepActiveOperationalV45(existingAssignment)) {
-      availableForRepair += Math.max(0, LDH_prepNumCloudV30(
-        existingAssignment?.qty ?? existingAssignment?.cantidad ?? 0
-      ));
+    /*
+     * V125 · Reparacion segura de consumos legacy.
+     *
+     * El fallo que corrige este bloque aparece cuando Preparacion conserva la
+     * traza de una asignacion antigua, la OT ya esta en Fabricacion y el Stock
+     * remoto mantiene la cantidad como RESERVA de esa MISMA OT. En ese caso el
+     * libre puede ser 0 aunque el fisico este correctamente apartado para el
+     * trabajo. La reparacion solo puede apoyarse en compromisos de la misma
+     * empresa + material + referencia; nunca toma reservas de otras OTs.
+     */
+    const physicalNowV125 = Math.max(0, LDH_prepPhysicalRemoteV45(
+      remoteDB, companyId, materialId
+    ));
+    if (qty > physicalNowV125 + 0.000001) {
+      throw new Error(
+        `Stock fisico insuficiente para reparar. Fisico actual: ${physicalNowV125}; necesario: ${qty}.`
+      );
     }
+
+    const activeAssignmentQtyV125 =
+      existingAssignment && LDH_prepActiveOperationalV45(existingAssignment)
+        ? Math.max(0, LDH_prepNumCloudV30(
+            existingAssignment?.qty ?? existingAssignment?.cantidad ?? 0
+          ))
+        : 0;
+
+    const ownReservationsV125 = (Array.isArray(remoteDB.reservations)
+      ? remoteDB.reservations : [])
+      .filter((reservation) => LDH_prepActiveOperationalV45(reservation))
+      .filter((reservation) => !LDH_stockEsReservaAutoRecibida(reservation))
+      .filter((reservation) =>
+        String(reservation?.materialId ?? reservation?.matId ?? "") === materialId
+        && String(reservation?.companyId ?? reservation?.empresaId ?? "") === companyId
+        && sameRef(reservation?.ref ?? reservation?.jobRef ?? reservation?.reference ?? "")
+      );
+
+    const ownReservedQtyV125 = ownReservationsV125.reduce(
+      (sum, reservation) => sum + Math.max(0, LDH_prepNumCloudV30(
+        reservation?.qty ?? reservation?.cantidad ?? reservation?.reservado ?? 0
+      )),
+      0
+    );
+
+    const freeNowV125 = LDH_prepFreeRemoteV45(remoteDB, companyId, materialId);
+    const coveredWithoutReservationV125 = freeNowV125 + activeAssignmentQtyV125;
+    const availableForRepair = coveredWithoutReservationV125 + ownReservedQtyV125;
+
     if (qty > availableForRepair + 0.000001) {
-      throw new Error(`Stock insuficiente para reparar. Disponible ahora: ${availableForRepair}.`);
+      throw new Error(
+        `Stock insuficiente para reparar sin tocar material de otros trabajos. ` +
+        `Libre: ${Math.max(0, freeNowV125)}; asignado a esta OT: ${activeAssignmentQtyV125}; ` +
+        `reservado para esta OT: ${ownReservedQtyV125}; necesario: ${qty}.`
+      );
     }
 
     const now = new Date().toISOString();
+
+    /*
+     * La reserva propia se consume antes que el libre cuando la asignacion se
+     * perdio. Es exactamente el comportamiento esperado al entrar en
+     * Fabricacion: el material reservado para esta OT deja de estar reservado y
+     * pasa a salida fisica. Si ya existe una asignacion activa, solo se toma de
+     * reserva la parte que esa asignacion no cubra.
+     */
+    let reservationToConsumeV125 = Math.min(
+      ownReservedQtyV125,
+      Math.max(0, qty - Math.min(qty, activeAssignmentQtyV125))
+    );
+    let reservationConsumedV125 = 0;
+    for (const reservation of ownReservationsV125) {
+      if (reservationToConsumeV125 <= 0.000001) break;
+      const before = Math.max(0, LDH_prepNumCloudV30(
+        reservation?.qty ?? reservation?.cantidad ?? reservation?.reservado ?? 0
+      ));
+      if (before <= 0) continue;
+      const take = Math.min(before, reservationToConsumeV125);
+      const after = Math.max(0, before - take);
+      reservation.qty = after;
+      reservation.cantidad = after;
+      reservation.updatedAt = now;
+      if (!Array.isArray(reservation.consumptions)) reservation.consumptions = [];
+      reservation.consumptions.push({
+        qty: take,
+        ref: reference,
+        jobRef: reference,
+        materialId,
+        at: now,
+        reason: "reparacion_consumo_fabricacion_v125"
+      });
+      if (after <= 0.000001) {
+        reservation.qty = 0;
+        reservation.cantidad = 0;
+        reservation.status = "consumida";
+        reservation.estado = "consumida";
+        reservation.consumedAt = now;
+        reservation.closeReason = "consumo_fabricacion_recovery_v125";
+      }
+      reservationToConsumeV125 -= take;
+      reservationConsumedV125 += take;
+    }
+
+    if (reservationToConsumeV125 > 0.000001) {
+      throw new Error(
+        `La reserva de esta OT cambio durante la reparacion. Faltan ${reservationToConsumeV125} por cubrir.`
+      );
+    }
     const assignment = {
       ...(existingAssignment || {}),
       id: String(existingAssignment?.id ?? existingAssignment?.assignmentId ?? assignmentId),
@@ -18356,7 +18451,16 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       remoteDB,
       "preparacion_pedidos_reparacion_asignar_libre_v117"
     );
-    return { remoteDB, alreadyConsumed: false, assignment, movementId, chunks };
+    return {
+      remoteDB,
+      alreadyConsumed: false,
+      assignment,
+      movementId,
+      chunks,
+      reservationConsumed: reservationConsumedV125,
+      freeBefore: freeNowV125,
+      physicalBefore: physicalNowV125
+    };
   });
 
   const rawText = JSON.stringify(result.remoteDB);
@@ -18379,6 +18483,8 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
 
 window.LDH_repararConsumoLibrePerdidoV117 =
   LDH_prepRepairLostOwnFreeConsumptionV117;
+window.LDH_PREP_V125_REPARACION_RESERVA_PROPIA_SEGURA =
+  'PREPARACION-V125-REPARACION-RESERVA-PROPIA-SEGURA-20260831';
 
 function LDH_prepSameRefV32(a, b) {
   return LDH_prepNormCloudV30(a) === LDH_prepNormCloudV30(b);
