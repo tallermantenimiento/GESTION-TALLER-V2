@@ -18385,7 +18385,68 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
      * trabajo. La reparacion solo puede apoyarse en compromisos de la misma
      * empresa + material + referencia; nunca toma reservas de otras OTs.
      */
-    const physicalNowV125 = Math.max(0, Number(physicalInfoV126.value || 0));
+    /*
+     * V128 · La vista de Preparacion (V68) puede resolver una ficha homonima
+     * distinta de materialId cuando el fisico legacy vive en otro ID. La
+     * reparacion debe consumir exactamente esa misma ficha fisica; de lo
+     * contrario se cerraria la reserva y el saldo real quedaria LIBRE.
+     */
+    const physicalCandidatesV128 = (() => {
+      const candidates = [];
+      const seen = new Set();
+      const companyAliases = companyAliasesV126;
+      const companyMatch = (row) => aliasMatchesV126(companyAliases, [
+        row?.companyId,row?.empresaId,row?.company,row?.empresa,row?.companyName,row?.empresaNombre
+      ]);
+      const materialRows = Array.isArray(remoteDB.materials) ? remoteDB.materials : [];
+      const targetName = normAliasV126(materialName);
+      const addCandidate = (id, name) => {
+        id=String(id||'').trim(); name=String(name||'').trim();
+        if(!id || seen.has(id)) return;
+        if(targetName && name && normAliasV126(name)!==targetName) return;
+        seen.add(id);
+        const nameNorm=normAliasV126(name||materialName);
+        const matchMaterial = (row) => {
+          const rid=String(LDH_prepFirstCloudV30(row?.materialId,row?.matId,row?.material_id,'')||'').trim();
+          if(rid) return rid===id;
+          return [row?.material,row?.mat,row?.materialName,row?.nombreMaterial,row?.name,row?.nombre]
+            .some(v=>nameNorm && normAliasV126(v)===nameNorm);
+        };
+        const movements=(Array.isArray(remoteDB.movements)?remoteDB.movements:[])
+          .filter(m=>companyMatch(m)&&matchMaterial(m));
+        const physicalMovements=movements.filter(m=>LDH_prepMovementSignCloudV30(m?.type??m?.tipo??'entrada')!==0);
+        let value=0, source='stock_row', rowPhysical=0;
+        if(physicalMovements.length){
+          value=physicalMovements.reduce((sum,m)=>sum + LDH_prepMovementSignCloudV30(m?.type??m?.tipo??'entrada') * LDH_prepNumCloudV30(m?.qty??m?.cantidad??m?.quantity??m?.amount??0),0);
+          source='movements';
+        }else{
+          const rows=(Array.isArray(remoteDB.stock)?remoteDB.stock:[]).filter(r=>companyMatch(r)&&matchMaterial(r));
+          rowPhysical=rows.reduce((sum,row)=>sum+LDH_prepNumCloudV30(LDH_prepFirstCloudV30(
+            row?.physicalQty,row?.physical,row?.fisico,row?.físico,row?.qtyPhysical,row?.realQty,row?.stockFisico,row?.stockFísico,
+            row?.stockReal,row?.stockActual,row?.existencias,row?.actualQty,row?.onHand,row?.currentQty,row?.current,row?.totalQty,
+            row?.total,row?.qty,row?.cantidad,row?.quantity,row?.stock,row?.real,0
+          )),0);
+          value=rowPhysical;
+        }
+        candidates.push({materialId:id,materialName:name||materialName,value,source,rowPhysical,movementCount:physicalMovements.length});
+      };
+      addCandidate(materialId, materialName);
+      materialRows.forEach(m=>{
+        const id=String(LDH_prepFirstCloudV30(m?.id,m?.materialId,m?.matId,m?.material_id,'')||'').trim();
+        const name=String(LDH_prepFirstCloudV30(m?.name,m?.nombre,m?.material,m?.mat,m?.label,'')||'').trim();
+        if(targetName && normAliasV126(name)===targetName) addCandidate(id,name);
+      });
+      return candidates.sort((a,b)=>Number(b.value||0)-Number(a.value||0));
+    })();
+    const bestPhysicalV128 = physicalCandidatesV128[0] || {
+      materialId, materialName, value:physicalInfoV126.value, source:physicalInfoV126.source,
+      rowPhysical:physicalInfoV126.rowPhysical, movementCount:physicalInfoV126.movementCount
+    };
+    const effectivePhysicalInfoV128 = Number(bestPhysicalV128.value||0) > Number(physicalInfoV126.value||0)
+      ? bestPhysicalV128
+      : Object.assign({materialId,materialName}, physicalInfoV126);
+    const physicalMaterialIdV128 = String(effectivePhysicalInfoV128.materialId||materialId);
+    const physicalNowV125 = Math.max(0, Number(effectivePhysicalInfoV128.value || 0));
 
     const activeAssignmentQtyV125 =
       existingAssignment && LDH_prepActiveOperationalV45(existingAssignment)
@@ -18563,7 +18624,7 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
      * Se crea una entrada-base idempotente por el saldo previo y, en la misma
      * transaccion, la salida real. El resultado neto sigue siendo el correcto.
      */
-    if (repairModeV127 === "physical_exit" && physicalInfoV126.source === "stock_row" && physicalNowV125 > 0) {
+    if (repairModeV127 === "physical_exit" && effectivePhysicalInfoV128.source === "stock_row" && physicalNowV125 > 0) {
       const baselineIdV126 = `mov_stock_legacy_baseline_v126_${repairKey}`;
       const baselineExistsV126 = (Array.isArray(remoteDB.movements) ? remoteDB.movements : [])
         .some((movement) => String(movement?.id ?? movement?.movementId ?? "") === baselineIdV126);
@@ -18572,7 +18633,7 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
           id: baselineIdV126,
           movementId: baselineIdV126,
           companyId,
-          materialId,
+          materialId: physicalMaterialIdV128,
           type: "entrada",
           tipo: "entrada",
           qty: physicalNowV125,
@@ -18595,7 +18656,7 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
         id: movementId,
         movementId,
         companyId,
-        materialId,
+        materialId: physicalMaterialIdV128,
         type: "salida",
         tipo: "salida",
         qty,
@@ -18607,6 +18668,8 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
         reason: "consumo_stock_propio_al_entrar_fabricacion_v127_recovery",
         source: "preparacion_pedidos_reparacion_compromiso_ot_v127",
         assignmentId: assignment.id,
+        originalAssignmentMaterialId: materialId,
+        physicalMaterialId: physicalMaterialIdV128,
         debtExempt: true,
         returnRequired: false
       });
@@ -28612,6 +28675,69 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
   });
   window.LDH_comprobarConsumoLibrePerdidoV117=check;
 })();
+</script>
+
+
+<!-- LDH_PREP_V128_RECUPERAR_LIBERACION_V127_20260831 -->
+<script id="LDH_PREP_V128_RECUPERAR_LIBERACION_V127_20260831">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V128_RECOVERY__) return;
+  window.__LDH_PREP_V128_RECOVERY__=true;
+  let busy=false, offered=false;
+  const n=v=>{const x=Number.parseFloat(String(v??'').replace(',','.'));return Number.isFinite(x)?x:0};
+  const first=(...xs)=>xs.find(v=>v!==undefined&&v!==null&&String(v).trim()!=='')??'';
+  const norm=v=>String(v??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[^a-z0-9]+/g,'');
+  const refKey=v=>{const s=String(v||'').trim();const m=s.match(/\bOT-\d{6}-\d{3}(?:-[A-Z0-9]+)?\b/i);return m?m[0].toUpperCase():norm(s)};
+  const sameRef=(a,b)=>!!refKey(a)&&refKey(a)===refKey(b);
+  function currentRef(){return String((typeof refActual!=='undefined'&&refActual)||window.refActual||new URL(location.href).searchParams.get('openRef')||'').trim()}
+  function active(row){const st=norm(first(row?.status,row?.estado,'activa'));const ph=norm(first(row?.phase,row?.fase,'preparacion'));return st==='activa'&&(ph==='preparacion'||ph==='fabricacion')}
+  function sign(type){const t=norm(type);if(['entrada','in','ajustepos','devolucion','devolucionfisica','entradapreparacion','entradaprep','entradadesdepreparacion','stockentrada','recepcionstock','addstock'].includes(t))return 1;if(['salida','out','ajusteneg','consumo','consumoterminal'].includes(t))return -1;return 0}
+  function companyAliases(db,companyId){
+    const set=new Set([String(companyId||''),norm(companyId)]);
+    (db.companies||[]).forEach(c=>{const ids=[c?.id,c?.companyId,c?.empresaId].map(v=>String(v||''));if(!ids.includes(String(companyId||'')))return;[c?.id,c?.companyId,c?.empresaId,c?.name,c?.nombre,c?.empresa,c?.company,c?.code,c?.codigo].forEach(v=>{if(String(v||'').trim()){set.add(String(v).trim());set.add(norm(v))}})});return set;
+  }
+  function companyMatch(set,row){return [row?.companyId,row?.empresaId,row?.company,row?.empresa,row?.companyName,row?.empresaNombre].some(v=>{const s=String(v||'').trim();return s&&(set.has(s)||set.has(norm(s)))})}
+  function candidatePhysical(db,companyId,materialName,originMaterialId){
+    const target=norm(materialName);const cset=companyAliases(db,companyId);const rows=[];const seen=new Set();
+    const add=(id,name)=>{id=String(id||'').trim();name=String(name||'').trim();if(!id||seen.has(id)||!target||norm(name)!==target)return;seen.add(id);
+      const matchMat=row=>{const rid=String(first(row?.materialId,row?.matId,row?.material_id,'')||'').trim();if(rid)return rid===id;return [row?.material,row?.mat,row?.materialName,row?.nombreMaterial,row?.name,row?.nombre].some(v=>norm(v)===target)};
+      const mov=(db.movements||[]).filter(m=>companyMatch(cset,m)&&matchMat(m));const phys=mov.filter(m=>sign(first(m?.type,m?.tipo,'entrada'))!==0);let value=0,source='stock_row',rowPhysical=0;
+      if(phys.length){value=phys.reduce((s,m)=>s+sign(first(m?.type,m?.tipo,'entrada'))*n(first(m?.qty,m?.cantidad,m?.quantity,m?.amount,0)),0);source='movements'}else{rowPhysical=(db.stock||[]).filter(r=>companyMatch(cset,r)&&matchMat(r)).reduce((s,r)=>s+n(first(r?.physicalQty,r?.physical,r?.fisico,r?.qtyPhysical,r?.realQty,r?.stockFisico,r?.stockReal,r?.stockActual,r?.existencias,r?.actualQty,r?.onHand,r?.currentQty,r?.current,r?.totalQty,r?.total,r?.qty,r?.cantidad,r?.quantity,r?.stock,r?.real,0)),0);value=rowPhysical}
+      rows.push({materialId:id,materialName:name,value,source,rowPhysical,movementCount:phys.length});};
+    (db.materials||[]).forEach(m=>add(first(m?.id,m?.materialId,m?.matId,m?.material_id,''),first(m?.name,m?.nombre,m?.material,m?.mat,m?.label,'')));
+    const origin=(db.materials||[]).find(m=>String(first(m?.id,m?.materialId,m?.matId,m?.material_id,''))===String(originMaterialId||''));if(origin)add(first(origin?.id,origin?.materialId,origin?.matId,origin?.material_id,''),first(origin?.name,origin?.nombre,origin?.material,origin?.mat,origin?.label,materialName));
+    return rows.sort((a,b)=>b.value-a.value)[0]||null;
+  }
+  function detect(db,ref){
+    const out=[];
+    (db.movements||[]).filter(m=>sameRef(first(m?.ref,m?.jobRef,''),ref)&&m?.nonPhysical===true&&String(m?.reason||'').includes('fisico_ya_cero_v127')&&!m?.physicalCorrectionApplied).forEach(marker=>{
+      const qty=Math.max(0,n(first(marker?.originalQty,marker?.reconciledQty,0)));if(!qty)return;
+      const assignment=(db.assignments||[]).find(a=>String(first(a?.id,a?.assignmentId,''))===String(marker?.assignmentId||''))||(db.assignments||[]).find(a=>sameRef(first(a?.consumerRef,a?.jobRef,a?.ref,''),ref)&&String(first(a?.materialId,a?.matId,''))===String(marker?.materialId||''));
+      if(!assignment)return;
+      const companyId=String(first(assignment?.companyId,assignment?.empresaId,marker?.companyId,''));const materialId=String(first(assignment?.materialId,assignment?.matId,marker?.materialId,''));const materialName=String(first(assignment?.materialName,assignment?.material,assignment?.mat,''));if(!companyId||!materialName)return;
+      const physical=candidatePhysical(db,companyId,materialName,materialId);if(!physical||physical.value+1e-6<qty)return;
+      const already=(db.movements||[]).some(m=>sameRef(first(m?.ref,m?.jobRef,''),ref)&&String(m?.source||'').includes('v128')&&String(m?.assignmentId||'')===String(marker?.assignmentId||''));if(already)return;
+      out.push({markerId:String(first(marker?.id,marker?.movementId,'')),assignmentId:String(marker?.assignmentId||''),companyId,originMaterialId:materialId,materialName,qty,physical});
+    });return out;
+  }
+  async function repair(items,ref){
+    const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
+      const metaRef=doc(LDH_PREP_STOCK_DB_V28,'taller_data','stock');const db=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);const fresh=detect(db,ref);const wanted=new Set(items.map(x=>x.markerId));const todo=fresh.filter(x=>wanted.has(x.markerId));if(todo.length!==items.length)throw new Error('El Stock cambió durante la confirmación. No se ha tocado nada.');const now=new Date().toISOString();
+      for(const item of todo){const p=item.physical;if(p.value+1e-6<item.qty)throw new Error(`${item.materialName}: el físico ya no cubre ${item.qty}.`);const safe=s=>String(s||'').replace(/[^a-zA-Z0-9_-]+/g,'_').slice(0,70);const key=[safe(refKey(ref)),safe(item.companyId),safe(p.materialId),safe(item.assignmentId)].join('_');
+        if(p.source==='stock_row'&&p.value>0){const baseId='mov_v128_baseline_'+key;if(!(db.movements||[]).some(m=>String(first(m?.id,m?.movementId,''))===baseId)){db.movements.push({id:baseId,movementId:baseId,companyId:item.companyId,materialId:p.materialId,type:'entrada',tipo:'entrada',qty:p.value,cantidad:p.value,date:now,createdAt:now,ref,jobRef:ref,reason:'base_saldo_fisico_legacy_antes_consumo_v128',source:'preparacion_pedidos_v128',reconciliationOnly:true,debtExempt:true,returnRequired:false})}}
+        const outId='mov_v128_salida_'+key;if(!(db.movements||[]).some(m=>String(first(m?.id,m?.movementId,''))===outId)){db.movements.push({id:outId,movementId:outId,companyId:item.companyId,materialId:p.materialId,type:'salida',tipo:'salida',qty:item.qty,cantidad:item.qty,date:now,createdAt:now,ref,jobRef:ref,reason:'correccion_v127_reserva_liberada_consumo_fisico_v128',source:'preparacion_pedidos_v128',assignmentId:item.assignmentId,originalAssignmentMaterialId:item.originMaterialId,physicalMaterialId:p.materialId,debtExempt:true,returnRequired:false})}
+        const marker=(db.movements||[]).find(m=>String(first(m?.id,m?.movementId,''))===item.markerId);if(marker){marker.physicalCorrectionApplied=true;marker.physicalCorrectionAt=now;marker.physicalCorrectionMovementId=outId;marker.physicalAlreadyApplied=false;marker.updatedAt=now;marker.supersededBy=outId}
+      }
+      LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,db,'preparacion_pedidos_corregir_liberacion_v127_v128');return {remoteDB:db,count:todo.length};});
+    const raw=JSON.stringify(result.remoteDB);try{setAny(LDH_PREP_STOCK_KEY_V28,raw)}catch(_){try{localStorage.setItem(LDH_PREP_STOCK_KEY_V28,raw)}catch(__){}}window.__LDH_STOCK_MEMORY_DB=result.remoteDB;window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB);try{if(typeof renderTabla==='function')renderTabla()}catch(_){}return result;
+  }
+  async function check(){if(busy||offered)return;const ref=currentRef();const db=window.__LDH_PREP_STOCK_CLOUD_DB;if(!ref||!db)return;const items=detect(db,ref);if(!items.length)return;offered=true;const detail=items.map(x=>`• ${x.materialName}: ${x.qty} (ahora libres por V127)`).join('\n');if(!confirm('Se ha detectado una liberación incorrecta causada por la reparación V127.\n\n'+detail+'\n\nEstas cantidades pertenecían a esta misma OT y deben quedar consumidas al estar en Fabricación.\n\n¿Corregir ahora el consumo físico?'))return;busy=true;try{await repair(items,ref);alert('✅ Corregido. La reserva no se ha restaurado: el material queda consumido físicamente por esta OT.')}catch(e){console.error('[Preparación V128]',e);alert('No se ha corregido nada.\n\n'+String(e&&e.message||e))}finally{busy=false}}
+  const schedule=()=>[900,1800,3200,5200,8000,12000].forEach(ms=>setTimeout(check,ms));
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',schedule,{once:true});else schedule();
+  window.LDH_PREP_V128_CORREGIR_LIBERACION=check;
+})();
+window.LDH_PREP_V128_RESERVA_MISMA_OT_FISICO_HOMONIMO='PREPARACION-V128-20260831';
 </script>
 
 <script id="LDH_PREP_V117_MARKER">
