@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V118-OPENREF-PRIORIDAD-20260825" />
+<meta name="ldh-build" content="PREPARACION-V126-REPARACION-ALIAS-SEGURA-20260831" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -18269,8 +18269,97 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       return !!key && key === referenceKeyV124;
     };
 
-    const existingMovement = remoteDB.movements.find((movement) =>
-      String(movement?.materialId ?? movement?.matId ?? "") === materialId
+    /*
+     * V126 · Compatibilidad segura ID/NOMBRE para datos legacy.
+     * Stock y la ficha visible ya consideran equivalentes las filas antiguas
+     * guardadas por nombre y las modernas guardadas por ID. La reparación debe
+     * aplicar exactamente el mismo criterio, sobre todo dentro de la transacción
+     * Firebase, o puede leer físico 0 aunque la ficha muestre el saldo correcto.
+     */
+    const normAliasV126 = (value) => LDH_prepNormCloudV30(value ?? "");
+    const addAliasV126 = (set, value) => {
+      const raw = String(value ?? "").trim();
+      if (!raw) return;
+      set.add(raw);
+      const normalized = normAliasV126(raw);
+      if (normalized) set.add(normalized);
+    };
+    const companyAliasesV126 = new Set();
+    const materialAliasesV126 = new Set();
+    addAliasV126(companyAliasesV126, companyId);
+    addAliasV126(materialAliasesV126, materialId);
+    addAliasV126(materialAliasesV126, materialName);
+
+    const companyRecordV126 = (Array.isArray(remoteDB.companies) ? remoteDB.companies : []).find((company) =>
+      LDH_prepCompanyMatchesV45(company, companyId)
+    ) || null;
+    if (companyRecordV126) {
+      [companyRecordV126.id, companyRecordV126.companyId, companyRecordV126.empresaId,
+       companyRecordV126.name, companyRecordV126.nombre, companyRecordV126.empresa,
+       companyRecordV126.company, companyRecordV126.code, companyRecordV126.codigo]
+        .forEach((value) => addAliasV126(companyAliasesV126, value));
+    }
+
+    const materialRecordV126 = (Array.isArray(remoteDB.materials) ? remoteDB.materials : []).find((material) =>
+      LDH_prepMaterialMatchesV45(material, materialId, materialName)
+    ) || null;
+    if (materialRecordV126) {
+      [materialRecordV126.id, materialRecordV126.materialId, materialRecordV126.matId,
+       materialRecordV126.material_id, materialRecordV126.name, materialRecordV126.nombre,
+       materialRecordV126.material, materialRecordV126.mat, materialRecordV126.label]
+        .forEach((value) => addAliasV126(materialAliasesV126, value));
+    }
+
+    const aliasMatchesV126 = (set, values) => values.some((value) => {
+      const raw = String(value ?? "").trim();
+      if (!raw) return false;
+      return set.has(raw) || set.has(normAliasV126(raw));
+    });
+    const rowCompanyMatchesV126 = (row) => aliasMatchesV126(companyAliasesV126, [
+      row?.companyId, row?.empresaId, row?.company, row?.empresa,
+      row?.companyName, row?.empresaNombre
+    ]);
+    const rowOriginCompanyMatchesV126 = (row) => aliasMatchesV126(companyAliasesV126, [
+      row?.companyId, row?.fromCompanyId, row?.empresaId, row?.fromEmpresa,
+      row?.company, row?.empresa
+    ]);
+    const rowMaterialMatchesV126 = (row) => aliasMatchesV126(materialAliasesV126, [
+      row?.materialId, row?.matId, row?.material_id, row?.material,
+      row?.mat, row?.materialName, row?.nombreMaterial, row?.name, row?.nombre
+    ]);
+
+    const physicalInfoV126 = (() => {
+      const movements = (Array.isArray(remoteDB.movements) ? remoteDB.movements : [])
+        .filter((movement) => rowCompanyMatchesV126(movement) && rowMaterialMatchesV126(movement));
+      const physicalMovements = movements.filter((movement) =>
+        LDH_prepMovementSignCloudV30(movement?.type ?? movement?.tipo ?? "entrada") !== 0
+      );
+      if (physicalMovements.length) {
+        const value = physicalMovements.reduce((sum, movement) => {
+          const sign = LDH_prepMovementSignCloudV30(movement?.type ?? movement?.tipo ?? "entrada");
+          return sum + sign * LDH_prepNumCloudV30(
+            movement?.qty ?? movement?.cantidad ?? movement?.quantity ?? movement?.amount ?? 0
+          );
+        }, 0);
+        return { value, source: "movements", movementCount: physicalMovements.length, rowPhysical: 0 };
+      }
+      const rows = (Array.isArray(remoteDB.stock) ? remoteDB.stock : [])
+        .filter((row) => rowCompanyMatchesV126(row) && rowMaterialMatchesV126(row));
+      const rowPhysical = rows.reduce((sum, row) => sum + LDH_prepNumCloudV30(
+        LDH_prepFirstCloudV30(
+          row?.physicalQty, row?.physical, row?.fisico, row?.físico,
+          row?.qtyPhysical, row?.realQty, row?.stockFisico, row?.stockFísico,
+          row?.stockReal, row?.stockActual, row?.existencias, row?.actualQty,
+          row?.onHand, row?.currentQty, row?.current, row?.totalQty, row?.total,
+          row?.qty, row?.cantidad, row?.quantity, 0
+        )
+      ), 0);
+      return { value: rowPhysical, source: "stock_row", movementCount: 0, rowPhysical };
+    })();
+
+    const existingMovement = (Array.isArray(remoteDB.movements) ? remoteDB.movements : []).find((movement) =>
+      rowMaterialMatchesV126(movement)
+      && rowCompanyMatchesV126(movement)
       && sameRef(movement?.ref ?? movement?.jobRef ?? "")
       && ["salida","consumo","out"].includes(LDH_prepNormCloudV30(movement?.type ?? movement?.tipo ?? ""))
     );
@@ -18278,9 +18367,9 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       return { remoteDB, alreadyConsumed: true, movement: existingMovement, chunks: 0 };
     }
 
-    const existingAssignment = remoteDB.assignments.find((assignment) =>
-      String(assignment?.materialId ?? assignment?.matId ?? "") === materialId
-      && String(assignment?.companyId ?? assignment?.empresaId ?? "") === companyId
+    const existingAssignment = (Array.isArray(remoteDB.assignments) ? remoteDB.assignments : []).find((assignment) =>
+      rowMaterialMatchesV126(assignment)
+      && rowCompanyMatchesV126(assignment)
       && sameRef(assignment?.consumerRef ?? assignment?.jobRef ?? assignment?.ref ?? "")
     );
 
@@ -18294,12 +18383,11 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
      * trabajo. La reparacion solo puede apoyarse en compromisos de la misma
      * empresa + material + referencia; nunca toma reservas de otras OTs.
      */
-    const physicalNowV125 = Math.max(0, LDH_prepPhysicalRemoteV45(
-      remoteDB, companyId, materialId
-    ));
+    const physicalNowV125 = Math.max(0, Number(physicalInfoV126.value || 0));
     if (qty > physicalNowV125 + 0.000001) {
       throw new Error(
-        `Stock fisico insuficiente para reparar. Fisico actual: ${physicalNowV125}; necesario: ${qty}.`
+        `Stock fisico insuficiente para reparar. Fisico nube: ${physicalNowV125}; necesario: ${qty}. ` +
+        `Fuente: ${physicalInfoV126.source === "movements" ? "movimientos fisicos" : "fila de Stock"}.`
       );
     }
 
@@ -18315,8 +18403,8 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       .filter((reservation) => LDH_prepActiveOperationalV45(reservation))
       .filter((reservation) => !LDH_stockEsReservaAutoRecibida(reservation))
       .filter((reservation) =>
-        String(reservation?.materialId ?? reservation?.matId ?? "") === materialId
-        && String(reservation?.companyId ?? reservation?.empresaId ?? "") === companyId
+        rowMaterialMatchesV126(reservation)
+        && rowCompanyMatchesV126(reservation)
         && sameRef(reservation?.ref ?? reservation?.jobRef ?? reservation?.reference ?? "")
       );
 
@@ -18327,7 +18415,28 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       0
     );
 
-    const freeNowV125 = LDH_prepFreeRemoteV45(remoteDB, companyId, materialId);
+    const allReservedV126 = (Array.isArray(remoteDB.reservations) ? remoteDB.reservations : [])
+      .filter(LDH_prepActiveOperationalV45)
+      .filter((row) => !LDH_stockEsReservaAutoRecibida(row))
+      .filter((row) => rowCompanyMatchesV126(row) && rowMaterialMatchesV126(row))
+      .reduce((sum, row) => sum + Math.max(0, LDH_prepNumCloudV30(
+        row?.qty ?? row?.cantidad ?? row?.reservado ?? 0
+      )), 0);
+    const allOwnAssignedV126 = (Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [])
+      .filter(LDH_prepActiveOperationalV45)
+      .filter((row) => !LDH_prepIsLoanV45(row))
+      .filter((row) => rowCompanyMatchesV126(row) && rowMaterialMatchesV126(row))
+      .reduce((sum, row) => sum + Math.max(0, LDH_prepNumCloudV30(
+        row?.qty ?? row?.cantidad ?? row?.asignado ?? 0
+      )), 0);
+    const allLentV126 = (Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [])
+      .filter(LDH_prepActiveOperationalV45)
+      .filter(LDH_prepIsLoanV45)
+      .filter((row) => rowOriginCompanyMatchesV126(row) && rowMaterialMatchesV126(row))
+      .reduce((sum, row) => sum + Math.max(0, LDH_prepNumCloudV30(
+        row?.pendingQty ?? row?.qtyPending ?? row?.qty ?? row?.cantidad ?? 0
+      )), 0);
+    const freeNowV125 = physicalNowV125 - allReservedV126 - allOwnAssignedV126 - allLentV126;
     const coveredWithoutReservationV125 = freeNowV125 + activeAssignmentQtyV125;
     const availableForRepair = coveredWithoutReservationV125 + ownReservedQtyV125;
 
@@ -18414,8 +18523,8 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       consumerRef: reference,
       lineIndex: payload.lineIndex ?? existingAssignment?.lineIndex ?? 0,
       assignmentType: existingAssignment?.assignmentType || "libre",
-      reason: "reparacion_asignacion_libre_perdida_v117",
-      source: "preparacion_pedidos_reparacion_asignar_libre_v117",
+      reason: "reparacion_asignacion_libre_perdida_v126",
+      source: "preparacion_pedidos_reparacion_alias_segura_v126",
       cloudConfirmed: true,
       consumedQty: qty,
       consumedAt: now,
@@ -18424,6 +18533,40 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       updatedAt: now
     };
     LDH_prepUpsertRemoteV45(remoteDB.assignments, assignment, "assignments");
+
+    /*
+     * Si un Stock legacy solo tenia saldo explicito en la fila y todavia no
+     * existia ningun movimiento fisico, crear la primera SALIDA sin una base
+     * convertiría 66 físicos en -66 al pasar el sistema a modo movements.
+     * Se crea una entrada-base idempotente por el saldo previo y, en la misma
+     * transaccion, la salida real. El resultado neto sigue siendo el correcto.
+     */
+    if (physicalInfoV126.source === "stock_row" && physicalNowV125 > 0) {
+      const baselineIdV126 = `mov_stock_legacy_baseline_v126_${repairKey}`;
+      const baselineExistsV126 = (Array.isArray(remoteDB.movements) ? remoteDB.movements : [])
+        .some((movement) => String(movement?.id ?? movement?.movementId ?? "") === baselineIdV126);
+      if (!baselineExistsV126) {
+        remoteDB.movements.push({
+          id: baselineIdV126,
+          movementId: baselineIdV126,
+          companyId,
+          materialId,
+          type: "entrada",
+          tipo: "entrada",
+          qty: physicalNowV125,
+          cantidad: physicalNowV125,
+          date: now,
+          createdAt: now,
+          ref: reference,
+          jobRef: reference,
+          reason: "reconciliacion_saldo_fisico_legacy_v126",
+          source: "preparacion_pedidos_reparacion_legacy_v126",
+          debtExempt: true,
+          returnRequired: false,
+          reconciliationOnly: true
+        });
+      }
+    }
 
     remoteDB.movements.push({
       id: movementId,
@@ -18438,8 +18581,8 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       createdAt: now,
       ref: reference,
       jobRef: reference,
-      reason: "consumo_stock_propio_al_entrar_fabricacion_v117_recovery",
-      source: "preparacion_pedidos_reparacion_asignar_libre_v117",
+      reason: "consumo_stock_propio_al_entrar_fabricacion_v126_recovery",
+      source: "preparacion_pedidos_reparacion_alias_segura_v126",
       assignmentId: assignment.id,
       debtExempt: true,
       returnRequired: false
@@ -18449,7 +18592,7 @@ async function LDH_prepRepairLostOwnFreeConsumptionV117(payload) {
       transaction,
       metaRef,
       remoteDB,
-      "preparacion_pedidos_reparacion_asignar_libre_v117"
+      "preparacion_pedidos_reparacion_alias_segura_v126"
     );
     return {
       remoteDB,
@@ -18485,6 +18628,8 @@ window.LDH_repararConsumoLibrePerdidoV117 =
   LDH_prepRepairLostOwnFreeConsumptionV117;
 window.LDH_PREP_V125_REPARACION_RESERVA_PROPIA_SEGURA =
   'PREPARACION-V125-REPARACION-RESERVA-PROPIA-SEGURA-20260831';
+window.LDH_PREP_V126_REPARACION_ALIAS_SEGURA =
+  'PREPARACION-V126-REPARACION-ID-NOMBRE-SEGURA-20260831';
 
 function LDH_prepSameRefV32(a, b) {
   return LDH_prepNormCloudV30(a) === LDH_prepNormCloudV30(b);
