@@ -17725,6 +17725,45 @@ function LDH_prepWriteRemoteStockTransactionV45(
   return chunks.length;
 }
 
+/* V129 · Puente seguro para reparaciones legacy que necesitan una transacción
+ * de Stock desde bloques de compatibilidad no-module. El callback recibe la
+ * copia remota leída DENTRO de la transacción; esta función conserva en este
+ * módulo el alcance real de runTransaction/doc/Firebase. */
+window.LDH_prepRunStockMutationV129 = async function(source, mutateFn) {
+  if (typeof mutateFn !== "function") throw new Error("Mutación de Stock no válida.");
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    await signInAnonymously(LDH_PREP_STOCK_AUTH_V28);
+  }
+  if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
+    throw new Error("Stock nube todavía no está autenticado.");
+  }
+  const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
+    const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
+    const remoteDB = await LDH_prepReadRemoteStockTransactionV45(transaction, metaRef);
+    const extra = (await mutateFn(remoteDB)) || {};
+    const chunks = LDH_prepWriteRemoteStockTransactionV45(
+      transaction, metaRef, remoteDB, String(source || "preparacion_pedidos_v129")
+    );
+    return { remoteDB, chunks, ...extra };
+  });
+  if (result && result.remoteDB) {
+    const rawText = JSON.stringify(result.remoteDB);
+    try { localStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+    try { sessionStorage.setItem(LDH_PREP_STOCK_KEY_V28, rawText); } catch (_) {}
+    window.__LDH_STOCK_MEMORY_DB = result.remoteDB;
+    window.__LDH_PREP_STOCK_CLOUD_DB = result.remoteDB;
+    window.__LDH_PREP_STOCK_CLOUD_ROWS = LDH_prepBuildCloudRowsV30(result.remoteDB);
+    window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+      connected: true,
+      projectId: LDH_PREP_STOCK_CONFIG_V28.projectId,
+      lastReadAt: new Date().toISOString(),
+      lastWriteAt: new Date().toISOString(),
+      error: ""
+    };
+  }
+  return result;
+};
+
 async function LDH_prepPublishIntercompanyV45(payload) {
   if (!payload || !["prestamo", "donacion"].includes(payload.operation)) {
     throw new Error("Tipo de operación entre empresas no válido.");
@@ -28722,22 +28761,25 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     });return out;
   }
   async function repair(items,ref){
-    const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
-      const metaRef=doc(LDH_PREP_STOCK_DB_V28,'taller_data','stock');const db=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);const fresh=detect(db,ref);const wanted=new Set(items.map(x=>x.markerId));const todo=fresh.filter(x=>wanted.has(x.markerId));if(todo.length!==items.length)throw new Error('El Stock cambió durante la confirmación. No se ha tocado nada.');const now=new Date().toISOString();
+    if(typeof window.LDH_prepRunStockMutationV129!=='function') throw new Error('El conector transaccional de Stock todavía no está listo. Recarga la página y vuelve a intentarlo.');
+    const result=await window.LDH_prepRunStockMutationV129('preparacion_pedidos_corregir_liberacion_v127_v129',async db=>{
+      const fresh=detect(db,ref);const wanted=new Set(items.map(x=>x.markerId));const todo=fresh.filter(x=>wanted.has(x.markerId));if(todo.length!==items.length)throw new Error('El Stock cambió durante la confirmación. No se ha tocado nada.');const now=new Date().toISOString();
       for(const item of todo){const p=item.physical;if(p.value+1e-6<item.qty)throw new Error(`${item.materialName}: el físico ya no cubre ${item.qty}.`);const safe=s=>String(s||'').replace(/[^a-zA-Z0-9_-]+/g,'_').slice(0,70);const key=[safe(refKey(ref)),safe(item.companyId),safe(p.materialId),safe(item.assignmentId)].join('_');
-        if(p.source==='stock_row'&&p.value>0){const baseId='mov_v128_baseline_'+key;if(!(db.movements||[]).some(m=>String(first(m?.id,m?.movementId,''))===baseId)){db.movements.push({id:baseId,movementId:baseId,companyId:item.companyId,materialId:p.materialId,type:'entrada',tipo:'entrada',qty:p.value,cantidad:p.value,date:now,createdAt:now,ref,jobRef:ref,reason:'base_saldo_fisico_legacy_antes_consumo_v128',source:'preparacion_pedidos_v128',reconciliationOnly:true,debtExempt:true,returnRequired:false})}}
-        const outId='mov_v128_salida_'+key;if(!(db.movements||[]).some(m=>String(first(m?.id,m?.movementId,''))===outId)){db.movements.push({id:outId,movementId:outId,companyId:item.companyId,materialId:p.materialId,type:'salida',tipo:'salida',qty:item.qty,cantidad:item.qty,date:now,createdAt:now,ref,jobRef:ref,reason:'correccion_v127_reserva_liberada_consumo_fisico_v128',source:'preparacion_pedidos_v128',assignmentId:item.assignmentId,originalAssignmentMaterialId:item.originMaterialId,physicalMaterialId:p.materialId,debtExempt:true,returnRequired:false})}
+        if(p.source==='stock_row'&&p.value>0){const baseId='mov_v129_baseline_'+key;if(!(db.movements||[]).some(m=>String(first(m?.id,m?.movementId,''))===baseId)){db.movements.push({id:baseId,movementId:baseId,companyId:item.companyId,materialId:p.materialId,type:'entrada',tipo:'entrada',qty:p.value,cantidad:p.value,date:now,createdAt:now,ref,jobRef:ref,reason:'base_saldo_fisico_legacy_antes_consumo_v129',source:'preparacion_pedidos_v129',reconciliationOnly:true,debtExempt:true,returnRequired:false})}}
+        const outId='mov_v129_salida_'+key;if(!(db.movements||[]).some(m=>String(first(m?.id,m?.movementId,''))===outId)){db.movements.push({id:outId,movementId:outId,companyId:item.companyId,materialId:p.materialId,type:'salida',tipo:'salida',qty:item.qty,cantidad:item.qty,date:now,createdAt:now,ref,jobRef:ref,reason:'correccion_v127_reserva_liberada_consumo_fisico_v129',source:'preparacion_pedidos_v129',assignmentId:item.assignmentId,originalAssignmentMaterialId:item.originMaterialId,physicalMaterialId:p.materialId,debtExempt:true,returnRequired:false})}
         const marker=(db.movements||[]).find(m=>String(first(m?.id,m?.movementId,''))===item.markerId);if(marker){marker.physicalCorrectionApplied=true;marker.physicalCorrectionAt=now;marker.physicalCorrectionMovementId=outId;marker.physicalAlreadyApplied=false;marker.updatedAt=now;marker.supersededBy=outId}
       }
-      LDH_prepWriteRemoteStockTransactionV45(transaction,metaRef,db,'preparacion_pedidos_corregir_liberacion_v127_v128');return {remoteDB:db,count:todo.length};});
-    const raw=JSON.stringify(result.remoteDB);try{setAny(LDH_PREP_STOCK_KEY_V28,raw)}catch(_){try{localStorage.setItem(LDH_PREP_STOCK_KEY_V28,raw)}catch(__){}}window.__LDH_STOCK_MEMORY_DB=result.remoteDB;window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB);try{if(typeof renderTabla==='function')renderTabla()}catch(_){}return result;
+      return {count:todo.length};
+    });
+    const raw=JSON.stringify(result.remoteDB);try{if(typeof setAny==='function')setAny('ldh_v2_company_stock_v1',raw);else localStorage.setItem('ldh_v2_company_stock_v1',raw)}catch(_){try{localStorage.setItem('ldh_v2_company_stock_v1',raw)}catch(__){}}window.__LDH_STOCK_MEMORY_DB=result.remoteDB;window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;try{if(typeof renderTabla==='function')renderTabla()}catch(_){}return result;
   }
   async function check(){if(busy||offered)return;const ref=currentRef();const db=window.__LDH_PREP_STOCK_CLOUD_DB;if(!ref||!db)return;const items=detect(db,ref);if(!items.length)return;offered=true;const detail=items.map(x=>`• ${x.materialName}: ${x.qty} (ahora libres por V127)`).join('\n');if(!confirm('Se ha detectado una liberación incorrecta causada por la reparación V127.\n\n'+detail+'\n\nEstas cantidades pertenecían a esta misma OT y deben quedar consumidas al estar en Fabricación.\n\n¿Corregir ahora el consumo físico?'))return;busy=true;try{await repair(items,ref);alert('✅ Corregido. La reserva no se ha restaurado: el material queda consumido físicamente por esta OT.')}catch(e){console.error('[Preparación V128]',e);alert('No se ha corregido nada.\n\n'+String(e&&e.message||e))}finally{busy=false}}
   const schedule=()=>[900,1800,3200,5200,8000,12000].forEach(ms=>setTimeout(check,ms));
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',schedule,{once:true});else schedule();
   window.LDH_PREP_V128_CORREGIR_LIBERACION=check;
 })();
-window.LDH_PREP_V128_RESERVA_MISMA_OT_FISICO_HOMONIMO='PREPARACION-V128-20260831';
+window.LDH_PREP_V128_RESERVA_MISMA_OT_FISICO_HOMONIMO='PREPARACION-V129-TRANSACCION-MODULO-20260831';
+window.LDH_PREP_V129_TRANSACCION_MODULO=true;
 </script>
 
 <script id="LDH_PREP_V117_MARKER">
