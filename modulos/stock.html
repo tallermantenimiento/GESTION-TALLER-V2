@@ -1087,6 +1087,7 @@ html, body{
 <!-- LDH_STOCK_DEPURAR_ASIGNACIONES_HUERFANAS_1006 -->
 <!-- LDH_STOCK_DEPURAR_RECEPCIONES_PREP_HUERFANAS_1006 -->
 <!-- LDH_STOCK_LIMPIAR_ASIGNADO_VISIBLE_SIN_ORIGEN_1006 -->
+<!-- LDH_STOCK_V68_CONSUMIDO_NO_RESERVADO_3108 -->
 
 
 
@@ -1973,10 +1974,66 @@ function _activeBorrowDebtForRefMaterial(companyId, materialId, ref){
     return assignmentPendingQty(a) > 0;
   });
 }
+/* V68 · Una línea recibida de Preparación solo sigue siendo "asignada/reservada"
+ * mientras NO exista una salida física confirmada para esa misma OT + empresa + material.
+ * Conservamos la ficha prep_recepcion_ como trazabilidad: no se borra ni se modifica.
+ */
+function _stockAssignedRefKeyV68(value){
+  const raw=String(value||'').trim();
+  const match=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]))?\b/);
+  if(match) return 'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:'');
+  return _prepNormText(raw);
+}
+function _stockSameAssignedRefV68(a,b){
+  const ka=_stockAssignedRefKeyV68(a), kb=_stockAssignedRefKeyV68(b);
+  return !!ka && ka===kb;
+}
+function _stockPhysicalOutV68(movement){
+  if(!movement || movement.nonPhysical===true || movement.reconciliationOnly===true) return false;
+  const type=_prepNormText(movement.type||movement.tipo||'').replace(/\s+/g,'_');
+  return ['salida','consumo','out','ajuste_neg','consumo_terminal'].includes(type);
+}
+function _stockMovementMaterialMatchV68(movement,materialId){
+  const mid=movement && (movement.materialId||movement.matId||movement.material_id||movement.physicalMaterialId||'');
+  if(!mid) return false;
+  try{return _sameDebtMaterial(mid,materialId);}catch(_){return String(mid)===String(materialId||'');}
+}
+function _stockConfirmedConsumptionQtyV68(companyId,materialId,ref){
+  try{
+    return (db.movements||[]).reduce((sum,movement)=>{
+      if(!_stockPhysicalOutV68(movement)) return sum;
+      const mRef=movement.ref||movement.jobRef||movement.reference||movement.referencia||movement.consumerRef||movement.usedByRef||'';
+      if(!_stockSameAssignedRefV68(mRef,ref)) return sum;
+      const mCompany=movement.companyId||movement.empresaId||movement.company||movement.empresa||'';
+      if(!_companyMatchesForPrep(mCompany,companyId)) return sum;
+      if(!_stockMovementMaterialMatchV68(movement,materialId)) return sum;
+      const qty=Number(movement.qty??movement.cantidad??movement.quantity??movement.amount??0)||0;
+      return sum+Math.max(0,qty);
+    },0);
+  }catch(_){return 0;}
+}
+function _stockAssignmentHasPhysicalConsumptionV68(assignment,companyId,materialId){
+  try{
+    const assignmentId=String(assignment&&(assignment.id||assignment.assignmentId)||'');
+    const movementId=String(assignment&&assignment.movementId||'');
+    const ref=String(assignment&&(assignment.consumerRef||assignment.jobRef||assignment.ref||assignment.reference)||'');
+    return (db.movements||[]).some(movement=>{
+      if(!_stockPhysicalOutV68(movement)) return false;
+      const mid=String(movement&&(movement.id||movement.movementId)||'');
+      if(movementId && mid===movementId) return true;
+      if(assignmentId && String(movement.assignmentId||'')===assignmentId) return true;
+      if(!ref) return false;
+      const mRef=movement.ref||movement.jobRef||movement.reference||movement.referencia||movement.consumerRef||movement.usedByRef||'';
+      if(!_stockSameAssignedRefV68(mRef,ref)) return false;
+      const mCompany=movement.companyId||movement.empresaId||movement.company||movement.empresa||'';
+      if(!_companyMatchesForPrep(mCompany,companyId)) return false;
+      return _stockMovementMaterialMatchV68(movement,materialId);
+    });
+  }catch(_){return false;}
+}
 function prepAssignedStock(companyId,materialId){
-  // Fallback de seguridad: si Preparación tiene una línea recibida/OK propia
-  // y ya no existe deuda pendiente, debe aparecer en Stock como ASIGNADO propio.
-  // Evita que al devolver una deuda el receptor quede a 0 aunque ya tenga su material recibido.
+  // Fallback de seguridad de Preparación, descontando lo que ya tiene salida física
+  // confirmada. Así una OT en Fabricación no vuelve a aparecer como Reservado.
   try{
     let total = 0;
     const seen = new Set();
@@ -1991,14 +2048,8 @@ function prepAssignedStock(companyId,materialId){
 
       const refCompany = _refCompanyFromPrep(ref);
       if(refCompany && !_companyMatchesForPrep(refCompany, companyId)) continue;
-
-      // Si no se puede identificar empresa, no inventamos asignación.
       if(!refCompany) continue;
-
-      // Si solo queda la ficha local prep_recepcion_ pero el trabajo ya no existe
-      // en el flujo real, no debe seguir contando como ASIGNADO en Stock.
       if(!_stockRefExistsOutsidePrepReception(ref)) continue;
-
       if(_activeBorrowDebtForRefMaterial(companyId, materialId, ref)) continue;
 
       let lines = [];
@@ -2007,10 +2058,15 @@ function prepAssignedStock(companyId,materialId){
         lines = Array.isArray(parsed) ? parsed : [];
       }catch(e){ lines = []; }
 
+      let assignedForRef=0;
       lines.forEach(line=>{
         if(!_prepLineMaterialMatch(line, materialId)) return;
-        total += _lineReceivedOwnQty(line);
+        assignedForRef += _lineReceivedOwnQty(line);
       });
+      if(assignedForRef<=0) continue;
+
+      const consumedForRef=_stockConfirmedConsumptionQtyV68(companyId,materialId,ref);
+      total += Math.max(0,assignedForRef-consumedForRef);
     }
 
     return Math.max(0, total);
@@ -2024,6 +2080,7 @@ function _ownAssignmentDBStock(companyId,materialId){
    .filter(a=>['preparacion','fabricacion'].includes(String(a.phase||a.fase||'preparacion')))
    .filter(a=>String(a.status||a.estado)==='activa')
    .filter(a=>!_isLoanAssignment(a))
+   .filter(a=>!_stockAssignmentHasPhysicalConsumptionV68(a,companyId,materialId))
    .reduce((sum,a)=>sum+Number(a.qty||a.cantidad||0),0)
 }
 function assignedStock(companyId,materialId){
