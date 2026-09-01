@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V131-REFERENCIA-VISIBLE-PREVALECE-20260901" />
+<meta name="ldh-build" content="PREPARACION-V133-LIMPIA-ALIAS-TECNICO-RESIDUAL-20260901" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -3359,6 +3359,23 @@ try{
       const materialesConsolidados = LDH_consolidarMaterialesDuplicados(materialesImport);
       setAny(KP(ref), JSON.stringify(materialesConsolidados));
       try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); setAny("prep_import_guard_ts", String(Date.now())); }catch(_){ }
+
+      // V133 · Si la referencia visible contiene una aclaración, la antigua llave
+      // técnica de ESTA MISMA partida (OT-...-A/B/C/D) queda obsoleta.
+      // La eliminamos ahora; LiveSync V6, parcheado abajo, impedirá que una copia
+      // antigua de Firebase la vuelva a introducir antes de publicar la migración.
+      try{
+        const techAliasV133=String(technicalPartRefV130||'').trim();
+        if(techAliasV133 && techAliasV133!==ref){
+          try{ removeAny(KM(techAliasV133)); }catch(_){ }
+          try{ removeAny(KP(techAliasV133)); }catch(_){ }
+          window.__LDH_PREP_FRESH_TECH_ALIAS_V133=techAliasV133;
+          window.__LDH_PREP_FRESH_VISIBLE_REF_V133=ref;
+          try{ sessionStorage.setItem('__LDH_PREP_FRESH_TECH_ALIAS_V133',techAliasV133); }catch(_){ }
+          try{ sessionStorage.setItem('__LDH_PREP_FRESH_VISIBLE_REF_V133',ref); }catch(_){ }
+        }
+      }catch(error){ console.warn('[Preparación V133] limpieza alias técnico residual',error); }
+
       // V131 · Una llave antigua de apertura (normalmente la OT técnica corta)
       // no puede volver a abrir la misma partida sin su nota después de importar.
       try{
@@ -15975,6 +15992,22 @@ function LDH_prepVolverMenu(){
            k === "prep_import_guard_ts";
   }
 
+  // V133 · Una importación recién hecha con referencia visible larga debe poder
+  // borrar de la nube la ficha técnica corta de la misma partida. Sin esta regla,
+  // applyRemote() veía OT-...-A en Firebase y la recreaba localmente después de
+  // haberla migrado a OT-...-A (aclaración).
+  function technicalPartRefV133(value){
+    const m=String(value||'').trim().toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})[\s_-]*([A-Z]{1,3})\b/);
+    return m ? ('OT-'+m[1]+'-'+m[2]+'-'+m[3]) : '';
+  }
+  function isFreshObsoleteTechnicalAliasV133(k,info){
+    if(!info || !info.fresh || !info.guardRef) return false;
+    const visible=String(info.guardRef||'').trim();
+    const tech=technicalPartRefV133(visible);
+    if(!tech || visible.toUpperCase()===tech) return false;
+    return k === 'prep_meta_' + tech || k === 'prep_recepcion_' + tech;
+  }
+
   function applyRemote(remote){
     if(!remote || !remote.data) return false;
     const rdata = remote.data || {};
@@ -15993,6 +16026,16 @@ function LDH_prepVolverMenu(){
     try{
       Array.from(all).forEach(k => {
         if(!isPrepKey(k)) return;
+
+        // V133: durante una importación fresca con aclaración visible, la clave
+        // técnica corta de esa misma partida es una versión antigua. No se restaura
+        // desde Firebase; se mantiene borrada y se publica ese borrado a continuación.
+        if(isFreshObsoleteTechnicalAliasV133(k,freshInfo)){
+          if(getValue(k) !== null) changed = true;
+          removeBoth(k);
+          preservedFreshImport = true;
+          return;
+        }
 
         // V54: una partida recién importada desde Cálculo es la autoridad para
         // sus dos claves, aunque Firebase conserve una versión anterior de la
@@ -29473,6 +29516,14 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   window.LDH_PREP_V124_REFERENCIA_OT_UNICA_REPARACION='PREPARACION-V124-REPARACION-REF-OT-UNICA-20260825';
   document.documentElement.dataset.ldhPrepBuild='V124';
   console.info('[Preparación V124] Reparación histórica compara por código OT único y no puede duplicar consumo por referencia corta/larga.');
+})();
+</script>
+
+<script id="LDH_PREP_V133_LIMPIA_ALIAS_TECNICO_RESIDUAL_20260901">
+(function(){
+  window.LDH_PREP_V133_LIMPIA_ALIAS_TECNICO_RESIDUAL='PREPARACION-V133-LIMPIA-ALIAS-TECNICO-RESIDUAL-20260901';
+  document.documentElement.dataset.ldhPrepBuild='V133';
+  console.info('[Preparación V133] La sincronización no puede reintroducir OT técnica corta tras migrarla a una referencia visible con aclaración.');
 })();
 </script>
 
