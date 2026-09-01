@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V130-REFERENCIA-VISIBLE-OT-TECNICA-20260901" />
+<meta name="ldh-build" content="PREPARACION-V131-REFERENCIA-VISIBLE-PREVALECE-20260901" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -2960,34 +2960,55 @@ function saveLinkMap(){
         const earlyGroupId = String(snap.composite_group_id || snap.compositeGroupId || '').trim();
         const earlyPartId = String(snap.composite_part_id || snap.partId || '').trim();
         const earlyPartRef = String(snap.composite_part_reference || snap.partReference || '').trim();
-        technicalPartRefV130 = earlyPartRef;
+
+        // V131 · La identidad técnica se puede recuperar incluso cuando Cálculo no
+        // transporta metadatos composite. El sufijo A/B/C/D forma parte de la OT.
+        const technicalCodeV131 = (value) => {
+          const m=String(value||'').trim().toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
+          return m ? ('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')) : '';
+        };
 
         // La referencia escrita en Cálculo manda como etiqueta/clave visible.
-        // Solo usamos la referencia técnica como fallback si no llegó una visible.
         const incomingVisibleRefV130 = String((snap && (snap.referencia || snap.ref)) || refCandidate || '').trim();
+        technicalPartRefV130 = earlyPartRef || technicalCodeV131(incomingVisibleRefV130) || technicalCodeV131(refCandidate);
         refBase = incomingVisibleRefV130 || earlyPartRef || refCandidate;
 
-        // Buscar la misma partida por su identidad técnica para evitar A (1), A (2)...
-        // Si estaba guardada con otra etiqueta, se migra después a la nueva visible.
-        if(earlyGroupId && earlyPartId){
-          const seenKeys = new Set();
-          outerV130:
-          for(const storage of [localStorage,sessionStorage]){
-            try{
-              for(let i=0;i<storage.length;i++){
-                const key=storage.key(i);
-                if(!key || !key.startsWith('prep_meta_') || seenKeys.has(key)) continue;
-                seenKeys.add(key);
-                const existingMeta=JSON.parse(storage.getItem(key)||'{}')||{};
-                const existingGroup=String(existingMeta.composite_group_id||existingMeta.compositeGroupId||'').trim();
-                const existingPart=String(existingMeta.composite_part_id||existingMeta.compositePartId||'').trim();
-                if(existingGroup===earlyGroupId && existingPart===earlyPartId){
-                  existingCompositeStorageRefV130=key.slice('prep_meta_'.length);
-                  break outerV130;
+        // Buscar la misma partida primero por identidad composite y, si esos campos no
+        // viajaron desde Cálculo, por el código OT técnico EXACTO (incluido -A/-B/-C/-D).
+        // Nunca se compara solo con la referencia maestra, así no se mezclan hermanas.
+        const seenKeys = new Set();
+        const aliasRefsV131 = [];
+        outerV130:
+        for(const storage of [localStorage,sessionStorage]){
+          try{
+            for(let i=0;i<storage.length;i++){
+              const key=storage.key(i);
+              if(!key || !key.startsWith('prep_meta_') || seenKeys.has(key)) continue;
+              seenKeys.add(key);
+              const keyRef=key.slice('prep_meta_'.length);
+              const existingMeta=JSON.parse(storage.getItem(key)||'{}')||{};
+              const existingGroup=String(existingMeta.composite_group_id||existingMeta.compositeGroupId||'').trim();
+              const existingPart=String(existingMeta.composite_part_id||existingMeta.compositePartId||'').trim();
+              const sameComposite=!!(earlyGroupId && earlyPartId && existingGroup===earlyGroupId && existingPart===earlyPartId);
+              const sameTechnical=!!(technicalPartRefV130 && technicalCodeV131(keyRef)===technicalPartRefV130);
+              if(sameComposite || sameTechnical){
+                aliasRefsV131.push(keyRef);
+                if(keyRef!==refBase && (!existingCompositeStorageRefV130 || keyRef===technicalPartRefV130)){
+                  existingCompositeStorageRefV130=keyRef;
                 }
               }
-            }catch(error){}
-          }
+            }
+          }catch(error){}
+        }
+
+        // Si el dato entrante fuese la OT corta pero ya existe una etiqueta larga de
+        // esa MISMA partida, no dejamos que una apertura técnica posterior borre la nota.
+        // La referencia larga existente gana como presentación.
+        if(technicalPartRefV130 && refBase===technicalPartRefV130){
+          const visibleExisting=aliasRefsV131
+            .filter(r=>r!==technicalPartRefV130 && technicalCodeV131(r)===technicalPartRefV130)
+            .sort((a,b)=>b.length-a.length)[0] || '';
+          if(visibleExisting) refBase=visibleExisting;
         }
 
         // Renombrado seguro de la ficha de Preparación: conserva metadatos y líneas
@@ -3065,6 +3086,13 @@ try{
         metaParaGuardar.orderId = agendaOrderId;
       }
       const compositeGroupId = String(snap.composite_group_id || snap.compositeGroupId || '').trim();
+      // V131: guardar siempre identidad técnica + referencia visible, aunque el
+      // payload de Cálculo no incluya campos composite.
+      if(technicalPartRefV130){
+        metaParaGuardar.technical_ref = technicalPartRefV130;
+        metaParaGuardar.display_ref = ref;
+        metaParaGuardar.visible_ref = ref;
+      }
       if(compositeGroupId){
         metaParaGuardar.composite_version = 1;
         metaParaGuardar.composite_group_id = compositeGroupId;
@@ -3331,6 +3359,22 @@ try{
       const materialesConsolidados = LDH_consolidarMaterialesDuplicados(materialesImport);
       setAny(KP(ref), JSON.stringify(materialesConsolidados));
       try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); setAny("prep_import_guard_ts", String(Date.now())); }catch(_){ }
+      // V131 · Una llave antigua de apertura (normalmente la OT técnica corta)
+      // no puede volver a abrir la misma partida sin su nota después de importar.
+      try{
+        window.__LDH_PREP_FRESH_VISIBLE_REF_V131 = ref;
+        const techNowV131 = String(technicalPartRefV130 || '').trim();
+        for(const storage of [localStorage,sessionStorage]){
+          try{
+            const oldOpen=String(storage.getItem('ldh_open_prep_after_init_ref')||'').trim();
+            if(oldOpen && techNowV131){
+              const m=oldOpen.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
+              const oldTech=m?('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')):'';
+              if(oldTech===techNowV131) storage.setItem('ldh_open_prep_after_init_ref',ref);
+            }
+          }catch(_){ }
+        }
+      }catch(_){ }
 removeAny("latest_materials_v1");
           removeAny("pedido_en_preparacion");
           removeAny("prep_pedido_payload");
@@ -29432,11 +29476,11 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 })();
 </script>
 
-<script id="LDH_PREP_V130_REFERENCIA_VISIBLE_OT_TECNICA_20260901">
+<script id="LDH_PREP_V131_REFERENCIA_VISIBLE_PREVALECE_20260901">
 (function(){
-  window.LDH_PREP_V130_REFERENCIA_VISIBLE_OT_TECNICA='PREPARACION-V130-REFERENCIA-VISIBLE-OT-TECNICA-20260901';
-  document.documentElement.dataset.ldhPrepBuild='V130';
-  console.info('[Preparación V130] Las partidas compuestas conservan OT técnica para identidad y referencia completa de Cálculo como etiqueta visible.');
+  window.LDH_PREP_V131_REFERENCIA_VISIBLE_PREVALECE='PREPARACION-V131-REFERENCIA-VISIBLE-PREVALECE-20260901';
+  document.documentElement.dataset.ldhPrepBuild='V131';
+  console.info('[Preparación V131] La referencia visible de Cálculo prevalece sobre llaves técnicas antiguas de la misma partida OT.');
 })();
 </script>
 
