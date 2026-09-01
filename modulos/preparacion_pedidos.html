@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V127-REPARACION-COMPROMISO-MISMA-OT-20260831" />
+<meta name="ldh-build" content="PREPARACION-V130-REFERENCIA-VISIBLE-OT-TECNICA-20260901" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -2949,15 +2949,29 @@ function saveLinkMap(){
         return;
       }
       let refBase = refCandidate;
-      // Pedido compuesto: la identidad real de una partida es groupId + partId.
-      // Si se recalcula, se sustituye esa misma partida y nunca se crea un B (1).
+      // V130 · Referencia visible + identidad técnica independiente.
+      // En pedidos compuestos la identidad estable sigue siendo groupId + partId /
+      // composite_part_reference (p.ej. OT-260828-001-A), pero si en Cálculo el
+      // usuario añade una aclaración a la referencia, esa referencia completa es la
+      // que se conserva y se muestra en Preparación y fases posteriores.
+      let existingCompositeStorageRefV130 = '';
+      let technicalPartRefV130 = '';
       try{
         const earlyGroupId = String(snap.composite_group_id || snap.compositeGroupId || '').trim();
         const earlyPartId = String(snap.composite_part_id || snap.partId || '').trim();
         const earlyPartRef = String(snap.composite_part_reference || snap.partReference || '').trim();
-        if(earlyGroupId && earlyPartRef) refBase = earlyPartRef;
+        technicalPartRefV130 = earlyPartRef;
+
+        // La referencia escrita en Cálculo manda como etiqueta/clave visible.
+        // Solo usamos la referencia técnica como fallback si no llegó una visible.
+        const incomingVisibleRefV130 = String((snap && (snap.referencia || snap.ref)) || refCandidate || '').trim();
+        refBase = incomingVisibleRefV130 || earlyPartRef || refCandidate;
+
+        // Buscar la misma partida por su identidad técnica para evitar A (1), A (2)...
+        // Si estaba guardada con otra etiqueta, se migra después a la nueva visible.
         if(earlyGroupId && earlyPartId){
           const seenKeys = new Set();
+          outerV130:
           for(const storage of [localStorage,sessionStorage]){
             try{
               for(let i=0;i<storage.length;i++){
@@ -2968,14 +2982,29 @@ function saveLinkMap(){
                 const existingGroup=String(existingMeta.composite_group_id||existingMeta.compositeGroupId||'').trim();
                 const existingPart=String(existingMeta.composite_part_id||existingMeta.compositePartId||'').trim();
                 if(existingGroup===earlyGroupId && existingPart===earlyPartId){
-                  refBase=key.slice('prep_meta_'.length);
-                  break;
+                  existingCompositeStorageRefV130=key.slice('prep_meta_'.length);
+                  break outerV130;
                 }
               }
             }catch(error){}
           }
         }
-      }catch(error){}
+
+        // Renombrado seguro de la ficha de Preparación: conserva metadatos y líneas
+        // existentes (incluidas recepciones) antes de reimportar el nuevo cálculo.
+        if(existingCompositeStorageRefV130 && existingCompositeStorageRefV130 !== refBase){
+          const oldMetaKeyV130 = KM(existingCompositeStorageRefV130);
+          const oldRecKeyV130 = KP(existingCompositeStorageRefV130);
+          const newMetaKeyV130 = KM(refBase);
+          const newRecKeyV130 = KP(refBase);
+          const oldMetaRawV130 = getAny(oldMetaKeyV130);
+          const oldRecRawV130 = getAny(oldRecKeyV130);
+          if(oldMetaRawV130 && !getAny(newMetaKeyV130)) setAny(newMetaKeyV130, oldMetaRawV130);
+          if(oldRecRawV130 && !getAny(newRecKeyV130)) setAny(newRecKeyV130, oldRecRawV130);
+          try{ removeAny(oldMetaKeyV130); }catch(_){ }
+          try{ removeAny(oldRecKeyV130); }catch(_){ }
+        }
+      }catch(error){ console.warn('[Preparación V130] referencia visible compuesta',error); }
 
 // UID de pedido:
 // - Si el pedido ya existe con esa referencia, REUTILIZAMOS su UID para NO crear "#2".
@@ -3047,6 +3076,10 @@ try{
         metaParaGuardar.composite_part_count = Math.max(2,Math.round(Number(snap.composite_part_count || snap.partCount)||2));
         metaParaGuardar.composite_part_concept = String(snap.composite_part_concept || snap.partConcept || snap.concepto || '').trim();
         metaParaGuardar.composite_part_quantity = Math.max(1,Math.round(Number(snap.composite_part_quantity || snap.partQuantity || qty)||1));
+        // V130: identidad técnica y etiqueta visible quedan separadas.
+        metaParaGuardar.technical_ref = String(technicalPartRefV130 || metaParaGuardar.composite_part_reference || '').trim();
+        metaParaGuardar.display_ref = ref;
+        metaParaGuardar.visible_ref = ref;
       }
 
       // Pedido ID inmutable (para abrir ficha aunque cambie el nombre/ref)
@@ -29398,4 +29431,13 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   console.info('[Preparación V124] Reparación histórica compara por código OT único y no puede duplicar consumo por referencia corta/larga.');
 })();
 </script>
+
+<script id="LDH_PREP_V130_REFERENCIA_VISIBLE_OT_TECNICA_20260901">
+(function(){
+  window.LDH_PREP_V130_REFERENCIA_VISIBLE_OT_TECNICA='PREPARACION-V130-REFERENCIA-VISIBLE-OT-TECNICA-20260901';
+  document.documentElement.dataset.ldhPrepBuild='V130';
+  console.info('[Preparación V130] Las partidas compuestas conservan OT técnica para identidad y referencia completa de Cálculo como etiqueta visible.');
+})();
+</script>
+
 </body></html>
