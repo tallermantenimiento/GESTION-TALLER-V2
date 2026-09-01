@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="ldh-build" content="CONFIG-PLETINA-MM-V1-20260813">
+<meta name="ldh-build" content="CONFIG-PLETINA-MM-V2-CONCEPT-GUARD-20260901">
 <title>LOS DEL HIERRO'S - Gestión Integral</title>
 <style>
 /* Autofill (Chrome/Edge) - evitar fondo blanco y texto negro en autocompletar */
@@ -1795,6 +1795,47 @@ _fmtPartialStore(s){
                 units: ["cerradura=1", "bisagra=2"]
             }];
         }
+        // === LDH RECUPERACION ADITIVA + BLINDAJE DE CONCEPTOS 2026-09-01 ===
+        // Los conceptos A/B/C/D se recuperan una sola vez como conceptos vacios.
+        // No se crean perfiles, accesorios ni pintura.
+        try{
+            if(!this.state.conceptTombstones || typeof this.state.conceptTombstones !== 'object') {
+                this.state.conceptTombstones = {};
+            }
+            const RECOVER_KEY = 'LDH_RECOVER_CONCEPTO_VARIABLE_ABCD_20260901_V1';
+            if(localStorage.getItem(RECOVER_KEY) !== '1') {
+                const now = Date.now();
+                const wanted = [
+                    'CONCEPTO VARIABLE (A)',
+                    'CONCEPTO VARIABLE (B)',
+                    'CONCEPTO VARIABLE (C)',
+                    'CONCEPTO VARIABLE (D)'
+                ];
+                const norm = v => String(v || '').trim().toLowerCase();
+                const existing = new Set((this.state.concepts || []).map(c => norm(c && c.name)).filter(Boolean));
+                let added = 0;
+                wanted.forEach((name, i) => {
+                    const key = norm(name);
+                    if(existing.has(key)) return;
+                    if(this.state.conceptTombstones[key]) delete this.state.conceptTombstones[key];
+                    this.state.concepts.push({
+                        name,
+                        vars:['cantidad'],
+                        lines:[],
+                        units:[],
+                        stockLinks:{lines:{}, units:{}},
+                        _ldhUpdatedAtMs: now + i,
+                        _ldhRecoveredABCDV1: true
+                    });
+                    existing.add(key);
+                    added++;
+                });
+                if(added) this.saveData();
+                localStorage.setItem(RECOVER_KEY, '1');
+                console.log('[LDH conceptos] Recuperados A/B/C/D:', added);
+            }
+        }catch(e){ console.warn('[LDH conceptos] Recuperacion A/B/C/D no aplicada', e); }
+
         // Cargar logo si existe
         const logo = localStorage.getItem('ldh_logo');
         if(logo) {
@@ -4476,7 +4517,15 @@ _uaPill(item){
         const duplicateIdx = this.state.concepts.findIndex((c, i) => c && c.name === name && i !== existingIdx);
         if(duplicateIdx >= 0) return alert('Ya existe otro concepto con ese nombre.');
 
-        const newConcept = Object.assign({}, existingConcept || {}, { name, vars, lines, units, stockLinks });
+        const conceptNow = Date.now();
+        if(!this.state.conceptTombstones || typeof this.state.conceptTombstones !== 'object') this.state.conceptTombstones = {};
+        const normConceptKey = v => String(v || '').trim().toLowerCase();
+        if(selectedOldName && selectedOldName !== name){
+            this.state.conceptTombstones[normConceptKey(selectedOldName)] = conceptNow;
+        }
+        delete this.state.conceptTombstones[normConceptKey(name)];
+
+        const newConcept = Object.assign({}, existingConcept || {}, { name, vars, lines, units, stockLinks, _ldhUpdatedAtMs: conceptNow });
         if(existingIdx >= 0) this.state.concepts[existingIdx] = newConcept;
         else {
             this.state.concepts.push(newConcept);
@@ -4533,6 +4582,8 @@ _uaPill(item){
         const name = document.getElementById('cfgListSel').value;
         if(!name) return;
         if(confirm('¿Borrar concepto '+name+'?')) {
+            if(!this.state.conceptTombstones || typeof this.state.conceptTombstones !== 'object') this.state.conceptTombstones = {};
+            this.state.conceptTombstones[String(name || '').trim().toLowerCase()] = Date.now();
             this.state.concepts = this.state.concepts.filter(c => c.name !== name);
             this.saveData();
             this.refreshConceptSelects();
@@ -7687,12 +7738,93 @@ window.ejecutarDevolucion = function(matId, maxQty){
     return JSON.stringify(m);
   }
 
+  function conceptTimestamp(c){
+    try{
+      const raw = c && (c._ldhUpdatedAtMs ?? c.updatedAtMs ?? c.updatedAt ?? c.modifiedAt);
+      if(typeof raw === 'number' && Number.isFinite(raw)) return raw;
+      if(raw){
+        const n = Number(raw);
+        if(Number.isFinite(n) && n > 0) return n;
+        const d = Date.parse(String(raw));
+        if(Number.isFinite(d)) return d;
+      }
+    }catch(e){}
+    return 0;
+  }
+
+  function conceptRichness(c){
+    try{
+      const lines = Array.isArray(c && c.lines) ? c.lines.length : 0;
+      const units = Array.isArray(c && c.units) ? c.units.length : 0;
+      const vars = Array.isArray(c && c.vars) ? c.vars.length : 0;
+      const links = c && c.stockLinks && typeof c.stockLinks === 'object'
+        ? Object.keys(c.stockLinks.lines || {}).length + Object.keys(c.stockLinks.units || {}).length
+        : 0;
+      return lines * 1000 + units * 1000 + links * 100 + vars;
+    }catch(e){ return 0; }
+  }
+
+  function mergeConceptArrays(remoteArr, localArr, tombstones){
+    const map = new Map();
+    const add = (c, source) => {
+      if(!c || typeof c !== 'object') return;
+      const key = normKey(c.name);
+      if(!key) return;
+      const prev = map.get(key);
+      if(!prev){ map.set(key, c); return; }
+      const ta = conceptTimestamp(prev);
+      const tb = conceptTimestamp(c);
+      if(tb > ta){ map.set(key, c); return; }
+      if(tb < ta) return;
+      const ra = conceptRichness(prev);
+      const rb = conceptRichness(c);
+      if(rb > ra){ map.set(key, c); return; }
+      if(rb < ra) return;
+      // En legado sin fecha ni diferencias, conservar remoto evita que un PC viejo lo degrade al arrancar.
+      if(source === 'remote') map.set(key, c);
+    };
+    (Array.isArray(remoteArr) ? remoteArr : []).forEach(c => add(c, 'remote'));
+    (Array.isArray(localArr) ? localArr : []).forEach(c => add(c, 'local'));
+    const out = [];
+    map.forEach((c,key) => {
+      const deletedAt = Number((tombstones || {})[key] || 0) || 0;
+      const updatedAt = conceptTimestamp(c);
+      if(deletedAt > 0 && deletedAt >= updatedAt) return;
+      out.push(c);
+    });
+    return out;
+  }
+
+  function mergeLdhDbPayload(remoteRaw, localRaw){
+    const r = parseSafeJSON(remoteRaw, null);
+    const l = parseSafeJSON(localRaw, null);
+    if(!r && !l) return localRaw || remoteRaw || null;
+    if(!r) return localRaw;
+    if(!l) return remoteRaw;
+    const m = Object.assign({}, r, l);
+    const rt = (r.conceptTombstones && typeof r.conceptTombstones === 'object') ? r.conceptTombstones : {};
+    const lt = (l.conceptTombstones && typeof l.conceptTombstones === 'object') ? l.conceptTombstones : {};
+    const tombstones = Object.assign({}, rt);
+    Object.entries(lt).forEach(([k,v]) => {
+      const key = normKey(k);
+      tombstones[key] = Math.max(Number(tombstones[key] || 0) || 0, Number(v || 0) || 0);
+    });
+    m.conceptTombstones = tombstones;
+    m.concepts = mergeConceptArrays(r.concepts, l.concepts, tombstones);
+    return JSON.stringify(m);
+  }
+
   function mergeLocalIntoRemoteStorage(remoteAll, localAll){
     const merged = Object.assign({}, remoteAll || {}, localAll || {});
     const stockKeys = ["ldh_v2_company_stock_v1", "taller_stock_v3_data"];
     stockKeys.forEach(k=>{
       if((remoteAll && remoteAll[k]) || (localAll && localAll[k])) merged[k] = mergeStockPayload(remoteAll && remoteAll[k], localAll && localAll[k]);
     });
+    // ldh_db contiene Configuracion. Antes se trataba como un unico string y un PC antiguo podia
+    // sustituir el catalogo entero. Ahora SOLO los conceptos se fusionan de forma aditiva y versionada.
+    if((remoteAll && remoteAll.ldh_db) || (localAll && localAll.ldh_db)){
+      merged.ldh_db = mergeLdhDbPayload(remoteAll && remoteAll.ldh_db, localAll && localAll.ldh_db);
+    }
     return merged;
   }
 
