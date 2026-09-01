@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- V64.2 CAMBIAR VINCULO VISIBLE TAMBIEN EN RENDER DE RESPALDO · 01/09/2026 -->
 <html lang="es">
 <head>
 <meta charset="utf-8">
@@ -1780,9 +1781,18 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const required=info.required===null||info.required===undefined?null:Math.max(0,num(info.required));
       const jobKey=ref;
       let style='';try{style=workThemeStyle(ral,info.paintName||ralLabel(ral));}catch(_){ }
+      /* V64.2: incluso si la ficha entra por el render de respaldo, el cambio de
+         vinculo debe seguir visible. Antes este fallback omitía el botón y por eso
+         podía desaparecer aunque la pintura estuviera correctamente vinculada. */
+      let relinkButton='';
+      try{ relinkButton=manualPaintLinkButtonHtml(w,text(info.kind)); }catch(_){ relinkButton=''; }
+      if(!relinkButton && ref && (text(info.kind)==='linked' || !!info.row)){
+        let blocked=false;try{blocked=!!paintRelinkBlockReason(w);}catch(_){ blocked=false; }
+        relinkButton='<button class="btn '+(blocked?'warn':'ghost')+' small" type="button" data-paint-link-open="'+esc(encodeURIComponent(ref))+'">🔗 Cambiar vínculo</button>';
+      }
       return '<details class="work work-accordion" style="'+style+'" data-work-job-key="'+esc(encodeURIComponent(jobKey))+'"'+(state.openWorkJobs.has(jobKey)?' open':'')+'>'+ 
         '<summary class="work-summary"><div class="work-summary-main"><span class="accordion-arrow">&#8250;</span><div class="work-summary-title"><div class="level-label level-work">Trabajo</div><div class="ref">'+esc(ref)+'</div><div class="concept">'+esc(concept)+'</div><div class="meta">Total: '+fmt(w.total)+'</div></div></div>'+ 
-        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span><span class="work-summary-metric units"><b>'+fmt(pending)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':'Pintura necesaria &middot; '+esc(fmtLiters(required)))+'</small></span><span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Cerrar trabajo</span></span></div></summary>'+ 
+        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span><span class="work-summary-metric units"><b>'+fmt(pending)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':'Pintura necesaria &middot; '+esc(fmtLiters(required)))+'</small></span>'+relinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Cerrar trabajo</span></span></div></summary>'+ 
         '<div class="work-body">'+
           '<div class="job-paint-strip'+(required===null?' missing':'')+'"><div><div class="job-paint-title">'+esc(text(info.paintName)||ralLabel(ral)||'Pintura')+'</div><div class="job-paint-sub">Necesidad de este trabajo para sus unidades pendientes de pintar.</div></div><div class="job-paint-value"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Necesidad sin dato':esc(fmtLiters(required))+' necesarios')+'</small></div></div>'+ 
           '<div class="phase-grid"><div class="phase"><b>'+fmt(flow.fab)+'</b><span>FAB</span></div><div class="phase paint"><b>'+fmt(flow.pintura)+'</b><span>PINT</span></div><div class="phase store"><b>'+fmt(flow.almacen)+'</b><span>ALM</span></div><div class="phase"><b>'+fmt(flow.entregado)+'</b><span>ENT</span></div></div>'+ 
@@ -2738,7 +2748,10 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(linkKind&&linkKind!=='linked'&&linkKind!=='loading'&&linkKind!=='stock_error'){
       return '<button class="btn good small" type="button" data-paint-link-open="'+ref+'">🔗 Vincular pintura</button>';
     }
-    if(linkKind==='linked'&&isTerminalManualPaintLink(work)){
+    /* V64.1: si el trabajo ya tiene una pintura resuelta, el pintor debe poder
+       corregir el vínculo desde la propia OT. El bloqueo real lo decide
+       paintRelinkBlockReason(): no se permite si hay ALM/ENT pendientes de rectificar. */
+    if(linkKind==='linked'){
       const blocked=!!paintRelinkBlockReason(work);
       return '<button class="btn '+(blocked?'warn':'ghost')+' small" type="button" data-paint-link-open="'+ref+'">🔗 Cambiar vínculo</button>';
     }
@@ -2747,7 +2760,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function saveManualPaintLink(ref,materialId){
     const op=requireOperator(); if(!op)return false;
     const w=state.works.find(x=>sameRef(x.ref,ref)); if(!w){alert('Trabajo no encontrado.');return false;}
-    const changing=state.activePaintLinkMode==='change'||isTerminalManualPaintLink(w);
+    let currentLink=null;try{currentLink=paintLinkForWork(w);}catch(_){}
+    const changing=state.activePaintLinkMode==='change'||!!(currentLink&&currentLink.kind==='linked');
     if(changing){
       const reason=paintRelinkBlockReason(w);
       if(reason){alert(reason);return false;}
@@ -2799,7 +2813,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const w=state.works.find(x=>sameRef(x.ref,ref));
     if(!w)return alert('Trabajo no encontrado.');
     if(!state.stock)return alert('El Stock de pintura todav&iacute;a no est&aacute; disponible.');
-    const changing=isTerminalManualPaintLink(w);
+    let currentLink=null;try{currentLink=paintLinkForWork(w);}catch(_){}
+    const changing=!!(currentLink&&currentLink.kind==='linked');
     if(changing){
       const reason=paintRelinkBlockReason(w);
       if(reason)return alert(reason);
@@ -2817,7 +2832,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       return '<option value="'+esc(text(r.mat.id))+'">'+esc(name)+(ral?' · RAL '+esc(ral):'')+' · '+esc(fmtBotesEq(Math.max(0,num(r.physical))))+' disponibles</option>';
     }).join('');
     const meta=paintMetaForWork(w)||{};
-    const currentId=changing?text(meta.paintStockMaterialId||meta.paintMaterialId||meta.paintMatId):'';
+    const currentId=changing?text((currentLink&&currentLink.row&&currentLink.row.mat&&currentLink.row.mat.id)||meta.paintStockMaterialId||meta.paintMaterialId||meta.paintMatId):'';
     if(currentId&&rows.some(r=>text(r.mat.id)===currentId))$('paintLinkSelect').value=currentId;
     else{
       const exact=rows.filter(r=>paintMatchesRal(r,workRal(w)));
