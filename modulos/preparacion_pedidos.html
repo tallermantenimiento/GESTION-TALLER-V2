@@ -9725,6 +9725,12 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
   const notasFinales = notaHierro + "Enviado desde Preparación.";
   const empresaFinal = String(metaActual.empresa || metaActual.company || "").trim();
   const materialSnapshot = LDH_materialSnapshotForFabricacion(estadoMateriales);
+  // V138 · La referencia técnica sigue siendo la identidad productiva.
+  // La identificación escrita en Agenda viaja aparte y nunca altera la clave OT.
+  const displayRefFabricacionV138 = String(
+    metaActual.display_ref || metaActual.displayReference || metaActual.visible_ref ||
+    metaActual.referencia_visible || refActual || ""
+  ).trim() || String(refActual || "").trim();
 
   const record = {
     unassignedBorrow: ((metaActual.unassignedBorrow || getGlobalBorrow(refActual) || { items: [], updatedAt: Date.now() })),
@@ -9733,6 +9739,19 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
     orderId: String(metaActual.agenda_order_id || metaActual.orderId || "").trim(),
     client: "Taller / Interno",
     ref: refActual,
+    referencia: refActual,
+    technical_ref: String(metaActual.technical_ref || metaActual.composite_part_reference || refActual || "").trim() || refActual,
+    display_ref: displayRefFabricacionV138,
+    displayReference: displayRefFabricacionV138,
+    visible_ref: displayRefFabricacionV138,
+    referencia_visible: displayRefFabricacionV138,
+    composite_group_id: String(metaActual.composite_group_id || metaActual.compositeGroupId || "").trim(),
+    composite_master_order_id: String(metaActual.composite_master_order_id || metaActual.agenda_order_id || metaActual.orderId || "").trim(),
+    composite_master_reference: String(metaActual.composite_master_reference || "").trim(),
+    composite_part_id: String(metaActual.composite_part_id || metaActual.compositePartId || "").trim(),
+    composite_part_reference: String(metaActual.composite_part_reference || refActual || "").trim() || refActual,
+    composite_part_index: Number(metaActual.composite_part_index || 0) || 0,
+    composite_part_count: Number(metaActual.composite_part_count || 0) || 0,
     company: empresaFinal || "",
     empresa: empresaFinal || "",
     concept: metaActual.concepto || "Sin concepto",
@@ -9772,6 +9791,20 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
         if(!arr[idx].empresa && arr[idx].company) arr[idx].empresa = arr[idx].company;
       }
       arr[idx].unassignedBorrow = record.unassignedBorrow;
+      arr[idx].ref = refActual;
+      arr[idx].referencia = refActual;
+      arr[idx].technical_ref = record.technical_ref;
+      arr[idx].display_ref = record.display_ref;
+      arr[idx].displayReference = record.displayReference;
+      arr[idx].visible_ref = record.visible_ref;
+      arr[idx].referencia_visible = record.referencia_visible;
+      if(record.composite_group_id) arr[idx].composite_group_id = record.composite_group_id;
+      if(record.composite_master_order_id) arr[idx].composite_master_order_id = record.composite_master_order_id;
+      if(record.composite_master_reference) arr[idx].composite_master_reference = record.composite_master_reference;
+      if(record.composite_part_id) arr[idx].composite_part_id = record.composite_part_id;
+      if(record.composite_part_reference) arr[idx].composite_part_reference = record.composite_part_reference;
+      if(record.composite_part_index) arr[idx].composite_part_index = record.composite_part_index;
+      if(record.composite_part_count) arr[idx].composite_part_count = record.composite_part_count;
       if(record.agendaOrderId){
         arr[idx].agendaOrderId = record.agendaOrderId;
         arr[idx].orderId = record.orderId || record.agendaOrderId;
@@ -9865,6 +9898,19 @@ function mandarAFabricacion(unidadesFinal, withAlert) {
   try{ sessionStorage.setItem("prep_import_guard_ts", String(Date.now())); }catch(e){}
   setTimeout(function(){ try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow("mandar_fabricacion_" + refActual); }catch(e){} }, 80);
   setTimeout(function(){ try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow("mandar_fabricacion_retry_" + refActual); }catch(e){} }, 900);
+  try{
+    const publishV138=()=>{
+      if(typeof window.LDH_prepPublishFabricacionPartV138==='function'){
+        Promise.resolve(window.LDH_prepPublishFabricacionPartV138(record,metaActual)).catch(error=>console.warn('[Preparación V138] publicación directa Fabricación pendiente',error));
+        return true;
+      }
+      return false;
+    };
+    if(!publishV138()){
+      setTimeout(publishV138,500);
+      setTimeout(publishV138,1800);
+    }
+  }catch(_){ }
 
   LDH_cls("pillFab").remove("hidden");
   if(withAlert){
@@ -28419,11 +28465,56 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
     return 'preparacion';
   };
 
+  // V138 · Las partidas A/B/C son independientes. Si un intento anterior marcó
+  // la meta como Fabricación pero la partida técnica NO existe realmente en ldh_db,
+  // se reabre solo ESA partida. Nunca se toca una hermana ni una OT ya existente.
+  const technicalKeyV138=value=>{
+    const raw=String(value||'').trim();
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+    if(m) return 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
+    return raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  };
+  const sameTechnicalV138=(a,b)=>{const ka=technicalKeyV138(a),kb=technicalKeyV138(b);return !!ka&&ka===kb;};
+  const hasRealFabricacionRecordV138=reference=>{
+    try{
+      const db=JSON.parse((typeof getAny==='function'?getAny('ldh_db'):localStorage.getItem('ldh_db'))||'{}')||{};
+      return ['deliveries','fabricacion','fab','trabajos'].some(pool=>
+        (Array.isArray(db[pool])?db[pool]:[]).some(row=>{
+          if(!row||row.deleted||row.archived) return false;
+          const rr=String(row.ref||row.referencia||row.jobRef||'').trim();
+          if(!sameTechnicalV138(rr,reference)) return false;
+          const f=row.flow&&typeof row.flow==='object'?row.flow:{};
+          const total=Number(f.fab??f.fabricacion??0)+Number(f.pintura??0)+Number(f.almacen??0)+Number(f.entregado??row.delivered??0);
+          return total>0 || /fabric|pint|almacen|entreg/i.test(String(row.fase||row.estado||row.status||row.tipo||''));
+        })
+      );
+    }catch(_){return false;}
+  };
+  const healCompositeGhostV138=reference=>{
+    try{
+      const meta=currentMeta();
+      const isComposite=!!String(meta?.composite_group_id||meta?.compositeGroupId||'').trim() &&
+        !!String(meta?.composite_part_id||meta?.compositePartId||'').trim();
+      const live=!!(typeof getAny==='function'&&typeof KP==='function'&&getAny(KP(reference)));
+      if(!isComposite||!live||hasRealFabricacionRecordV138(reference)) return false;
+      const marked=!!(meta.en_fabricacion||meta.fabricacion_ts||String(meta.fase||'').toLowerCase()==='fabricacion'||String(meta.estado||'').toLowerCase()==='fabricacion'||String(meta.workflow_stage||'').toLowerCase()==='fabricacion');
+      if(!marked) return false;
+      delete meta.en_fabricacion; delete meta.fabricacion_ts;
+      if(String(meta.fase||'').toLowerCase()==='fabricacion') meta.fase='preparacion';
+      if(String(meta.estado||'').toLowerCase()==='fabricacion') meta.estado='preparacion';
+      if(String(meta.workflow_stage||'').toLowerCase()==='fabricacion') meta.workflow_stage='preparacion';
+      meta.lastUpdate=new Date().toISOString();
+      if(typeof setAny==='function'&&typeof KM==='function') setAny(KM(reference),JSON.stringify(meta));
+      return true;
+    }catch(_){return false;}
+  };
+
   const baseConfirm=window.confirmarTodoRecepcion;
   window.confirmarTodoRecepcion=async function(){
     const reference=currentRef();
     if(!reference) return typeof baseConfirm==='function' ? baseConfirm.apply(this,arguments) : undefined;
 
+    healCompositeGhostV138(reference);
     const stage=stageFor(reference);
     if(stage && stage!=='preparacion'){
       alert('Este trabajo ya está en '+stage+'.\n\nNo se vuelve a mandar para evitar duplicados.');
@@ -28441,6 +28532,18 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
     if(units<=0){
       alert('⛔ Indica las UNIDADES.');
       input?.focus();
+      return;
+    }
+
+    // V138 · Si Stock todavía está autenticando, esperamos antes de cambiar de fase.
+    // Evita el estado parcial «meta en Fabricación / consumo no confirmado».
+    try{
+      if(typeof window.__LDH_PREP_STOCK_GET_TOKEN_V74==='function'){
+        const timeout=new Promise((_,reject)=>setTimeout(()=>reject(new Error('La conexión con Stock está tardando demasiado.')),12000));
+        await Promise.race([Promise.resolve(window.__LDH_PREP_STOCK_GET_TOKEN_V74()),timeout]);
+      }
+    }catch(authError){
+      alert('Stock todavía está conectando. No se ha modificado la partida.\n\n'+String(authError?.message||authError||''));
       return;
     }
 
@@ -29406,10 +29509,77 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 })();
 </script>
 
+<!-- LDH_PREP_V138_PARTIDAS_FABRICACION_INDEPENDIENTES_20260902 -->
+<script type="module" id="LDH_PREP_V138_PARTIDAS_FABRICACION_INDEPENDIENTES_20260902">
+(async function(){
+  'use strict';
+  if(window.__LDH_PREP_V138_FAB_DIRECT__) return;
+  window.__LDH_PREP_V138_FAB_DIRECT__=true;
+  const [{initializeApp,getApps},{getFirestore,doc,runTransaction,serverTimestamp}] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')
+  ]);
+  const cfg={apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',authDomain:'gestion-taller-v2.firebaseapp.com',projectId:'gestion-taller-v2',storageBucket:'gestion-taller-v2.firebasestorage.app',messagingSenderId:'888590823508',appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'};
+  let app=getApps().find(a=>a&&a.options&&a.options.projectId===cfg.projectId);
+  if(!app) app=initializeApp(cfg,'ldh-prep-fab-direct-v138');
+  const db=getFirestore(app), target=doc(db,'taller_data','fabricacion');
+  const pools=['deliveries','fabricacion','fab','trabajos'];
+  const txt=v=>String(v??'').trim();
+  const num=v=>{const x=Number.parseFloat(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const parse=(v,fb)=>{try{return v&&typeof v==='object'?v:(v?JSON.parse(v):fb);}catch(_){return fb;}};
+  const refOf=o=>txt(o&&(o.ref||o.referencia||o.jobRef));
+  const key=v=>{const raw=txt(v);if(!raw)return'';const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();};
+  const same=(a,b)=>{const ka=key(a),kb=key(b);return !!ka&&ka===kb;};
+  const flow=o=>{o=o||{};const f=o.flow&&typeof o.flow==='object'?o.flow:{};return {fab:Math.max(0,num(f.fab??f.fabricacion??o.fab)),pintura:Math.max(0,num(f.pintura??o.pintura)),almacen:Math.max(0,num(f.almacen??o.almacen)),entregado:Math.max(0,num(f.entregado??o.delivered??o.entregado))};};
+  const score=o=>{const f=flow(o);return f.fab+f.pintura*2+f.almacen*3+f.entregado*4;};
+  const phase=f=>f.entregado>0&&f.fab+f.pintura+f.almacen<=0?'entregado':f.almacen>0&&f.fab+f.pintura<=0?'almacen':f.pintura>0?'pintura':'fabricacion';
+  function mergeRow(existing,record){
+    if(!existing) return {...record};
+    const oldScore=score(existing),newScore=score(record),advanced=oldScore>newScore?existing:record;
+    const out={...existing,...record};
+    const af=flow(advanced);out.flow={fab:af.fab,fabricacion:af.fab,pintura:af.pintura,almacen:af.almacen,entregado:af.entregado};
+    out.fase=phase(af);out.estado=out.fase;out.status='pendiente';out.archived=false;
+    out.keepInFab=af.fab>0||af.pintura>0;out.hideFromFab=!(af.fab>0||af.pintura>0);
+    // La OT técnica es siempre la de la partida; la identificación viaja aparte.
+    out.ref=txt(record.ref||record.referencia);out.referencia=out.ref;
+    if(record.display_ref){out.display_ref=record.display_ref;out.displayReference=record.display_ref;out.visible_ref=record.display_ref;out.referencia_visible=record.display_ref;}
+    out.updatedAt=new Date().toISOString();
+    return out;
+  }
+  function uniqueRefs(ldh){const s=new Set();pools.forEach(p=>(ldh[p]||[]).forEach(r=>{const k=key(refOf(r));if(k)s.add(k);}));return s.size;}
+  window.LDH_prepPublishFabricacionPartV138=async function(record,meta){
+    record=record&&typeof record==='object'?{...record}:null;if(!record||!txt(record.ref||record.referencia))return false;
+    const technical=txt(record.ref||record.referencia);
+    return runTransaction(db,async tx=>{
+      const snap=await tx.get(target);const pkg=snap.exists()?{...(snap.data()||{})}:{};
+      const ldh=parse(pkg.ldh_db,{})||{};pools.forEach(p=>{if(!Array.isArray(ldh[p]))ldh[p]=[];});
+      let representative={...record};
+      pools.forEach(pool=>{
+        const arr=ldh[pool],matches=[],keep=[];let existing=null;
+        arr.forEach(row=>{if(same(refOf(row),technical)){matches.push(row);existing=mergeRow(existing,row);}else keep.push(row);});
+        representative=mergeRow(existing,record);keep.push({...representative});ldh[pool]=keep;
+      });
+      ldh.updatedAt=new Date().toISOString();
+      let inbox=parse(pkg.inbox,[]);if(!Array.isArray(inbox))inbox=[];inbox=inbox.filter(r=>!same(refOf(r),technical));inbox.push(representative);
+      const prepMeta={...(pkg.prepMeta||{})},prepRecepcion={...(pkg.prepRecepcion||{})};
+      try{const raw=localStorage.getItem('prep_meta_'+technical)||sessionStorage.getItem('prep_meta_'+technical);if(raw)prepMeta[technical]=raw;}catch(_){ }
+      try{const raw=localStorage.getItem('prep_recepcion_'+technical)||sessionStorage.getItem('prep_recepcion_'+technical);if(raw)prepRecepcion[technical]=raw;}catch(_){ }
+      const at=new Date().toISOString();
+      const next={...pkg,ldh_db:JSON.stringify(ldh),inbox:JSON.stringify(inbox.slice(-200)),prepMeta,prepRecepcion,updatedAtISO:at,source:'preparacion_v138_direct_fabricacion'};
+      next.counts={refs:uniqueRefs(ldh),deliveries:ldh.deliveries.length,fabricacion:ldh.fabricacion.length,fab:ldh.fab.length,trabajos:ldh.trabajos.length,prepMeta:Object.keys(prepMeta).length,prepRecepcion:Object.keys(prepRecepcion).length};
+      tx.set(target,{...next,updatedAt:serverTimestamp()},{merge:false});
+      return true;
+    });
+  };
+  window.LDH_PREP_V138_PARTIDAS_FABRICACION='PREPARACION-V138-PARTIDAS-INDEPENDIENTES-DISPLAY-REF-DIRECT-FAB-20260902';
+  document.documentElement.dataset.ldhPrepBuild='V138';
+  console.info('[Preparación V138] Partidas A/B/C independientes + publicación directa a Fabricación.');
+})();
+</script>
 <!-- LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS_20260902 -->
 <script id="LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS_20260902">
 window.LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS='PREPARACION-V137-BASE-V129-REFERENCIA-VISIBLE-SIN-WRAPPERS-20260902';
-document.documentElement.dataset.ldhPrepBuild='V137';
-console.info('[Preparación V137] Base V129 estable + display_ref; sin wrappers V130-V136.');
+if(!document.documentElement.dataset.ldhPrepBuild || document.documentElement.dataset.ldhPrepBuild==='V137') document.documentElement.dataset.ldhPrepBuild='V138';
+console.info('[Preparación V137/V138] Base V129 estable + display_ref; V138 añade partidas independientes y publicación Fabricación.');
 </script>
 </body></html>

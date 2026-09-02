@@ -164,6 +164,12 @@
   function n(v){ const x = Number(String(v ?? 0).replace(",", ".")); return Number.isFinite(x) ? x : 0; }
   function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  // V10 · Identidad técnica y texto visible son datos distintos. Las acciones,
+  // sincronización y deduplicación siguen usando item.ref (OT técnica).
+  function visibleWorkRef(item){
+    item=item&&typeof item==='object'?item:{};
+    return String(item.display_ref||item.displayReference||item.visible_ref||item.referencia_visible||item.ref||item.referencia||'').trim();
+  }
 
   // V8 · Una OT tiene una sola identidad aunque una copia antigua guarde
   // solo el código (OT-xxxxxx-xxx) y otra guarde código + descripción.
@@ -315,6 +321,18 @@
           orderId: String(meta.agenda_order_id || meta.orderId || "").trim(),
           ref,
           referencia: ref,
+          technical_ref: String(meta.technical_ref || meta.composite_part_reference || ref).trim() || ref,
+          display_ref: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
+          displayReference: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
+          visible_ref: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
+          referencia_visible: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
+          composite_group_id: String(meta.composite_group_id || meta.compositeGroupId || '').trim(),
+          composite_master_order_id: String(meta.composite_master_order_id || meta.agenda_order_id || meta.orderId || '').trim(),
+          composite_master_reference: String(meta.composite_master_reference || '').trim(),
+          composite_part_id: String(meta.composite_part_id || meta.compositePartId || '').trim(),
+          composite_part_reference: String(meta.composite_part_reference || ref).trim() || ref,
+          composite_part_index: Number(meta.composite_part_index || 0) || 0,
+          composite_part_count: Number(meta.composite_part_count || 0) || 0,
           concept: meta.concepto || meta.concept || "Sin concepto",
           concepto: meta.concepto || meta.concept || "Sin concepto",
           company: meta.empresa || meta.company || "",
@@ -442,6 +460,11 @@
       const total = Math.max(0, n(item.total || item.unidades || item.cantidad || item.uds || item.units || 0));
       item.ref = ref;
       item.referencia = ref;
+      const visibleRef = visibleWorkRef(item) || ref;
+      item.display_ref = visibleRef;
+      item.displayReference = visibleRef;
+      item.visible_ref = visibleRef;
+      item.referencia_visible = visibleRef;
       item.concept = item.concept || item.concepto || item.nombreConcepto || "Sin concepto";
       item.concepto = item.concepto || item.concept;
       item.company = item.company || item.empresa || item.empresaReceptora || "";
@@ -503,6 +526,11 @@
       const out = {...old, ...incoming};
       const prefRef = preferredWorkRef(old.ref || old.referencia, incoming.ref || incoming.referencia);
       out.ref = prefRef; out.referencia = prefRef;
+      const oldVisible=visibleWorkRef(old), incomingVisible=visibleWorkRef(incoming);
+      const chosenVisible=(incomingVisible && incomingVisible!==String(incoming.ref||incoming.referencia||'').trim())
+        ? incomingVisible
+        : ((oldVisible && oldVisible!==String(old.ref||old.referencia||'').trim()) ? oldVisible : (incomingVisible||oldVisible||prefRef));
+      out.display_ref=chosenVisible; out.displayReference=chosenVisible; out.visible_ref=chosenVisible; out.referencia_visible=chosenVisible;
       out.flow = {...(authoritative.flow || {})};
       ["fase","estado","status","keepInFab","hideFromFab","archived","delivered"].forEach(k=>{
         if(authoritative[k] !== undefined) out[k] = authoritative[k];
@@ -612,7 +640,7 @@
         .filter(it => !companyFilter || String(it.company || it.empresa || "") === companyFilter)
         .filter(it => {
           if(!q) return true;
-          const hay = [it.ref,it.referencia,it.concept,it.concepto,it.company,it.empresa,it.notes].join(" ");
+          const hay = [it.ref,it.referencia,visibleWorkRef(it),it.concept,it.concepto,it.company,it.empresa,it.notes].join(" ");
           return norm(hay).includes(q);
         });
     },
@@ -695,7 +723,7 @@
       return `
         <tr>
           <td>
-            <div class="ref">${esc(item.ref || item.referencia || "")}</div>
+            <div class="ref">${esc(visibleWorkRef(item))}</div>
             <div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div>
             <div class="muted">${esc(item.company || item.empresa || "Sin empresa")} ${uaPill}</div>
           </td>
@@ -850,6 +878,10 @@
       meta.empresa = item.company || item.empresa || meta.empresa;
       meta.company = item.company || item.empresa || meta.company;
       meta.concepto = item.concept || item.concepto || meta.concepto;
+      const visibleRefV10=visibleWorkRef(item);
+      if(visibleRefV10){
+        meta.display_ref=visibleRefV10; meta.displayReference=visibleRefV10; meta.visible_ref=visibleRefV10; meta.referencia_visible=visibleRefV10;
+      }
       meta.unidades = item.total || meta.unidades || 1;
       meta.uds = meta.unidades;
       meta.total = item.total || meta.total || meta.unidades;
@@ -971,7 +1003,7 @@
       if(!item) return;
       const f = this.ensureFlow(item);
       alert(
-        "Referencia: " + (item.ref || "") + "\n" +
+        "Referencia: " + visibleWorkRef(item) + "\n" +
         "Concepto: " + (item.concept || item.concepto || "") + "\n" +
         "Empresa: " + (item.company || item.empresa || "") + "\n\n" +
         "Fabricación: " + n(f.fab) + "\n" +
@@ -1231,9 +1263,45 @@ function withoutDeletedRefs(pkg){
   // deleted, pero no se destruyen dentro de ldh_db; así pueden recuperarse con seguridad.
   return pkg;
 }
+function mergeLocalCompositeIntoRemoteV10(pkg){
+  try{
+    if(!pkg||!pkg.ldh_db) return pkg;
+    const local=parse(getStore(DB_KEY),{})||{};
+    const remote=parse(pkg.ldh_db,{})||{};
+    const pools=['deliveries','fabricacion','fab','trabajos'];
+    pools.forEach(pool=>{
+      const localRows=Array.isArray(local[pool])?local[pool]:[];
+      const remoteRows=Array.isArray(remote[pool])?remote[pool].slice():[];
+      localRows.forEach(localRow=>{
+        const isComposite=!!String(localRow?.composite_part_id||'').trim() || !!String(localRow?.composite_group_id||'').trim();
+        if(!isComposite) return;
+        const lr=String(localRow?.ref||localRow?.referencia||'').trim(); if(!lr)return;
+        const idx=remoteRows.findIndex(row=>sameWorkRef(String(row?.ref||row?.referencia||''),lr));
+        if(idx<0){ remoteRows.push({...localRow}); return; }
+        const merged=mergeRawAliasRows(remoteRows[idx],localRow);
+        const vr=visibleWorkRef(localRow);
+        if(vr && vr!==lr){ merged.display_ref=vr; merged.displayReference=vr; merged.visible_ref=vr; merged.referencia_visible=vr; }
+        remoteRows[idx]=merged;
+      });
+      remote[pool]=remoteRows;
+    });
+    pkg={...pkg,ldh_db:JSON.stringify(dedupeLdhByIdentity(remote))};
+
+    // La recepción local de una partida compuesta recién enviada nunca se sustituye
+    // por una copia remota anterior. Para el resto, se mantiene la política existente.
+    const localMeta={},localReception={};
+    try{
+      storageKeys('prep_meta_').forEach(k=>{const raw=getStore(k),ref=refFromKey(k);if(!raw||!ref)return;const m=parse(raw,{})||{};if(m.composite_part_id||m.composite_group_id)localMeta[ref]=raw;});
+      storageKeys('prep_recepcion_').forEach(k=>{const raw=getStore(k),ref=refFromKey(k);if(!raw||!ref)return;const m=parse(getStore('prep_meta_'+ref),{})||{};if(m.composite_part_id||m.composite_group_id)localReception[ref]=raw;});
+    }catch(_){ }
+    pkg.prepMeta={...(pkg.prepMeta||{}),...localMeta};
+    pkg.prepRecepcion={...(pkg.prepRecepcion||{}),...localReception};
+    return pkg;
+  }catch(error){console.warn('[Fabricación V10] no se pudo fusionar partida compuesta local',error);return pkg;}
+}
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
-  pkg = withoutDeletedRefs(pkg);
+  pkg = mergeLocalCompositeIntoRemoteV10(withoutDeletedRefs(pkg));
   const appliedStamp = String(pkg.updatedAtISO || "");
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
@@ -1632,6 +1700,12 @@ setTimeout(hookApp, 1500);
 <!-- LDH_FAB_ENTREGA_SINCRONIZADA_V2_20260803 -->
 <!-- LDH_FABRICACION_ALMACEN_AUTORITATIVO_V3_20260803 -->
 
+<!-- LDH_FABRICACION_DISPLAY_REF_PARTIDAS_V10_20260902 -->
+<script id="LDH_FABRICACION_DISPLAY_REF_PARTIDAS_V10_20260902">
+window.LDH_FABRICACION_DISPLAY_REF_PARTIDAS_V10='FABRICACION-V10-DISPLAY-REF-PARTIDAS-INDEPENDIENTES-20260902';
+document.documentElement.dataset.ldhFabricacionBuild='V10';
+console.info('[Fabricación V10] Referencia visible separada de OT técnica; partidas A/B/C independientes.');
+</script>
 <!-- LDH_FABRICACION_REFERENCIA_UNICA_V8_20260825 -->
 <!-- LDH_FABRICACION_CABINA_SYNC_V9_20260825 -->
 
