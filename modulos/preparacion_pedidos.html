@@ -507,6 +507,16 @@
 #refIdent{margin-top:5px;color:#fde68a;font-size:18px;font-weight:950;line-height:1.2;overflow-wrap:anywhere}
 #refIdent:empty{display:none}
 </style>
+<style id="LDH_PREP_V143_TARJETAS_ORGANIZADAS">
+#lista.list{grid-template-columns:repeat(auto-fit,minmax(420px,1fr))!important;gap:14px!important;align-items:start!important}
+#lista .item{min-width:0!important;max-width:none!important;width:auto!important;padding:14px!important;box-sizing:border-box!important}
+#lista .ldh-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px}
+#lista .ldh-card-status{display:flex;gap:7px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+#lista .ldh-card-ident{color:#fde68a;font-size:15px;font-weight:950;line-height:1.25;margin:2px 0 8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#lista .ldh-card-meta{font-size:12px;color:#9fb0c8;line-height:1.35;white-space:normal;overflow-wrap:anywhere}
+#lista .ldh-tech-ref{white-space:nowrap;overflow-wrap:normal;flex:0 0 auto}
+@media(max-width:980px){#lista.list{grid-template-columns:1fr!important}}
+</style>
 </head>
 <body>
 
@@ -797,18 +807,75 @@ const removeAny = (k)=>{
 };
 
 function normRef(s){ return (s||'').toString().trim().toLowerCase(); }
+
+/* V143 · Referencia técnica e identificación son datos distintos.
+ * La OT técnica nunca se modifica. La identificación se recupera primero de
+ * Preparación y, como respaldo seguro, de la Agenda local. La descripción larga
+ * del trabajo NO se usa como identificación.
+ */
+function LDH_extractTechnicalRefV143(value){
+  const raw=String(value||'').trim();
+  const match=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]))?\b/);
+  if(match) return 'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:'');
+  return raw;
+}
+function LDH_agendaIdentificationV143(technical){
+  const tech=LDH_extractTechnicalRefV143(technical);
+  if(!tech) return '';
+  const rows=[];
+  const seen=new Set();
+  for(const storage of [localStorage,sessionStorage]){
+    try{
+      const raw=storage.getItem('ldh_work_orders_v1');
+      if(!raw) continue;
+      const parsed=JSON.parse(raw);
+      const list=Array.isArray(parsed)?parsed:(parsed&&Array.isArray(parsed.orders)?parsed.orders:[]);
+      list.forEach(order=>{
+        const id=String(order&&order.id||'')+'|'+String(order&&order.reference||'');
+        if(seen.has(id)) return;
+        seen.add(id); rows.push(order);
+      });
+    }catch(_){ }
+  }
+  const clean=v=>String(v||'').trim();
+  for(const order of rows){
+    if(!order||typeof order!=='object') continue;
+    const orderTech=LDH_extractTechnicalRefV143(order.reference||order.ref||'');
+    if(orderTech===tech){
+      const own=clean(order.identification||order.workIdentification||order.workLabel||order.referenceLabel||order.shortDescription);
+      if(own) return own;
+    }
+    const comp=order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:null;
+    if(comp&&Array.isArray(comp.parts)){
+      const part=comp.parts.find(p=>LDH_extractTechnicalRefV143(p&&(p.reference||p.partReference||p.displayReference||p.display_ref)||'')===tech);
+      if(part){
+        const partIdent=clean(part.partDescription||part.partLabel||part.identification||part.workIdentification||part.workLabel||part.referenceLabel);
+        if(partIdent) return partIdent;
+      }
+    }
+  }
+  return '';
+}
 function LDH_refVisualParts(technical,meta){
   meta=meta&&typeof meta==='object'?meta:{};
-  let tech=String(meta.technical_ref||meta.composite_part_reference||technical||'').trim();
-  if(!tech) tech=String(technical||'').trim();
+  const rawTech=String(meta.technical_ref||meta.composite_part_reference||technical||'').trim() || String(technical||'').trim();
+  const tech=LDH_extractTechnicalRefV143(rawTech);
   let full=String(meta.display_ref||meta.displayReference||meta.visible_ref||meta.referencia_visible||technical||'').trim();
   let ident=String(meta.identification||meta.workIdentification||meta.workLabel||meta.referenceLabel||meta.composite_part_description||meta.partDescription||'').trim();
+
+  // Respaldo principal: identificación real guardada en Agenda. Nunca usamos order.description.
+  if(!ident) ident=LDH_agendaIdentificationV143(tech);
+
+  // Compatibilidad para partidas compuestas antiguas: sus display_ref ya guardaban
+  // explícitamente la identificación entre paréntesis. No aplicamos este fallback
+  // a referencias simples concatenadas con la descripción larga.
   if(!ident&&full&&tech&&full!==tech){
-    let rest=full.toLowerCase().startsWith(tech.toLowerCase())?full.slice(tech.length):full;
-    rest=rest.replace(/^[\s()\[\]{}:;,.·\-–—]+|[\s()\[\]{}:;,.·\-–—]+$/g,'').trim();
-    if(rest&&rest!==tech)ident=rest;
+    const escaped=tech.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    const m=full.match(new RegExp('^\\s*'+escaped+'\\s*\\((.*)\\)\\s*$','i'));
+    if(m&&String(m[1]||'').trim()) ident=String(m[1]).trim();
   }
-  return {technical:tech||String(technical||'').trim(),identification:ident,display:full||tech};
+  const display=ident ? tech+' ('+ident+')' : (full||tech);
+  return {technical:tech||String(technical||'').trim(),identification:ident,display};
 }
 function LDH_escapeRefVisual(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function LDH_refVisualHTML(technical,meta){const p=LDH_refVisualParts(technical,meta);return `<span class="ldh-ref-stack"><span class="ldh-tech-ref">${LDH_escapeRefVisual(p.technical||'—')}</span>${p.identification?`<span class="ldh-work-ident">${LDH_escapeRefVisual(p.identification)}</span>`:''}</span>`;}
@@ -3055,11 +3122,23 @@ try{
       metaParaGuardar.referencia = ref;
       // V137 · La OT técnica sigue siendo la clave interna. La identificación escrita
       // en Agenda/Cálculo se conserva solo como referencia visible.
-      const displayRefV137 = String((snap && (snap.display_ref || snap.visible_ref || snap.referencia_visible || snap.displayReference)) || metaParaGuardar.display_ref || metaParaGuardar.visible_ref || ref).trim();
-      metaParaGuardar.technical_ref = String((snap && (snap.technical_ref || snap.technicalRef)) || ref).trim() || ref;
-      metaParaGuardar.display_ref = displayRefV137 || ref;
-      metaParaGuardar.visible_ref = displayRefV137 || ref;
-      metaParaGuardar.referencia_visible = displayRefV137 || ref;
+      const technicalRefV143 = LDH_extractTechnicalRefV143(String((snap && (snap.technical_ref || snap.technicalRef || snap.composite_part_reference || snap.partReference)) || metaParaGuardar.technical_ref || ref).trim() || ref);
+      const incomingIdentificationV143 = String((snap && (snap.identification || snap.workIdentification || snap.workLabel || snap.referenceLabel || snap.composite_part_description || snap.partDescription || snap.partLabel)) || '').trim();
+      const identificationV143 = incomingIdentificationV143 || LDH_agendaIdentificationV143(technicalRefV143) || String(metaParaGuardar.identification || metaParaGuardar.workIdentification || metaParaGuardar.workLabel || metaParaGuardar.referenceLabel || '').trim();
+      const displayRefV137 = identificationV143
+        ? `${technicalRefV143} (${identificationV143})`
+        : String((snap && (snap.display_ref || snap.visible_ref || snap.referencia_visible || snap.displayReference)) || metaParaGuardar.display_ref || metaParaGuardar.visible_ref || ref).trim();
+      metaParaGuardar.technical_ref = technicalRefV143 || ref;
+      if(identificationV143){
+        metaParaGuardar.identification = identificationV143;
+        metaParaGuardar.workIdentification = identificationV143;
+        metaParaGuardar.workLabel = identificationV143;
+        metaParaGuardar.referenceLabel = identificationV143;
+      }
+      metaParaGuardar.display_ref = displayRefV137 || technicalRefV143 || ref;
+      metaParaGuardar.displayReference = displayRefV137 || technicalRefV143 || ref;
+      metaParaGuardar.visible_ref = displayRefV137 || technicalRefV143 || ref;
+      metaParaGuardar.referencia_visible = displayRefV137 || technicalRefV143 || ref;
       metaParaGuardar.pedido_uid = pedidoUid;
       const agendaOrderId = String(snap.agenda_order_id || snap.orderId || snap.workOrderId || '').trim();
       if(agendaOrderId){
@@ -3543,17 +3622,18 @@ function cargarLista() {
       item.dataset.ref = ref;
       item.dataset.refNorm = normRef(ref);
     }catch(e){}
+    const refVisualV143 = LDH_refVisualParts(ref,meta);
     item.innerHTML = `
-      <div style="display:flex;justify-content:space-between;margin-bottom:6px; gap:10px; align-items:flex-start;">
-        ${LDH_refVisualHTML(ref,meta)}
-        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+      <div class="ldh-card-head">
+        <span class="ldh-tech-ref">${LDH_escapeRefVisual(refVisualV143.technical || ref || '—')}</span>
+        <div class="ldh-card-status">
           ${fab ? `<span class="badge b-fab"><span class="dot"></span> En fabricación</span>` : ``}
-          
           <span class="badge ${badgeClass}">${badgeText}</span>
         </div>
       </div>
-      <div style="font-size:12px; color:#9fb0c8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-        ${meta.concepto || "Sin concepto"} (${meta.unidades || 1} uds)${(meta.empresa || meta.company) ? (" · " + (meta.empresa || meta.company)) : ""}
+      ${refVisualV143.identification ? `<div class="ldh-card-ident">${LDH_escapeRefVisual(refVisualV143.identification)}</div>` : ``}
+      <div class="ldh-card-meta">
+        ${LDH_escapeRefVisual(meta.concepto || "Sin concepto")} · ${LDH_escapeRefVisual(meta.unidades || 1)} uds${(meta.empresa || meta.company) ? (" · " + LDH_escapeRefVisual(meta.empresa || meta.company)) : ""}
       </div>`;
     item.onclick = () => abrirPedido(ref);
     lista.appendChild(item);
@@ -29754,7 +29834,7 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 <script id="LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS_20260902">
 window.LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS='PREPARACION-V137-BASE-V129-REFERENCIA-VISIBLE-SIN-WRAPPERS-20260902';
 if(!document.documentElement.dataset.ldhPrepBuild || document.documentElement.dataset.ldhPrepBuild==='V137') document.documentElement.dataset.ldhPrepBuild='V138';
-console.info('[Preparación V137/V138] Base V129 estable + display_ref; V138 añade partidas independientes y publicación Fabricación.');
+console.info('[Preparación V143] Base V141 estable + identificación real de Agenda + tarjetas organizadas.');
 </script>
 
 <script id="LDH_PREP_V139_CIERRE_FABRICACION_DEFINITIVO_20260902">
@@ -29771,4 +29851,5 @@ console.info('[Preparación V141] COMPLETO + fase avanzada sale de la lista; V11
 <!-- LDH_PREP_V142_IDENTIFICACION_VISUAL_UNIFICADA_20260902 -->
 
 <script id="LDH_PREPARACION_V142_BUILD_DATASET_20260902">try{document.documentElement.dataset.ldhPrepBuild='V142';}catch(_e){}</script>
+<!-- LDH_PREP_V143_IDENTIFICACION_REAL_AGENDA -->
 </body></html>
