@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="es">
 <head>
-  <!-- BUILD: ALMACEN-DESPLEGABLE-PERSISTENTE-V1-20260810 -->
+  <!-- BUILD: ALMACEN-DESPLEGABLE-PERSISTENTE-V2-ID-VISUAL-GLOBAL-DELETE-20260902 -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Almacén · Gestión Taller</title>
@@ -44,6 +44,8 @@
     th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#93c5fd;background:rgba(15,23,42,.5)}
     tr:hover td{background:rgba(34,211,238,.04)}
     .ref{font-weight:900;color:#fff}.concept{font-size:12px;color:#a7f3d0;margin-top:3px}.muted{color:var(--muted);font-size:12px}
+    /* V2 · referencia tecnica e identificacion visual separadas. */
+    .ldh-ref-stack{display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-width:0}.ldh-tech-ref{display:inline-flex;align-items:center;padding:3px 7px;border:1px solid rgba(34,211,238,.48);border-radius:8px;background:rgba(8,145,178,.16);color:#7dd3fc;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;font-weight:950;letter-spacing:.045em;line-height:1.15;overflow-wrap:anywhere}.ldh-work-ident{display:block;color:#fde68a;font-size:15px;font-weight:950;line-height:1.2;overflow-wrap:anywhere}
     .flow{display:flex;gap:6px;flex-wrap:wrap}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
     .empty{text-align:center;color:var(--muted);padding:40px 14px;border:1px dashed rgba(148,163,184,.25);border-radius:14px;background:rgba(15,23,42,.35)}
     .toast{position:fixed;right:16px;bottom:16px;background:#042f2e;border:1px solid rgba(16,185,129,.45);color:#d1fae5;border-radius:12px;padding:12px 14px;font-weight:900;box-shadow:var(--shadow);display:none;z-index:50}
@@ -110,6 +112,34 @@
   function n(v){ const x = Number(String(v ?? 0).replace(",", ".")); return Number.isFinite(x) ? x : 0; }
   function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+    function technicalRefValue(value){
+      const raw=String(value||"").trim();
+      const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
+      return m ? `OT-${m[1]}-${m[2]}${m[3]?`-${m[3]}`:""}` : raw;
+    }
+    function technicalWorkRef(item){
+      item=item&&typeof item==="object"?item:{};
+      return technicalRefValue(item.technical_ref||item.technicalRef||item.composite_part_reference||item.ref||item.referencia||"");
+    }
+    function visibleWorkRef(item){
+      item=item&&typeof item==="object"?item:{};
+      return String(item.display_ref||item.displayReference||item.visible_ref||item.referencia_visible||item.ref||item.referencia||"").trim();
+    }
+    function workIdentification(item){
+      item=item&&typeof item==="object"?item:{};
+      let id=String(item.identification||item.workIdentification||item.workLabel||item.referenceLabel||item.partDescription||item.composite_part_description||"").trim();
+      const tech=technicalWorkRef(item), full=visibleWorkRef(item);
+      if(!id&&full&&tech&&norm(full)!==norm(tech)){
+        let rest=full.toLowerCase().startsWith(tech.toLowerCase())?full.slice(tech.length):full;
+        rest=rest.replace(/^[\s()\[\]{}:;,.·\-–—]+|[\s()\[\]{}:;,.·\-–—]+$/g,"").trim();
+        if(rest&&norm(rest)!==norm(tech)) id=rest;
+      }
+      return id;
+    }
+    function workRefVisualHTML(item){
+      const tech=technicalWorkRef(item)||"—", id=workIdentification(item);
+      return `<span class="ldh-ref-stack"><span class="ldh-tech-ref">${esc(tech)}</span>${id?`<span class="ldh-work-ident">${esc(id)}</span>`:""}</span>`;
+    }
   function fmtDate(v){
     if(!v) return "";
     const s = String(v);
@@ -124,6 +154,11 @@
     state:{ deliveries:[], deliveryCompanies:[] },
     expandedPending:new Set(),
     expandedDelivered:new Set(),
+    globalDeletedKeys:new Set(),
+
+    deletedKey(ref){ return technicalRefValue(ref).toUpperCase(); },
+    isGloballyDeleted(ref){ const key=this.deletedKey(ref); return !!key && (this.globalDeletedKeys.has(key) || (typeof window.LDH_almacenIsDeletedRef === "function" && window.LDH_almacenIsDeletedRef(ref))); },
+    setGlobalDeletedRefs(refs){ this.globalDeletedKeys=new Set((Array.isArray(refs)?refs:[]).map(r=>this.deletedKey(r)).filter(Boolean)); this.purgeDeletedRefs(Array.from(this.globalDeletedKeys), false); this.render(); this.renderDelivered(); },
 
     init(){
       this.load();
@@ -234,7 +269,7 @@
         const ref = k.replace(/^prep_meta_/,"").trim();
         const meta = parse(getStore(k), null);
         if(!ref || !meta) return;
-        if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos) return;
+        if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos || this.isGloballyDeleted(ref)) return;
         const fase = norm(meta.fase || meta.estado || meta.status);
         const isAlm = !!(meta.en_almacen || meta.almacen_ts || fase.includes("almacen"));
         const isEnt = !!(meta.entregado || meta.en_entregado || meta.entregado_ts || fase.includes("entreg"));
@@ -246,7 +281,12 @@
 
         const rec = {
           id: meta.pedido_uid || ("ALM-" + ref),
-          ref, referencia: ref,
+          ref: technicalRefValue(meta.technical_ref || meta.composite_part_reference || ref), referencia: technicalRefValue(meta.technical_ref || meta.composite_part_reference || ref),
+          technical_ref: technicalRefValue(meta.technical_ref || meta.composite_part_reference || ref),
+          identification: String(meta.identification || meta.workIdentification || meta.workLabel || meta.referenceLabel || meta.partDescription || meta.composite_part_description || "").trim(),
+          workIdentification: String(meta.identification || meta.workIdentification || meta.workLabel || meta.referenceLabel || meta.partDescription || meta.composite_part_description || "").trim(),
+          display_ref: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim(),
+          displayReference: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim(),
           concept, concepto: concept,
           company, empresa: company, empresaReceptora: company,
           total: units,
@@ -271,7 +311,7 @@
 
     upsertDelivery(rec){
       const arr = this.state.deliveries || (this.state.deliveries = []);
-      const ref = String(rec.ref || rec.referencia || "").trim();
+      const ref = technicalWorkRef(rec);
       if(!ref) return false;
       const idx = arr.findIndex(x => x && String(x.ref || x.referencia || "").trim() === ref);
       if(idx >= 0){
@@ -286,8 +326,8 @@
 
     syncEveryPool(item){
       if(!item || typeof item !== "object") return false;
-      const ref = String(item.ref || item.referencia || "").trim();
-      if(!ref) return false;
+      const ref = technicalWorkRef(item);
+      if(!ref || this.isGloballyDeleted(ref)) return false;
 
       item.ref = ref;
       item.referencia = ref;
@@ -358,11 +398,11 @@
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
       return (this.state.deliveries || [])
-        .filter(item => !item.deleted && this.itemAlmacen(item) > 0)
+        .filter(item => !item.deleted && !this.isGloballyDeleted(item.ref || item.referencia) && this.itemAlmacen(item) > 0)
         .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
         .filter(item => {
           if(!q) return true;
-          const hay = [item.ref, item.referencia, item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
+          const hay = [technicalWorkRef(item), visibleWorkRef(item), workIdentification(item), item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
           return norm(hay).includes(q);
         });
     },
@@ -442,7 +482,7 @@
       const company = String(item.company || item.empresa || item.empresaReceptora || "Sin empresa");
       return `
         <tr>
-          <td><div class="ref">${esc(item.ref || item.referencia || "")}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
+          <td><div class="ref">${workRefVisualHTML(item)}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
           <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Prev.: ${esc(fmtDate(item.datePrev || item.fechaPrevista || ""))}</div></td>
           <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
           <td><span class="badge b-green">En almacén</span><div class="muted">Total: ${esc(item.total || alm || 0)}</div></td>
@@ -454,11 +494,11 @@
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
       return (this.state.deliveries || [])
-        .filter(item => !item.deleted && (this.itemEntregado(item) > 0 || norm(item.fase || item.estado || item.status).includes("entreg")))
+        .filter(item => !item.deleted && !this.isGloballyDeleted(item.ref || item.referencia) && (this.itemEntregado(item) > 0 || norm(item.fase || item.estado || item.status).includes("entreg")))
         .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
         .filter(item => {
           if(!q) return true;
-          const hay = [item.ref, item.referencia, item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
+          const hay = [technicalWorkRef(item), visibleWorkRef(item), workIdentification(item), item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
           return norm(hay).includes(q);
         });
     },
@@ -518,7 +558,7 @@
       const lastEnt = Array.isArray(item.history) ? [...item.history].reverse().find(h=>String(h.type||"").includes("entrega")) : null;
       return `
         <tr>
-          <td><div class="ref">${esc(item.ref || item.referencia || "")}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
+          <td><div class="ref">${workRefVisualHTML(item)}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
           <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Entrega: ${esc(fmtDate((lastEnt && lastEnt.date) || item.entregado_ts || item.fechaEntrega || ""))}</div></td>
           <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
           <td><span class="badge b-green">Entregado</span><div class="muted">Total: ${esc(item.total || ent || 0)}</div></td>
@@ -622,21 +662,61 @@
       this.toast("Devuelto a Fabricación");
     },
 
-    eliminarPedido(idx, origen){
+    refsForGlobalDelete(item){
+      const tech=technicalWorkRef(item);
+      if(!tech) return [];
+      const refs=new Set([tech]);
+      // Si alguna vez se elimina un padre compuesto desde Almacén, se eliminan también sus partidas.
+      if(/^OT-\d{6}-\d{3}$/i.test(tech)){
+        ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+          (Array.isArray(this.state[pool])?this.state[pool]:[]).forEach(row=>{
+            const r=technicalWorkRef(row); if(r&&r.toUpperCase().startsWith(tech.toUpperCase()+"-")) refs.add(r);
+          });
+        });
+      }
+      return Array.from(refs);
+    },
+
+    purgeDeletedRefs(refs, persist=true){
+      const keys=new Set((Array.isArray(refs)?refs:[refs]).map(r=>this.deletedKey(r)).filter(Boolean));
+      if(!keys.size) return 0;
+      ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
+        if(Array.isArray(this.state[pool])) this.state[pool]=this.state[pool].filter(row=>!keys.has(this.deletedKey(technicalWorkRef(row))));
+      });
+      keys.forEach(ref=>this.markPrepDeleted(ref));
+      try{
+        let inbox=parse(getStore(INBOX_KEY),[])||[];
+        if(Array.isArray(inbox)){ inbox=inbox.filter(row=>!keys.has(this.deletedKey(technicalWorkRef(row)))); setStore(INBOX_KEY,JSON.stringify(inbox)); }
+        const ov=parse(getStore(OVERRIDE_KEY),{})||{};
+        Object.keys(ov).forEach(k=>{ if(keys.has(this.deletedKey(k))) ov[k]={...(ov[k]||{}),deleted:true,archived:true,flow:{fab:0,fabricacion:0,pintura:0,almacen:0,entregado:0},fase:"eliminado",estado:"eliminado",updatedAt:new Date().toISOString()}; });
+        setStore(OVERRIDE_KEY,JSON.stringify(ov));
+      }catch(e){}
+      if(persist) this.save();
+      return keys.size;
+    },
+
+    async eliminarPedido(idx, origen){
       const item = this.state.deliveries[idx];
       if(!item) return;
-      const ref = String(item.ref || item.referencia || "").trim();
+      const refs=this.refsForGlobalDelete(item);
+      const ref=refs[0]||technicalWorkRef(item);
+      const ident=workIdentification(item);
       const label = origen === "entregados" ? "Entregados" : "Almacén";
-      const ok = confirm("¿Eliminar definitivamente este pedido de " + label + "?\n\nReferencia: " + ref + "\n\nNo volverá a aparecer en Almacén ni en Entregados.");
+      const ok = confirm("¿Eliminar este pedido de " + label + " y ocultarlo de TODO el flujo?\n\nReferencia técnica: " + ref + (ident?"\nIdentificación: "+ident:"") + (refs.length>1?"\nPartidas afectadas: "+refs.length:"") + "\n\nSe conserva el histórico de movimientos de Stock.");
       if(!ok) return;
-
-      this.state.deliveries = (this.state.deliveries || []).filter((x, i) => i !== idx && String(x && (x.ref || x.referencia) || "").trim() !== ref);
-
-      this.markPrepDeleted(ref);
-      this.save();
+      if(typeof window.LDH_almacenDeleteGlobal !== "function"){ alert("La sincronización de borrado global todavía no está preparada. Espera a que la nube esté conectada y vuelve a intentarlo."); return; }
+      try{
+        await window.LDH_almacenDeleteGlobal(refs);
+      }catch(error){
+        console.error(error);
+        alert("No se pudo registrar el borrado global. No se ha eliminado el pedido.\n\n"+String(error&&error.message||error));
+        return;
+      }
+      refs.forEach(r=>this.globalDeletedKeys.add(this.deletedKey(r)));
+      this.purgeDeletedRefs(refs, true);
       this.render();
       this.renderDelivered();
-      this.toast("Pedido eliminado");
+      this.toast("Pedido eliminado de todo el flujo");
     },
 
     markPrepDeleted(ref){
@@ -672,6 +752,11 @@
       const ent = this.itemEntregado(item);
       meta.empresa = item.company || item.empresa || item.empresaReceptora || meta.empresa;
       meta.concepto = item.concept || item.concepto || meta.concepto;
+      meta.technical_ref = technicalWorkRef(item) || meta.technical_ref || ref;
+      const identV2=workIdentification(item);
+      if(identV2){ meta.identification=identV2; meta.workIdentification=identV2; meta.workLabel=identV2; }
+      const visibleV2=visibleWorkRef(item);
+      if(visibleV2){ meta.display_ref=visibleV2; meta.displayReference=visibleV2; meta.visible_ref=visibleV2; meta.referencia_visible=visibleV2; }
       meta.unidades = item.total || meta.unidades || 1;
       meta.lastUpdate = new Date().toISOString();
 
@@ -707,7 +792,8 @@
       if(!item) return;
       const f = item.flow || {};
       alert(
-        "Referencia: " + (item.ref || item.referencia || "") + "\n" +
+        "Referencia técnica: " + technicalWorkRef(item) + "\n" +
+        (workIdentification(item) ? "Identificación: " + workIdentification(item) + "\n" : "") +
         "Concepto: " + (item.concept || item.concepto || "") + "\n" +
         "Empresa: " + (item.company || item.empresa || item.empresaReceptora || "") + "\n\n" +
         "Fabricación: " + n(f.fab ?? f.fabricacion ?? 0) + "\n" +
@@ -761,6 +847,11 @@
   }
   function parse(raw, fallback){ try{ return raw ? JSON.parse(raw) : fallback; }catch(e){ return fallback; } }
   function n(v){ const x = Number(String(v ?? 0).replace(',', '.')); return Number.isFinite(x) ? Math.max(0,x) : 0; }
+  function technicalRefValueModule(value){
+    const raw=String(value||'').trim();
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
+    return m ? 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'') : raw;
+  }
   function getStore(key){
     try{ const value = localStorage.getItem(key); if(value !== null && value !== undefined) return value; }catch(e){}
     try{ const value = sessionStorage.getItem(key); if(value !== null && value !== undefined) return value; }catch(e){}
@@ -883,7 +974,7 @@
   try{
     const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
     const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-    const {getFirestore,doc,runTransaction,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+    const {getFirestore,collection,doc,getDocs,setDoc,onSnapshot,runTransaction,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
     // Usar la app [DEFAULT] es imprescindible: Firebase Auth guarda la sesion
     // por nombre de app. Fabricacion usa [DEFAULT], por lo que Almacen debe usar
@@ -907,6 +998,11 @@
     const auth = getAuth(app);
     const db = getFirestore(app);
     const docRef = doc(db, 'taller_data', 'fabricacion');
+    const deletedCol = collection(db, 'taller_data', 'fabricacion', 'deleted');
+    const deletedKeys = new Set();
+    const deletedKey = ref => technicalRefValueModule(ref).toUpperCase();
+    window.LDH_almacenIsDeletedRef = ref => deletedKeys.has(deletedKey(ref));
+    const deletedDocId = ref => encodeURIComponent(technicalRefValueModule(ref));
 
     async function syncItems(items, source, startup=false){
       items = (Array.isArray(items) ? items : [items]).map(cloneItem).filter(item=>refOf(item));
@@ -961,6 +1057,24 @@
       return syncChain;
     };
 
+    window.LDH_almacenDeleteGlobal = async function(refs){
+      refs=(Array.isArray(refs)?refs:[refs]).map(technicalRefValueModule).filter(Boolean);
+      if(!refs.length) return true;
+      if(!authReady) throw new Error('Nube todavía sin sesión para registrar el borrado');
+      for(const ref of refs){
+        await setDoc(doc(deletedCol,deletedDocId(ref)),{ref,reference:ref,deleted:true,deletedAtMs:Date.now(),deletedAt:serverTimestamp(),source:'almacen.html'}, {merge:true});
+        deletedKeys.add(deletedKey(ref));
+      }
+      if(window.App&&typeof window.App.setGlobalDeletedRefs==='function') window.App.setGlobalDeletedRefs(Array.from(deletedKeys));
+      return true;
+    };
+
+    onSnapshot(deletedCol,snap=>{
+      deletedKeys.clear();
+      snap.docs.forEach(d=>{ const data=d.data()||{}; const ref=technicalRefValueModule(data.ref||data.reference||''); if(ref)deletedKeys.add(deletedKey(ref)); });
+      if(window.App&&typeof window.App.setGlobalDeletedRefs==='function') window.App.setGlobalDeletedRefs(Array.from(deletedKeys));
+    },error=>console.warn('Almacén: no se pudieron leer borrados globales',error));
+
     async function flushPendingItems(){
       const items = Array.from(pendingByRef.values());
       if(!items.length) return true;
@@ -974,6 +1088,7 @@
       const items = Array.isArray(state && state.deliveries) ? state.deliveries : [];
       const authoritative = items.filter(item=>{
         const copy = cloneItem(item);
+        if(window.LDH_almacenIsDeletedRef && window.LDH_almacenIsDeletedRef(refOf(copy))) return false;
         return n(copy.flow.almacen) > 0 || n(copy.flow.entregado) > 0;
       });
       if(authoritative.length) await syncItems(authoritative, 'almacen_reconciliacion_inicio', true);
