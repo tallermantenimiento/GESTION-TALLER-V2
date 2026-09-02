@@ -1,4 +1,5 @@
 <!doctype html>
+<!-- V66 · RECUPERAR OT VIVA FRENTE A BORRADO ANTIGUO · 02/09/2026 -->
 <!-- V65 IDENTIFICACION VISUAL UNIFICADA + BORRADO GLOBAL POR OT TECNICA · 02/09/2026 -->
 <html lang="es">
 <head>
@@ -162,7 +163,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V65 &middot; Recuento f&iacute;sico con botes enteros + resto en bote abierto. PINTADO consume en Cabina; correcci&oacute;n devuelve pieza + consumibles. Inbox de Fabricaci&oacute;n como respaldo y referencia &uacute;nica por OT mantenida.</div>
+      <div class="sub">V66 &middot; Recuento f&iacute;sico con botes enteros + resto en bote abierto. PINTADO consume en Cabina; correcci&oacute;n devuelve pieza + consumibles. Inbox de Fabricaci&oacute;n como respaldo y referencia &uacute;nica por OT mantenida.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -469,16 +470,54 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return 'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
   };
   const sameRef = (a,b) => { const ka=workIdentityKey(a),kb=workIdentityKey(b); return !!ka&&ka===kb; };
-  const isDeletedWorkRef = ref => { const key=workIdentityKey(ref); return !!key && state.deletedRefs.has(key); };
+  // V66 · una marca antigua de borrado no puede ocultar una OT que ha vuelto a
+  // tener flujo vivo en Pintura después de aquella marca. Los borrados actuales
+  // siguen prevaleciendo porque guardan deletedAtMs y son posteriores al trabajo.
+  const deletedRecordMs = data => {
+    data=data&&typeof data==='object'?data:{};
+    const direct=Number(data.deletedAtMs); if(Number.isFinite(direct)&&direct>0)return direct;
+    const ts=data.deletedAt;
+    try{ if(ts&&typeof ts.toMillis==='function'){const ms=ts.toMillis();if(Number.isFinite(ms)&&ms>0)return ms;} }catch(_){ }
+    const parsed=Date.parse(text(ts)); return Number.isFinite(parsed)?parsed:0;
+  };
+  const applyDeletedSnapshot = snap => {
+    const refs=new Set(), meta=new Map();
+    (snap&&Array.isArray(snap.docs)?snap.docs:[]).forEach(d=>{
+      const data=(d&&typeof d.data==='function'?(d.data()||{}):{});
+      const key=workIdentityKey(text(data.ref||data.reference));
+      if(!key)return;
+      refs.add(key);
+      meta.set(key,{deletedAtMs:deletedRecordMs(data),source:text(data.source)});
+    });
+    state.deletedRefs=refs;
+    state.deletedMetaByKey=meta;
+  };
+  const isDeletedWorkRef = (ref,item) => {
+    const key=workIdentityKey(ref); if(!key||!state.deletedRefs.has(key))return false;
+    const f=flowOf(item||{});
+    if(num(f.pintura)<=0)return true;
+    const rec=state.deletedMetaByKey&&state.deletedMetaByKey.get(key);
+    const deletedMs=rec&&Number(rec.deletedAtMs)||0;
+    const liveMs=workUpdatedMs(item||{});
+    // Tombstone legacy sin fecha: no debe ocultar una OT que actualmente esta en Pintura.
+    if(deletedMs<=0)return false;
+    // Si la OT se actualizo despues del tombstone, el flujo vivo es la autoridad.
+    if(liveMs>deletedMs)return false;
+    return true;
+  };
   const preferredWorkRef = (a,b) => {
     a=text(a); b=text(b); if(!a)return b; if(!b)return a; if(!sameRef(a,b))return a;
     return b.length>a.length?b:a;
   };
   const workUpdatedMs = item => {
-    for(const v of [item&&item.localFlowUpdatedAt,item&&item.updatedAt,item&&item.lastUpdate]){
-      const ms=Date.parse(text(v)); if(Number.isFinite(ms))return ms;
+    let best=0;
+    for(const v of [item&&item.localFlowUpdatedAt,item&&item.updatedAt,item&&item.lastUpdate,item&&item.fabricacion_ts,item&&item.pintura_ts,item&&item.almacen_ts,item&&item.entregado_ts]){
+      const ms=Date.parse(text(v)); if(Number.isFinite(ms))best=Math.max(best,ms);
     }
-    return 0;
+    (Array.isArray(item&&item.history)?item.history:[]).forEach(ev=>{
+      const ms=Date.parse(text(ev&&(ev.date||ev.at||ev.createdAt||ev.updatedAt))); if(Number.isFinite(ms))best=Math.max(best,ms);
+    });
+    return best;
   };
   const mergeAliasWork = (a,b) => {
     a=a&&typeof a==='object'?a:{}; b=b&&typeof b==='object'?b:{};
@@ -524,6 +563,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     prepPackage:null,
     works:[],
     deletedRefs:new Set(),
+    deletedMetaByKey:new Map(),
     stock:null,
     stockReady:false,
     stockError:'',
@@ -667,7 +707,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     FLOW_POOLS.forEach(pool=>{
       const arr=Array.isArray(db[pool])?db[pool]:[];
       arr.forEach(raw=>{
-        const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref)) return;
+        const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref,raw)) return;
         const key=workIdentityKey(ref); if(!key)return;
         const prev=map.get(key);
         map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
@@ -678,14 +718,14 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     // ya tiene PINT > 0 solo por ese pequeño desfase de publicación.
     const inboxFallback=safeParse(pkg.inbox,'[]');
     (Array.isArray(inboxFallback)?inboxFallback:[]).forEach(raw=>{
-      const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref)) return;
+      const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref,raw)) return;
       const key=workIdentityKey(ref); if(!key)return;
       const prev=map.get(key);
       map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
     });
     Object.keys(overrides).forEach(ref=>{
       const key=workIdentityKey(ref);
-      if(!key || !map.has(key) || isDeletedWorkRef(ref)) return;
+      if(!key || !map.has(key) || isDeletedWorkRef(ref,map.get(key))) return;
       const ov=overrides[ref]||{};
       const item=map.get(key);
       const merged={...item,...ov,ref:preferredWorkRef(refOf(item),ref),referencia:preferredWorkRef(refOf(item),ref),flow:{...(item.flow||{}),...(ov.flow||{})}};
@@ -1923,7 +1963,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function loadDeletedRefs(){
     try{
       const snap=await getDocs(deletedCol);
-      state.deletedRefs=new Set(snap.docs.map(d=>workIdentityKey(text((d.data()||{}).ref||(d.data()||{}).reference))).filter(Boolean));
+      applyDeletedSnapshot(snap);
       renderWorks();
     }catch(e){ console.warn('deleted refs',e); }
   }
@@ -4074,7 +4114,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
        Al recibirlas recalculamos necesidad sin tocar Stock ni Fabricacion. */
     if(state.flowPackage){renderWorks();renderControl();}
   },e=>console.warn('Preparacion: no se pudieron leer lineas de material',e));
-  onSnapshot(deletedCol,snap=>{state.deletedRefs=new Set(snap.docs.map(d=>workIdentityKey(text((d.data()||{}).ref||(d.data()||{}).reference))).filter(Boolean));renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
+  onSnapshot(deletedCol,snap=>{applyDeletedSnapshot(snap);renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
   function startStockWatch(){
     if(stockUnsub) return;
     stockUnsub=onSnapshot(stockMetaRef,()=>{if(state.stockAuthReady)loadStockPackage();},e=>console.warn('stock listener SDK no disponible; REST sigue activo',e));
