@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V139-CIERRE-FABRICACION-DEFINITIVO-20260902" />
+<meta name="ldh-build" content="PREPARACION-V141-CIERRE-VISIBLE-Y-REPARACION-STOCK-20260902" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -3461,6 +3461,41 @@ function cargarLista() {
 
     const completeLines = lines.filter(l => (toNum(l.qty_recibida)) >= (toNum(l.qty_pedida))).length;
     const anyReceived = lines.some(l => (toNum(l.qty_recibida)) > 0);
+
+    /* V141 · Una OT completa que ya está en Fabricación/Pintura/Almacén/Entregado
+       deja de pertenecer a la lista normal de Preparación. Conservamos únicamente
+       las OTs con deuda real pendiente de devolver, que sí deben seguir visibles.
+       El cierre físico/Stock continúa ejecutándose por V114/V115 en segundo plano. */
+    let advancedStageV141 = !!(
+      meta?.en_fabricacion || meta?.fabricacion_ts ||
+      meta?.en_pintura || meta?.pintura_ts ||
+      meta?.en_almacen || meta?.almacen_ts ||
+      meta?.entregado || meta?.en_entregado
+    );
+    try{
+      if(!advancedStageV141 && typeof window.LDH_getTrabajoStage === 'function'){
+        const st=String(window.LDH_getTrabajoStage(ref)||'').toLowerCase();
+        advancedStageV141=['fabricacion','pintura','almacen','entregado'].includes(st);
+      }
+    }catch(_){ }
+    let debtPendingV141=false;
+    try{
+      const localUb=meta?.unassignedBorrow;
+      const globalUb=typeof getGlobalBorrow==='function' ? getGlobalBorrow(ref) : null;
+      const ub=(localUb&&Array.isArray(localUb.items)&&localUb.items.length)?localUb:globalUb;
+      debtPendingV141=!!(ub&&Array.isArray(ub.items)&&ub.items.some(it=>
+        toNum(it?.qtyPending ?? it?.pending ?? it?.pendingQty ?? it?.qty_pending ?? 0)>0
+      ));
+    }catch(_){ }
+    if(totalLines>0 && completeLines===totalLines && advancedStageV141 && !debtPendingV141){
+      // No borramos a ciegas: V114/V115 mantiene el consumo seguro y el tombstone.
+      try{
+        if(typeof window.LDH_finalizarPreparacionV114==='function'){
+          setTimeout(()=>{ try{ window.LDH_finalizarPreparacionV114(ref); }catch(_){ } },0);
+        }
+      }catch(_){ }
+      return;
+    }
 
     let badgeClass = "b-p"; let badgeText = "Pendiente";
     if (totalLines > 0 && completeLines === totalLines) { badgeClass = "b-c"; badgeText = "Completo"; }
@@ -28881,7 +28916,7 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
       const detail=candidates.map(c=>`• ${c.materialName}: ${c.qty}`).join('\n');
       const ok=confirm(
         'Se ha detectado una asignación manual antigua que consta en Preparación, pero no llegó a consumirse en Stock al entrar en Fabricación.\n\n'+
-        detail+'\n\n¿Reparar ahora este consumo en Stock?'
+        detail+'\n\nSi aceptas, se reparará el consumo en Stock y, si la OT ya está completa, se retirará automáticamente de Preparación.\n\n¿Reparar ahora?'
       );
       if(!ok) return;
       for(const c of candidates){
@@ -28894,7 +28929,29 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
       }
       try{ if(typeof guardarEstadoLocal==='function') guardarEstadoLocal(); }catch(_){ }
       try{ if(typeof renderTabla==='function') renderTabla(); }catch(_){ }
-      alert('✅ Consumo reparado y confirmado en Stock nube.');
+
+      /* V141 · La reparación V117 existía precisamente porque la OT ya había
+         entrado en Fabricación sin cerrar correctamente Stock. Una vez reparado
+         el consumo, quitamos el hold de revisión y completamos el cierre seguro
+         V114. Así no queda una tarjeta COMPLETO + FAB colgada en Preparación. */
+      let closedV141=false;
+      try{
+        if(typeof window.LDH_prepClearRepairHoldV121==='function') window.LDH_prepClearRepairHoldV121();
+      }catch(_){ }
+      try{
+        if(typeof window.LDH_finalizarPreparacionV114==='function'){
+          closedV141=!!(await window.LDH_finalizarPreparacionV114(ref));
+        }
+      }catch(closeError){
+        console.warn('[Preparación V141] Consumo reparado; cierre automático pendiente',closeError);
+      }
+      if(closedV141){
+        alert('✅ Consumo reparado y confirmado en Stock nube.\n\nLa OT se ha retirado de Preparación.');
+        try{ if(typeof volverLista==='function') volverLista(); }catch(_){ }
+      }else{
+        alert('✅ Consumo reparado y confirmado en Stock nube.\n\nEl cierre de Preparación se reintentará automáticamente.');
+        try{ if(typeof cargarLista==='function') cargarLista(); }catch(_){ }
+      }
     }catch(e){
       console.error('[Preparación V117] Error reparando consumo perdido',e);
       alert('No se ha reparado el consumo.\n\n'+String((e&&(e.message||e.code))||e||'Error de sincronización'));
@@ -29670,4 +29727,9 @@ document.documentElement.dataset.ldhPrepBuild='V139';
 console.info('[Preparación V139] Las OTs completas desaparecen de Preparación tras confirmar Fabricación; cierre remoto protegido.');
 </script>
 <!-- LDH_PREP_V140_CIERRE_POR_OT_TECNICA_20260902 -->
+<script id="LDH_PREP_V141_CIERRE_VISIBLE_REPARACION_STOCK_20260902">
+window.LDH_PREP_V141_CIERRE_VISIBLE_REPARACION_STOCK='PREPARACION-V141-CIERRE-VISIBLE-REPARACION-STOCK-20260902';
+document.documentElement.dataset.ldhPrepBuild='V141';
+console.info('[Preparación V141] COMPLETO + fase avanzada sale de la lista; V117 repara Stock y completa cierre seguro.');
+</script>
 </body></html>
