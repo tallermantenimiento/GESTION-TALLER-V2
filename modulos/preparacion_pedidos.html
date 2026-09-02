@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V135-DISPLAY-REF-AUTORITATIVA-20260902" />
+<meta name="ldh-build" content="PREPARACION-V127-REPARACION-COMPROMISO-MISMA-OT-20260831" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -2938,23 +2938,8 @@ function saveLinkMap(){
 
   if (snap) {
     try {
-      // V134 · Al entrar desde Cálculo, la referencia escrita allí es autoritativa.
-      // getFocusRef() puede conservar la OT técnica corta procedente de Agenda
-      // (OT-...-A/B/C/D); se lee para limpiar esa pista, pero SOLO se usa como
-      // respaldo si el snapshot de Cálculo no trae referencia.
-      const focusRefV134 = ((typeof getFocusRef==="function") ? getFocusRef() : null);
-      const snapVisibleRefV134 = String((snap && (snap.referencia || snap.ref)) || '').trim();
-      // V136: identidad y texto visible viajan separados. La OT técnica sirve de clave;
-      // display_ref conserva exactamente la aclaración escrita en Cálculo.
-      const snapDisplayRefV136 = String((snap && (snap.display_ref || snap.visible_ref || snap.referencia_visible)) || '').trim();
-      const _techV136 = (value) => {
-        const m=String(value||'').trim().toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
-        return m ? ('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')) : '';
-      };
-      const snapTechnicalRefV136 = String((snap && (snap.technical_ref || snap.technicalRef)) || '').trim()
-        || _techV136(snapDisplayRefV136) || _techV136(snapVisibleRefV134);
-      const incomingRef = snapTechnicalRefV136 || explicitOpenRefV118 || snapVisibleRefV134 || focusRefV134;
-      const refCandidate = String(incomingRef || '').trim();
+      const incomingRef = explicitOpenRefV118 || ((typeof getFocusRef==="function") ? getFocusRef() : null);
+      const refCandidate = String(incomingRef || (snap && (snap.referencia || snap.ref)) || '').trim();
       if (!refCandidate) {
         console.warn('[PREP] Snap sin referencia: se ignora para evitar pedidos SIN_REF.');
         try { removeAny("prep_open_ts"); } catch(_) {}
@@ -2964,87 +2949,33 @@ function saveLinkMap(){
         return;
       }
       let refBase = refCandidate;
-      // V130 · Referencia visible + identidad técnica independiente.
-      // En pedidos compuestos la identidad estable sigue siendo groupId + partId /
-      // composite_part_reference (p.ej. OT-260828-001-A), pero si en Cálculo el
-      // usuario añade una aclaración a la referencia, esa referencia completa es la
-      // que se conserva y se muestra en Preparación y fases posteriores.
-      let existingCompositeStorageRefV130 = '';
-      let technicalPartRefV130 = '';
+      // Pedido compuesto: la identidad real de una partida es groupId + partId.
+      // Si se recalcula, se sustituye esa misma partida y nunca se crea un B (1).
       try{
         const earlyGroupId = String(snap.composite_group_id || snap.compositeGroupId || '').trim();
         const earlyPartId = String(snap.composite_part_id || snap.partId || '').trim();
         const earlyPartRef = String(snap.composite_part_reference || snap.partReference || '').trim();
-
-        // V131 · La identidad técnica se puede recuperar incluso cuando Cálculo no
-        // transporta metadatos composite. El sufijo A/B/C/D forma parte de la OT.
-        const technicalCodeV131 = (value) => {
-          const m=String(value||'').trim().toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
-          return m ? ('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')) : '';
-        };
-
-        // V136: la referencia escrita en Cálculo manda SOLO como etiqueta visible.
-        // La clave de Preparación sigue siendo la OT técnica, evitando duplicados y
-        // evitando que autoaperturas antiguas puedan borrar la aclaración.
-        const incomingVisibleRefV130 = snapDisplayRefV136
-          || String((snap && (snap.visible_ref || snap.referencia_visible)) || '').trim()
-          || String((snap && (snap.referencia || snap.ref)) || refCandidate || '').trim();
-        technicalPartRefV130 = snapTechnicalRefV136 || earlyPartRef || technicalCodeV131(incomingVisibleRefV130) || technicalCodeV131(refCandidate);
-        refBase = technicalPartRefV130 || refCandidate;
-
-        // Buscar la misma partida primero por identidad composite y, si esos campos no
-        // viajaron desde Cálculo, por el código OT técnico EXACTO (incluido -A/-B/-C/-D).
-        // Nunca se compara solo con la referencia maestra, así no se mezclan hermanas.
-        const seenKeys = new Set();
-        const aliasRefsV131 = [];
-        outerV130:
-        for(const storage of [localStorage,sessionStorage]){
-          try{
-            for(let i=0;i<storage.length;i++){
-              const key=storage.key(i);
-              if(!key || !key.startsWith('prep_meta_') || seenKeys.has(key)) continue;
-              seenKeys.add(key);
-              const keyRef=key.slice('prep_meta_'.length);
-              const existingMeta=JSON.parse(storage.getItem(key)||'{}')||{};
-              const existingGroup=String(existingMeta.composite_group_id||existingMeta.compositeGroupId||'').trim();
-              const existingPart=String(existingMeta.composite_part_id||existingMeta.compositePartId||'').trim();
-              const sameComposite=!!(earlyGroupId && earlyPartId && existingGroup===earlyGroupId && existingPart===earlyPartId);
-              const sameTechnical=!!(technicalPartRefV130 && technicalCodeV131(keyRef)===technicalPartRefV130);
-              if(sameComposite || sameTechnical){
-                aliasRefsV131.push(keyRef);
-                if(keyRef!==refBase && (!existingCompositeStorageRefV130 || keyRef===technicalPartRefV130)){
-                  existingCompositeStorageRefV130=keyRef;
+        if(earlyGroupId && earlyPartRef) refBase = earlyPartRef;
+        if(earlyGroupId && earlyPartId){
+          const seenKeys = new Set();
+          for(const storage of [localStorage,sessionStorage]){
+            try{
+              for(let i=0;i<storage.length;i++){
+                const key=storage.key(i);
+                if(!key || !key.startsWith('prep_meta_') || seenKeys.has(key)) continue;
+                seenKeys.add(key);
+                const existingMeta=JSON.parse(storage.getItem(key)||'{}')||{};
+                const existingGroup=String(existingMeta.composite_group_id||existingMeta.compositeGroupId||'').trim();
+                const existingPart=String(existingMeta.composite_part_id||existingMeta.compositePartId||'').trim();
+                if(existingGroup===earlyGroupId && existingPart===earlyPartId){
+                  refBase=key.slice('prep_meta_'.length);
+                  break;
                 }
               }
-            }
-          }catch(error){}
+            }catch(error){}
+          }
         }
-
-        // Si el dato entrante fuese la OT corta pero ya existe una etiqueta larga de
-        // esa MISMA partida, no dejamos que una apertura técnica posterior borre la nota.
-        // La referencia larga existente gana como presentación.
-        if(!snapDisplayRefV136 && technicalPartRefV130 && refBase===technicalPartRefV130){
-          const visibleExisting=aliasRefsV131
-            .filter(r=>r!==technicalPartRefV130 && technicalCodeV131(r)===technicalPartRefV130)
-            .sort((a,b)=>b.length-a.length)[0] || '';
-          if(visibleExisting) refBase=visibleExisting;
-        }
-
-        // Renombrado seguro de la ficha de Preparación: conserva metadatos y líneas
-        // existentes (incluidas recepciones) antes de reimportar el nuevo cálculo.
-        if(existingCompositeStorageRefV130 && existingCompositeStorageRefV130 !== refBase){
-          const oldMetaKeyV130 = KM(existingCompositeStorageRefV130);
-          const oldRecKeyV130 = KP(existingCompositeStorageRefV130);
-          const newMetaKeyV130 = KM(refBase);
-          const newRecKeyV130 = KP(refBase);
-          const oldMetaRawV130 = getAny(oldMetaKeyV130);
-          const oldRecRawV130 = getAny(oldRecKeyV130);
-          if(oldMetaRawV130 && !getAny(newMetaKeyV130)) setAny(newMetaKeyV130, oldMetaRawV130);
-          if(oldRecRawV130 && !getAny(newRecKeyV130)) setAny(newRecKeyV130, oldRecRawV130);
-          try{ removeAny(oldMetaKeyV130); }catch(_){ }
-          try{ removeAny(oldRecKeyV130); }catch(_){ }
-        }
-      }catch(error){ console.warn('[Preparación V130] referencia visible compuesta',error); }
+      }catch(error){}
 
 // UID de pedido:
 // - Si el pedido ya existe con esa referencia, REUTILIZAMOS su UID para NO crear "#2".
@@ -3098,10 +3029,13 @@ try{
 
       let metaParaGuardar = JSON.parse(getAny(KM(ref)) || "{}");
       metaParaGuardar.referencia = ref;
-      const displayRefV136 = String(snapDisplayRefV136 || metaParaGuardar.display_ref || metaParaGuardar.visible_ref || ref).trim();
-      metaParaGuardar.display_ref = displayRefV136;
-      metaParaGuardar.visible_ref = displayRefV136;
-      metaParaGuardar.referencia_visible = displayRefV136;
+      // V137 · La OT técnica sigue siendo la clave interna. La identificación escrita
+      // en Agenda/Cálculo se conserva solo como referencia visible.
+      const displayRefV137 = String((snap && (snap.display_ref || snap.visible_ref || snap.referencia_visible || snap.displayReference)) || metaParaGuardar.display_ref || metaParaGuardar.visible_ref || ref).trim();
+      metaParaGuardar.technical_ref = String((snap && (snap.technical_ref || snap.technicalRef)) || ref).trim() || ref;
+      metaParaGuardar.display_ref = displayRefV137 || ref;
+      metaParaGuardar.visible_ref = displayRefV137 || ref;
+      metaParaGuardar.referencia_visible = displayRefV137 || ref;
       metaParaGuardar.pedido_uid = pedidoUid;
       const agendaOrderId = String(snap.agenda_order_id || snap.orderId || snap.workOrderId || '').trim();
       if(agendaOrderId){
@@ -3109,14 +3043,6 @@ try{
         metaParaGuardar.orderId = agendaOrderId;
       }
       const compositeGroupId = String(snap.composite_group_id || snap.compositeGroupId || '').trim();
-      // V131: guardar siempre identidad técnica + referencia visible, aunque el
-      // payload de Cálculo no incluya campos composite.
-      if(technicalPartRefV130){
-        metaParaGuardar.technical_ref = technicalPartRefV130;
-        metaParaGuardar.display_ref = displayRefV136;
-        metaParaGuardar.visible_ref = displayRefV136;
-        metaParaGuardar.referencia_visible = displayRefV136;
-      }
       if(compositeGroupId){
         metaParaGuardar.composite_version = 1;
         metaParaGuardar.composite_group_id = compositeGroupId;
@@ -3128,11 +3054,6 @@ try{
         metaParaGuardar.composite_part_count = Math.max(2,Math.round(Number(snap.composite_part_count || snap.partCount)||2));
         metaParaGuardar.composite_part_concept = String(snap.composite_part_concept || snap.partConcept || snap.concepto || '').trim();
         metaParaGuardar.composite_part_quantity = Math.max(1,Math.round(Number(snap.composite_part_quantity || snap.partQuantity || qty)||1));
-        // V130: identidad técnica y etiqueta visible quedan separadas.
-        metaParaGuardar.technical_ref = String(technicalPartRefV130 || metaParaGuardar.composite_part_reference || '').trim();
-        metaParaGuardar.display_ref = displayRefV136;
-        metaParaGuardar.visible_ref = displayRefV136;
-        metaParaGuardar.referencia_visible = displayRefV136;
       }
 
       // Pedido ID inmutable (para abrir ficha aunque cambie el nombre/ref)
@@ -3384,39 +3305,6 @@ try{
       const materialesConsolidados = LDH_consolidarMaterialesDuplicados(materialesImport);
       setAny(KP(ref), JSON.stringify(materialesConsolidados));
       try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); setAny("prep_import_guard_ts", String(Date.now())); }catch(_){ }
-
-      // V133 · Si la referencia visible contiene una aclaración, la antigua llave
-      // técnica de ESTA MISMA partida (OT-...-A/B/C/D) queda obsoleta.
-      // La eliminamos ahora; LiveSync V6, parcheado abajo, impedirá que una copia
-      // antigua de Firebase la vuelva a introducir antes de publicar la migración.
-      try{
-        const techAliasV133=String(technicalPartRefV130||'').trim();
-        if(techAliasV133 && techAliasV133!==ref){
-          try{ removeAny(KM(techAliasV133)); }catch(_){ }
-          try{ removeAny(KP(techAliasV133)); }catch(_){ }
-          window.__LDH_PREP_FRESH_TECH_ALIAS_V133=techAliasV133;
-          window.__LDH_PREP_FRESH_VISIBLE_REF_V133=ref;
-          try{ sessionStorage.setItem('__LDH_PREP_FRESH_TECH_ALIAS_V133',techAliasV133); }catch(_){ }
-          try{ sessionStorage.setItem('__LDH_PREP_FRESH_VISIBLE_REF_V133',ref); }catch(_){ }
-        }
-      }catch(error){ console.warn('[Preparación V133] limpieza alias técnico residual',error); }
-
-      // V131 · Una llave antigua de apertura (normalmente la OT técnica corta)
-      // no puede volver a abrir la misma partida sin su nota después de importar.
-      try{
-        window.__LDH_PREP_FRESH_VISIBLE_REF_V131 = ref;
-        const techNowV131 = String(technicalPartRefV130 || '').trim();
-        for(const storage of [localStorage,sessionStorage]){
-          try{
-            const oldOpen=String(storage.getItem('ldh_open_prep_after_init_ref')||'').trim();
-            if(oldOpen && techNowV131){
-              const m=oldOpen.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
-              const oldTech=m?('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')):'';
-              if(oldTech===techNowV131) storage.setItem('ldh_open_prep_after_init_ref',ref);
-            }
-          }catch(_){ }
-        }
-      }catch(_){ }
 removeAny("latest_materials_v1");
           removeAny("pedido_en_preparacion");
           removeAny("prep_pedido_payload");
@@ -16017,22 +15905,6 @@ function LDH_prepVolverMenu(){
            k === "prep_import_guard_ts";
   }
 
-  // V133 · Una importación recién hecha con referencia visible larga debe poder
-  // borrar de la nube la ficha técnica corta de la misma partida. Sin esta regla,
-  // applyRemote() veía OT-...-A en Firebase y la recreaba localmente después de
-  // haberla migrado a OT-...-A (aclaración).
-  function technicalPartRefV133(value){
-    const m=String(value||'').trim().toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})[\s_-]*([A-Z]{1,3})\b/);
-    return m ? ('OT-'+m[1]+'-'+m[2]+'-'+m[3]) : '';
-  }
-  function isFreshObsoleteTechnicalAliasV133(k,info){
-    if(!info || !info.fresh || !info.guardRef) return false;
-    const visible=String(info.guardRef||'').trim();
-    const tech=technicalPartRefV133(visible);
-    if(!tech || visible.toUpperCase()===tech) return false;
-    return k === 'prep_meta_' + tech || k === 'prep_recepcion_' + tech;
-  }
-
   function applyRemote(remote){
     if(!remote || !remote.data) return false;
     const rdata = remote.data || {};
@@ -16051,16 +15923,6 @@ function LDH_prepVolverMenu(){
     try{
       Array.from(all).forEach(k => {
         if(!isPrepKey(k)) return;
-
-        // V133: durante una importación fresca con aclaración visible, la clave
-        // técnica corta de esa misma partida es una versión antigua. No se restaura
-        // desde Firebase; se mantiene borrada y se publica ese borrado a continuación.
-        if(isFreshObsoleteTechnicalAliasV133(k,freshInfo)){
-          if(getValue(k) !== null) changed = true;
-          removeBoth(k);
-          preservedFreshImport = true;
-          return;
-        }
 
         // V54: una partida recién importada desde Cálculo es la autoridad para
         // sus dos claves, aunque Firebase conserve una versión anterior de la
@@ -29544,417 +29406,10 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 })();
 </script>
 
-<script id="LDH_PREP_V133_LIMPIA_ALIAS_TECNICO_RESIDUAL_20260901">
-(function(){
-  window.LDH_PREP_V133_LIMPIA_ALIAS_TECNICO_RESIDUAL='PREPARACION-V133-LIMPIA-ALIAS-TECNICO-RESIDUAL-20260901';
-  document.documentElement.dataset.ldhPrepBuild='V133';
-  console.info('[Preparación V133] La sincronización no puede reintroducir OT técnica corta tras migrarla a una referencia visible con aclaración.');
-})();
+<!-- LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS_20260902 -->
+<script id="LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS_20260902">
+window.LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS='PREPARACION-V137-BASE-V129-REFERENCIA-VISIBLE-SIN-WRAPPERS-20260902';
+document.documentElement.dataset.ldhPrepBuild='V137';
+console.info('[Preparación V137] Base V129 estable + display_ref; sin wrappers V130-V136.');
 </script>
-
-<script id="LDH_PREP_V131_REFERENCIA_VISIBLE_PREVALECE_20260901">
-(function(){
-  window.LDH_PREP_V131_REFERENCIA_VISIBLE_PREVALECE='PREPARACION-V131-REFERENCIA-VISIBLE-PREVALECE-20260901';
-  document.documentElement.dataset.ldhPrepBuild='V131';
-  console.info('[Preparación V131] La referencia visible de Cálculo prevalece sobre llaves técnicas antiguas de la misma partida OT.');
-})();
-</script>
-
-
-<script id="LDH_PREP_V132_PREFERIR_ALIAS_VISIBLE_PARTIDA_20260901">
-(function(){
-  window.LDH_PREP_V132_PREFERIR_ALIAS_VISIBLE_PARTIDA='PREPARACION-V132-PREFERIR-ALIAS-VISIBLE-PARTIDA-20260901';
-  document.documentElement.dataset.ldhPrepBuild='V132';
-
-  function s(v){ return String(v == null ? '' : v).trim(); }
-  function technicalPart(v){
-    const m=s(v).toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})[\s_-]*([A-Z]{1,3})\b/);
-    return m ? ('OT-'+m[1]+'-'+m[2]+'-'+m[3]) : '';
-  }
-  function allPrepRefs(){
-    const set=new Set();
-    for(const st of [localStorage,sessionStorage]){
-      try{
-        for(let i=0;i<st.length;i++){
-          const k=st.key(i)||'';
-          if(k.startsWith('prep_meta_')) set.add(k.slice('prep_meta_'.length));
-          else if(k.startsWith('prep_recepcion_')) set.add(k.slice('prep_recepcion_'.length));
-        }
-      }catch(_){ }
-    }
-    return [...set].map(s).filter(Boolean);
-  }
-  function visibleAlias(wanted){
-    const raw=s(wanted);
-    const tech=technicalPart(raw);
-    if(!raw || !tech) return raw;
-
-    // Si ya se pide una referencia con aclaración, nunca la degradamos a la técnica.
-    if(raw.toUpperCase() !== tech) return raw;
-
-    const aliases=allPrepRefs()
-      .filter(r=>technicalPart(r)===tech && r.toUpperCase()!==tech)
-      .sort((a,b)=>b.length-a.length || a.localeCompare(b,'es'));
-    return aliases[0] || raw;
-  }
-  window.LDH_prepVisibleAliasV132=visibleAlias;
-
-  function rewriteFocusKeys(){
-    for(const st of [localStorage,sessionStorage]){
-      for(const key of ['prep_focus_ref','prep_last_import_ref','prep_focus_hash_ref','prep_auto_open_ref','ldh_auto_open_ref','ldh_open_prep_after_init_ref']){
-        try{
-          const old=s(st.getItem(key));
-          const next=visibleAlias(old);
-          if(old && next && next!==old) st.setItem(key,next);
-        }catch(_){ }
-      }
-    }
-  }
-
-  function install(){
-    try{
-      rewriteFocusKeys();
-      const fn=window.abrirPedido;
-      if(typeof fn!=='function' || fn.__ldhV132VisibleAlias) return;
-      const wrapped=function(ref){
-        return fn.call(this,visibleAlias(ref));
-      };
-      wrapped.__ldhV132VisibleAlias=true;
-      wrapped.__ldhV132Base=fn;
-      window.abrirPedido=wrapped;
-    }catch(_){ }
-  }
-
-  install();
-  [40,120,300,700,1500,3000,6000,10000].forEach(ms=>setTimeout(install,ms));
-  console.info('[Preparación V132] Una OT compuesta corta (A/B/C/D) abre su alias visible completo si existe, sin cambiar la identidad técnica.');
-})();
-</script>
-
-
-<script id="LDH_PREP_V134_REFERENCIA_CALCULO_AUTORITATIVA_20260901">
-(function(){
-  window.LDH_PREP_V134_REFERENCIA_CALCULO_AUTORITATIVA='PREPARACION-V134-REFERENCIA-CALCULO-AUTORITATIVA-20260901';
-  document.documentElement.dataset.ldhPrepBuild='V134';
-  console.info('[Preparación V134] La referencia visible recibida desde Cálculo prevalece sobre prep_focus_ref técnico de Agenda.');
-})();
-</script>
-
-<script id="LDH_PREP_V135_DISPLAY_REF_AUTORITATIVA_20260902">
-(function(){
-  'use strict';
-  const KEY='LDH_PREP_VISIBLE_REF_V135';
-  const MAX_AGE=30*60*1000;
-  const BUILD='PREPARACION-V135-DISPLAY-REF-AUTORITATIVA-20260902';
-  window.LDH_PREP_V135_DISPLAY_REF_AUTORITATIVA=BUILD;
-  document.documentElement.dataset.ldhPrepBuild='V135';
-
-  function s(v){ return String(v==null?'':v).trim(); }
-  function tech(v){
-    const m=s(v).toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
-    return m ? ('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')) : '';
-  }
-  function sameTech(a,b){ const ta=tech(a),tb=tech(b); return !!ta && ta===tb; }
-  function raw(k){
-    try{ if(typeof getAny==='function'){ const v=getAny(k); if(v!=null&&v!=='') return v; } }catch(_){ }
-    try{ const v=localStorage.getItem(k); if(v!=null&&v!=='') return v; }catch(_){ }
-    try{ const v=sessionStorage.getItem(k); if(v!=null&&v!=='') return v; }catch(_){ }
-    return '';
-  }
-  function write(k,v){
-    try{ if(typeof setAny==='function'){ setAny(k,v); return; } }catch(_){ }
-    try{ localStorage.setItem(k,v); }catch(_){ }
-  }
-  function parse(v){ try{ return JSON.parse(v||''); }catch(_){ return null; } }
-
-  function hintCandidates(){
-    const out=[];
-    for(const storage of [sessionStorage,localStorage]){
-      try{
-        const h=parse(storage.getItem(KEY));
-        if(h){
-          const vr=s(h.visibleRef||h.display_ref||h.referencia||h.ref);
-          const ts=Number(h.ts||0)||0;
-          if(vr && (!ts || Date.now()-ts<MAX_AGE)) out.push({ref:vr,ts:ts||Date.now(),source:KEY});
-        }
-      }catch(_){ }
-      for(const key of ['latest_materials_v1','prep_pedido_payload','pedido_en_preparacion','prep_materiales']){
-        try{
-          const o=parse(storage.getItem(key));
-          const vr=s(o&&(o.display_ref||o.visible_ref||o.referencia||o.ref));
-          if(vr) out.push({ref:vr,ts:Number(o.ts||o.timestamp||0)||0,source:key});
-        }catch(_){ }
-      }
-    }
-    try{
-      const nm=s(window.name);
-      if(nm.startsWith('LDH_PREP|')){
-        const o=parse(nm.slice('LDH_PREP|'.length));
-        const vr=s(o&&(o.display_ref||o.visible_ref||o.referencia||o.ref));
-        if(vr) out.push({ref:vr,ts:Number(o.ts||o.timestamp||0)||0,source:'window.name'});
-      }
-    }catch(_){ }
-    return out;
-  }
-
-  function bestHintFor(ref){
-    const t=tech(ref);
-    if(!t) return '';
-    const c=hintCandidates().filter(x=>sameTech(x.ref,ref));
-    if(!c.length) return '';
-    c.sort((a,b)=>{
-      const aLong=s(a.ref).toUpperCase()!==t ? 1:0;
-      const bLong=s(b.ref).toUpperCase()!==t ? 1:0;
-      return bLong-aLong || s(b.ref).length-s(a.ref).length || (b.ts||0)-(a.ts||0);
-    });
-    return s(c[0].ref);
-  }
-
-  function metaFor(ref){
-    try{ return parse(raw('prep_meta_'+ref))||{}; }catch(_){ return {}; }
-  }
-  function displayFor(ref,meta){
-    const m=meta||metaFor(ref);
-    const stored=s(m.display_ref||m.visible_ref||m.referencia_visible||'');
-    if(stored && sameTech(stored,ref)) return stored;
-    const h=bestHintFor(ref);
-    if(h && sameTech(h,ref)) return h;
-    return s(ref);
-  }
-  window.LDH_prepDisplayRefV135=displayFor;
-
-  function persistDisplay(ref){
-    ref=s(ref); if(!ref) return '';
-    const m=metaFor(ref);
-    const display=displayFor(ref,m);
-    if(display && display!==ref && sameTech(display,ref)){
-      let changed=false;
-      if(s(m.display_ref)!==display){m.display_ref=display;changed=true;}
-      if(s(m.visible_ref)!==display){m.visible_ref=display;changed=true;}
-      const t=tech(ref);
-      if(t && s(m.technical_ref)!==t){m.technical_ref=t;changed=true;}
-      // `referencia` se mantiene técnica para no romper reservas/asignaciones antiguas.
-      if(changed){ try{ write('prep_meta_'+ref,JSON.stringify(m)); }catch(_){ } }
-      try{
-        if(typeof metaActual!=='undefined' && s(typeof refActual!=='undefined'?refActual:'')===ref){
-          metaActual=m;
-        }
-      }catch(_){ }
-    }
-    return display||ref;
-  }
-
-  function applyCurrent(){
-    let ref='';
-    try{ ref=s(typeof refActual!=='undefined'?refActual:''); }catch(_){ }
-    if(!ref) return;
-    const display=persistDisplay(ref);
-    try{
-      const el=document.getElementById('ref');
-      if(el && display && s(el.textContent)!==display) el.textContent=display;
-    }catch(_){ }
-  }
-
-  function applyList(){
-    try{
-      document.querySelectorAll('#lista .item[data-ref]').forEach(item=>{
-        const ref=s(item.dataset.ref); if(!ref) return;
-        const display=persistDisplay(ref);
-        if(!display || display===ref) return;
-        const head=item.querySelector(':scope > div:first-child span[style*="font-weight:bold"], :scope > div:first-child span');
-        if(head && s(head.textContent)!==display) head.textContent=display;
-        item.dataset.displayRef=display;
-      });
-    }catch(_){ }
-  }
-
-  function scheduleApply(){
-    [0,40,120,350,900,1800].forEach(ms=>setTimeout(()=>{applyCurrent();applyList();},ms));
-  }
-
-  function wrap(name,after){
-    try{
-      const fn=window[name];
-      if(typeof fn!=='function' || fn.__ldhV135DisplayRef) return;
-      const wrapped=function(){
-        const r=fn.apply(this,arguments);
-        try{ after(); }catch(_){ }
-        return r;
-      };
-      wrapped.__ldhV135DisplayRef=true;
-      wrapped.__ldhV135Base=fn;
-      window[name]=wrapped;
-    }catch(_){ }
-  }
-
-  function install(){
-    wrap('abrirPedido',scheduleApply);
-    wrap('renderTabla',scheduleApply);
-    wrap('cargarLista',()=>{setTimeout(applyList,0);setTimeout(applyList,150);});
-  }
-  install();
-  [50,180,500,1200,3000,6000].forEach(ms=>setTimeout(()=>{install();scheduleApply();},ms));
-  document.addEventListener('DOMContentLoaded',scheduleApply);
-  window.addEventListener('load',scheduleApply);
-
-  // Observador final: ninguna capa antigua puede volver a pintar la OT corta en cabecera.
-  try{
-    const el=document.getElementById('ref');
-    if(el){
-      const obs=new MutationObserver(()=>applyCurrent());
-      obs.observe(el,{childList:true,subtree:true,characterData:true});
-    }
-  }catch(_){ }
-
-  console.info('[Preparación V135] display_ref separado de la OT técnica; cabecera y lista conservan la aclaración escrita en Cálculo.');
-})();
-</script>
-
-<!-- LDH V136 · DISPLAY_REF DESDE URL, INDEPENDIENTE DE LA OT TÉCNICA -->
-<script id="LDH_PREP_V136_DISPLAY_REF_URL_20260902">
-(function(){
-  'use strict';
-  if(window.__LDH_PREP_V136_DISPLAY_REF_URL) return;
-  window.__LDH_PREP_V136_DISPLAY_REF_URL='PREP-V136-DISPLAY-REF-URL-20260902';
-  document.documentElement.dataset.ldhPrepBuild='V136';
-
-  const s=v=>String(v==null?'':v).trim();
-  const tech=v=>{
-    const m=s(v).toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
-    return m ? ('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')) : '';
-  };
-  const sameTech=(a,b)=>{ const ta=tech(a),tb=tech(b); return !!ta&&ta===tb; };
-  const parse=v=>{ try{return JSON.parse(v||'');}catch(_){return null;} };
-
-  function queryDisplay(){
-    try{return s(new URL(location.href).searchParams.get('displayRef'));}catch(_){return '';}
-  }
-  function queryOpen(){
-    try{const u=new URL(location.href);return s(u.searchParams.get('openRef')||u.searchParams.get('ref')||u.searchParams.get('referencia'));}catch(_){return '';}
-  }
-
-  function readStored(technical){
-    for(const st of [sessionStorage,localStorage]){
-      try{ const v=s(st.getItem('LDH_PREP_VISIBLE_REF_V136_'+technical)); if(v&&sameTech(v,technical)) return v; }catch(_){ }
-      try{
-        const h=parse(st.getItem('LDH_PREP_VISIBLE_REF_V136'));
-        const v=s(h&&(h.display_ref||h.visibleRef||h.visible_ref));
-        if(v&&sameTech(v,technical)) return v;
-      }catch(_){ }
-    }
-    return '';
-  }
-
-  function displayFor(ref,meta){
-    const t=tech(ref); if(!t) return s(ref);
-    const q=queryDisplay(); if(q&&sameTech(q,t)) return q;
-    const m=meta||{};
-    for(const v of [m.display_ref,m.visible_ref,m.referencia_visible]){
-      if(s(v)&&sameTech(v,t)) return s(v);
-    }
-    const st=readStored(t); if(st) return st;
-    return s(ref);
-  }
-
-  function persistFor(ref){
-    ref=s(ref); const t=tech(ref); if(!t) return s(ref);
-    let display=displayFor(ref,null);
-    if(!display||!sameTech(display,t)) display=ref;
-    const refs=new Set([ref,t]);
-    try{
-      for(const st of [localStorage,sessionStorage]){
-        for(let i=0;i<st.length;i++){
-          const k=st.key(i)||'';
-          if(k.startsWith('prep_meta_')){
-            const r=k.slice('prep_meta_'.length);
-            if(sameTech(r,t)) refs.add(r);
-          }
-        }
-      }
-    }catch(_){ }
-    refs.forEach(r=>{
-      for(const st of [localStorage,sessionStorage]){
-        try{
-          const k='prep_meta_'+r; const raw=st.getItem(k); if(!raw) continue;
-          const m=parse(raw)||{};
-          m.display_ref=display; m.visible_ref=display; m.referencia_visible=display; m.technical_ref=t;
-          st.setItem(k,JSON.stringify(m));
-        }catch(_){ }
-      }
-    });
-    try{ sessionStorage.setItem('LDH_PREP_VISIBLE_REF_V136_'+t,display); }catch(_){ }
-    try{ localStorage.setItem('LDH_PREP_VISIBLE_REF_V136_'+t,display); }catch(_){ }
-    return display;
-  }
-
-  function currentTechnical(){
-    try{ if(typeof refActual!=='undefined'&&s(refActual)) return tech(refActual)||s(refActual); }catch(_){ }
-    return tech(queryOpen())||tech(queryDisplay())||queryOpen();
-  }
-
-  let applying=false;
-  function applyCurrent(){
-    if(applying) return;
-    applying=true;
-    try{
-      let ref=''; try{ ref=s(typeof refActual!=='undefined'?refActual:''); }catch(_){ }
-      if(!ref) ref=queryOpen()||queryDisplay();
-      if(!ref) return;
-      const display=persistFor(ref);
-      const el=document.getElementById('ref');
-      if(el&&display&&s(el.textContent)!==display) el.textContent=display;
-    }finally{ applying=false; }
-  }
-
-  function applyList(){
-    try{
-      document.querySelectorAll('#lista .item[data-ref]').forEach(item=>{
-        const r=s(item.dataset.ref); if(!r) return;
-        let m={};
-        try{m=parse(localStorage.getItem('prep_meta_'+r)||sessionStorage.getItem('prep_meta_'+r)||'{}')||{};}catch(_){ }
-        const display=displayFor(r,m);
-        if(!display||display===r) return;
-        const first=item.querySelector('span[style*="font-weight:bold"],span');
-        if(first&&s(first.textContent)!==display) first.textContent=display;
-        item.dataset.displayRef=display;
-      });
-    }catch(_){ }
-  }
-
-  function after(){ [0,20,80,200,500,1000].forEach(ms=>setTimeout(()=>{applyCurrent();applyList();},ms)); }
-  function wrap(name){
-    try{
-      const fn=window[name]; if(typeof fn!=='function'||fn.__ldhV136DisplayRef) return;
-      const w=function(){ const r=fn.apply(this,arguments); after(); return r; };
-      w.__ldhV136DisplayRef=true; w.__ldhV136Base=fn; window[name]=w;
-    }catch(_){ }
-  }
-  function install(){ wrap('abrirPedido'); wrap('cargarLista'); wrap('renderTabla'); }
-
-  // Capturar displayRef antes de que cualquier autoapertura antigua pinte la OT técnica.
-  try{
-    const d=queryDisplay(); const t=tech(d)||tech(queryOpen());
-    if(d&&t&&sameTech(d,t)){
-      try{ sessionStorage.setItem('LDH_PREP_VISIBLE_REF_V136_'+t,d); }catch(_){ }
-      try{ localStorage.setItem('LDH_PREP_VISIBLE_REF_V136_'+t,d); }catch(_){ }
-    }
-  }catch(_){ }
-
-  install(); after();
-  [50,150,400,900,1800,3500,7000].forEach(ms=>setTimeout(()=>{install();after();},ms));
-  document.addEventListener('DOMContentLoaded',after);
-  window.addEventListener('load',after);
-
-  try{
-    const target=document.getElementById('ref');
-    if(target) new MutationObserver(()=>applyCurrent()).observe(target,{childList:true,subtree:true,characterData:true});
-    const list=document.getElementById('lista');
-    if(list) new MutationObserver(()=>applyList()).observe(list,{childList:true,subtree:true,characterData:true});
-  }catch(_){ }
-
-  console.info('[Preparación V136] displayRef URL manda visualmente; OT técnica permanece separada para Stock/sincronización.');
-})();
-</script>
-
 </body></html>
-
