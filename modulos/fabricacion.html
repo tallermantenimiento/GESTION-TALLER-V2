@@ -51,7 +51,8 @@
     table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid rgba(148,163,184,.15);vertical-align:middle;text-align:left}
     th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#93c5fd;background:rgba(15,23,42,.5)}
     tr:hover td{background:rgba(34,211,238,.04)}
-    .ref{font-weight:900;color:#fff}.concept{font-size:12px;color:#a7f3d0;margin-top:3px}.muted{color:var(--muted);font-size:12px}
+    .ref{font-weight:900;color:#fff}.concept{font-size:12px;color:#a7f3d0;margin-top:5px}.muted{color:var(--muted);font-size:12px}
+    .ldh-ref-stack{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0}.ldh-tech-ref{display:inline-flex;align-items:center;padding:3px 7px;border:1px solid rgba(34,211,238,.45);border-radius:8px;background:rgba(8,145,178,.16);color:#7dd3fc;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;font-weight:950;letter-spacing:.045em;line-height:1.15;overflow-wrap:anywhere}.ldh-work-ident{display:block;color:#fde68a;font-size:15px;font-weight:950;line-height:1.2;overflow-wrap:anywhere}
     .flow{display:flex;gap:6px;flex-wrap:wrap}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
     .empty{text-align:center;color:var(--muted);padding:40px 14px;border:1px dashed rgba(148,163,184,.25);border-radius:14px;background:rgba(15,23,42,.35)}
     .toast{position:fixed;right:16px;bottom:16px;background:#042f2e;border:1px solid rgba(16,185,129,.45);color:#d1fae5;border-radius:12px;padding:12px 14px;font-weight:900;box-shadow:var(--shadow);display:none;z-index:50}
@@ -66,7 +67,7 @@
     <span class="spacer"></span>
     <a class="btn small" href="preparacion_pedidos.html">← Preparación</a>
     <a class="btn small" href="almacen.html">Almacén →</a>
-    <button class="btn small" onclick="App.reload()">Actualizar</button><button class="btn small" onclick="window.LDH_fabricacionPublishNow && window.LDH_fabricacionPublishNow()">Publicar nube</button><button class="btn small" onclick="window.LDH_fabricacionRestoreCloudNow && window.LDH_fabricacionRestoreCloudNow()">Restaurar nube</button>
+    <button class="btn small" onclick="App.reload();window.LDH_fabricacionRefreshIdentifications?.()">Actualizar</button><button class="btn small" onclick="window.LDH_fabricacionPublishNow && window.LDH_fabricacionPublishNow()">Publicar nube</button><button class="btn small" onclick="window.LDH_fabricacionRestoreCloudNow && window.LDH_fabricacionRestoreCloudNow()">Restaurar nube</button>
   </div>
 
   <main class="wrap">
@@ -170,6 +171,30 @@
     item=item&&typeof item==='object'?item:{};
     return String(item.display_ref||item.displayReference||item.visible_ref||item.referencia_visible||item.ref||item.referencia||'').trim();
   }
+  function technicalWorkRef(item){
+    item=item&&typeof item==='object'?item:{};
+    const explicit=String(item.technical_ref||item.technicalRef||item.composite_part_reference||'').trim();
+    if(explicit)return explicit;
+    const raw=String(item.ref||item.referencia||'').trim();
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
+    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw;
+  }
+  function workIdentification(item){
+    item=item&&typeof item==='object'?item:{};
+    let id=String(item.identification||item.workIdentification||item.workLabel||item.referenceLabel||item.partDescription||item.composite_part_description||'').trim();
+    const tech=technicalWorkRef(item),full=visibleWorkRef(item);
+    if(!id&&full&&tech&&full!==tech){let rest=full.toLowerCase().startsWith(tech.toLowerCase())?full.slice(tech.length):full;rest=rest.replace(/^[\s()\[\]{}:;,.·\-–—]+|[\s()\[\]{}:;,.·\-–—]+$/g,'').trim();if(rest&&rest!==tech)id=rest;}
+    // V11: para trabajos que YA estaban en Fabricación antes de crear este campo,
+    // usa como respaldo la identificación actual de Agenda, sin alterar la OT ni el flujo.
+    if(!id){
+      try{
+        const map=window.__LDH_FAB_AGENDA_IDENT_BY_REF||{};
+        id=String(map[String(tech||'').toUpperCase()]||'').trim();
+      }catch(_e){}
+    }
+    return id;
+  }
+  function workRefVisualHTML(item){const tech=technicalWorkRef(item),id=workIdentification(item);return `<span class="ldh-ref-stack"><span class="ldh-tech-ref">${esc(tech||'—')}</span>${id?`<span class="ldh-work-ident">${esc(id)}</span>`:''}</span>`;}
 
   // V8 · Una OT tiene una sola identidad aunque una copia antigua guarde
   // solo el código (OT-xxxxxx-xxx) y otra guarde código + descripción.
@@ -322,6 +347,9 @@
           ref,
           referencia: ref,
           technical_ref: String(meta.technical_ref || meta.composite_part_reference || ref).trim() || ref,
+          identification: String(meta.identification || meta.workIdentification || meta.workLabel || meta.referenceLabel || meta.composite_part_description || "").trim(),
+          workIdentification: String(meta.identification || meta.workIdentification || meta.workLabel || meta.referenceLabel || meta.composite_part_description || "").trim(),
+          workLabel: String(meta.identification || meta.workIdentification || meta.workLabel || meta.referenceLabel || meta.composite_part_description || "").trim(),
           display_ref: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
           displayReference: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
           visible_ref: String(meta.display_ref || meta.displayReference || meta.visible_ref || meta.referencia_visible || ref).trim() || ref,
@@ -461,6 +489,11 @@
       item.ref = ref;
       item.referencia = ref;
       const visibleRef = visibleWorkRef(item) || ref;
+      const identification = workIdentification(item);
+      item.technical_ref = technicalWorkRef(item) || ref;
+      item.identification = identification;
+      item.workIdentification = identification;
+      item.workLabel = identification;
       item.display_ref = visibleRef;
       item.displayReference = visibleRef;
       item.visible_ref = visibleRef;
@@ -723,7 +756,7 @@
       return `
         <tr>
           <td>
-            <div class="ref">${esc(visibleWorkRef(item))}</div>
+            <div class="ref">${workRefVisualHTML(item)}</div>
             <div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div>
             <div class="muted">${esc(item.company || item.empresa || "Sin empresa")} ${uaPill}</div>
           </td>
@@ -1003,7 +1036,8 @@
       if(!item) return;
       const f = this.ensureFlow(item);
       alert(
-        "Referencia: " + visibleWorkRef(item) + "\n" +
+        "Referencia técnica: " + technicalWorkRef(item) + "\n" +
+        (workIdentification(item) ? "Identificación: " + workIdentification(item) + "\n" : "") +
         "Concepto: " + (item.concept || item.concepto || "") + "\n" +
         "Empresa: " + (item.company || item.empresa || "") + "\n\n" +
         "Fabricación: " + n(f.fab) + "\n" +
@@ -1619,11 +1653,37 @@ setTimeout(hookApp, 1500);
     if(!app) app=initializeApp(firebaseConfig,'ldh-workflow-v2-client');
     const auth=getAuth(app), db=getFirestore(app);
     const ordersCol=collection(db,'taller_data','work_orders','orders');
+    async function refreshAgendaIdentifications(){
+      try{
+        const snap=await getDocs(ordersCol);
+        const map={};
+        const add=(ref,label)=>{
+          ref=String(ref||'').trim().toUpperCase(); label=String(label||'').trim();
+          if(ref&&label) map[ref]=label;
+        };
+        snap.docs.forEach(ds=>{
+          const row=ds.data()||{};
+          add(row.reference||row.ref,row.identification||row.workIdentification||row.workLabel||row.referenceLabel);
+          const comp=row.compositeV1&&typeof row.compositeV1==='object'?row.compositeV1:null;
+          if(comp&&Array.isArray(comp.parts)){
+            comp.parts.forEach(part=>add(part&&part.reference,part&&(part.partDescription||part.partLabel||part.identification||part.workIdentification||part.workLabel||part.referenceLabel)));
+          }
+        });
+        window.__LDH_FAB_AGENDA_IDENT_BY_REF=map;
+        try{window.App?.render?.();}catch(_e){}
+        return map;
+      }catch(error){
+        console.warn('[Fabricación V11] no se pudo refrescar identificación desde Agenda',error);
+        return window.__LDH_FAB_AGENDA_IDENT_BY_REF||{};
+      }
+    }
+    window.LDH_fabricacionRefreshIdentifications=refreshAgendaIdentifications;
     let authReady=false;
     onAuthStateChanged(auth,user=>{
       if(user){
         authReady=true;
         readyResolve(true);
+        setTimeout(()=>refreshAgendaIdentifications(),450);
         const reconcile=delay=>setTimeout(()=>{
           try{ window.App?.syncAllWorkflow?.('fabricacion_reconciliacion'); }
           catch(error){ console.warn('[Workflow V2] reconciliación',error); }
@@ -1906,5 +1966,10 @@ console.info('[Fabricación V10] Referencia visible separada de OT técnica; par
 })();
 </script>
 
+<!-- LDH_FABRICACION_V11_IDENTIFICACION_VISUAL_UNIFICADA_20260902 -->
+<script id="LDH_FABRICACION_V11_BUILD_20260902">
+window.LDH_FABRICACION_IDENTIFICACION_VISUAL_V11='FABRICACION-V11-IDENTIFICACION-VISUAL-UNIFICADA-20260902';
+document.documentElement.dataset.ldhFabricacionBuild='V11';
+</script>
 </body>
 </html>
