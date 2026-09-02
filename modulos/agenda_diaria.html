@@ -10108,8 +10108,43 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
   }
   function liveForOrder(order){
     if(!order) return null;
+
+    /* LDH_COMPOSITE_PARENT_FLOW_SUM_V1_20260902
+     * Un pedido compuesto conserva quantity=1 en la orden padre, pero sus pills
+     * FAB/PINT/ALM/ENT deben sumar el flujo real de cada partida tecnica A/B/C/...
+     * No modificamos la cantidad del pedido padre ni mezclamos referencias: cada
+     * partida se localiza primero por orderId+referencia tecnica y luego por ref.
+     */
+    const orderId=text(order.id);
+    const comp=order&&order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:null;
+    if(comp&&comp.enabled!==false&&Array.isArray(comp.parts)&&comp.parts.length){
+      const aggregate={fabricacion:0,pintura:0,almacen:0,entregado:0,atMs:0,priority:30};
+      const seen=new Set();
+      let found=false;
+
+      comp.parts.forEach(part=>{
+        const partReference=text(part&&(part.reference||part.partReference||part.displayReference||part.display_ref));
+        const canonicalPart=refKey(partReference);
+        if(!canonicalPart||seen.has(canonicalPart)) return;
+        seen.add(canonicalPart);
+
+        const livePart=(orderId?byId.get(orderId+'|'+canonicalPart):null) || byRef.get(canonicalPart);
+        if(!livePart) return;
+        found=true;
+        aggregate.fabricacion+=number(livePart.fabricacion);
+        aggregate.pintura+=number(livePart.pintura);
+        aggregate.almacen+=number(livePart.almacen);
+        aggregate.entregado+=number(livePart.entregado);
+        aggregate.atMs=Math.max(aggregate.atMs,number(livePart.atMs));
+      });
+
+      // En cuanto existe flujo de al menos una partida, el padre se deriva SOLO
+      // del desglose. Asi una copia antigua del padre (p.ej. FAB 1) no pisa A+B+C.
+      if(found) return aggregate;
+    }
+
     const canonical=refKey(order.reference);
-    return byId.get(text(order.id)+'|'+canonical) || byRef.get(canonical);
+    return byId.get(orderId+'|'+canonical) || byRef.get(canonical);
   }
   function applyLiveFlows(orders){
     let changed = false;
