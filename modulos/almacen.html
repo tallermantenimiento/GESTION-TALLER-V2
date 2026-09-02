@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="es">
 <head>
-  <!-- BUILD: ALMACEN-DESPLEGABLE-PERSISTENTE-V2-ID-VISUAL-GLOBAL-DELETE-20260902 -->
+  <!-- BUILD: ALMACEN-V3-ID-VISUAL-GLOBAL-DELETE-DEDUP-OT-20260902 -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Almacén · Gestión Taller</title>
@@ -394,10 +394,46 @@
 
     itemAlmacen(item){ const f = item.flow || {}; return n(f.almacen ?? f.alm ?? item.almacen ?? item.enAlmacen ?? 0); },
     itemEntregado(item){ const f = item.flow || {}; return n(f.entregado ?? item.delivered ?? item.entregado ?? 0); },
+
+    // V3 · Una OT técnica solo puede aparecer una vez por listado.
+    // No suma cantidades ni modifica datos: elige una de las copias existentes,
+    // priorizando la fase más avanzada, la actualización más reciente y el registro
+    // que conserva más información visible.
+    dedupeByTechnicalRef(items){
+      const best=new Map();
+      const score=item=>{
+        const f=item&&item.flow&&typeof item.flow==='object'?item.flow:{};
+        const fab=n(f.fab ?? f.fabricacion ?? (item&&item.fab) ?? 0);
+        const pint=n(f.pintura ?? (item&&item.pintura) ?? 0);
+        const alm=this.itemAlmacen(item);
+        const ent=this.itemEntregado(item);
+        const progress=ent*4+alm*3+pint*2+fab;
+        let updated=0;
+        [item&&item.localFlowUpdatedAt,item&&item.updatedAt,item&&item.lastUpdate,item&&item.entregado_ts,item&&item.almacen_ts].forEach(v=>{
+          const ms=Date.parse(String(v||'')); if(Number.isFinite(ms))updated=Math.max(updated,ms);
+        });
+        const richness=(workIdentification(item)?4:0)+(visibleWorkRef(item)?2:0)+((item&&item.concept)||(item&&item.concepto)?1:0);
+        return {progress,updated,richness};
+      };
+      (Array.isArray(items)?items:[]).forEach(item=>{
+        const key=(technicalWorkRef(item)||String(item&&item.ref||item&&item.referencia||'')).toUpperCase();
+        if(!key){ best.set('ROW_'+best.size,item); return; }
+        const prev=best.get(key);
+        if(!prev){ best.set(key,item); return; }
+        const a=score(prev), b=score(item);
+        if(b.progress>a.progress ||
+           (b.progress===a.progress && b.updated>a.updated) ||
+           (b.progress===a.progress && b.updated===a.updated && b.richness>a.richness)){
+          best.set(key,item);
+        }
+      });
+      return Array.from(best.values());
+    },
+
     visibleItems(){
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
-      return (this.state.deliveries || [])
+      const rows=(this.state.deliveries || [])
         .filter(item => !item.deleted && !this.isGloballyDeleted(item.ref || item.referencia) && this.itemAlmacen(item) > 0)
         .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
         .filter(item => {
@@ -405,6 +441,7 @@
           const hay = [technicalWorkRef(item), visibleWorkRef(item), workIdentification(item), item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
           return norm(hay).includes(q);
         });
+      return this.dedupeByTechnicalRef(rows);
     },
 
     toggleCompany(head, section){
@@ -493,7 +530,7 @@
     deliveredItems(){
       const q = norm(document.getElementById("q").value);
       const companyFilter = document.getElementById("companyFilter").value;
-      return (this.state.deliveries || [])
+      const rows=(this.state.deliveries || [])
         .filter(item => !item.deleted && !this.isGloballyDeleted(item.ref || item.referencia) && (this.itemEntregado(item) > 0 || norm(item.fase || item.estado || item.status).includes("entreg")))
         .filter(item => !companyFilter || String(item.company || item.empresa || item.empresaReceptora || "") === companyFilter)
         .filter(item => {
@@ -501,6 +538,7 @@
           const hay = [technicalWorkRef(item), visibleWorkRef(item), workIdentification(item), item.concept, item.concepto, item.company, item.empresa, item.empresaReceptora].join(" ");
           return norm(hay).includes(q);
         });
+      return this.dedupeByTechnicalRef(rows);
     },
 
     renderDelivered(){
