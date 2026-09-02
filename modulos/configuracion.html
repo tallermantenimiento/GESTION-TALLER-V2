@@ -8784,4 +8784,196 @@ function LDH_cfgStockDiagnostico(){
 })();
 </script>
 
+<!-- LDH V136 · REFERENCIA VISIBLE AUTORITATIVA POR URL -->
+<script id="LDH_CALC_V136_DISPLAY_REF_URL_20260902">
+(function(){
+  'use strict';
+  if(window.__LDH_CALC_V136_DISPLAY_REF_URL) return;
+  window.__LDH_CALC_V136_DISPLAY_REF_URL='CALC-V136-DISPLAY-REF-URL-20260902';
+
+  const BAR_MM=6000;
+  const s=v=>String(v==null?'':v).trim();
+  const tech=v=>{
+    const m=s(v).toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?/);
+    return m ? ('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')) : '';
+  };
+  const sameTech=(a,b)=>{ const ta=tech(a),tb=tech(b); return !!ta&&ta===tb; };
+
+  function getVisibleRef(){
+    const candidates=[];
+    try{ const el=document.getElementById('refInput'); if(el&&s(el.value)) candidates.push(s(el.value)); }catch(_){ }
+    try{ const v=window.App&&App.lastCalculation&&App.lastCalculation.ref; if(s(v)) candidates.push(s(v)); }catch(_){ }
+    try{
+      document.querySelectorAll('input[type="text"],input:not([type]),textarea').forEach(el=>{
+        if(el&&el.offsetParent!==null&&s(el.value)&&/^OT[\s_-]*\d{6}[\s_-]*\d{3}/i.test(s(el.value))) candidates.push(s(el.value));
+      });
+    }catch(_){ }
+    try{
+      document.querySelectorAll('div,span,strong,b,p,td').forEach(el=>{
+        if(!el||el.offsetParent===null) return;
+        const t=s(el.textContent);
+        const m=t.match(/OT[\s_-]*\d{6}[\s_-]*\d{3}(?:[\s_-]*[A-Z]{1,3})?(?:\s*\([^\n]{1,160}\))?/i);
+        if(m&&s(m[0])) candidates.push(s(m[0]));
+      });
+    }catch(_){ }
+    const base=candidates.find(Boolean)||'';
+    const t=tech(base);
+    const same=t ? candidates.filter(v=>sameTech(v,t)) : candidates;
+    same.sort((a,b)=>{
+      const al=a.toUpperCase()!==tech(a)?1:0;
+      const bl=b.toUpperCase()!==tech(b)?1:0;
+      return bl-al || b.length-a.length;
+    });
+    return same[0]||base;
+  }
+
+  function getQty(){
+    try{
+      const el=document.getElementById('var_cantidad')||document.getElementById('cantidad')||document.querySelector('input[name="cantidad"],input#cant,input[id*="cantidad"]');
+      const n=el?parseFloat(String(el.value||'').replace(',','.')):NaN;
+      return (!isFinite(n)||n<1)?1:n;
+    }catch(_){ return 1; }
+  }
+
+  function buildMaterials(conceptName,empresa){
+    const app=window.App||null;
+    const last=app&&app.lastCalculation;
+    if(!last) return null;
+    const concept=app&&app.state&&Array.isArray(app.state.concepts)
+      ? app.state.concepts.find(c=>c&&s(c.name)===s(conceptName)) : null;
+    const links=concept&&concept.stockLinks?concept.stockLinks:{lines:{},units:{}};
+    const out=[];
+    Object.entries(last.lineales||{}).forEach(([name,val])=>{
+      const mm=Number(val)||0; if(mm<=0) return;
+      const qty=Math.max(1,Math.ceil(mm/BAR_MM));
+      const id=s(links.lines&&links.lines[name]);
+      out.push({
+        tipo:'barra',mat:s(name),material:s(name),unit:'barra',unidad:'barra',
+        qty_pedida:qty,pedido:qty,qty_recibida:0,recibida:0,aplicado_qty:0,aplicado:0,
+        mm_total:mm,metros_total:mm/1000,merma_mm:(qty*BAR_MM)-mm,
+        linked_matId:id,linkedMatId:id,stockMatId:id,stockLinkId:id,
+        linked_company:s(empresa),stockLinkEmpresa:s(empresa),ok:false,estado:'pendiente',status:'pendiente'
+      });
+    });
+    Object.entries(last.unidades||{}).forEach(([name,val])=>{
+      const qty=Number(val)||0; if(qty<=0) return;
+      const id=s(links.units&&links.units[name]);
+      out.push({
+        tipo:'unidad',mat:s(name),material:s(name),unit:'ud',unidad:'ud',
+        qty_pedida:qty,pedido:qty,qty_recibida:0,recibida:0,aplicado_qty:0,aplicado:0,
+        linked_matId:id,linkedMatId:id,stockMatId:id,stockLinkId:id,
+        linked_company:s(empresa),stockLinkEmpresa:s(empresa),ok:false,estado:'pendiente',status:'pendiente'
+      });
+    });
+    return out;
+  }
+
+  function applyPaintLink(materiales,empresa){
+    if(!Array.isArray(materiales)) return true;
+    const isPaint=line=>{
+      const n=s(line&& (line.mat||line.material));
+      try{ if(window.App&&typeof App.isPaintLine==='function'&&App.isPaintLine(n)) return true; }catch(_){ }
+      return /pintur|\bral\b/i.test(n);
+    };
+    if(!materiales.some(isPaint)) return true;
+    const sel=document.getElementById('calcPaintMat');
+    const id=s(sel&&sel.value);
+    if(!id){ alert('Este pedido incluye pintura. Selecciona la pintura/color antes de enviarlo a Preparación.'); return false; }
+    const label=s(sel&&sel.selectedIndex>=0&&sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'');
+    materiales.forEach(line=>{
+      if(!isPaint(line)) return;
+      line.linked_matId=id; line.linkedMatId=id; line.stockMatId=id; line.stockLinkId=id; line.matId=id;
+      line.linked_company=s(empresa); line.stockLinkEmpresa=s(empresa);
+      if(label){ line.linked_matLabel=label; }
+    });
+    return true;
+  }
+
+  function findAgendaMeta(technicalRef){
+    const extra={};
+    try{
+      const db=JSON.parse(localStorage.getItem('ldh_db')||'{}')||{};
+      const pools=['workOrders','orders','ordenes','agenda','jobs','trabajos'];
+      for(const p of pools){
+        const arr=Array.isArray(db[p])?db[p]:[];
+        for(const wo of arr){
+          if(!wo||typeof wo!=='object') continue;
+          const refs=[wo.reference,wo.ref,wo.referencia];
+          const parts=wo.compositeV1&&Array.isArray(wo.compositeV1.parts)?wo.compositeV1.parts:[];
+          const part=parts.find(x=>x&&sameTech(x.reference||x.ref||'',technicalRef));
+          if(part){
+            extra.agenda_order_id=s(wo.id||wo.orderId||''); extra.orderId=extra.agenda_order_id;
+            extra.composite_group_id=s(wo.compositeV1.groupId||'');
+            extra.composite_master_order_id=s(wo.compositeV1.masterOrderId||wo.id||'');
+            extra.composite_master_reference=s(wo.compositeV1.masterReference||wo.reference||'');
+            extra.composite_part_id=s(part.id||'');
+            extra.composite_part_reference=s(part.reference||technicalRef);
+            extra.composite_part_concept=s(part.concept||'');
+            extra.composite_part_quantity=Number(part.quantity)||1;
+            extra.composite_part_index=Math.max(1,parts.indexOf(part)+1);
+            extra.composite_part_count=parts.length||0;
+            return extra;
+          }
+          if(refs.some(r=>sameTech(r,technicalRef))){
+            extra.agenda_order_id=s(wo.id||wo.orderId||''); extra.orderId=extra.agenda_order_id;
+            return extra;
+          }
+        }
+      }
+    }catch(_){ }
+    return extra;
+  }
+
+  function sendV136(){
+    const visible=getVisibleRef();
+    if(!visible){ alert('Debes indicar una referencia antes de pasar a Preparación.'); return; }
+    const technical=tech(visible)||visible;
+    const concepto=s((document.getElementById('selConcepto')||{}).value);
+    const empresa=s((document.getElementById('calcEmpresa')||{}).value);
+    const qty=getQty();
+    const materiales=buildMaterials(concepto,empresa);
+    if(!materiales||!materiales.length){ alert('Primero realiza un cálculo antes de enviar a Preparación.'); return; }
+    if(!applyPaintLink(materiales,empresa)) return;
+
+    const payload=Object.assign({
+      referencia:technical,ref:technical,technical_ref:technical,
+      display_ref:visible,visible_ref:visible,referencia_visible:visible,
+      concepto:concepto,concept:concepto,empresa:empresa,company:empresa,
+      unidades:qty,cantidad:qty,totalUnits:qty,vars:{cantidad:qty},
+      materiales:materiales,materials:materiales,
+      pedido_uid:'P'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+      ts:Date.now(),timestamp:Date.now(),origen:'calculo_v136',source:'calculo_v136',version:'prep_payload_v136'
+    },findAgendaMeta(technical));
+
+    const handoff={display_ref:visible,visibleRef:visible,technical_ref:technical,ts:Date.now()};
+    for(const st of [localStorage,sessionStorage]){
+      try{ st.setItem('LDH_PREP_VISIBLE_REF_V136',JSON.stringify(handoff)); }catch(_){ }
+      try{ st.setItem('LDH_PREP_VISIBLE_REF_V136_'+technical,visible); }catch(_){ }
+      try{ st.setItem('latest_materials_v1',JSON.stringify(payload)); }catch(_){ }
+      try{ st.setItem('prep_pedido_payload',JSON.stringify(payload)); }catch(_){ }
+      try{ st.setItem('prep_focus_ref',technical); }catch(_){ }
+      try{ st.setItem('prep_last_import_ref',technical); }catch(_){ }
+    }
+    try{ window.name='LDH_PREP|'+JSON.stringify(payload); }catch(_){ }
+    const target='preparacion_pedidos.html?openRef='+encodeURIComponent(technical)+'&displayRef='+encodeURIComponent(visible)+'&v=136';
+    window.location.href=target;
+  }
+  window.LDH_sendPreparacionV136=sendV136;
+  window.irAPreparacion=sendV136;
+  window.enviarAPreparacionPedido=sendV136;
+
+  document.addEventListener('click',function(ev){
+    const el=ev.target&&ev.target.closest?ev.target.closest('button,a'):null;
+    if(!el) return;
+    const txt=s(el.textContent).toLowerCase();
+    if((txt.includes('preparación')||txt.includes('preparacion'))&&txt.includes('pedido')){
+      ev.preventDefault(); ev.stopPropagation(); ev.stopImmediatePropagation();
+      sendV136();
+    }
+  },true);
+  console.info('[Cálculo V136] envío autoritativo: OT técnica en referencia y aclaración visible por displayRef URL.');
+})();
+</script>
+
 </body></html>
+
