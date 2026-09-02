@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
-  <meta name="ldh-build" content="CALC-REAL-PARTIDAS-LABEL-QTY-V21-20260902">
+  <meta name="ldh-build" content="CALC-REAL-V22-IDENTIFICACION-VISUAL-UNIFICADA-20260902">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -36,6 +36,12 @@
     .warn{color:#fed7aa;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:10px;padding:10px;margin-top:10px}
     .agenda-handoff{display:none;margin-bottom:16px;color:#cffafe;background:rgba(8,145,178,.15);border:1px solid rgba(34,211,238,.38);border-radius:12px;padding:11px 13px;font-weight:750}
     .agenda-handoff.show{display:block}
+    .ldh-tech-ref{display:inline-flex;align-items:center;padding:4px 8px;border:1px solid rgba(34,211,238,.42);border-radius:8px;background:rgba(8,145,178,.16);color:#7dd3fc;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;font-weight:950;letter-spacing:.045em}
+    .ldh-work-ident{display:block;margin-top:6px;color:#fde68a;font-size:15px;font-weight:950;line-height:1.2;overflow-wrap:anywhere}
+    .ldh-reference-ident{margin-top:7px;padding:8px 10px;border:1px solid rgba(245,158,11,.32);border-radius:9px;background:rgba(69,40,5,.22);color:#fde68a;font-size:13px;font-weight:900}
+    .ldh-reference-ident.hidden{display:none}
+    #kpiRef .ldh-tech-ref{font-size:10px}
+    #kpiRef .ldh-work-ident{font-size:15px;margin-top:5px}
     table{width:100%;border-collapse:collapse}
     th,td{padding:11px 10px;border-bottom:1px solid rgba(148,163,184,.15);vertical-align:middle;text-align:left}
     th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#93c5fd;background:rgba(15,23,42,.5)}
@@ -104,7 +110,8 @@
       <div class="grid-2">
         <div>
           <label>Referencia / Cliente</label>
-          <input id="refInput" placeholder="Ej: Mesa Cliente Juan">
+          <input id="refInput" placeholder="Ej: OT-260902-002">
+          <div id="referenceIdentification" class="ldh-reference-ident hidden"></div>
         </div>
         <div>
           <label>Concepto guardado</label>
@@ -199,6 +206,27 @@
   function n(v){ const x = Number(String(v ?? 0).replace(",", ".")); return Number.isFinite(x) ? x : 0; }
   function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  function refIdentification(payload,technical,display){
+    payload=payload&&typeof payload==='object'?payload:{};
+    let id=String(payload.partDescription||payload.partLabel||payload.identification||payload.workIdentification||payload.workLabel||payload.referenceLabel||'').trim();
+    const tech=String(technical||'').trim(), full=String(display||payload.displayReference||payload.display_ref||'').trim();
+    if(!id && full && tech && full!==tech){
+      let rest=full.toLowerCase().startsWith(tech.toLowerCase())?full.slice(tech.length):full;
+      rest=rest.replace(/^[\s()\[\]{}:;,.·\-–—]+|[\s()\[\]{}:;,.·\-–—]+$/g,'').trim();
+      if(rest && rest!==tech) id=rest;
+    }
+    return id;
+  }
+  function displayReferenceFor(technical,identification,preferred){
+    const tech=String(technical||'').trim(), id=String(identification||'').trim(), pref=String(preferred||'').trim();
+    if(id) return `${tech} (${id})`;
+    if(pref) return pref;
+    return tech;
+  }
+  function refVisualHtml(technical,identification){
+    const tech=String(technical||'').trim(), id=String(identification||'').trim();
+    return `<span class="ldh-tech-ref">${esc(tech||'—')}</span>${id?`<span class="ldh-work-ident">${esc(id)}</span>`:''}`;
+  }
   function uid(){ return "P" + Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
   function fmt(v, dec=3){
     const x = n(v);
@@ -625,6 +653,9 @@
       display_ref: String(payload.display_ref || payload.displayReference || payload.visible_ref || ref).trim(),
       visible_ref: String(payload.display_ref || payload.displayReference || payload.visible_ref || ref).trim(),
       referencia_visible: String(payload.display_ref || payload.displayReference || payload.visible_ref || ref).trim(),
+      identification: String(payload.identification || payload.workIdentification || payload.workLabel || payload.referenceLabel || payload.composite_part_description || '').trim(),
+      workIdentification: String(payload.identification || payload.workIdentification || payload.workLabel || payload.referenceLabel || payload.composite_part_description || '').trim(),
+      workLabel: String(payload.identification || payload.workIdentification || payload.workLabel || payload.referenceLabel || payload.composite_part_description || '').trim(),
       original_ref: payload.original_ref || payload.referencia_original || "",
       pedido_uid: payload.pedido_uid || payload.uid || uid(),
       pedido_id: "pid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,8),
@@ -763,13 +794,15 @@
 
       const reference = String(payload.partReference || payload.reference || "").trim();
       const description = String(payload.description || "").trim();
-      const partDescription = String(payload.partDescription || payload.partLabel || "").trim();
       const agendaDisplayRef = String(payload.displayReference || payload.display_ref || "").trim();
-      const combinedReference = payload.composite
-        ? (agendaDisplayRef || (partDescription ? `${reference} (${partDescription})` : reference))
-        : [reference,description].filter(Boolean).join(" ");
+      const identification = refIdentification(payload,reference,agendaDisplayRef);
+      const combinedReference = displayReferenceFor(reference,identification,agendaDisplayRef);
+      payload.identification=identification; payload.workIdentification=identification; payload.workLabel=identification;
+      payload.displayReference=combinedReference; payload.display_ref=combinedReference;
       const refInput = document.getElementById("refInput");
-      if(refInput) refInput.value = combinedReference;
+      if(refInput) refInput.value = reference;
+      const idBox=document.getElementById("referenceIdentification");
+      if(idBox){ idBox.textContent=identification; idBox.classList.toggle("hidden",!identification); }
 
       const companySelect = document.getElementById("companySelect");
       const companyCandidates = [
@@ -901,7 +934,8 @@
       const concept = this.concept;
       const ref = document.getElementById("refInput").value.trim();
       const company = document.getElementById("companySelect").value.trim();
-      document.getElementById("kpiRef").textContent = ref || "—";
+      const currentIdent = refIdentification(this.agendaHandoff,ref,this.agendaHandoff && (this.agendaHandoff.displayReference||this.agendaHandoff.display_ref));
+      document.getElementById("kpiRef").innerHTML = refVisualHtml(ref,currentIdent);
       document.getElementById("kpiConcept").textContent = concept ? concept.name : "—";
       document.getElementById("kpiCompany").textContent = company || "—";
 
@@ -995,6 +1029,9 @@
 
       this.last = {
         ref,
+        identification:currentIdent,
+        workLabel:currentIdent,
+        display_ref:displayReferenceFor(ref,currentIdent,this.agendaHandoff && (this.agendaHandoff.displayReference||this.agendaHandoff.display_ref)),
         concept: concept.name,
         concepto: concept.name,
         empresa: company,
@@ -1056,7 +1093,9 @@
       const isCompositePart = !!(this.agendaHandoff && this.agendaHandoff.composite && this.agendaHandoff.partId);
       const exactCompositeRef = String(this.agendaHandoff && this.agendaHandoff.partReference || data.ref || "").trim();
       const refFinal = isCompositePart ? exactCompositeRef : uniquePrepRef(data.ref);
-      const visibleRef = isCompositePart ? String(data.ref || this.agendaHandoff?.displayReference || this.agendaHandoff?.display_ref || exactCompositeRef).trim() : String(data.ref||refFinal).trim();
+      const identification = String(data.identification || refIdentification(this.agendaHandoff,refFinal,this.agendaHandoff && (this.agendaHandoff.displayReference||this.agendaHandoff.display_ref)) || '').trim();
+      const agendaVisible = String(this.agendaHandoff && (this.agendaHandoff.displayReference || this.agendaHandoff.display_ref) || '').trim();
+      const visibleRef = displayReferenceFor(refFinal,identification,agendaVisible);
       if(!isCompositePart && refFinal !== data.ref){
         alert("La referencia ya existía en Preparación. Se enviará como: " + refFinal);
       }
@@ -1079,6 +1118,10 @@
 
         technical_ref:refFinal,
         technicalRef:refFinal,
+        identification:identification,
+        workIdentification:identification,
+        workLabel:identification,
+        referenceLabel:identification,
         display_ref:visibleRef,
         visible_ref:visibleRef,
         referencia_visible:visibleRef,
@@ -1119,14 +1162,14 @@
       setStore("prep_last_import_ref", refFinal);
       setStore("prep_focus_ref", refFinal);
       setStore("prep_import_guard_ts", String(Date.now()));
-      if(isCompositePart && visibleRef){
+      if(visibleRef && visibleRef !== refFinal){
         setStore("LDH_PREP_VISIBLE_REF_V136_" + refFinal, visibleRef);
-        setStore("LDH_PREP_VISIBLE_REF_V136", JSON.stringify({technical_ref:refFinal,display_ref:visibleRef,at:Date.now()}));
+        setStore("LDH_PREP_VISIBLE_REF_V136", JSON.stringify({technical_ref:refFinal,display_ref:visibleRef,identification,at:Date.now()}));
       }
 
       try{ window.name = "LDH_PREP|" + json; }catch(e){}
       const encoded = encodeURIComponent(json);
-      const prepBase = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal) + (isCompositePart && visibleRef ? "&displayRef=" + encodeURIComponent(visibleRef) : "");
+      const prepBase = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal) + (visibleRef && visibleRef !== refFinal ? "&displayRef=" + encodeURIComponent(visibleRef) : "");
       if(encoded.length < 1500000){
         location.href = prepBase + "#ldhPrep=" + encoded;
       }else{
