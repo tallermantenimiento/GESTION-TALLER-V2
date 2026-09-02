@@ -1427,19 +1427,50 @@ ensureAutomaticAccess();
   function uid(){
     return 'wo_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,8);
   }
+  /* LDH_COMPOSITE_PARENT_STATE_V1_20260902
+   * El estado general de un pedido compuesto se deriva de la suma real de sus
+   * partidas. Nunca puede quedar TERMINADO mientras exista alguna unidad en FAB
+   * o PINT, ni mientras falten partidas por alcanzar ALM/ENT.
+   * La cantidad visible del pedido padre no se modifica.
+   */
   function normalizeWorkflowState(raw){
     const o = raw && typeof raw === 'object' ? raw : {};
     const value = normText(o.workflowStateV2 || o.workflowState || o.workState || o.orderState)
       .toLocaleLowerCase('es')
       .replace(/[\s-]+/g,'_');
-    if(['preparing','preparacion','en_preparacion'].includes(value)) return 'preparing';
-    if(['waiting_material','esperando_material','material_pendiente'].includes(value)) return 'waiting_material';
-    if(['queued','queue','en_cola','cola'].includes(value)) return 'queued';
-    if(['fabrication','fabricacion','en_fabricacion','in_progress','en_proceso','proceso'].includes(value)) return 'fabrication';
-    if(['painting','pintura','en_pintura'].includes(value)) return 'painting';
-    if(['finished','terminado','finalizado','en_almacen','almacen'].includes(value)) return 'finished';
-    if(['cancelled','canceled','anulado','cancelado'].includes(value)) return 'cancelled';
-    return o.inProgress ? 'fabrication' : '';
+
+    let baseState='';
+    if(['preparing','preparacion','en_preparacion'].includes(value)) baseState='preparing';
+    else if(['waiting_material','esperando_material','material_pendiente'].includes(value)) baseState='waiting_material';
+    else if(['queued','queue','en_cola','cola'].includes(value)) baseState='queued';
+    else if(['fabrication','fabricacion','en_fabricacion','in_progress','en_proceso','proceso'].includes(value)) baseState='fabrication';
+    else if(['painting','pintura','en_pintura'].includes(value)) baseState='painting';
+    else if(['finished','terminado','finalizado','en_almacen','almacen'].includes(value)) baseState='finished';
+    else if(['cancelled','canceled','anulado','cancelado'].includes(value)) baseState='cancelled';
+    else baseState=o.inProgress ? 'fabrication' : '';
+
+    if(baseState==='cancelled') return baseState;
+
+    const comp=o&&o.compositeV1&&typeof o.compositeV1==='object'?o.compositeV1:null;
+    if(comp&&comp.enabled!==false&&Array.isArray(comp.parts)&&comp.parts.length){
+      const num=v=>{const x=Number(v);return Number.isFinite(x)?Math.max(0,x):0;};
+      const f=phaseFlow(o);
+      const fab=num(f.fabricacion), pint=num(f.pintura), alm=num(f.almacen), ent=num(f.entregado);
+      const flowTotal=fab+pint+alm+ent;
+      const partsTotal=comp.parts.reduce((sum,p)=>sum+num(p&&(p.quantity??p.cantidad??p.unidades??p.uds)),0);
+      const total=partsTotal>0?partsTotal:num(o.quantity??o.cantidad??o.unidades??o.uds);
+
+      if(fab>0) return 'fabrication';
+      if(pint>0) return 'painting';
+      if(total>0 && (alm+ent)>=total) return 'finished';
+
+      if(flowTotal>0){
+        if(['waiting_material','preparing','queued'].includes(baseState)) return baseState;
+        return 'preparing';
+      }
+    }
+
+    return baseState;
   }
   function phaseFlow(order){
     const f=order&&order.phaseFlowV2&&typeof order.phaseFlowV2==='object'?order.phaseFlowV2:{};
