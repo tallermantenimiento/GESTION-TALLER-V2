@@ -91,6 +91,8 @@
 </style>
 </head>
 <body>
+<!-- LDH_CALC_V23_RAL_AGENDA_AUTO_20260902 -->
+
   <div class="topbar">
     <a class="btn" href="../index.html">← Menú</a>
     <strong>Cálculo</strong>
@@ -441,6 +443,71 @@
       });
     return [...byName.values()];
   }
+  const AGENDA_ORDERS_KEY = "ldh_work_orders_v1";
+  function agendaOrderForHandoff(payload){
+    payload = payload && typeof payload === "object" ? payload : {};
+    const wantedIds = [payload.orderId,payload.masterOrderId,payload.agendaOrderId]
+      .map(v=>String(v||"").trim()).filter(Boolean);
+    const wantedRefs = [payload.masterReference,payload.reference,payload.partReference]
+      .map(v=>String(v||"").trim()).filter(Boolean);
+    const partRef = String(payload.partReference || payload.reference || "").trim();
+    const partMatch = partRef.toUpperCase().match(/^(OT[-_\s]*\d{6}[-_\s]*\d{3})(?:[-_\s]*[A-Z])(?:\b|$)/);
+    if(partMatch) wantedRefs.unshift(partMatch[1].replace(/[_\s]+/g,"-"));
+    for(const storage of [sessionStorage,localStorage]){
+      try{
+        const rows = parse(storage.getItem(AGENDA_ORDERS_KEY),[]);
+        if(!Array.isArray(rows)) continue;
+        let row = rows.find(o=>wantedIds.includes(String(o && o.id || "").trim()));
+        if(row) return row;
+        row = rows.find(o=>{
+          const ref=String(o && (o.reference || o.ref) || "").trim();
+          return ref && wantedRefs.some(w=>norm(w)===norm(ref));
+        });
+        if(row) return row;
+      }catch(error){
+        console.warn("No se pudo leer el RAL original de Agenda",error);
+      }
+    }
+    return null;
+  }
+  function agendaRalForHandoff(payload){
+    payload = payload && typeof payload === "object" ? payload : {};
+    const direct = [payload.agendaRal,payload.ral,payload.ralColor,payload.colorRal,payload.paintRal,payload.acabadoRal]
+      .map(v=>String(v||"").trim()).find(Boolean);
+    if(direct) return direct;
+    const order = agendaOrderForHandoff(payload);
+    return String(order && (order.ral || order.ralColor || order.colorRal || order.paintRal || order.acabadoRal) || "").trim();
+  }
+  function agendaRalCode(value){
+    const raw=String(value||"").trim();
+    if(!raw) return "";
+    const explicit=raw.match(/\bRAL\s*[-:]?\s*(\d{3,5})\b/i);
+    if(explicit) return explicit[1];
+    const only=raw.match(/^\s*(\d{3,5})\s*$/);
+    return only ? only[1] : "";
+  }
+  function regexEscape(value){ return String(value||"").replace(/[.*+?^${}()|[\]\\]/g,"\\$&"); }
+  function agendaPaintMatch(paints, ralValue){
+    const list=Array.isArray(paints)?paints:[];
+    const wanted=norm(ralValue).replace(/\s+/g," ");
+    const code=agendaRalCode(ralValue);
+    let best=null, bestScore=0;
+    list.forEach(m=>{
+      const name=stockMaterialName(m);
+      const nn=norm(name).replace(/\s+/g," ");
+      let score=0;
+      if(wanted && nn===wanted) score=120;
+      if(code){
+        const safe=regexEscape(code);
+        if(new RegExp(`\\bral\\s*[-:]?\\s*${safe}\\b`,"i").test(nn)) score=Math.max(score,110);
+        else if(new RegExp(`(^|[^0-9])${safe}([^0-9]|$)`).test(nn)) score=Math.max(score,100);
+      }
+      if(wanted && nn.includes(wanted)) score=Math.max(score,90);
+      if(score>bestScore){ bestScore=score; best=m; }
+    });
+    return bestScore>=90 ? best : null;
+  }
+
   function isCommonStockCompanyRecord(c){
     if(!c) return false;
     if(c.sharedStock === true || c.sharedPool === true || c.isSharedStock === true || c.common === true || c.isCommon === true) return true;
@@ -778,6 +845,11 @@
           const uq=Math.max(1,Math.round(n(urlQtyRaw)||1));
           payload.partQuantity=uq; payload.quantity=uq; payload.cantidad=uq; payload.unidades=uq;
         }
+        const agendaRal = agendaRalForHandoff(payload);
+        if(agendaRal){
+          payload.agendaRal=agendaRal;
+          payload.ral=agendaRal;
+        }
         const json = JSON.stringify(payload);
         for(const storage of [sessionStorage,localStorage]){
           try{ storage.setItem(AGENDA_HANDOFF_KEY,json); }catch(error){}
@@ -834,8 +906,9 @@
       }
 
       this.agendaHandoff = payload;
+      const agendaRal = String(payload.agendaRal || payload.ral || "").trim();
       if(notice){
-        notice.textContent = `Recibido desde Agenda: ${combinedReference || reference || "sin referencia"}${agendaConcept ? " · " + agendaConcept : ""}${companyLabel ? " · " + companyLabel : ""}${payload.composite ? " · " + Math.max(1,Math.round(n(payload.partQuantity ?? payload.quantity ?? payload.cantidad ?? payload.unidades)||1)) + " uds." : ""}. Revisa el cálculo antes de enviarlo a Preparación.`;
+        notice.textContent = `Recibido desde Agenda: ${combinedReference || reference || "sin referencia"}${agendaConcept ? " · " + agendaConcept : ""}${companyLabel ? " · " + companyLabel : ""}${agendaRal ? " · " + (/^ral\b/i.test(agendaRal) ? agendaRal : "RAL " + agendaRal) : ""}${payload.composite ? " · " + Math.max(1,Math.round(n(payload.partQuantity ?? payload.quantity ?? payload.cantidad ?? payload.unidades)||1)) + " uds." : ""}. Revisa el cálculo antes de enviarlo a Preparación.`;
         notice.classList.add("show");
       }
       return true;
@@ -890,16 +963,39 @@
       const sel = document.getElementById("paintSelect");
       const hint = document.getElementById("paintHint");
       const company = document.getElementById("companySelect").value;
+      const previous = String(sel && sel.value || "").trim();
       const paints = paintMaterialsForCompany(company);
       sel.innerHTML = '<option value="">— (Opcional) Selecciona pintura —</option>' + paints.map(m=>{
         const name = stockMaterialName(m);
         const id = stockMaterialId(m);
         return `<option value="${esc(id)}">${esc(name)}</option>`;
       }).join("");
+
+      // V23: conservar una selección manual válida. Si no existe, usar el RAL pedido en Agenda.
+      if(previous && paints.some(m=>stockMaterialId(m)===previous)) sel.value=previous;
+      const agendaRal = String(this.agendaHandoff && (this.agendaHandoff.agendaRal || this.agendaHandoff.ral) || "").trim();
+      let agendaPaint=null;
+      if(!sel.value && agendaRal && company && paints.length){
+        agendaPaint=agendaPaintMatch(paints,agendaRal);
+        if(agendaPaint){
+          sel.value=stockMaterialId(agendaPaint);
+          this.agendaHandoff.paintMaterialId=stockMaterialId(agendaPaint);
+          this.agendaHandoff.paint_material_id=stockMaterialId(agendaPaint);
+          this.agendaHandoff.paintMaterialName=stockMaterialName(agendaPaint);
+          this.agendaHandoff.paint_material_name=stockMaterialName(agendaPaint);
+        }
+      }
+
       if(!company){
         hint.textContent = "Selecciona empresa para filtrar pinturas.";
       }else if(!paints.length){
         hint.textContent = `⚠️ No hay pinturas de color vinculadas a ${company} en Stock.`;
+      }else if(agendaRal && agendaPaint){
+        const label=/^ral\b/i.test(agendaRal) ? agendaRal : `RAL ${agendaRal}`;
+        hint.textContent = `${label} recibido desde Agenda · pintura preseleccionada: ${stockMaterialName(agendaPaint)}.`;
+      }else if(agendaRal && !sel.value){
+        const label=/^ral\b/i.test(agendaRal) ? agendaRal : `RAL ${agendaRal}`;
+        hint.textContent = `⚠️ ${label} recibido desde Agenda, pero no encuentro una ficha de pintura coincidente para ${company}.`;
       }else{
         hint.textContent = `${paints.length} pintura${paints.length===1?'':'s'} de ${company} encontrada${paints.length===1?'':'s'} en Stock.`;
       }
