@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V127-REPARACION-COMPROMISO-MISMA-OT-20260831" />
+<meta name="ldh-build" content="PREPARACION-V139-CIERRE-FABRICACION-DEFINITIVO-20260902" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -3447,6 +3447,15 @@ function cargarLista() {
   keys.reverse().forEach(k => {
     const ref = k.replace("prep_recepcion_", "");
     const meta = JSON.parse(getAny(KM(ref)) || "{}");
+
+    // V139 · Una OT cerrada correctamente al entrar en Fabricación no puede
+    // volver a aparecer en Preparación aunque una copia remota antigua conserve
+    // temporalmente prep_recepcion_<REF>. La meta cerrada es autoritativa.
+    if(meta && meta.closed_from_preparation === true){
+      try{ removeAny(k); }catch(_){ }
+      return;
+    }
+
     const lines = JSON.parse(getAny(k) || "[]");
     const totalLines = lines.length;
 
@@ -15951,6 +15960,18 @@ function LDH_prepVolverMenu(){
            k === "prep_import_guard_ts";
   }
 
+  // V139 · Tombstone lógico de cierre. La meta cerrada se conserva para
+  // trazabilidad, pero prep_recepcion_<REF> debe permanecer ausente.
+  function closedMetaV139(raw){
+    try{
+      const meta = raw && typeof raw === "object" ? raw : JSON.parse(String(raw || "{}"));
+      return !!(meta && meta.closed_from_preparation === true);
+    }catch(_){ return false; }
+  }
+  function refFromPrepKeyV139(k,prefix){
+    return String(k || "").slice(String(prefix || "").length);
+  }
+
   function applyRemote(remote){
     if(!remote || !remote.data) return false;
     const rdata = remote.data || {};
@@ -15965,10 +15986,35 @@ function LDH_prepVolverMenu(){
     const freshInfo = freshImportInfo();
     let changed = false;
     let preservedFreshImport = false;
+    let preservedClosedV139 = false;
     applyingRemote = true;
     try{
       Array.from(all).forEach(k => {
         if(!isPrepKey(k)) return;
+
+        // V139 · Si una referencia ya fue cerrada en Preparación, una nube
+        // antigua no puede reponer su ficha de recepción. Miramos tanto la meta
+        // local como la meta del propio snapshot remoto para que funcione también
+        // en otro PC que reciba el cierre por primera vez.
+        if(k.indexOf("prep_recepcion_") === 0){
+          const ref = refFromPrepKeyV139(k,"prep_recepcion_");
+          const metaKey = "prep_meta_" + ref;
+          const localClosed = closedMetaV139(getValue(metaKey));
+          const remoteClosed = closedMetaV139(rdata[metaKey]);
+          if(localClosed || remoteClosed){
+            if(getValue(k) !== null){ removeBoth(k); changed = true; }
+            preservedClosedV139 = true;
+            return;
+          }
+        }
+        if(k.indexOf("prep_meta_") === 0){
+          const localClosed = closedMetaV139(getValue(k));
+          const remoteClosed = closedMetaV139(rdata[k]);
+          if(localClosed && !remoteClosed){
+            preservedClosedV139 = true;
+            return;
+          }
+        }
 
         // V54: una partida recién importada desde Cálculo es la autoridad para
         // sus dos claves, aunque Firebase conserve una versión anterior de la
@@ -16011,6 +16057,11 @@ function LDH_prepVolverMenu(){
     if(changed) refreshViews(true);
     if(preservedFreshImport && booted){
       setTimeout(function(){ pushNow("fresh_import_preserved_v55:" + freshInfo.guardRef); }, 80);
+    }
+    if(preservedClosedV139 && booted){
+      // Publica enseguida el estado sin prep_recepcion_<REF>; doc.set merge:false
+      // elimina también la clave residual del snapshot remoto.
+      setTimeout(function(){ pushNow("closed_preparation_guard_v139"); }, 40);
     }
     return changed;
   }
@@ -27379,12 +27430,31 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
         }
       }catch(_){ }
 
+      // V139 · Al cerrar esta misma OT anulamos el guard de "importación
+      // reciente" que antes permitía a Firebase reponer prep_recepcion_<REF>.
+      try{
+        const lastImport = typeof getAny === 'function' ? String(getAny('prep_last_import_ref') || '').trim() : '';
+        const focusImport = typeof getAny === 'function' ? String(getAny('prep_focus_ref') || '').trim() : '';
+        if((lastImport && sameRef(lastImport,ref)) || (focusImport && sameRef(focusImport,ref))){
+          if(typeof removeAny === 'function'){
+            removeAny('prep_last_import_ref');
+            removeAny('prep_import_guard_ts');
+          }
+        }
+      }catch(_){ }
+
       clearFocusFor(ref);
       window.__LDH_PREP_SUPPRESS_AUTO_OPEN_UNTIL=Date.now()+3000;
-      [350,1400,3500].forEach(delay => setTimeout(function(){
-        try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow('retirada_v114_'+ref); }catch(_){ }
+      // Publicación inmediata del cierre; los reintentos quedan como respaldo.
+      try{
+        if(window.__ldhPrepSyncNow) await Promise.resolve(window.__ldhPrepSyncNow('retirada_v139_'+ref));
+      }catch(syncError){
+        console.warn('[Preparacion V139] Cierre local confirmado; publicación remota pendiente',ref,syncError);
+      }
+      [500,1600,3800].forEach(delay => setTimeout(function(){
+        try{ if(window.__ldhPrepSyncNow) window.__ldhPrepSyncNow('retirada_v139_retry_'+ref); }catch(_){ }
       },delay));
-      console.info('[Preparacion V114] Cierre confirmado: Stock consumido antes de retirar',ref,consumed);
+      console.info('[Preparacion V139] Cierre confirmado: OT retirada de Preparación y protegida frente a snapshots antiguos',ref,consumed);
       return true;
     }catch(error){
       // Regla de seguridad: si falla Stock, la OT SE QUEDA en Preparación.
@@ -29581,5 +29651,11 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
 window.LDH_PREP_V137_REFERENCIA_VISIBLE_SIN_WRAPPERS='PREPARACION-V137-BASE-V129-REFERENCIA-VISIBLE-SIN-WRAPPERS-20260902';
 if(!document.documentElement.dataset.ldhPrepBuild || document.documentElement.dataset.ldhPrepBuild==='V137') document.documentElement.dataset.ldhPrepBuild='V138';
 console.info('[Preparación V137/V138] Base V129 estable + display_ref; V138 añade partidas independientes y publicación Fabricación.');
+</script>
+
+<script id="LDH_PREP_V139_CIERRE_FABRICACION_DEFINITIVO_20260902">
+window.LDH_PREP_V139_CIERRE_FABRICACION='PREPARACION-V139-CIERRE-FABRICACION-DEFINITIVO-20260902';
+document.documentElement.dataset.ldhPrepBuild='V139';
+console.info('[Preparación V139] Las OTs completas desaparecen de Preparación tras confirmar Fabricación; cierre remoto protegido.');
 </script>
 </body></html>
