@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
-  <meta name="ldh-build" content="CALC-PLETINA-MM-V2-PREP-V81-COMMON-SOLVENT-20260819">
+  <meta name="ldh-build" content="CALC-REAL-PARTIDAS-LABEL-QTY-V21-20260902">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -621,6 +621,10 @@
     const meta = {
       referencia: ref,
       ref: ref,
+      technical_ref: String(payload.technical_ref || payload.technicalRef || ref).trim(),
+      display_ref: String(payload.display_ref || payload.displayReference || payload.visible_ref || ref).trim(),
+      visible_ref: String(payload.display_ref || payload.displayReference || payload.visible_ref || ref).trim(),
+      referencia_visible: String(payload.display_ref || payload.displayReference || payload.visible_ref || ref).trim(),
       original_ref: payload.original_ref || payload.referencia_original || "",
       pedido_uid: payload.pedido_uid || payload.uid || uid(),
       pedido_id: "pid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,8),
@@ -730,6 +734,19 @@
       const payload = validCandidates[0] || null;
       const valid = !!payload;
       if(payload){
+        // Partida compuesta: la URL refuerza los datos pulsados en Agenda para que
+        // ni una copia antigua de localStorage ni un cambio pendiente pueda devolver cantidad 1.
+        const urlPartRef = String(params.get("partRef") || "").trim();
+        const urlPartDescription = String(params.get("partDescription") || "").trim();
+        const urlDisplayRef = String(params.get("displayRef") || "").trim();
+        const urlQtyRaw = params.get("partQty");
+        if(urlPartRef) payload.partReference = urlPartRef;
+        if(urlPartDescription){ payload.partDescription=urlPartDescription; payload.partLabel=urlPartDescription; }
+        if(urlDisplayRef){ payload.displayReference=urlDisplayRef; payload.display_ref=urlDisplayRef; }
+        if(urlQtyRaw !== null && urlQtyRaw !== ""){
+          const uq=Math.max(1,Math.round(n(urlQtyRaw)||1));
+          payload.partQuantity=uq; payload.quantity=uq; payload.cantidad=uq; payload.unidades=uq;
+        }
         const json = JSON.stringify(payload);
         for(const storage of [sessionStorage,localStorage]){
           try{ storage.setItem(AGENDA_HANDOFF_KEY,json); }catch(error){}
@@ -746,7 +763,11 @@
 
       const reference = String(payload.partReference || payload.reference || "").trim();
       const description = String(payload.description || "").trim();
-      const combinedReference = payload.composite ? reference : [reference,description].filter(Boolean).join(" ");
+      const partDescription = String(payload.partDescription || payload.partLabel || "").trim();
+      const agendaDisplayRef = String(payload.displayReference || payload.display_ref || "").trim();
+      const combinedReference = payload.composite
+        ? (agendaDisplayRef || (partDescription ? `${reference} (${partDescription})` : reference))
+        : [reference,description].filter(Boolean).join(" ");
       const refInput = document.getElementById("refInput");
       if(refInput) refInput.value = combinedReference;
 
@@ -781,7 +802,7 @@
 
       this.agendaHandoff = payload;
       if(notice){
-        notice.textContent = `Recibido desde Agenda: ${reference || "sin referencia"}${agendaConcept ? " · " + agendaConcept : ""}${companyLabel ? " · " + companyLabel : ""}. Revisa el cálculo antes de enviarlo a Preparación.`;
+        notice.textContent = `Recibido desde Agenda: ${combinedReference || reference || "sin referencia"}${agendaConcept ? " · " + agendaConcept : ""}${companyLabel ? " · " + companyLabel : ""}${payload.composite ? " · " + Math.max(1,Math.round(n(payload.partQuantity ?? payload.quantity ?? payload.cantidad ?? payload.unidades)||1)) + " uds." : ""}. Revisa el cálculo antes de enviarlo a Preparación.`;
         notice.classList.add("show");
       }
       return true;
@@ -1035,6 +1056,7 @@
       const isCompositePart = !!(this.agendaHandoff && this.agendaHandoff.composite && this.agendaHandoff.partId);
       const exactCompositeRef = String(this.agendaHandoff && this.agendaHandoff.partReference || data.ref || "").trim();
       const refFinal = isCompositePart ? exactCompositeRef : uniquePrepRef(data.ref);
+      const visibleRef = isCompositePart ? String(data.ref || this.agendaHandoff?.displayReference || this.agendaHandoff?.display_ref || exactCompositeRef).trim() : String(data.ref||refFinal).trim();
       if(!isCompositePart && refFinal !== data.ref){
         alert("La referencia ya existía en Preparación. Se enviará como: " + refFinal);
       }
@@ -1052,14 +1074,21 @@
         composite_part_index: Math.max(0,Math.round(n(this.agendaHandoff && this.agendaHandoff.partIndex)||0)),
         composite_part_count: Math.max(0,Math.round(n(this.agendaHandoff && this.agendaHandoff.partCount)||0)),
         composite_part_concept: String(this.agendaHandoff && this.agendaHandoff.partConcept || "").trim(),
-        composite_part_quantity: Math.max(0,Math.round(n(this.agendaHandoff && this.agendaHandoff.partQuantity)||0)),
+        composite_part_description: String(this.agendaHandoff && (this.agendaHandoff.partDescription || this.agendaHandoff.partLabel) || "").trim(),
+        composite_part_quantity: Math.max(0,Math.round(n(this.agendaHandoff && (this.agendaHandoff.partQuantity ?? this.agendaHandoff.quantity ?? this.agendaHandoff.cantidad ?? this.agendaHandoff.unidades))||0)),
 
+        technical_ref:refFinal,
+        technicalRef:refFinal,
+        display_ref:visibleRef,
+        visible_ref:visibleRef,
+        referencia_visible:visibleRef,
+        displayReference:visibleRef,
         pedido_uid:pedidoUid,
         uid:pedidoUid,
         referencia:refFinal,
         ref:refFinal,
-        referencia_original:data.ref,
-        original_ref:data.ref,
+        referencia_original:isCompositePart ? refFinal : data.ref,
+        original_ref:isCompositePart ? refFinal : data.ref,
         concepto:data.concept,
         concept:data.concept,
         empresa:data.empresa,
@@ -1090,13 +1119,18 @@
       setStore("prep_last_import_ref", refFinal);
       setStore("prep_focus_ref", refFinal);
       setStore("prep_import_guard_ts", String(Date.now()));
+      if(isCompositePart && visibleRef){
+        setStore("LDH_PREP_VISIBLE_REF_V136_" + refFinal, visibleRef);
+        setStore("LDH_PREP_VISIBLE_REF_V136", JSON.stringify({technical_ref:refFinal,display_ref:visibleRef,at:Date.now()}));
+      }
 
       try{ window.name = "LDH_PREP|" + json; }catch(e){}
       const encoded = encodeURIComponent(json);
+      const prepBase = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal) + (isCompositePart && visibleRef ? "&displayRef=" + encodeURIComponent(visibleRef) : "");
       if(encoded.length < 1500000){
-        location.href = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal) + "#ldhPrep=" + encoded;
+        location.href = prepBase + "#ldhPrep=" + encoded;
       }else{
-        location.href = "preparacion_pedidos.html?openRef=" + encodeURIComponent(refFinal);
+        location.href = prepBase;
       }
     }
   };
@@ -1454,6 +1488,12 @@
 <script id="LDH_CALC_AGENDA_SIMPLE_DEFAULTS_V20_MARKER">
 window.LDH_CALC_AGENDA_SIMPLE_DEFAULTS_V20='CALCULO-AGENDA-SIMPLE-CONCEPTO-CANTIDAD-20260825';
 console.info('[Cálculo V20] Acepta concepto + cantidad de OT simple y conserva partConcept/partQuantity de pedidos compuestos.');
+</script>
+
+<!-- LDH_CALC_REAL_COMPOSITE_LABEL_QTY_V21_20260902 -->
+<script id="LDH_CALC_REAL_COMPOSITE_LABEL_QTY_V21_MARKER">
+window.LDH_CALC_REAL_COMPOSITE_LABEL_QTY_V21='CALC-REAL-COMPOSITE-LABEL-QTY-20260902';
+console.info('[Cálculo real] Partida: OT técnica separada de identificación visible; cantidad reforzada desde Agenda.');
 </script>
 </body>
 </html>
