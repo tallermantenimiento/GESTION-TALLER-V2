@@ -3905,7 +3905,46 @@ function saveMove(type){
     }
 
     // 1) Movimiento físico principal. Esto debe funcionar aunque falle la parte de trabajo/reserva.
-    db.movements.push(mv(activeCompany, mat, type, qty, noteEl ? noteEl.value.trim() : ''));
+    // V115: si la fila usa longitud autoritativa en mm, Entrada/Salida debe mover
+    // tambien ese saldo. El resto de materiales conserva exactamente la logica anterior.
+    const primaryMove = mv(activeCompany, mat, type, qty, noteEl ? noteEl.value.trim() : '');
+    try{
+      const sr = stockRow(activeCompany, mat);
+      const lengthMode = String(sr && sr.lengthMode || '').toLowerCase();
+      if(sr && lengthMode === 'mm'){
+        const moveType = String(type || '').toLowerCase();
+        const isLengthIn = ['entrada','ajuste_pos','devolucion','in'].includes(moveType);
+        const isLengthOut = ['salida','ajuste_neg','consumo','out'].includes(moveType);
+        if(isLengthIn || isLengthOut){
+          const rawCurrent = Number(sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm ?? 0);
+          const currentMm = Number.isFinite(rawCurrent) ? Math.max(0, rawCurrent) : 0;
+          if(isLengthOut && qty > currentMm){
+            alert('No puedes sacar ' + fmt(qty) + ' mm.\n\nFisico disponible: ' + fmt(currentMm) + ' mm.');
+            return;
+          }
+          const nextMm = Math.max(0, currentMm + (isLengthIn ? qty : -qty));
+          const stamp = now();
+          sr.lengthPhysicalMm = nextMm;
+          sr.physicalMm = nextMm;
+          sr.fisicoMm = nextMm;
+          sr.lengthMode = 'mm';
+          sr.lengthUpdatedAt = stamp;
+          sr.lastManualLengthMoveAt = stamp;
+          Object.assign(primaryMove,{
+            unit:'mm', unidad:'mm', unitBasis:'mm', lengthMode:'mm',
+            lengthQtySchemaV64:'mm', lengthQtySchemaV66:'mm', pletinaMm:true,
+            mmAllocated:qty, lineMm:qty,
+            barLengthMm:Math.max(1,Number(sr.barLengthMm || 6000) || 6000),
+            lengthPhysicalBeforeMm:currentMm,
+            lengthPhysicalAfterMm:nextMm,
+            lengthAuthoritativeMoveV115:true
+          });
+        }
+      }
+    }catch(e){
+      console.warn('[Stock V115] No se pudo aplicar movimiento manual en mm; se mantiene la logica anterior.',e);
+    }
+    db.movements.push(primaryMove);
 
     // 2) Entrada vinculada a trabajo, protegida: si falla no bloquea guardar la entrada.
     if(type === 'entrada'){
@@ -9079,5 +9118,6 @@ body{
 
 <!-- LDH_STOCK_EDIT_PAINT_COLOR_V67_20260824 -->
 <!-- LDH_STOCK_FAMILY_RENAME_V65_20260824 -->
+<!-- LDH_STOCK_V115_ENTRADA_SALIDA_MM_AUTORITATIVA_20260903 -->
 </body>
 </html>
