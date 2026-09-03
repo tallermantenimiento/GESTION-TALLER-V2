@@ -19615,7 +19615,17 @@ async function LDH_prepRestorePrematureConsumptionV106(workRef){
           source==="preparacion_pedidos_consumo_stock_asignado_fabricacion_v51" ||
           reason==="consumo_stock_comun_al_mandar_fabricacion" ||
           reason==="consumo_stock_propio_al_mandar_fabricacion";
-        if(!oldV51) return false;
+        /*
+         * V145 · Durante las reparaciones V117/V127/V129 algunas OTs que seguian
+         * vivas en Preparacion recibieron una salida fisica prematura. La politica
+         * actual V106 exige mantener FISICO + RESERVADO hasta el cierre definitivo.
+         * Solo se reconocen las firmas exactas de esas reparaciones historicas.
+         */
+        const oldRepairPrematureV145=
+          reason==="consumo_stock_propio_al_entrar_fabricacion_v117_recovery" ||
+          reason==="consumo_stock_propio_al_entrar_fabricacion_v127_recovery" ||
+          reason==="correccion_v127_reserva_liberada_consumo_fisico_v129";
+        if(!(oldV51 || oldRepairPrematureV145)) return false;
         /*
          * V107: si la OT sigue viva en Preparacion, CUALQUIER salida de la V51
          * identificada por referencia es prematura por definicion. Las versiones
@@ -19681,7 +19691,7 @@ async function LDH_prepRestorePrematureConsumptionV106(workRef){
       window.__LDH_STOCK_MEMORY_DB=result.remoteDB;
       window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;
       window.__LDH_PREP_STOCK_CLOUD_ROWS=LDH_prepBuildCloudRowsV30(result.remoteDB);
-      console.info("[Preparación V106] Consumo prematuro V51 restaurado",reference,result.restoredQty);
+      console.info("[Preparación V145] Consumo prematuro V51/V117/V127/V129 restaurado",reference,result.restoredQty);
     }
     return result;
   }finally{
@@ -29023,6 +29033,13 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     const ref=currentRef();
     const offeredKey=refKey(ref);
     if(!ref||offered.has(offeredKey)) return;
+    /* V145 · Una ficha viva en Preparacion NO debe disparar la reparacion V117:
+       estar tambien en Fabricacion no autoriza consumo fisico. */
+    try{
+      const liveKey=(typeof KP==='function')?KP(ref):('prep_recepcion_'+ref);
+      if(typeof getAny==='function' && getAny(liveKey)) return;
+      if(localStorage.getItem(liveKey) || sessionStorage.getItem(liveKey)) return;
+    }catch(_){ }
     // V118: si Fabricación pidió abrir una OT concreta, nunca ofrecer la
     // reparación sobre otra ficha que haya quedado abierta por datos antiguos.
     const requestedRef=String(window.__LDH_PREP_EXPLICIT_OPEN_REF_V118||'').trim();
@@ -29149,7 +29166,26 @@ console.info('[Preparación V116] Accesorios legacy exactos se migran al Stock p
     });
     const raw=JSON.stringify(result.remoteDB);try{if(typeof setAny==='function')setAny('ldh_v2_company_stock_v1',raw);else localStorage.setItem('ldh_v2_company_stock_v1',raw)}catch(_){try{localStorage.setItem('ldh_v2_company_stock_v1',raw)}catch(__){}}window.__LDH_STOCK_MEMORY_DB=result.remoteDB;window.__LDH_PREP_STOCK_CLOUD_DB=result.remoteDB;try{if(typeof renderTabla==='function')renderTabla()}catch(_){}return result;
   }
-  async function check(){if(busy||offered)return;const ref=currentRef();const db=window.__LDH_PREP_STOCK_CLOUD_DB;if(!ref||!db)return;const items=detect(db,ref);if(!items.length)return;offered=true;const detail=items.map(x=>`• ${x.materialName}: ${x.qty} (ahora libres por V127)`).join('\n');if(!confirm('Se ha detectado una liberación incorrecta causada por la reparación V127.\n\n'+detail+'\n\nEstas cantidades pertenecían a esta misma OT y deben quedar consumidas al estar en Fabricación.\n\n¿Corregir ahora el consumo físico?'))return;busy=true;try{await repair(items,ref);alert('✅ Corregido. La reserva no se ha restaurado: el material queda consumido físicamente por esta OT.')}catch(e){console.error('[Preparación V128]',e);alert('No se ha corregido nada.\n\n'+String(e&&e.message||e))}finally{busy=false}}
+  async function check(){
+    if(busy||offered)return;
+    const ref=currentRef();
+    const db=window.__LDH_PREP_STOCK_CLOUD_DB;
+    if(!ref||!db)return;
+    /* V145 · V128/V129 era una reparacion de consumo para OTs ya fuera de
+       Preparacion. Si la ficha sigue viva, no se descuenta nada todavia. */
+    try{
+      const liveKey=(typeof KP==='function')?KP(ref):('prep_recepcion_'+ref);
+      if(typeof getAny==='function' && getAny(liveKey)) return;
+      if(localStorage.getItem(liveKey) || sessionStorage.getItem(liveKey)) return;
+    }catch(_){ }
+    const items=detect(db,ref);
+    if(!items.length)return;
+    offered=true;
+    const detail=items.map(x=>`• ${x.materialName}: ${x.qty} (ahora libres por V127)`).join('\n');
+    if(!confirm('Se ha detectado una liberación incorrecta causada por la reparación V127.\n\n'+detail+'\n\nEstas cantidades pertenecían a esta misma OT y deben quedar consumidas al estar en Fabricación.\n\n¿Corregir ahora el consumo físico?'))return;
+    busy=true;
+    try{await repair(items,ref);alert('✅ Corregido. La reserva no se ha restaurado: el material queda consumido físicamente por esta OT.')}catch(e){console.error('[Preparación V128]',e);alert('No se ha corregido nada.\n\n'+String(e&&e.message||e))}finally{busy=false}
+  }
   const schedule=()=>[900,1800,3200,5200,8000,12000].forEach(ms=>setTimeout(check,ms));
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',schedule,{once:true});else schedule();
   window.LDH_PREP_V128_CORREGIR_LIBERACION=check;
@@ -29864,4 +29900,10 @@ console.info('[Preparación V141] COMPLETO + fase avanzada sale de la lista; V11
 
 <script id="LDH_PREPARACION_V142_BUILD_DATASET_20260902">try{document.documentElement.dataset.ldhPrepBuild='V142';}catch(_e){}</script>
 <!-- LDH_PREP_V143_IDENTIFICACION_REAL_AGENDA -->
+
+<script id="LDH_PREP_V145_RESTAURA_FISICO_PREMATURO_20260903">
+window.LDH_PREP_V145_RESTAURA_FISICO_PREMATURO='PREPARACION-V145-RESTAURA-FISICO-PREMATURO-20260903';
+document.documentElement.dataset.ldhPreparacionPhysicalGuard='V145';
+console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; se restauran consumos prematuros V117/V127/V129 y se bloquean sus reparadores antiguos.');
+</script>
 </body></html>
