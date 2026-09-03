@@ -162,7 +162,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V65 &middot; Recuento f&iacute;sico con botes enteros + resto en bote abierto. PINTADO consume en Cabina; correcci&oacute;n devuelve pieza + consumibles. Inbox de Fabricaci&oacute;n como respaldo y referencia &uacute;nica por OT mantenida.</div>
+      <div class="sub">V67 &middot; Sincronizaci&oacute;n por OT V19. Los trabajos terminados de pintar permanecen visibles hasta pulsar Cerrar trabajo, permitiendo rectificar antes de retirarlos de Cabina.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -677,8 +677,11 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     }));
   }
   function workRowsFromPackage(pkg){
-    if(!pkg || !pkg.ldh_db) return [];
-    const db=safeParse(pkg.ldh_db,{})||{};
+    // V67: phaseFlowV19 puede existir aunque el paquete legacy ldh_db esté vacío o
+    // temporalmente ausente. La Cabina debe poder reconstruir los trabajos desde
+    // el mapa autoritativo por OT sin depender de una copia antigua del paquete.
+    if(!pkg || typeof pkg!=='object') return [];
+    const db=safeParse(pkg.ldh_db,'{}')||{};
     const overrides=safeParse(pkg.overrides,'{}')||{};
     const map=new Map();
     FLOW_POOLS.forEach(pool=>{
@@ -705,7 +708,10 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       if(!key || !map.has(key) || isDeletedWorkRef(ref)) return;
       const ov=overrides[ref]||{};
       const item=map.get(key);
-      const merged={...item,...ov,ref:preferredWorkRef(refOf(item),ref),referencia:preferredWorkRef(refOf(item),ref),flow:{...(item.flow||{}),...(ov.flow||{})}};
+      // V67: overrides queda únicamente como respaldo de metadatos. Su flow legacy
+      // no puede ocultar un trabajo que ldh_db/inbox o phaseFlowV19 ya sitúan en Pintura.
+      const {flow:_legacyOverrideFlow,...ovMeta}=ov;
+      const merged={...item,...ovMeta,ref:preferredWorkRef(refOf(item),ref),referencia:preferredWorkRef(refOf(item),ref),flow:{...(item.flow||{})}};
       map.set(key,merged);
     });
     // V66: phaseFlowV19 es la única fuente autoritativa de cantidades. El paquete
@@ -715,16 +721,21 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       if(!entry||!entry.flow)return;const ref=text(entry.workRef||entry.ref||entry.reference);const k=workIdentityKey(ref);if(!k||isDeletedWorkRef(ref))return;
       const base=map.get(k)||{ref,referencia:ref,company:text(entry.company),concept:text(entry.concept),total:num(entry.total)};
       const cf=canonicalFlow(flowOf(entry));const ph=phaseFromFlow(cf);
-      map.set(k,{...base,ref:preferredWorkRef(refOf(base),entry.displayRef||ref),referencia:preferredWorkRef(refOf(base),entry.displayRef||ref),company:text(base.company||entry.company),concept:text(base.concept||entry.concept),total:num(base.total||entry.total),flow:cf,fase:ph,estado:ph,archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),phaseFlowV19UpdatedAtMs:num(entry.updatedAtMs),phaseFlowV19Source:text(entry.source)});
+      const cabinEvents=Array.isArray(entry.events)?entry.events:[];
+      const cabinActive=entry.cabinActive===true || cf.pintura>0 || text(entry.source).includes('terminal_cabina_pintura') || cabinEvents.some(h=>text(h&&h.type).startsWith('terminal_pintura_'));
+      const cabinClosed=entry.cabinClosed===true;
+      map.set(k,{...base,ref:preferredWorkRef(refOf(base),entry.displayRef||ref),referencia:preferredWorkRef(refOf(base),entry.displayRef||ref),company:text(base.company||entry.company),concept:text(base.concept||entry.concept),total:num(base.total||entry.total),flow:cf,fase:ph,estado:ph,archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),cabinActive,cabinClosed,cabinClosedAtMs:num(entry.cabinClosedAtMs),phaseFlowV19UpdatedAtMs:num(entry.updatedAtMs),phaseFlowV19Source:text(entry.source)});
     });
     return Array.from(map.values()).map(item=>{
       const flow=flowOf(item); const total=totalOf(item,flow);
       return {...item,ref:refOf(item),company:text(item.company||item.empresa||item.empresaReceptora),concept:text(item.concept||item.concepto||item.nombreConcepto||'Sin concepto'),flow,total};
     }).filter(item=>{
       if(item.deleted)return false;
-      /* V37: la cabina solo recibe trabajos que Fabricacion ya ha movido a Pintura.
-         Un RAL historico no puede adelantar un trabajo que aun tiene PINT = 0. */
-      return item.flow.pintura>0;
+      // V67: entra al tener PINT > 0. Cuando se pinta la última pieza no desaparece:
+      // queda visible como trabajo de Cabina hasta que el operario pulsa Cerrar trabajo.
+      // Si posteriormente vuelve alguna pieza a Pintura, reaparece aunque estuviera cerrado.
+      if(num(item.flow&&item.flow.pintura)>0)return true;
+      return item.cabinActive===true && item.cabinClosed!==true;
     });
   }
   function paintSummary(item){
@@ -1642,7 +1653,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return '<details class="work work-accordion" style="'+workStyle+'" data-work-job-key="'+esc(encodeURIComponent(jobKey))+'"'+(open?' open':'')+'>'+ 
       '<summary class="work-summary">'+
         '<div class="work-summary-main"><span class="accordion-arrow">&#8250;</span><div class="work-summary-title"><div class="level-label level-work">Trabajo</div><div class="ref">'+workRefVisualHTML(w)+'</div><div class="concept">'+esc(w.concept)+'</div><div class="meta">Total: '+fmt(w.total)+(p?' &middot; '+esc(p):'')+(waitingLegacy?' &middot; Pendiente de entrar en cabina':'')+'</div></div></div>'+ 
-        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span>'+(waitingLegacy?'<span class="ral-tag missing">PENDIENTE CABINA</span>':'')+'<span class="work-summary-metric units"><b>'+fmt(pendingUnits)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':((calculation&&calculation.source!=='preparacion'?(calculation.seeded?'Dato confirmado &middot; ':'C&aacute;lculo manual &middot; '):'Pintura necesaria &middot; ')+esc(fmtLiters(required))))+'</small></span>'+manualLinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Cerrar trabajo</span></span></div>'+ 
+        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span>'+(waitingLegacy?'<span class="ral-tag missing">PENDIENTE CABINA</span>':'')+'<span class="work-summary-metric units"><b>'+fmt(pendingUnits)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':((calculation&&calculation.source!=='preparacion'?(calculation.seeded?'Dato confirmado &middot; ':'C&aacute;lculo manual &middot; '):'Pintura necesaria &middot; ')+esc(fmtLiters(required))))+'</small></span>'+manualLinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Plegar trabajo</span></span></div>'+ 
       '</summary>'+ 
       '<div class="work-body">'+
         jobPaintStripHtml(entry)+
@@ -1656,6 +1667,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
           '<button class="btn good paint-one" data-paint-one="'+encodeURIComponent(w.ref)+'"'+(num(w.flow.pintura)<1?' disabled':'')+'>✅ PINTADO +1</button>'+ 
           '<button class="btn good" data-move-store="'+encodeURIComponent(w.ref)+'"'+(num(w.flow.pintura)<1?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button>'+ 
           '<button class="btn warn" data-fix-phase="'+encodeURIComponent(w.ref)+'">Rectificar PINTADO</button>'+ 
+          '<button class="btn ghost" data-close-cabin="'+encodeURIComponent(w.ref)+'"'+(num(w.flow.pintura)>0?' disabled':'')+'>Cerrar trabajo</button>'+ 
         '</div>'+ 
       '</div>'+ 
     '</details>';
@@ -1846,11 +1858,11 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       }
       return '<details class="work work-accordion" style="'+style+'" data-work-job-key="'+esc(encodeURIComponent(jobKey))+'"'+(state.openWorkJobs.has(jobKey)?' open':'')+'>'+ 
         '<summary class="work-summary"><div class="work-summary-main"><span class="accordion-arrow">&#8250;</span><div class="work-summary-title"><div class="level-label level-work">Trabajo</div><div class="ref">'+workRefVisualHTML(w)+'</div><div class="concept">'+esc(concept)+'</div><div class="meta">Total: '+fmt(w.total)+'</div></div></div>'+ 
-        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span><span class="work-summary-metric units"><b>'+fmt(pending)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':'Pintura necesaria &middot; '+esc(fmtLiters(required)))+'</small></span>'+relinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Cerrar trabajo</span></span></div></summary>'+ 
+        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span><span class="work-summary-metric units"><b>'+fmt(pending)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':'Pintura necesaria &middot; '+esc(fmtLiters(required)))+'</small></span>'+relinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Plegar trabajo</span></span></div></summary>'+ 
         '<div class="work-body">'+
           '<div class="job-paint-strip'+(required===null?' missing':'')+'"><div><div class="job-paint-title">'+esc(text(info.paintName)||ralLabel(ral)||'Pintura')+'</div><div class="job-paint-sub">Necesidad de este trabajo para sus unidades pendientes de pintar.</div></div><div class="job-paint-value"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Necesidad sin dato':esc(fmtLiters(required))+' necesarios')+'</small></div></div>'+ 
           '<div class="phase-grid"><div class="phase"><b>'+fmt(flow.fab)+'</b><span>FAB</span></div><div class="phase paint"><b>'+fmt(flow.pintura)+'</b><span>PINT</span></div><div class="phase store"><b>'+fmt(flow.almacen)+'</b><span>ALM</span></div><div class="phase"><b>'+fmt(flow.entregado)+'</b><span>ENT</span></div></div>'+ 
-          '<div class="actions"><button class="btn good paint-one" data-paint-one="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>✅ PINTADO +1</button><button class="btn good" data-move-store="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button><button class="btn warn" data-fix-phase="'+encodeURIComponent(ref)+'">Rectificar PINTADO</button></div>'+ 
+          '<div class="actions"><button class="btn good paint-one" data-paint-one="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>✅ PINTADO +1</button><button class="btn good" data-move-store="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button><button class="btn warn" data-fix-phase="'+encodeURIComponent(ref)+'">Rectificar PINTADO</button><button class="btn ghost" data-close-cabin="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)>0?' disabled':'')+'>Cerrar trabajo</button></div>'+ 
         '</div></details>';
     }
   }
@@ -1924,7 +1936,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     $('kJobs').textContent=rows.length;
     const sums=rows.reduce((a,w)=>{a.f+=w.flow.fab;a.p+=w.flow.pintura;a.a+=w.flow.almacen;return a;},{f:0,p:0,a:0});
     $('kFab').textContent=fmt(sums.f); $('kPaint').textContent=fmt(sums.p); $('kStore').textContent=fmt(sums.a);
-    if(!rows.length){ $('workList').innerHTML='<div class="empty">No hay trabajos con unidades pendientes de pintar.</div>'; return; }
+    if(!rows.length){ $('workList').innerHTML='<div class="empty">No hay trabajos activos en Cabina.</div>'; return; }
 
     const root=$('workList');
     const forceOpen=!!norm($('workSearch').value)||!!text($('workCompany').value);
@@ -1942,6 +1954,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     root.querySelectorAll('[data-paint-one]').forEach(b=>b.onclick=()=>moveOnePaintToStore(decodeURIComponent(b.dataset.paintOne||''),b));
     root.querySelectorAll('[data-move-store]').forEach(b=>b.onclick=()=>movePaintToStore(decodeURIComponent(b.dataset.moveStore||'')));
     root.querySelectorAll('[data-fix-phase]').forEach(b=>b.onclick=()=>openPhaseModal(decodeURIComponent(b.dataset.fixPhase||'')));
+    root.querySelectorAll('[data-close-cabin]').forEach(b=>b.onclick=()=>closeCabinWorkV67(decodeURIComponent(b.dataset.closeCabin||''),b));
     setTimeout(refreshOrderMetaForWorks,0);
     schedulePendingCabinConsumptionRepair();
   }
@@ -2090,12 +2103,51 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       if(reversalTargets.length)event.reversalTargets=reversalTargets;
       const events=[...(Array.isArray(entry.events)?entry.events:[]),event].slice(-120);
       const cf=canonicalFlow(next),ph=phaseFromFlow(next),nowMs=Date.now();
-      const nextEntry={...entry,schema:1,flow:cf,fase:ph,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v66',events,recentOperationIds:[...recent,operationId],lastOperation:{id:operationId,type,qty,atMs:nowMs,source:'terminal_cabina_pintura_v66'}};
-      tx.update(flowRef,{['phaseFlowV19.'+mapKey]:nextEntry,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v66'});
+      const nextEntry={...entry,schema:1,flow:cf,fase:ph,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v67',events,recentOperationIds:[...recent,operationId],cabinActive:true,cabinClosed:false,cabinClosedAtMs:0,cabinClosedBy:'',lastOperation:{id:operationId,type,qty,atMs:nowMs,source:'terminal_cabina_pintura_v67'}};
+      tx.update(flowRef,{['phaseFlowV19.'+mapKey]:nextEntry,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v67'});
       return {entry:nextEntry,flow:next,before,operationId,note,commitMs:nowMs,reversalTargets};
     });
-    const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result.entry};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v66';
+    const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result.entry};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v67';
     return {...result,package:pkg};
+  }
+
+  async function closeCabinWorkV67(ref,button){
+    ref=text(ref);if(!ref)return;
+    const op=requireOperator();if(!op)return;
+    const work=(state.works||[]).find(w=>sameRef(w&&w.ref,ref));
+    if(!work)return alert('No encuentro este trabajo en Cabina. Pulsa Actualizar e inténtalo de nuevo.');
+    if(num(work.flow&&work.flow.pintura)>0)return alert('Todavía quedan '+fmt(work.flow.pintura)+' unidad(es) en PINTURA. Termina de pintarlas antes de cerrar el trabajo.');
+    const msg='¿Cerrar este trabajo en Cabina?\n\nNo se moverá ninguna unidad y no se tocará el Stock.\nSi necesitas corregir un PINTADO enviado a Almacén por error, pulsa Cancelar y usa «Rectificar PINTADO».\n\nReferencia: '+technicalWorkRef(work);
+    if(!confirm(msg))return;
+    if(button)button.disabled=true;
+    const mapKey=phaseMapKeyV19(ref),at=nowISO(),nowMs=Date.now();
+    try{
+      const result=await runTransaction(flowDb,async tx=>{
+        const snap=await tx.get(flowRef);if(!snap.exists())throw new Error('No existe taller_data/fabricacion.');
+        const pkg=snap.data()||{};
+        let entry=phaseEntryV19(pkg,ref);
+        if(!entry){
+          const ldh=safeParse(pkg.ldh_db,'{}')||{};
+          const current=currentFlowFromData(pkg,ldh,ref);
+          if(!current)throw new Error('No se encuentra la referencia en el flujo compartido.');
+          entry={schema:1,workRef:technicalWorkRef(work)||ref,displayRef:visibleWorkRef(work)||ref,concept:text(work.concept),company:text(work.company),total:num(work.total),flow:canonicalFlow(current),fase:phaseFromFlow(current),revision:0,events:[],recentOperationIds:[]};
+        }
+        const current=flowOf(entry);
+        if(num(current.pintura)>0)throw new Error('Todavía quedan '+fmt(current.pintura)+' unidad(es) en Pintura.');
+        const opId=uid('cabina_cierre_v67');
+        const events=[...(Array.isArray(entry.events)?entry.events:[]),{id:uid('hist'),type:'terminal_pintura_cierre_manual',qty:0,date:at,operator:op,operationId:opId}].slice(-120);
+        const next={...entry,schema:1,cabinActive:true,cabinClosed:true,cabinClosedAtMs:nowMs,cabinClosedAtISO:at,cabinClosedBy:op,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v67',events,lastOperation:{id:opId,type:'terminal_pintura_cierre_manual',qty:0,atMs:nowMs,source:'terminal_cabina_pintura_v67'}};
+        tx.update(flowRef,{['phaseFlowV19.'+mapKey]:next,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v67'});
+        return next;
+      });
+      const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v67';
+      state.flowPackage=pkg;state.lastLocalFlowCommitMs=nowMs;state.lastLocalFlowGuardUntil=Date.now()+8000;
+      renderWorks();renderControl();renderHistory();toast('Trabajo cerrado en Cabina.');
+    }catch(error){
+      console.error('Cerrar trabajo Cabina V67',error);
+      if(button)button.disabled=false;
+      alert('No se pudo cerrar el trabajo: '+String(error&&error.message||error));
+    }
   }
 
   async function ensureOrdersAuth(){
@@ -4123,5 +4175,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <!-- LDH_TERMINAL_CABINA_V64_RECUENTO_ENVASE_ABIERTO_20260826 -->
 <!-- LDH_TERMINAL_CABINA_V66_PHASE_MAP_20260903 -->
 <script>window.LDH_TERMINAL_CABINA_SYNC_V66='PHASE-MAP-ATOMIC-PER-OT-20260903';document.documentElement.dataset.ldhCabinaSync='V66';console.info('[Cabina V66] phaseFlowV19 autoritativo.');</script>
+<script id="LDH_TERMINAL_CABINA_V67_BUILD_20260903">window.LDH_TERMINAL_CABINA_SYNC_V67='PHASE-MAP-V19-VISIBLE-UNTIL-MANUAL-CLOSE-20260903';document.documentElement.dataset.ldhCabinaSync='V67';console.info('[Cabina V67] trabajos visibles hasta cierre manual + Rectificar PINTADO.');</script>
 </body>
 </html>
