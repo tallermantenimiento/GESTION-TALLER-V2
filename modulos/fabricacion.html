@@ -1504,9 +1504,43 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
     return pkg;
   }catch(error){console.warn('[Fabricación V10] no se pudo fusionar partida compuesta local',error);return pkg;}
 }
+function mergeLocalAdvancedFlowsIntoRemoteV14(pkg){
+  try{
+    if(!pkg || !pkg.ldh_db) return pkg;
+    const local=parse(getStore(DB_KEY),{})||{};
+    const remote=parse(pkg.ldh_db,{})||{};
+    const pools=['deliveries','fabricacion','fab','trabajos'];
+
+    pools.forEach(pool=>{
+      const localRows=Array.isArray(local[pool])?local[pool]:[];
+      const remoteRows=Array.isArray(remote[pool])?remote[pool].slice():[];
+      localRows.forEach(localRow=>{
+        const lr=String(localRow&&(localRow.ref||localRow.referencia||localRow.jobRef)||'').trim();
+        if(!lr) return;
+        const idx=remoteRows.findIndex(row=>sameWorkRef(String(row&&(row.ref||row.referencia||row.jobRef)||'').trim(),lr));
+        if(idx<0){
+          // Si esta OT existe solo en este PC, no la destruimos por restaurar un paquete
+          // remoto que todavia no la contiene. La publicacion posterior la consolidara.
+          remoteRows.push({...localRow});
+          return;
+        }
+        // mergeRawAliasRows elige como autoritativo el flujo mas avanzado; a igualdad
+        // de avance, conserva el registro con timestamp de flujo mas reciente.
+        // Por tanto un snapshot viejo 49 FAB / 3 PINT nunca puede pisar un 46 FAB / 6 PINT.
+        remoteRows[idx]=mergeRawAliasRows(remoteRows[idx],localRow);
+      });
+      remote[pool]=remoteRows;
+    });
+
+    return {...pkg,ldh_db:JSON.stringify(dedupeLdhByIdentity(remote))};
+  }catch(error){
+    console.warn('[Fabricacion V14] proteccion anti-retroceso',error);
+    return pkg;
+  }
+}
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
-  pkg = mergeLocalCompositeIntoRemoteV10(withoutDeletedRefs(pkg));
+  pkg = mergeLocalAdvancedFlowsIntoRemoteV14(mergeLocalCompositeIntoRemoteV10(withoutDeletedRefs(pkg)));
   const appliedStamp = String(pkg.updatedAtISO || "");
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
@@ -2153,6 +2187,12 @@ console.info('[Fabricación V10] Referencia visible separada de OT técnica; par
 <script id="LDH_FABRICACION_V11_BUILD_20260902">
 window.LDH_FABRICACION_IDENTIFICACION_VISUAL_V11='FABRICACION-V11-IDENTIFICACION-VISUAL-UNIFICADA-20260902';
 document.documentElement.dataset.ldhFabricacionBuild='V11';
+</script>
+
+<!-- LDH_FABRICACION_V14_ANTI_RETROCESO_FLUJO_20260903 -->
+<script id="LDH_FABRICACION_V14_BUILD_20260903">
+window.LDH_FABRICACION_ANTI_RETROCESO_V14='FABRICACION-V14-ANTI-RETROCESO-FLUJO-20260903';
+document.documentElement.dataset.ldhFabricacionSyncGuard='V14';
 </script>
 </body>
 </html>
