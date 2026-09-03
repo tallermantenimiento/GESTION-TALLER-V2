@@ -1100,17 +1100,72 @@
 
     let lastPhaseMapV19={};
     function applyPhaseMapToAppV19(appObj,persist=true){
-      if(!appObj||!appObj.state)return false;const phaseMap=lastPhaseMapV19&&typeof lastPhaseMapV19==='object'?lastPhaseMapV19:{};let changed=false;
+      if(!appObj||!appObj.state)return false;
+      const phaseMap=lastPhaseMapV19&&typeof lastPhaseMapV19==='object'?lastPhaseMapV19:{};
+      let changed=false;
+
       Object.values(phaseMap).forEach(entry=>{
-        if(!entry||!entry.flow)return;const ref=technicalRefValueModule(entry.workRef||entry.ref||entry.reference||'');if(!ref)return;
-        const f=entry.flow||{},cf={fab:n(f.fab??f.fabricacion),fabricacion:n(f.fab??f.fabricacion),pintura:n(f.pintura),almacen:n(f.almacen),entregado:n(f.entregado)};
+        if(!entry||!entry.flow)return;
+        const ref=technicalRefValueModule(entry.workRef||entry.ref||entry.reference||'');
+        if(!ref)return;
+        const identity=phaseIdentityV19(ref);
+        const f=entry.flow||{};
+        const cf={
+          fab:n(f.fab??f.fabricacion),
+          fabricacion:n(f.fab??f.fabricacion),
+          pintura:n(f.pintura),
+          almacen:n(f.almacen),
+          entregado:n(f.entregado)
+        };
+
         ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
-          if(!Array.isArray(appObj.state[pool]))appObj.state[pool]=[];const arr=appObj.state[pool];const idx=arr.findIndex(row=>phaseIdentityV19(refOf(row))===phaseIdentityV19(ref));
-          if(idx>=0){const old=arr[idx]||{};arr[idx]={...old,flow:{...(old.flow||{}),...cf},delivered:cf.entregado,fase:entry.fase||old.fase,estado:entry.fase||old.estado,phaseFlowV19UpdatedAtMs:n(entry.updatedAtMs),phaseFlowV19Source:String(entry.source||'')};changed=true;}
-          else if(pool==='deliveries'&&(cf.almacen>0||cf.entregado>0)){arr.push({ref,referencia:ref,display_ref:entry.displayRef||ref,concept:entry.concept||'Sin concepto',company:entry.company||'',total:n(entry.total)||cf.fab+cf.pintura+cf.almacen+cf.entregado,flow:cf,delivered:cf.entregado,fase:entry.fase||'almacen',estado:entry.fase||'almacen',status:'pendiente',archived:false});changed=true;}
+          if(!Array.isArray(appObj.state[pool]))appObj.state[pool]=[];
+          const arr=appObj.state[pool];
+          let matches=0;
+
+          // V6: actualizar TODAS las copias locales de la misma OT técnica.
+          // En versiones anteriores podía haber varias filas históricas de una OT;
+          // V5 solo corregía la primera y el deduplicador visual podía escoger después
+          // una copia antigua (por ejemplo ALM 64) por tener mayor puntuación de fase.
+          for(let i=0;i<arr.length;i++){
+            const row=arr[i];
+            if(phaseIdentityV19(refOf(row))!==identity)continue;
+            matches++;
+            const old=row&&typeof row==='object'?row:{};
+            arr[i]={
+              ...old,
+              flow:{...(old.flow||{}),...cf},
+              delivered:cf.entregado,
+              fase:entry.fase||old.fase,
+              estado:entry.fase||old.estado,
+              phaseFlowV19UpdatedAtMs:n(entry.updatedAtMs),
+              phaseFlowV19Source:String(entry.source||'')
+            };
+            changed=true;
+          }
+
+          // Solo crear una fila de Almacén si Firebase dice que realmente hay
+          // unidades en ALM/ENT y todavía no existe ninguna copia local de esa OT.
+          if(matches===0&&pool==='deliveries'&&(cf.almacen>0||cf.entregado>0)){
+            arr.push({
+              ref,referencia:ref,display_ref:entry.displayRef||ref,
+              concept:entry.concept||'Sin concepto',company:entry.company||'',
+              total:n(entry.total)||cf.fab+cf.pintura+cf.almacen+cf.entregado,
+              flow:{...cf},delivered:cf.entregado,
+              fase:entry.fase||'almacen',estado:entry.fase||'almacen',
+              status:'pendiente',archived:false,
+              phaseFlowV19UpdatedAtMs:n(entry.updatedAtMs),
+              phaseFlowV19Source:String(entry.source||'')
+            });
+            changed=true;
+          }
         });
       });
-      if(changed&&persist){try{localStorage.setItem(DB_KEY,JSON.stringify(appObj.state));}catch(_){}}
+
+      if(changed&&persist){
+        try{localStorage.setItem(DB_KEY,JSON.stringify(appObj.state));}
+        catch(_){try{sessionStorage.setItem(DB_KEY,JSON.stringify(appObj.state));}catch(__){}}
+      }
       return changed;
     }
     window.LDH_almacenApplyPhaseMapV19=applyPhaseMapToAppV19;
@@ -1182,7 +1237,7 @@
 
 <!-- LDH_ALMACEN_AUTH_DEFAULT_Y_COLA_PENDIENTE_V3_20260803 -->
 
-<!-- LDH_ALMACEN_V5_PHASE_MAP_SYNC_20260903 -->
-<script>window.LDH_ALMACEN_SYNC_V5='PHASE-MAP-ATOMIC-PER-OT-20260903';document.documentElement.dataset.ldhAlmacenSync='V5';console.info('[Almacén V5] solo sincronización phaseFlowV19; lógica funcional intacta.');</script>
+<!-- LDH_ALMACEN_V6_PHASE_MAP_ALL_DUPLICATES_20260903 -->
+<script>window.LDH_ALMACEN_SYNC_V6='PHASE-MAP-ALL-DUPLICATES-20260903';document.documentElement.dataset.ldhAlmacenSync='V6';console.info('[Almacén V6] phaseFlowV19 aplicado a todas las copias locales de cada OT; lógica funcional intacta.');</script>
 </body>
 </html>
