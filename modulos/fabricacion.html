@@ -877,11 +877,12 @@
           before:beforeFlowV17,after:afterFlowV17,
           total:n(item.total||item.unidades||0),atMs:moveAtV17
         };
-        if(typeof window.LDH_fabricacionQueueDirectSyncV17==='function')
-          window.LDH_fabricacionQueueDirectSyncV17(payloadV17);
+        payloadV17.operationId='fab19_'+moveAtV17.toString(36)+'_'+Math.random().toString(36).slice(2,8);
+        if(typeof window.LDH_fabricacionQueuePhaseFlowV19==='function')
+          window.LDH_fabricacionQueuePhaseFlowV19(payloadV17);
         else{
-          window.__LDH_FAB_V17_PENDING=Array.isArray(window.__LDH_FAB_V17_PENDING)?window.__LDH_FAB_V17_PENDING:[];
-          window.__LDH_FAB_V17_PENDING.push(payloadV17);
+          window.__LDH_FAB_V19_PENDING=Array.isArray(window.__LDH_FAB_V19_PENDING)?window.__LDH_FAB_V19_PENDING:[];
+          window.__LDH_FAB_V19_PENDING.push(payloadV17);
         }
       }catch(error){ console.warn('[Fabricación V17] no se pudo encolar sincronización directa',error); }
 
@@ -1094,9 +1095,55 @@
 })();
 </script>
 
-<script id="LDH_FABRICACION_V18_BOOTSTRAP_20260903">
+<script id="LDH_FABRICACION_V19_BOOTSTRAP_20260903">
 window.__LDH_FAB_V18_COMPACT_ACTIVE=true;
+window.__LDH_FAB_V19_PHASE_MAP_ACTIVE=true;
 window.LDH_FABRICACION_V18='COMPACT-CLOUD-UNDER-1MB-20260903';
+window.LDH_FABRICACION_V19='PHASE-MAP-ATOMIC-PER-OT-20260903';
+window.LDH_phaseKeyV19=function(value){
+  const raw=String(value==null?'':value).trim();
+  if(!raw)return '';
+  const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
+  const key=m?('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')):('REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim());
+  return encodeURIComponent(key).replace(/\./g,'%2E');
+};
+window.LDH_applyPhaseMapV19=function(pkg){
+  try{
+    if(!pkg||typeof pkg!=='object')return pkg;
+    const phaseMap=pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?pkg.phaseFlowV19:{};
+    const entries=Object.values(phaseMap).filter(x=>x&&typeof x==='object'&&x.flow);
+    if(!entries.length)return pkg;
+    const text=v=>String(v==null?'':v).trim();
+    const key=v=>window.LDH_phaseKeyV19(v);
+    const num=v=>{const n=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(n)?Math.max(0,n):0;};
+    const canon=f=>({fab:num(f&&f.fab),fabricacion:num(f&&f.fab),pintura:num(f&&f.pintura),almacen:num(f&&f.almacen),entregado:num(f&&f.entregado)});
+    const phase=f=>num(f.entregado)>0&&num(f.fab)+num(f.pintura)+num(f.almacen)<=0?'entregado':num(f.almacen)>0&&num(f.fab)+num(f.pintura)<=0?'almacen':num(f.pintura)>0?'pintura':'fabricacion';
+    const byKey=new Map(entries.map(e=>[key(e.workRef||e.ref||e.reference),e]).filter(x=>x[0]));
+    const parse=(raw,fb)=>{try{return typeof raw==='string'?JSON.parse(raw||'null')??fb:(raw&&typeof raw==='object'?raw:fb);}catch(_){return fb;}};
+    const out={...pkg};
+    const ldh={...(parse(pkg.ldh_db,{})||{})};
+    ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
+      const arr=Array.isArray(ldh[pool])?ldh[pool].slice():[];
+      ldh[pool]=arr.map(row=>{
+        const e=byKey.get(key(row&&(row.ref||row.referencia||row.jobRef))); if(!e)return row;
+        const cf=canon(e.flow), ph=phase(cf);
+        return {...row,flow:{...(row.flow||{}),...cf},delivered:cf.entregado,fase:ph,estado:ph,status:'pendiente',archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),phaseFlowV19UpdatedAtMs:num(e.updatedAtMs),phaseFlowV19Source:text(e.source)};
+      });
+    });
+    out.ldh_db=JSON.stringify(ldh);
+    let inbox=parse(pkg.inbox,[]); if(!Array.isArray(inbox))inbox=[];
+    inbox=inbox.map(row=>{const e=byKey.get(key(row&&(row.ref||row.referencia||row.jobRef)));if(!e)return row;const cf=canon(e.flow),ph=phase(cf);return {...row,flow:{...(row.flow||{}),...cf},delivered:cf.entregado,fase:ph,estado:ph,status:'pendiente',archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0)};});
+    out.inbox=JSON.stringify(inbox);
+    const ovs=parse(pkg.overrides,{})||{};
+    entries.forEach(e=>{
+      const ref=text(e.workRef||e.ref||e.reference);if(!ref)return;const cf=canon(e.flow),ph=phase(cf);
+      const existing=Object.keys(ovs).find(r=>key(r)===key(ref))||ref;
+      ovs[existing]={...(ovs[existing]||{}),flow:cf,fase:ph,estado:ph,status:'pendiente',archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),updatedAt:e.updatedAtISO||new Date(num(e.updatedAtMs)||Date.now()).toISOString(),phaseFlowV19UpdatedAtMs:num(e.updatedAtMs),phaseFlowV19Source:text(e.source)};
+    });
+    out.overrides=JSON.stringify(ovs);
+    return out;
+  }catch(error){console.warn('[Fabricacion V19] no se pudo aplicar phaseFlowV19',error);return pkg;}
+};
 </script>
 
 <script type="module" id="LDH_FABRICACION_FIRESTORE_SYNC_2107">
@@ -1765,6 +1812,7 @@ function mergeLocalFlowStateIntoRemoteV15(pkg){
 }
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
+  if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE && typeof window.LDH_applyPhaseMapV19==='function') pkg=window.LDH_applyPhaseMapV19(pkg);
   pkg = mergeLocalFlowStateIntoRemoteV15(mergeLocalCompositeIntoRemoteV10(withoutDeletedRefs(pkg)));
   const appliedStamp = String(pkg.updatedAtISO || "");
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
@@ -1793,6 +1841,11 @@ async function restoreIfRemoteBetter(){
     const snap = await getDoc(DOC_REF);
     if(!snap.exists()) return false;
     const remote = withoutDeletedRefs(snap.data() || {});
+    if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE){
+      applyRemotePackage(remote);
+      status('Nube V19 · flujo por OT', 'ok');
+      return true;
+    }
     if(applyRemotePerRefAdvancesV12(remote)){
       status("Nube reconciliada por OT · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
       return true;
@@ -1810,6 +1863,7 @@ async function restoreIfRemoteBetter(){
   }
 }
 async function publish(force=false){
+  if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE){ status('Nube V19 · flujo por OT', 'ok'); return; }
   if(!authReady || ignorePublish) return;
   clearTimeout(publishTimer);
   publishTimer = setTimeout(async()=>{
@@ -2025,6 +2079,11 @@ async function startLegacyCloudSyncV4(){
     if(remoteStamp && remoteStamp === lastRemoteUpdated) return;
     lastRemoteUpdated = remoteStamp;
 
+    if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE){
+      applyRemotePackage(remote);
+      status('Nube V19 · flujo por OT', 'ok');
+      return;
+    }
     if(applyRemotePerRefAdvancesV12(remote)){
       status("Nube reconciliada por OT · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
       return;
@@ -2244,6 +2303,7 @@ console.info('[Fabricación V10] Referencia visible separada de OT técnica; par
 <script type="module" id="LDH_FABRICACION_SYNC_REF_CABINA_V9_20260825">
 (async function(){
   'use strict';
+  if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE){ console.info('[Fabricación V9] desactivada por V19.'); return; }
   if(window.__LDH_FAB_SYNC_REF_V9) return;
   window.__LDH_FAB_SYNC_REF_V9 = true;
 
@@ -2462,6 +2522,7 @@ document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
 <script type="module" id="LDH_FABRICACION_V17_SYNC_DIRECTA_OT_20260903">
 (async function(){
   'use strict';
+  if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE){ console.info('[Fabricación V18] escritor de paquete completo desactivado por V19.'); return; }
   if(window.__LDH_FAB_V17_DIRECT_ACTIVE) return;
   window.__LDH_FAB_V17_DIRECT_ACTIVE=true;
 
@@ -2690,6 +2751,70 @@ document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
   window.LDH_FABRICACION_V18='COMPACT-CLOUD-UNDER-1MB-20260903';
   document.documentElement.dataset.ldhFabricacionSync='V18';
   console.info('[Fabricación V18] compactación Firestore + sincronización atómica por OT activa.');
+})();
+</script>
+
+
+<!-- LDH_FABRICACION_V19_PHASE_MAP_ATOMIC_20260903 -->
+<script type="module" id="LDH_FABRICACION_V19_PHASE_MAP_ATOMIC_20260903">
+(async function(){
+  'use strict';
+  if(window.__LDH_FAB_V19_MODULE_STARTED)return;
+  window.__LDH_FAB_V19_MODULE_STARTED=true;
+  const CFG={apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',authDomain:'gestion-taller-v2.firebaseapp.com',projectId:'gestion-taller-v2',storageBucket:'gestion-taller-v2.firebasestorage.app',messagingSenderId:'888590823508',appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'};
+  const text=v=>String(v==null?'':v).trim();
+  const num=v=>{const n=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(n)?Math.max(0,n):0;};
+  const key=v=>window.LDH_phaseKeyV19?window.LDH_phaseKeyV19(v):encodeURIComponent(text(v));
+  const tech=v=>{const raw=text(v);const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw;};
+  const flow=o=>{o=o&&typeof o==='object'?o:{};const f=o.flow&&typeof o.flow==='object'?o.flow:o;return {fab:num(f.fab??f.fabricacion),pintura:num(f.pintura),almacen:num(f.almacen??f.alm),entregado:num(f.entregado??o.delivered)};};
+  const canon=f=>({fab:num(f.fab),fabricacion:num(f.fab),pintura:num(f.pintura),almacen:num(f.almacen),entregado:num(f.entregado)});
+  const phase=f=>num(f.entregado)>0&&num(f.fab)+num(f.pintura)+num(f.almacen)<=0?'entregado':num(f.almacen)>0&&num(f.fab)+num(f.pintura)<=0?'almacen':num(f.pintura)>0?'pintura':'fabricacion';
+  const same=(a,b)=>key(a)===key(b);
+  const refOf=o=>text(o&&(o.technical_ref||o.technicalRef||o.composite_part_reference||o.ref||o.referencia||o.jobRef));
+  function status(msg,kind='ok'){const el=document.getElementById('cloudStatus');if(!el)return;el.textContent=msg;el.classList.remove('ok','warn','bad');el.classList.add(kind);}
+  function applyOp(base,p){const out={...base};let q=num(p.qty);const from=p.from==='fabricacion'?'fab':p.from,to=p.to==='fabricacion'?'fab':p.to;if(from){q=Math.min(q,num(out[from]));out[from]=Math.max(0,num(out[from])-q);}if(to)out[to]=num(out[to])+q;return out;}
+  function bestLegacy(pkg,reference){
+    const parse=(raw,fb)=>{try{return typeof raw==='string'?JSON.parse(raw||'null')??fb:(raw&&typeof raw==='object'?raw:fb);}catch(_){return fb;}};
+    const ovs=parse(pkg&&pkg.overrides,{})||{};const ldh=parse(pkg&&pkg.ldh_db,{})||{};let best=null;
+    ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>(Array.isArray(ldh[pool])?ldh[pool]:[]).forEach(row=>{if(!same(refOf(row),reference))return;if(!best)best={...row};else{const a=flow(best),b=flow(row),sa=a.fab+a.pintura*2+a.almacen*3+a.entregado*4,sb=b.fab+b.pintura*2+b.almacen*3+b.entregado*4;if(sb>sa)best={...row};}}));
+    const ovKey=Object.keys(ovs).find(r=>same(r,reference)); if(best&&ovKey&&ovs[ovKey])best={...best,...ovs[ovKey],flow:{...(best.flow||{}),...(ovs[ovKey].flow||{})}};
+    return best;
+  }
+  function entryFromItem(item,source='fabricacion_v19_migracion'){
+    const f=flow(item), now=Date.now(), r=tech(refOf(item));
+    return {schema:1,workRef:r,displayRef:text(item&&item.ref)||r,orderId:text(item&&(item.agendaOrderId||item.orderId||item.workOrderId)),concept:text(item&&(item.concept||item.concepto)),company:text(item&&(item.company||item.empresa||item.empresaReceptora)),total:num(item&&(item.total||item.unidades||item.cantidad||item.uds)),flow:canon(f),fase:phase(f),revision:1,updatedAtMs:now,updatedAtISO:new Date(now).toISOString(),source,recentOperationIds:[]};
+  }
+  const [{initializeApp,getApps},{getFirestore,doc,getDoc,setDoc,runTransaction,serverTimestamp}]=await Promise.all([import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')]);
+  let app=getApps().find(a=>a&&a.options&&a.options.projectId===CFG.projectId);if(!app)app=initializeApp(CFG,'ldh-fabricacion-phase-v19');
+  const db=getFirestore(app), DOC=doc(db,'taller_data','fabricacion');
+  async function migrate(){
+    const snap=await getDoc(DOC);if(!snap.exists())return 0;const pkg=snap.data()||{},existing=pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?{...pkg.phaseFlowV19}:{};let added=0;
+    const rows=Array.isArray(window.App?.allItems?.())?window.App.allItems():[];
+    const seen=new Set();for(const item of rows){const r=refOf(item),k=key(r);if(!r||!k||seen.has(k)||item.deleted)continue;seen.add(k);if(existing[k])continue;const legacy=bestLegacy(pkg,r)||item;existing[k]=entryFromItem({...item,...legacy,flow:canon(flow(legacy))});added++;}
+    if(added){const now=new Date().toISOString();await setDoc(DOC,{phaseFlowV19:existing,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:now,source:'fabricacion_v19_migracion'},{merge:true});console.info('[Fabricación V19] mapa por OT creado ·',added,'refs');}
+    return added;
+  }
+  let chain=Promise.resolve();
+  async function commit(payload){
+    const p={...payload,ref:text(payload&&payload.ref)};if(!p.ref)return false;const mapKey=key(p.ref),opId=text(p.operationId)||('fab19_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8));
+    status('Nube V19 · confirmando '+tech(p.ref)+'…','warn');
+    const result=await runTransaction(db,async tx=>{
+      const snap=await tx.get(DOC);if(!snap.exists())throw new Error('No existe taller_data/fabricacion');const pkg=snap.data()||{},phaseMap=pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?pkg.phaseFlowV19:{};let entry=phaseMap[mapKey];
+      if(!entry){const legacy=bestLegacy(pkg,p.ref)||window.App?.itemByRef?.(encodeURIComponent(p.ref))||{};entry=entryFromItem(legacy,'fabricacion_v19_seed_lazy');}
+      const recent=Array.isArray(entry.recentOperationIds)?entry.recentOperationIds.slice(-19):[];if(recent.includes(opId))return {entry,duplicate:true};
+      const base=flow(entry), target=applyOp(base,p), now=Date.now(), cf=canon(target), ph=phase(cf), local=window.App?.itemByRef?.(encodeURIComponent(p.ref))||{};
+      const next={...entry,schema:1,workRef:tech(entry.workRef||p.ref),displayRef:text(local.ref||local.referencia||entry.displayRef||p.ref),orderId:text(local.agendaOrderId||local.orderId||entry.orderId),concept:text(local.concept||local.concepto||entry.concept),company:text(local.company||local.empresa||local.empresaReceptora||entry.company),total:num(local.total||local.unidades||entry.total),flow:cf,fase:ph,revision:num(entry.revision)+1,updatedAtMs:now,updatedAtISO:new Date(now).toISOString(),source:'fabricacion_v19',recentOperationIds:[...recent,opId],lastOperation:{id:opId,from:text(p.from),to:text(p.to),qty:num(p.qty),atMs:now,source:'fabricacion_v19'}};
+      tx.update(DOC,{['phaseFlowV19.'+mapKey]:next,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:next.updatedAtISO,source:'fabricacion_v19'});
+      return {entry:next,duplicate:false};
+    });
+    const e=result.entry,f=flow(e);status('Nube V19 OK · '+num(f.fab)+' FAB / '+num(f.pintura)+' PINT / '+num(f.almacen)+' ALM','ok');return true;
+  }
+  function enqueue(payload){chain=chain.then(()=>commit(payload)).catch(async error=>{console.error('[Fabricación V19] sincronización por OT',error);status('Nube V19 ERROR · movimiento no confirmado','bad');try{await window.LDH_fabricacionRestoreCloudNow?.();}catch(_){}return false;});return chain;}
+  window.LDH_fabricacionQueuePhaseFlowV19=enqueue;window.LDH_fabricacionCommitPhaseFlowV19=commit;window.LDH_fabricacionMigratePhaseFlowV19=migrate;
+  await migrate();
+  const pending=Array.isArray(window.__LDH_FAB_V19_PENDING)?window.__LDH_FAB_V19_PENDING.splice(0):[];pending.forEach(enqueue);
+  document.documentElement.dataset.ldhFabricacionSync='V19';
+  console.info('[Fabricación V19] sincronización atómica por OT activa · phaseFlowV19.');
 })();
 </script>
 

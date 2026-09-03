@@ -1,5 +1,4 @@
 <!doctype html>
-<!-- V66 · RECUPERAR OT VIVA FRENTE A BORRADO ANTIGUO · 02/09/2026 -->
 <!-- V65 IDENTIFICACION VISUAL UNIFICADA + BORRADO GLOBAL POR OT TECNICA · 02/09/2026 -->
 <html lang="es">
 <head>
@@ -163,7 +162,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V66 &middot; Recuento f&iacute;sico con botes enteros + resto en bote abierto. PINTADO consume en Cabina; correcci&oacute;n devuelve pieza + consumibles. Inbox de Fabricaci&oacute;n como respaldo y referencia &uacute;nica por OT mantenida.</div>
+      <div class="sub">V65 &middot; Recuento f&iacute;sico con botes enteros + resto en bote abierto. PINTADO consume en Cabina; correcci&oacute;n devuelve pieza + consumibles. Inbox de Fabricaci&oacute;n como respaldo y referencia &uacute;nica por OT mantenida.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -470,54 +469,16 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return 'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
   };
   const sameRef = (a,b) => { const ka=workIdentityKey(a),kb=workIdentityKey(b); return !!ka&&ka===kb; };
-  // V66 · una marca antigua de borrado no puede ocultar una OT que ha vuelto a
-  // tener flujo vivo en Pintura después de aquella marca. Los borrados actuales
-  // siguen prevaleciendo porque guardan deletedAtMs y son posteriores al trabajo.
-  const deletedRecordMs = data => {
-    data=data&&typeof data==='object'?data:{};
-    const direct=Number(data.deletedAtMs); if(Number.isFinite(direct)&&direct>0)return direct;
-    const ts=data.deletedAt;
-    try{ if(ts&&typeof ts.toMillis==='function'){const ms=ts.toMillis();if(Number.isFinite(ms)&&ms>0)return ms;} }catch(_){ }
-    const parsed=Date.parse(text(ts)); return Number.isFinite(parsed)?parsed:0;
-  };
-  const applyDeletedSnapshot = snap => {
-    const refs=new Set(), meta=new Map();
-    (snap&&Array.isArray(snap.docs)?snap.docs:[]).forEach(d=>{
-      const data=(d&&typeof d.data==='function'?(d.data()||{}):{});
-      const key=workIdentityKey(text(data.ref||data.reference));
-      if(!key)return;
-      refs.add(key);
-      meta.set(key,{deletedAtMs:deletedRecordMs(data),source:text(data.source)});
-    });
-    state.deletedRefs=refs;
-    state.deletedMetaByKey=meta;
-  };
-  const isDeletedWorkRef = (ref,item) => {
-    const key=workIdentityKey(ref); if(!key||!state.deletedRefs.has(key))return false;
-    const f=flowOf(item||{});
-    if(num(f.pintura)<=0)return true;
-    const rec=state.deletedMetaByKey&&state.deletedMetaByKey.get(key);
-    const deletedMs=rec&&Number(rec.deletedAtMs)||0;
-    const liveMs=workUpdatedMs(item||{});
-    // Tombstone legacy sin fecha: no debe ocultar una OT que actualmente esta en Pintura.
-    if(deletedMs<=0)return false;
-    // Si la OT se actualizo despues del tombstone, el flujo vivo es la autoridad.
-    if(liveMs>deletedMs)return false;
-    return true;
-  };
+  const isDeletedWorkRef = ref => { const key=workIdentityKey(ref); return !!key && state.deletedRefs.has(key); };
   const preferredWorkRef = (a,b) => {
     a=text(a); b=text(b); if(!a)return b; if(!b)return a; if(!sameRef(a,b))return a;
     return b.length>a.length?b:a;
   };
   const workUpdatedMs = item => {
-    let best=0;
-    for(const v of [item&&item.localFlowUpdatedAt,item&&item.updatedAt,item&&item.lastUpdate,item&&item.fabricacion_ts,item&&item.pintura_ts,item&&item.almacen_ts,item&&item.entregado_ts]){
-      const ms=Date.parse(text(v)); if(Number.isFinite(ms))best=Math.max(best,ms);
+    for(const v of [item&&item.localFlowUpdatedAt,item&&item.updatedAt,item&&item.lastUpdate]){
+      const ms=Date.parse(text(v)); if(Number.isFinite(ms))return ms;
     }
-    (Array.isArray(item&&item.history)?item.history:[]).forEach(ev=>{
-      const ms=Date.parse(text(ev&&(ev.date||ev.at||ev.createdAt||ev.updatedAt))); if(Number.isFinite(ms))best=Math.max(best,ms);
-    });
-    return best;
+    return 0;
   };
   const mergeAliasWork = (a,b) => {
     a=a&&typeof a==='object'?a:{}; b=b&&typeof b==='object'?b:{};
@@ -563,7 +524,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     prepPackage:null,
     works:[],
     deletedRefs:new Set(),
-    deletedMetaByKey:new Map(),
     stock:null,
     stockReady:false,
     stockError:'',
@@ -699,6 +659,23 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     if(num(f.entregado)>0) return 'entregado';
     return 'fabricacion';
   }
+  const phaseMapKeyV19 = value => {
+    const raw=text(value);if(!raw)return '';
+    const k=workIdentityKey(raw);
+    return encodeURIComponent(k).replace(/\./g,'%2E');
+  };
+  function phaseEntryV19(pkg,reference){
+    const map=pkg&&pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?pkg.phaseFlowV19:{};
+    const direct=map[phaseMapKeyV19(reference)];if(direct&&direct.flow)return direct;
+    const wanted=workIdentityKey(reference);if(!wanted)return null;
+    return Object.values(map).find(e=>e&&e.flow&&workIdentityKey(e.workRef||e.ref||e.reference)===wanted)||null;
+  }
+  function compactPhaseEventsV19(events){
+    return (Array.isArray(events)?events:[]).filter(h=>text(h&&h.type).startsWith('terminal_pintura_')).slice(-120).map(h=>({
+      id:text(h&&h.id),type:text(h&&h.type),qty:num(h&&h.qty),date:text(h&&(h.date||h.at)),operator:text(h&&h.operator),operationId:text(h&&h.operationId),
+      reversalTargets:Array.isArray(h&&h.reversalTargets)?h.reversalTargets.map(x=>({operationId:text(x&&x.operationId),qty:num(x&&x.qty)})).filter(x=>x.operationId&&x.qty>0):undefined
+    }));
+  }
   function workRowsFromPackage(pkg){
     if(!pkg || !pkg.ldh_db) return [];
     const db=safeParse(pkg.ldh_db,{})||{};
@@ -707,7 +684,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     FLOW_POOLS.forEach(pool=>{
       const arr=Array.isArray(db[pool])?db[pool]:[];
       arr.forEach(raw=>{
-        const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref,raw)) return;
+        const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref)) return;
         const key=workIdentityKey(ref); if(!key)return;
         const prev=map.get(key);
         map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
@@ -718,18 +695,27 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     // ya tiene PINT > 0 solo por ese pequeño desfase de publicación.
     const inboxFallback=safeParse(pkg.inbox,'[]');
     (Array.isArray(inboxFallback)?inboxFallback:[]).forEach(raw=>{
-      const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref,raw)) return;
+      const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref)) return;
       const key=workIdentityKey(ref); if(!key)return;
       const prev=map.get(key);
       map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
     });
     Object.keys(overrides).forEach(ref=>{
       const key=workIdentityKey(ref);
-      if(!key || !map.has(key) || isDeletedWorkRef(ref,map.get(key))) return;
+      if(!key || !map.has(key) || isDeletedWorkRef(ref)) return;
       const ov=overrides[ref]||{};
       const item=map.get(key);
       const merged={...item,...ov,ref:preferredWorkRef(refOf(item),ref),referencia:preferredWorkRef(refOf(item),ref),flow:{...(item.flow||{}),...(ov.flow||{})}};
       map.set(key,merged);
+    });
+    // V66: phaseFlowV19 es la única fuente autoritativa de cantidades. El paquete
+    // legacy aporta metadatos, pero nunca puede volver a imponer un reparto antiguo.
+    const phaseMap=pkg&&pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?pkg.phaseFlowV19:{};
+    Object.values(phaseMap).forEach(entry=>{
+      if(!entry||!entry.flow)return;const ref=text(entry.workRef||entry.ref||entry.reference);const k=workIdentityKey(ref);if(!k||isDeletedWorkRef(ref))return;
+      const base=map.get(k)||{ref,referencia:ref,company:text(entry.company),concept:text(entry.concept),total:num(entry.total)};
+      const cf=canonicalFlow(flowOf(entry));const ph=phaseFromFlow(cf);
+      map.set(k,{...base,ref:preferredWorkRef(refOf(base),entry.displayRef||ref),referencia:preferredWorkRef(refOf(base),entry.displayRef||ref),company:text(base.company||entry.company),concept:text(base.concept||entry.concept),total:num(base.total||entry.total),flow:cf,fase:ph,estado:ph,archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),phaseFlowV19UpdatedAtMs:num(entry.updatedAtMs),phaseFlowV19Source:text(entry.source)});
     });
     return Array.from(map.values()).map(item=>{
       const flow=flowOf(item); const total=totalOf(item,flow);
@@ -1963,7 +1949,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function loadDeletedRefs(){
     try{
       const snap=await getDocs(deletedCol);
-      applyDeletedSnapshot(snap);
+      state.deletedRefs=new Set(snap.docs.map(d=>workIdentityKey(text((d.data()||{}).ref||(d.data()||{}).reference))).filter(Boolean));
       renderWorks();
     }catch(e){ console.warn('deleted refs',e); }
   }
@@ -1974,6 +1960,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return {refs:refs.size,deliveries:Array.isArray(ldh.deliveries)?ldh.deliveries.length:0,fabricacion:Array.isArray(ldh.fabricacion)?ldh.fabricacion.length:0,fab:Array.isArray(ldh.fab)?ldh.fab.length:0,trabajos:Array.isArray(ldh.trabajos)?ldh.trabajos.length:0};
   }
   function currentFlowFromData(pkg,ldh,ref){
+    const phaseEntry=phaseEntryV19(pkg,ref);
+    if(phaseEntry&&phaseEntry.flow)return flowOf(phaseEntry);
     const ov=safeParse(pkg.overrides,'{}')||{};
     const ovKey=Object.keys(ov).find(k=>sameRef(k,ref));
     if(ovKey && ov[ovKey] && ov[ovKey].flow) return flowOf({flow:ov[ovKey].flow});
@@ -2068,59 +2056,46 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function mutateWorkFlow(ref,mode,payload){
     const op=requireOperator(); if(!op) throw new Error('Operario obligatorio');
     const at=nowISO();
-    const operationId=mode==='to_store'?uid('cabina_pintado_v61'):(mode==='return_to_paint'?uid('cabina_retorno_v62'):(mode==='legacy_stock_restore'?uid('cabina_retorno_legacy_v62'):''));
-    return runTransaction(flowDb,async tx=>{
-      const snap=await tx.get(flowRef);
-      if(!snap.exists()) throw new Error('No existe taller_data/fabricacion.');
-      const pkg={...(snap.data()||{})};
-      const ldh=safeParse(pkg.ldh_db,'{}')||{};
-      FLOW_POOLS.forEach(p=>{if(!Array.isArray(ldh[p]))ldh[p]=[];});
-      let current=currentFlowFromData(pkg,ldh,ref);
-      if(current){
-        const existsInLdh=FLOW_POOLS.some(pool=>(Array.isArray(ldh[pool])?ldh[pool]:[]).some(x=>sameRef(refOf(x),ref)));
-        if(!existsInLdh){
-          const inbox=safeParse(pkg.inbox,'[]');
-          const seed=(Array.isArray(inbox)?inbox:[]).find(x=>sameRef(refOf(x),ref));
-          if(seed){
-            const seeded={...seed,ref:refOf(seed)||ref,referencia:refOf(seed)||ref,flow:canonicalFlow(flowOf(seed)),archived:false,deleted:false};
-            FLOW_POOLS.forEach(pool=>{if(!Array.isArray(ldh[pool]))ldh[pool]=[];ldh[pool].push({...seeded});});
-          }
-        }
-      }
-      if(!current) throw new Error('No se encuentra la referencia en Fabricacion ni en su Inbox de respaldo.');
-      const before={...current};
-      let next={...current}; let qty=0; let note=''; let type='';
+    const operationId=mode==='to_store'?uid('cabina_pintado_v66'):(mode==='return_to_paint'?uid('cabina_retorno_v66'):(mode==='legacy_stock_restore'?uid('cabina_retorno_legacy_v66'):uid('cabina_v66')));
+    const mapKey=phaseMapKeyV19(ref);
+    const result=await runTransaction(flowDb,async tx=>{
+      const snap=await tx.get(flowRef);if(!snap.exists())throw new Error('No existe taller_data/fabricacion.');
+      const pkg=snap.data()||{},ldh=safeParse(pkg.ldh_db,'{}')||{};
+      let entry=phaseEntryV19(pkg,ref);
+      let current=entry&&entry.flow?flowOf(entry):currentFlowFromData(pkg,ldh,ref);
+      if(!current)throw new Error('No se encuentra la referencia en Fabricación.');
+      const before={...current};let next={...current},qty=0,note='',type='';
       const reversalTargets=Array.isArray(payload&&payload.reversalTargets)?payload.reversalTargets.map(x=>({operationId:text(x&&x.operationId),qty:num(x&&x.qty)})).filter(x=>x.operationId&&x.qty>0):[];
       if(mode==='to_store'){
-        qty=num(payload.qty);
-        if(qty<=0 || qty>current.pintura) throw new Error('Cantidad no valida para Pintura.');
-        next.pintura=Math.max(0,current.pintura-qty); next.almacen=current.almacen+qty;
-        type='terminal_pintura_to_almacen'; note='Pintura -> Almacen: '+fmt(qty)+' uds · '+op;
+        qty=num(payload.qty);if(qty<=0||qty>current.pintura)throw new Error('Cantidad no válida para Pintura.');
+        next.pintura=Math.max(0,current.pintura-qty);next.almacen=current.almacen+qty;type='terminal_pintura_to_almacen';note='Pintura -> Almacén: '+fmt(qty)+' uds · '+op;
       }else if(mode==='return_to_paint'){
-        qty=num(payload.qty);
-        if(qty<=0||Math.abs(qty-Math.round(qty))>0.000001)throw new Error('La cantidad a devolver debe ser un numero entero de piezas.');
-        if(qty>current.almacen)throw new Error('No hay '+fmt(qty)+' piezas en Almacen para devolver a Pintura.');
+        qty=num(payload.qty);if(qty<=0||Math.abs(qty-Math.round(qty))>0.000001)throw new Error('La cantidad a devolver debe ser un número entero de piezas.');
+        if(qty>current.almacen)throw new Error('No hay '+fmt(qty)+' piezas en Almacén para devolver a Pintura.');
         if(!reversalTargets.length||Math.abs(reversalTargets.reduce((a,x)=>a+num(x.qty),0)-qty)>0.000001)throw new Error('No se han podido identificar de forma segura los PINTADO que se van a deshacer.');
-        const reason=text(payload.reason); if(!reason) throw new Error('Indica el motivo de la correccion.');
-        next.pintura=current.pintura+qty; next.almacen=Math.max(0,current.almacen-qty);
-        type='terminal_pintura_retorno_correccion'; note='Correccion PINTADO: Almacen -> Pintura '+fmt(qty)+' uds · '+reason+' · '+op;
+        const reason=text(payload.reason);if(!reason)throw new Error('Indica el motivo de la corrección.');
+        next.pintura=current.pintura+qty;next.almacen=Math.max(0,current.almacen-qty);type='terminal_pintura_retorno_correccion';note='Corrección PINTADO: Almacén -> Pintura '+fmt(qty)+' uds · '+reason+' · '+op;
       }else if(mode==='legacy_stock_restore'){
-        qty=num(payload.qty);
-        if(qty<=0||!reversalTargets.length)throw new Error('No hay un consumo anterior identificable para restaurar.');
-        const reason=text(payload.reason)||'Restauracion de Stock tras correccion V61 ya aplicada';
-        next={...current};
-        type='terminal_pintura_retorno_stock_legacy_v62'; note='Restauracion Stock sin cambiar fases: '+fmt(qty)+' uds · '+reason+' · '+op;
-      }else throw new Error('Operacion no soportada.');
-      const representative=updateFlowRows(ldh,ref,next,{type,qty,at,operator:op,note,operationId,reversalTargets});
-      if(!representative) throw new Error('La referencia no existe en los pools de Fabricacion.');
-      ldh.updatedAt=at;
-      pkg.ldh_db=JSON.stringify(ldh);
-      updateOverridesAndInbox(pkg,ref,next,representative,at);
-      pkg.counts={...(pkg.counts||{}),...countsForLdh(ldh),prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:num(pkg.counts&&pkg.counts.prepMeta),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:num(pkg.counts&&pkg.counts.prepRecepcion)};
-      pkg.updatedAtISO=at;
-      tx.set(flowRef,{...pkg,updatedAt:serverTimestamp(),source:'terminal_cabina_pintura.html'},{merge:false});
-      return {flow:next,before,operationId,representative,note,package:pkg,commitMs:Date.parse(at)||Date.now(),reversalTargets};
+        qty=num(payload.qty);if(qty<=0||!reversalTargets.length)throw new Error('No hay un consumo anterior identificable para restaurar.');
+        const reason=text(payload.reason)||'Restauración de Stock tras corrección ya aplicada';next={...current};type='terminal_pintura_retorno_stock_legacy_v66';note='Restauración Stock sin cambiar fases: '+fmt(qty)+' uds · '+reason+' · '+op;
+      }else throw new Error('Operación no soportada.');
+      if(!entry){
+        const baseWork=(state.works||[]).find(w=>sameRef(w.ref,ref))||{};let legacyHist=[];
+        for(const pool of FLOW_POOLS){const row=(Array.isArray(ldh[pool])?ldh[pool]:[]).find(x=>sameRef(refOf(x),ref));if(row&&Array.isArray(row.history)&&row.history.length>legacyHist.length)legacyHist=row.history;}
+        entry={schema:1,workRef:technicalWorkRef(baseWork)||technicalWorkRef({ref})||ref,displayRef:visibleWorkRef(baseWork)||ref,orderId:text(baseWork.agendaOrderId||baseWork.orderId||baseWork.workOrderId),concept:text(baseWork.concept||baseWork.concepto),company:text(baseWork.company||baseWork.empresa||baseWork.empresaReceptora),total:num(baseWork.total),flow:canonicalFlow(current),fase:phaseFromFlow(current),revision:0,events:compactPhaseEventsV19(legacyHist),recentOperationIds:[]};
+      }
+      const recent=Array.isArray(entry.recentOperationIds)?entry.recentOperationIds.slice(-39):[];
+      if(recent.includes(operationId))return {entry,flow:flowOf(entry),before,operationId,note,commitMs:Date.now(),reversalTargets};
+      const event={id:uid('hist'),type,qty,date:at,operator:op,operationId};
+      if(reversalTargets.length)event.reversalTargets=reversalTargets;
+      const events=[...(Array.isArray(entry.events)?entry.events:[]),event].slice(-120);
+      const cf=canonicalFlow(next),ph=phaseFromFlow(next),nowMs=Date.now();
+      const nextEntry={...entry,schema:1,flow:cf,fase:ph,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v66',events,recentOperationIds:[...recent,operationId],lastOperation:{id:operationId,type,qty,atMs:nowMs,source:'terminal_cabina_pintura_v66'}};
+      tx.update(flowRef,{['phaseFlowV19.'+mapKey]:nextEntry,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v66'});
+      return {entry:nextEntry,flow:next,before,operationId,note,commitMs:nowMs,reversalTargets};
     });
+    const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result.entry};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v66';
+    return {...result,package:pkg};
   }
 
   async function ensureOrdersAuth(){
@@ -2438,6 +2413,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
   function flowHistoryForRefV62(ref){
     const pkg=state.flowPackage||{};
+    const phaseEntry=phaseEntryV19(pkg,ref);
+    if(phaseEntry&&Array.isArray(phaseEntry.events)&&phaseEntry.events.length)return phaseEntry.events.slice();
     const ldh=safeParse(pkg.ldh_db,'{}')||{};
     let best=[];
     FLOW_POOLS.forEach(pool=>{
@@ -4114,7 +4091,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
        Al recibirlas recalculamos necesidad sin tocar Stock ni Fabricacion. */
     if(state.flowPackage){renderWorks();renderControl();}
   },e=>console.warn('Preparacion: no se pudieron leer lineas de material',e));
-  onSnapshot(deletedCol,snap=>{applyDeletedSnapshot(snap);renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
+  onSnapshot(deletedCol,snap=>{state.deletedRefs=new Set(snap.docs.map(d=>workIdentityKey(text((d.data()||{}).ref||(d.data()||{}).reference))).filter(Boolean));renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
   function startStockWatch(){
     if(stockUnsub) return;
     stockUnsub=onSnapshot(stockMetaRef,()=>{if(state.stockAuthReady)loadStockPackage();},e=>console.warn('stock listener SDK no disponible; REST sigue activo',e));
@@ -4144,5 +4121,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <!-- LDH_TERMINAL_CABINA_V62_RETORNO_PINTURA_RESTAURA_STOCK_20260825 -->
 <!-- LDH_TERMINAL_CABINA_V63_INBOX_FALLBACK_20260825 -->
 <!-- LDH_TERMINAL_CABINA_V64_RECUENTO_ENVASE_ABIERTO_20260826 -->
+<!-- LDH_TERMINAL_CABINA_V66_PHASE_MAP_20260903 -->
+<script>window.LDH_TERMINAL_CABINA_SYNC_V66='PHASE-MAP-ATOMIC-PER-OT-20260903';document.documentElement.dataset.ldhCabinaSync='V66';console.info('[Cabina V66] phaseFlowV19 autoritativo.');</script>
 </body>
 </html>

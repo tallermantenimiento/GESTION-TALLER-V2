@@ -163,6 +163,7 @@
     init(){
       this.load();
       this.mergePrepMeta();
+      if(typeof window.LDH_almacenApplyPhaseMapV19==='function') window.LDH_almacenApplyPhaseMapV19(this,false);
       this.loadCompanies();
       this.render();
       this.renderDelivered();
@@ -173,6 +174,7 @@
     reload(show=true){
       this.load();
       this.mergePrepMeta();
+      if(typeof window.LDH_almacenApplyPhaseMapV19==='function') window.LDH_almacenApplyPhaseMapV19(this,false);
       this.loadCompanies();
       this.render();
       this.renderDelivered();
@@ -896,6 +898,12 @@
     return null;
   }
   function refOf(item){ return String(item && (item.ref || item.referencia || item.jobRef) || '').trim(); }
+  function phaseIdentityV19(value){
+    const raw=String(value||'').trim();if(!raw)return '';
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
+    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):('REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim());
+  }
+  function phaseMapKeyV19(value){return encodeURIComponent(phaseIdentityV19(value)).replace(/\./g,'%2E');}
   function cloneItem(item){
     const copy = item && typeof item === 'object' ? JSON.parse(JSON.stringify(item)) : {};
     const ref = refOf(copy);
@@ -1043,44 +1051,27 @@
     const deletedDocId = ref => encodeURIComponent(technicalRefValueModule(ref));
 
     async function syncItems(items, source, startup=false){
-      items = (Array.isArray(items) ? items : [items]).map(cloneItem).filter(item=>refOf(item));
-      if(!items.length) return false;
-      if(!authReady){
-        items.forEach(item => pendingByRef.set(refOf(item), cloneItem(item)));
-        status('Nube: esperando sesion...', 'warn');
-        return false;
-      }
-      status('Nube: sincronizando...', 'warn');
+      items=(Array.isArray(items)?items:[items]).map(cloneItem).filter(item=>refOf(item));
+      if(!items.length)return false;
+      if(!authReady){items.forEach(item=>pendingByRef.set(refOf(item),cloneItem(item)));status('Nube: esperando sesion...','warn');return false;}
+      // V5: al abrir Almacén NUNCA se publica la copia local. El arranque es solo lectura;
+      // así una caché antigua no puede resucitar ALM 64 ni pisar Cabina/Fabricación.
+      if(startup){status('Nube: conectada · flujo V19','ok');return true;}
+      status('Nube: sincronizando flujo...','warn');
       try{
-        await runTransaction(db, async transaction=>{
-          const snap = await transaction.get(docRef);
-          let selected = items;
-          const remote = snap.exists() ? (snap.data() || {}) : {};
-          if(startup){
-            const remoteDb = parse(remote.ldh_db, {}) || {};
-            selected = items.filter(localItem=>{
-              const ref = refOf(localItem);
-              const remoteItem = findInDb(remoteDb, ref);
-              if(!remoteItem) return true;
-              const localFlow = JSON.stringify(cloneItem(localItem).flow);
-              const remoteFlow = JSON.stringify(cloneItem(remoteItem).flow);
-              if(localFlow === remoteFlow) return false;
-              const localEvent = lastEventMs(localItem);
-              const remoteEvent = lastEventMs(remoteItem);
-              return localEvent > 0 && localEvent >= remoteEvent;
-            });
-            if(!selected.length) return;
-          }
-          const merged = mergePackage(remote, selected, source);
-          transaction.set(docRef, {...merged, updatedAt:serverTimestamp()}, {merge:false});
+        await runTransaction(db,async transaction=>{
+          const snap=await transaction.get(docRef);if(!snap.exists())throw new Error('No existe taller_data/fabricacion');
+          const remote=snap.data()||{},phaseMap=remote.phaseFlowV19&&typeof remote.phaseFlowV19==='object'?remote.phaseFlowV19:{};const nowMs=Date.now(),nowISO=new Date(nowMs).toISOString();
+          const updates={phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:nowISO,source:source||'almacen_v5'};
+          items.forEach(item=>{
+            const ref=technicalRefValueModule(refOf(item)),k=phaseMapKeyV19(ref);const old=phaseMap[k]||{};const f=cloneItem(item).flow;
+            const cf={fab:n(f.fab),fabricacion:n(f.fab),pintura:n(f.pintura),almacen:n(f.almacen),entregado:n(f.entregado)};
+            updates['phaseFlowV19.'+k]={...old,schema:1,workRef:ref,displayRef:String(item.display_ref||item.displayReference||item.ref||ref),orderId:String(item.agendaOrderId||item.orderId||old.orderId||''),concept:String(item.concept||item.concepto||old.concept||''),company:String(item.company||item.empresa||item.empresaReceptora||old.company||''),total:n(item.total||item.unidades||old.total),flow:cf,fase:cf.entregado>0&&cf.fab+cf.pintura+cf.almacen<=0?'entregado':cf.almacen>0&&cf.fab+cf.pintura<=0?'almacen':cf.pintura>0?'pintura':'fabricacion',revision:n(old.revision)+1,updatedAtMs:nowMs,updatedAtISO:nowISO,source:source||'almacen_v5',lastOperation:{id:'alm_'+nowMs.toString(36),source:source||'almacen_v5',atMs:nowMs}};
+          });
+          transaction.update(docRef,updates);
         });
-        status('Nube: sincronizada', 'ok');
-        return true;
-      }catch(error){
-        console.error('Sincronización Almacén → Fabricación', error);
-        status('Nube: error', 'bad');
-        return false;
-      }
+        status('Nube: sincronizada · flujo V19','ok');return true;
+      }catch(error){console.error('Sincronización Almacén → flujo V19',error);status('Nube: error','bad');return false;}
     }
 
     window.LDH_almacenPublishItem = function(item, source){
@@ -1106,6 +1097,27 @@
       if(window.App&&typeof window.App.setGlobalDeletedRefs==='function') window.App.setGlobalDeletedRefs(Array.from(deletedKeys));
       return true;
     };
+
+    let lastPhaseMapV19={};
+    function applyPhaseMapToAppV19(appObj,persist=true){
+      if(!appObj||!appObj.state)return false;const phaseMap=lastPhaseMapV19&&typeof lastPhaseMapV19==='object'?lastPhaseMapV19:{};let changed=false;
+      Object.values(phaseMap).forEach(entry=>{
+        if(!entry||!entry.flow)return;const ref=technicalRefValueModule(entry.workRef||entry.ref||entry.reference||'');if(!ref)return;
+        const f=entry.flow||{},cf={fab:n(f.fab??f.fabricacion),fabricacion:n(f.fab??f.fabricacion),pintura:n(f.pintura),almacen:n(f.almacen),entregado:n(f.entregado)};
+        ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
+          if(!Array.isArray(appObj.state[pool]))appObj.state[pool]=[];const arr=appObj.state[pool];const idx=arr.findIndex(row=>phaseIdentityV19(refOf(row))===phaseIdentityV19(ref));
+          if(idx>=0){const old=arr[idx]||{};arr[idx]={...old,flow:{...(old.flow||{}),...cf},delivered:cf.entregado,fase:entry.fase||old.fase,estado:entry.fase||old.estado,phaseFlowV19UpdatedAtMs:n(entry.updatedAtMs),phaseFlowV19Source:String(entry.source||'')};changed=true;}
+          else if(pool==='deliveries'&&(cf.almacen>0||cf.entregado>0)){arr.push({ref,referencia:ref,display_ref:entry.displayRef||ref,concept:entry.concept||'Sin concepto',company:entry.company||'',total:n(entry.total)||cf.fab+cf.pintura+cf.almacen+cf.entregado,flow:cf,delivered:cf.entregado,fase:entry.fase||'almacen',estado:entry.fase||'almacen',status:'pendiente',archived:false});changed=true;}
+        });
+      });
+      if(changed&&persist){try{localStorage.setItem(DB_KEY,JSON.stringify(appObj.state));}catch(_){}}
+      return changed;
+    }
+    window.LDH_almacenApplyPhaseMapV19=applyPhaseMapToAppV19;
+    onSnapshot(docRef,snap=>{
+      if(!snap.exists())return;const data=snap.data()||{};lastPhaseMapV19=data.phaseFlowV19&&typeof data.phaseFlowV19==='object'?data.phaseFlowV19:{};
+      if(window.App){applyPhaseMapToAppV19(window.App,true);window.App.render();window.App.renderDelivered();}
+    },error=>console.warn('Almacén: no se pudo leer phaseFlowV19',error));
 
     onSnapshot(deletedCol,snap=>{
       deletedKeys.clear();
@@ -1170,5 +1182,7 @@
 
 <!-- LDH_ALMACEN_AUTH_DEFAULT_Y_COLA_PENDIENTE_V3_20260803 -->
 
+<!-- LDH_ALMACEN_V5_PHASE_MAP_SYNC_20260903 -->
+<script>window.LDH_ALMACEN_SYNC_V5='PHASE-MAP-ATOMIC-PER-OT-20260903';document.documentElement.dataset.ldhAlmacenSync='V5';console.info('[Almacén V5] solo sincronización phaseFlowV19; lógica funcional intacta.');</script>
 </body>
 </html>
