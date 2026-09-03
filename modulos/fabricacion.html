@@ -1094,6 +1094,11 @@
 })();
 </script>
 
+<script id="LDH_FABRICACION_V18_BOOTSTRAP_20260903">
+window.__LDH_FAB_V18_COMPACT_ACTIVE=true;
+window.LDH_FABRICACION_V18='COMPACT-CLOUD-UNDER-1MB-20260903';
+</script>
+
 <script type="module" id="LDH_FABRICACION_FIRESTORE_SYNC_2107">
 (async function(){
 try{
@@ -1242,6 +1247,79 @@ function activeRefSetFromDB(ldh){
   });
   return set;
 }
+/* V18 · Firestore limita cada documento a 1 MiB.
+ * ldh_db mantenia la MISMA OT completa en deliveries/fabricacion/fab/trabajos y
+ * ademas repetia otra copia en inbox. Con historiales de Cabina el documento
+ * supero el limite y Firestore rechazo TODAS las escrituras (400).
+ * En nube conservamos una unica fila completa por OT en deliveries; los lectores
+ * actuales recorren los cuatro pools, por lo que siguen viendo exactamente el
+ * mismo flujo. Localmente App puede seguir reconstruyendo sus pools redundantes. */
+function compactCloudPackageV18(input){
+  try{
+    const pkg={...(input&&typeof input==='object'?input:{})};
+    let ldh=parse(pkg.ldh_db,{})||{};
+    const pools=['deliveries','fabricacion','fab','trabajos'];
+    const byKey=new Map();
+    const loose=[];
+    const histKey=h=>{
+      h=h&&typeof h==='object'?h:{};
+      return String(h.id||h.operationId||'')+'|'+String(h.type||'')+'|'+String(h.date||h.at||h.atMs||'')+'|'+String(h.qty??'');
+    };
+    const mergeHistory=(a,b)=>{
+      const out=[], seen=new Set();
+      [...(Array.isArray(a)?a:[]),...(Array.isArray(b)?b:[])].forEach(h=>{
+        const k=histKey(h);
+        if(k==='|||'){ out.push(h); return; }
+        if(seen.has(k)) return;
+        seen.add(k); out.push(h);
+      });
+      return out;
+    };
+    pools.forEach(pool=>{
+      (Array.isArray(ldh[pool])?ldh[pool]:[]).forEach(row=>{
+        if(!row||typeof row!=='object') return;
+        const ref=refValue(row), key=flowIdentityKeyV12(ref);
+        if(!key){ loose.push({...row}); return; }
+        const prev=byKey.get(key);
+        if(!prev){ byKey.set(key,{...row,history:Array.isArray(row.history)?row.history.slice():row.history}); return; }
+        const ps=flowScoreV12(prev), rs=flowScoreV12(row);
+        const pt=flowStampV12(prev), rt=flowStampV12(row);
+        const auth=(rs>ps+0.000001 || (Math.abs(rs-ps)<0.000001 && rt>=pt))?row:prev;
+        const merged={...prev,...row};
+        const pref=String((row.ref||row.referencia||'')).length>String((prev.ref||prev.referencia||'')).length?(row.ref||row.referencia):(prev.ref||prev.referencia);
+        if(pref){ merged.ref=pref; merged.referencia=pref; }
+        merged.flow=canonicalFlowV12(flowV12(auth));
+        ['fase','estado','status','keepInFab','hideFromFab','archived','delivered','localFlowUpdatedAt','updatedAt','fabricacionFlowUpdatedAtMs','fabricacionFlowSource'].forEach(k=>{
+          if(auth&&auth[k]!==undefined) merged[k]=auth[k];
+        });
+        const hist=mergeHistory(prev.history,row.history);
+        if(hist.length) merged.history=hist; else delete merged.history;
+        byKey.set(key,merged);
+      });
+    });
+    const rows=[...byKey.values(),...loose];
+    ldh={...ldh,deliveries:rows,fabricacion:[],fab:[],trabajos:[]};
+    pkg.ldh_db=JSON.stringify(ldh);
+
+    // Inbox es solo respaldo de importacion: basta una representacion ligera por OT.
+    const keepKeys=['id','uid','agendaOrderId','orderId','workOrderId','pedido_uid','pedido_id','ref','referencia','technical_ref','technicalRef','display_ref','displayReference','visible_ref','referencia_visible','identification','workIdentification','workLabel','concept','concepto','company','empresa','total','unidades','cantidad','uds','datePed','datePrev','fechaPedido','fechaPrevista','fase','estado','status','keepInFab','hideFromFab','archived','delivered','composite_group_id','composite_master_order_id','composite_master_reference','composite_part_id','composite_part_reference','composite_part_index','composite_part_count'];
+    const thin=rows.map(row=>{
+      const o={}; keepKeys.forEach(k=>{if(row&&row[k]!==undefined)o[k]=row[k];});
+      o.flow=canonicalFlowV12(flowV12(row));
+      return o;
+    });
+    pkg.inbox=JSON.stringify(thin.slice(-200));
+    const refs=new Set(rows.map(r=>flowIdentityKeyV12(refValue(r))).filter(Boolean));
+    pkg.counts={...(pkg.counts||{}),refs:refs.size,deliveries:refs.size,fabricacion:refs.size,fab:refs.size,trabajos:refs.size,prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:Number(pkg.counts?.prepMeta||0),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:Number(pkg.counts?.prepRecepcion||0)};
+    pkg.cloudSchemaV18='single-full-pool';
+    return pkg;
+  }catch(error){
+    console.warn('[Fabricacion V18] no se pudo compactar paquete cloud',error);
+    return input;
+  }
+}
+window.LDH_compactFabricacionCloudPackageV18=compactCloudPackageV18;
+
 function localPackage(){
   const storedRaw = getStore(DB_KEY);
   let ldh = parse(storedRaw, {}) || {};
@@ -1259,7 +1337,7 @@ function localPackage(){
     if(rRaw) prepRecepcion[ref] = rRaw;
   });
 
-  return {
+  return compactCloudPackageV18({
     ldh_db: ldhRaw || JSON.stringify({deliveries:[],fabricacion:[],fab:[],trabajos:[],deliveryCompanies:[]}),
     inbox: getStore(INBOX_KEY) || "[]",
     overrides: getStore(OVERRIDE_KEY) || "{}",
@@ -1275,7 +1353,7 @@ function localPackage(){
       prepRecepcion: Object.keys(prepRecepcion).length
     },
     updatedAtISO: new Date().toISOString()
-  };
+  });
 }
 function localScore(pkg){
   pkg = pkg || localPackage();
@@ -1511,7 +1589,7 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
         const isComposite=!!String(localRow?.composite_part_id||'').trim() || !!String(localRow?.composite_group_id||'').trim();
         if(!isComposite) return;
         const lr=String(localRow?.ref||localRow?.referencia||'').trim(); if(!lr)return;
-        const idx=remoteRows.findIndex(row=>sameWorkRef(String(row?.ref||row?.referencia||''),lr));
+        const idx=remoteRows.findIndex(row=>flowIdentityKeyV12(String(row?.ref||row?.referencia||''))===flowIdentityKeyV12(lr));
         if(idx<0){ remoteRows.push({...localRow}); return; }
         const merged=mergeRawAliasRows(remoteRows[idx],localRow);
         const vr=visibleWorkRef(localRow);
@@ -1759,8 +1837,9 @@ async function publish(force=false){
           mergeLocalCompositeIntoRemoteV10(remote)
         );
         if(safeRemoteForPublish && safeRemoteForPublish.__ldhV15ProtectedLocal){
-          const outgoing={...safeRemoteForPublish};
+          let outgoing={...safeRemoteForPublish};
           delete outgoing.__ldhV15ProtectedLocal;
+          outgoing=compactCloudPackageV18(outgoing);
           outgoing.updatedAtISO=new Date().toISOString();
           outgoing.source="fabricacion.html";
           await setDoc(DOC_REF, {
@@ -2269,6 +2348,7 @@ console.info('[Fabricación V10] Referencia visible separada de OT técnica; par
     return null;
   }
   async function syncRef(reference,opts={}){
+    if(window.__LDH_FAB_V18_COMPACT_ACTIVE)return {changed:false,reason:'superseded_v18'};
     reference=txt(reference); if(!reference)return {changed:false,reason:'sin_ref'};
     const local=bestLocal(reference); if(!local)return {changed:false,reason:'sin_local'};
     const localScore=score(local);
@@ -2504,9 +2584,10 @@ document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
       // Mantener el prep_meta local de la misma OT para que ninguna lectura posterior regenere el reparto anterior.
       try{const raw=readLocal('prep_meta_'+p.ref);if(raw){pkg.prepMeta={...(pkg.prepMeta||{}),[p.ref]:raw};}}catch(_){ }
       pkg.counts={...(pkg.counts||{}),...counts(ldh),prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:Number(pkg.counts?.prepMeta||0),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:Number(pkg.counts?.prepRecepcion||0)};
-      pkg.updatedAtISO=at; pkg.source='fabricacion_direct_v17';
+      pkg.updatedAtISO=at; pkg.source='fabricacion_direct_v18';
       pkg.lastFabricacionDirectV17={ref:rr,atMs:Date.now(),flow:cf,from:p.from||'',to:p.to||'',qty:num(p.qty)};
-      tx.set(docRef,{...pkg,updatedAt:serverTimestamp(),source:'fabricacion_direct_v17'},{merge:false});
+      const cloudPkg=window.LDH_compactFabricacionCloudPackageV18?window.LDH_compactFabricacionCloudPackageV18(pkg):pkg;
+      tx.set(docRef,{...cloudPkg,updatedAt:serverTimestamp(),source:'fabricacion_direct_v18'},{merge:false});
       return {ref:rr,flow:cf,at};
     });
 
@@ -2545,6 +2626,33 @@ document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
   const pending=Array.isArray(window.__LDH_FAB_V17_PENDING)?window.__LDH_FAB_V17_PENDING.splice(0):[];
   pending.forEach(enqueue);
 
+  async function compactRemoteNowV18(){
+    try{
+      const result=await runTransaction(db,async tx=>{
+        const snap=await tx.get(docRef); if(!snap.exists())return {changed:false,before:0,after:0};
+        const raw=snap.data()||{};
+        const compacted=window.LDH_compactFabricacionCloudPackageV18?window.LDH_compactFabricacionCloudPackageV18(raw):raw;
+        const before=new Blob([JSON.stringify(raw)]).size;
+        const after=new Blob([JSON.stringify(compacted)]).size;
+        if(after>=before && raw.cloudSchemaV18==='single-full-pool')return {changed:false,before,after};
+        compacted.updatedAtISO=new Date().toISOString();
+        compacted.source='fabricacion_compact_v18';
+        tx.set(docRef,{...compacted,updatedAt:serverTimestamp(),source:'fabricacion_compact_v18'},{merge:false});
+        return {changed:true,before,after};
+      });
+      if(result&&result.changed){
+        console.info('[Fabricación V18] documento Firebase compactado',result.before,'->',result.after,'bytes JSON aprox.');
+        status('Nube compactada · '+Math.round(result.after/1024)+' KB','ok');
+      }
+      return result;
+    }catch(error){
+      console.error('[Fabricación V18] compactación inicial',error);
+      status('Nube ERROR · no se pudo compactar','bad');
+      throw error;
+    }
+  }
+  window.LDH_fabricacionCompactCloudV18=compactRemoteNowV18;
+
   // Reparación de arranque para el caso que ya existe ahora mismo: Fabricación local
   // tiene el movimiento correcto pero Firebase conserva la copia anterior.
   async function repairExisting(){
@@ -2574,12 +2682,14 @@ document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
       return repaired;
     }catch(error){console.warn('[Fabricación V17] reparación inicial',error);return 0;}
   }
-  setTimeout(repairExisting,900);
-  setTimeout(repairExisting,3200);
+  const compactReadyV18=compactRemoteNowV18().catch(()=>null);
+  compactReadyV18.then(()=>setTimeout(repairExisting,250));
+  compactReadyV18.then(()=>setTimeout(repairExisting,1800));
 
   window.LDH_FABRICACION_V17='SYNC-DIRECTA-OT-VERIFICADA-20260903';
-  document.documentElement.dataset.ldhFabricacionSync='V17';
-  console.info('[Fabricación V17] sincronización atómica por OT + verificación Firebase activa.');
+  window.LDH_FABRICACION_V18='COMPACT-CLOUD-UNDER-1MB-20260903';
+  document.documentElement.dataset.ldhFabricacionSync='V18';
+  console.info('[Fabricación V18] compactación Firestore + sincronización atómica por OT activa.');
 })();
 </script>
 
