@@ -162,7 +162,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <header>
     <div>
       <h1>Terminal Cabina de Pintura</h1>
-      <div class="sub">V67 &middot; Sincronizaci&oacute;n por OT V19. Los trabajos terminados de pintar permanecen visibles hasta pulsar Cerrar trabajo, permitiendo rectificar antes de retirarlos de Cabina.</div>
+      <div class="sub">V68 &middot; Sincronizaci&oacute;n estable por OT V19. Los trabajos activos en Cabina no desaparecen por refrescos tard&iacute;os; permanecen visibles hasta pulsar Cerrar trabajo.</div>
     </div>
     <div class="header-right">
       <span id="flowStatus" class="badge warn">Fabricaci&oacute;n: conectando...</span>
@@ -410,6 +410,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   const OP_KEY = 'ldh_terminal_pintura_operario_v1';
   const OP_CATALOG_LOCAL_KEY = 'ldh_terminal_pintura_operarios_catalogo_v1';
   const HISTORY_CUTOFF_KEY = 'ldh_terminal_pintura_historial_oculto_antes_v1';
+  const CABIN_ACTIVE_CACHE_KEY = 'ldh_terminal_pintura_trabajos_activos_v68';
   const FLOW_POOLS = ['deliveries','fabricacion','fab','trabajos'];
   const CHUNK_SIZE = 350000;
   const BOTE_LITROS = 4;
@@ -469,7 +470,13 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return 'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
   };
   const sameRef = (a,b) => { const ka=workIdentityKey(a),kb=workIdentityKey(b); return !!ka&&ka===kb; };
-  const isDeletedWorkRef = ref => { const key=workIdentityKey(ref); return !!key && state.deletedRefs.has(key); };
+  const isDeletedWorkRef = (ref,candidateUpdatedMs=0) => {
+    const key=workIdentityKey(ref); if(!key || !state.deletedRefs.has(key)) return false;
+    const deletedMs=state.deletedRefMs instanceof Map ? num(state.deletedRefMs.get(key)) : 0;
+    const candidateMs=num(candidateUpdatedMs);
+    if(candidateMs>0 && deletedMs>0 && candidateMs>deletedMs+1000) return false;
+    return true;
+  };
   const preferredWorkRef = (a,b) => {
     a=text(a); b=text(b); if(!a)return b; if(!b)return a; if(!sameRef(a,b))return a;
     return b.length>a.length?b:a;
@@ -524,6 +531,8 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     prepPackage:null,
     works:[],
     deletedRefs:new Set(),
+    deletedRefMs:new Map(),
+    cabinSticky:Object.create(null),
     stock:null,
     stockReady:false,
     stockError:'',
@@ -551,6 +560,36 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     openHistoryOperators:new Set(),
     tab:'works'
   };
+
+  // V68 · Registro de visibilidad de Cabina. Firebase sigue siendo autoritativo
+  // para las cantidades; este registro evita que un render tardío haga desaparecer
+  // una OT activa antes de que el operario pulse «Cerrar trabajo».
+  function cabinStickyLoadV68(){
+    try{
+      const raw=safeParse(localStorage.getItem(CABIN_ACTIVE_CACHE_KEY),'{}')||{};
+      state.cabinSticky=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:Object.create(null);
+    }catch(_){ state.cabinSticky=Object.create(null); }
+  }
+  function cabinStickySaveV68(){try{localStorage.setItem(CABIN_ACTIVE_CACHE_KEY,JSON.stringify(state.cabinSticky||{}));}catch(_){ }}
+  function cabinStickyKeyV68(ref){return workIdentityKey(ref);}
+  function cabinStickyRememberV68(item,forceActive=false){
+    if(!item||typeof item!=='object')return;
+    const ref=refOf(item),key=cabinStickyKeyV68(ref);if(!key)return;
+    const f=flowOf(item),prev=(state.cabinSticky&&state.cabinSticky[key])||{};
+    const active=forceActive||num(f.pintura)>0||item.cabinActive===true||prev.active===true;
+    const closed=num(f.pintura)>0?false:(item.cabinClosed===true||prev.closed===true);
+    state.cabinSticky[key]={...prev,active,closed,ref:preferredWorkRef(text(prev.ref),ref)||ref,company:text(item.company||prev.company),concept:text(item.concept||prev.concept),total:num(item.total||prev.total),flow:canonicalFlow(f),updatedAtMs:Math.max(num(prev.updatedAtMs),num(item.phaseFlowV19UpdatedAtMs),workUpdatedMs(item),Date.now()),cachedAtMs:Date.now()};
+    cabinStickySaveV68();
+  }
+  function cabinStickyCloseV68(ref){
+    const key=cabinStickyKeyV68(ref);if(!key)return;
+    const prev=(state.cabinSticky&&state.cabinSticky[key])||{ref:text(ref)};
+    state.cabinSticky[key]={...prev,active:true,closed:true,cachedAtMs:Date.now()};cabinStickySaveV68();
+  }
+  function cabinStickyPurgeDeletedV68(){
+    let changed=false;Object.keys(state.cabinSticky||{}).forEach(key=>{if(state.deletedRefs.has(key)){delete state.cabinSticky[key];changed=true;}});if(changed)cabinStickySaveV68();
+  }
+  cabinStickyLoadV68();
 
   function setStatus(id,label,kind){
     const el=$(id); if(!el) return;
@@ -687,7 +726,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     FLOW_POOLS.forEach(pool=>{
       const arr=Array.isArray(db[pool])?db[pool]:[];
       arr.forEach(raw=>{
-        const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref)) return;
+        const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref,workUpdatedMs(raw))) return;
         const key=workIdentityKey(ref); if(!key)return;
         const prev=map.get(key);
         map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
@@ -698,14 +737,14 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     // ya tiene PINT > 0 solo por ese pequeño desfase de publicación.
     const inboxFallback=safeParse(pkg.inbox,'[]');
     (Array.isArray(inboxFallback)?inboxFallback:[]).forEach(raw=>{
-      const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref)) return;
+      const ref=refOf(raw); if(!ref || isDeletedWorkRef(ref,workUpdatedMs(raw))) return;
       const key=workIdentityKey(ref); if(!key)return;
       const prev=map.get(key);
       map.set(key,prev?mergeAliasWork(prev,raw):{...raw});
     });
     Object.keys(overrides).forEach(ref=>{
       const key=workIdentityKey(ref);
-      if(!key || !map.has(key) || isDeletedWorkRef(ref)) return;
+      if(!key || !map.has(key) || isDeletedWorkRef(ref,Date.parse(text((overrides[ref]||{}).updatedAt))||0)) return;
       const ov=overrides[ref]||{};
       const item=map.get(key);
       // V67: overrides queda únicamente como respaldo de metadatos. Su flow legacy
@@ -718,7 +757,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     // legacy aporta metadatos, pero nunca puede volver a imponer un reparto antiguo.
     const phaseMap=pkg&&pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?pkg.phaseFlowV19:{};
     Object.values(phaseMap).forEach(entry=>{
-      if(!entry||!entry.flow)return;const ref=text(entry.workRef||entry.ref||entry.reference);const k=workIdentityKey(ref);if(!k||isDeletedWorkRef(ref))return;
+      if(!entry||!entry.flow)return;const ref=text(entry.workRef||entry.ref||entry.reference);const k=workIdentityKey(ref);const entryMs=num(entry.updatedAtMs)||(Date.parse(text(entry.updatedAtISO))||0);if(!k||isDeletedWorkRef(ref,entryMs))return;
       const base=map.get(k)||{ref,referencia:ref,company:text(entry.company),concept:text(entry.concept),total:num(entry.total)};
       const cf=canonicalFlow(flowOf(entry));const ph=phaseFromFlow(cf);
       const cabinEvents=Array.isArray(entry.events)?entry.events:[];
@@ -726,14 +765,29 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const cabinClosed=entry.cabinClosed===true;
       map.set(k,{...base,ref:preferredWorkRef(refOf(base),entry.displayRef||ref),referencia:preferredWorkRef(refOf(base),entry.displayRef||ref),company:text(base.company||entry.company),concept:text(base.concept||entry.concept),total:num(base.total||entry.total),flow:cf,fase:ph,estado:ph,archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),cabinActive,cabinClosed,cabinClosedAtMs:num(entry.cabinClosedAtMs),phaseFlowV19UpdatedAtMs:num(entry.updatedAtMs),phaseFlowV19Source:text(entry.source)});
     });
-    return Array.from(map.values()).map(item=>{
+    let normalized=Array.from(map.values()).map(item=>{
       const flow=flowOf(item); const total=totalOf(item,flow);
       return {...item,ref:refOf(item),company:text(item.company||item.empresa||item.empresaReceptora),concept:text(item.concept||item.concepto||item.nombreConcepto||'Sin concepto'),flow,total};
-    }).filter(item=>{
+    });
+    const present=new Set();
+    normalized=normalized.map(item=>{
+      const key=cabinStickyKeyV68(item.ref);if(key)present.add(key);
+      const sticky=key&&(state.cabinSticky||{})[key];
+      if(num(item.flow&&item.flow.pintura)>0){item.cabinActive=true;item.cabinClosed=false;cabinStickyRememberV68(item,true);}
+      else if(item.cabinClosed===true){cabinStickyCloseV68(item.ref);}
+      else if(sticky&&sticky.active===true&&sticky.closed!==true){item.cabinActive=true;item.cabinClosed=false;cabinStickyRememberV68(item,true);}
+      else if(item.cabinActive===true){cabinStickyRememberV68(item,true);}
+      return item;
+    });
+    Object.entries(state.cabinSticky||{}).forEach(([key,sticky])=>{
+      if(!sticky||sticky.active!==true||sticky.closed===true||present.has(key))return;
+      if(isDeletedWorkRef(sticky.ref,num(sticky.updatedAtMs)))return;
+      const f=flowOf({flow:sticky.flow||{}});
+      normalized.push({ref:text(sticky.ref),referencia:text(sticky.ref),company:text(sticky.company),concept:text(sticky.concept||'Sin concepto'),total:num(sticky.total)||(f.fab+f.pintura+f.almacen+f.entregado),flow:f,cabinActive:true,cabinClosed:false,phaseFlowV19UpdatedAtMs:num(sticky.updatedAtMs),_cabinStickyV68:true});
+    });
+    return normalized.filter(item=>{
       if(item.deleted)return false;
-      // V67: entra al tener PINT > 0. Cuando se pinta la última pieza no desaparece:
-      // queda visible como trabajo de Cabina hasta que el operario pulsa Cerrar trabajo.
-      // Si posteriormente vuelve alguna pieza a Pintura, reaparece aunque estuviera cerrado.
+      if(isDeletedWorkRef(item.ref,num(item.phaseFlowV19UpdatedAtMs)||workUpdatedMs(item)))return false;
       if(num(item.flow&&item.flow.pintura)>0)return true;
       return item.cabinActive===true && item.cabinClosed!==true;
     });
@@ -1962,8 +2016,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   async function loadDeletedRefs(){
     try{
       const snap=await getDocs(deletedCol);
-      state.deletedRefs=new Set(snap.docs.map(d=>workIdentityKey(text((d.data()||{}).ref||(d.data()||{}).reference))).filter(Boolean));
-      renderWorks();
+      state.deletedRefs=new Set();state.deletedRefMs=new Map();
+      snap.docs.forEach(d=>{const data=d.data()||{},key=workIdentityKey(text(data.ref||data.reference));if(!key)return;state.deletedRefs.add(key);let ms=num(data.deletedAtMs);try{if(!ms&&data.deletedAt&&typeof data.deletedAt.toMillis==='function')ms=num(data.deletedAt.toMillis());}catch(_){ }if(!ms)ms=Date.parse(text(data.deletedAt))||0;state.deletedRefMs.set(key,ms);});
+      cabinStickyPurgeDeletedV68();renderWorks();
     }catch(e){ console.warn('deleted refs',e); }
   }
 
@@ -2103,11 +2158,11 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       if(reversalTargets.length)event.reversalTargets=reversalTargets;
       const events=[...(Array.isArray(entry.events)?entry.events:[]),event].slice(-120);
       const cf=canonicalFlow(next),ph=phaseFromFlow(next),nowMs=Date.now();
-      const nextEntry={...entry,schema:1,flow:cf,fase:ph,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v67',events,recentOperationIds:[...recent,operationId],cabinActive:true,cabinClosed:false,cabinClosedAtMs:0,cabinClosedBy:'',lastOperation:{id:operationId,type,qty,atMs:nowMs,source:'terminal_cabina_pintura_v67'}};
-      tx.update(flowRef,{['phaseFlowV19.'+mapKey]:nextEntry,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v67'});
+      const nextEntry={...entry,schema:1,flow:cf,fase:ph,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v68',events,recentOperationIds:[...recent,operationId],cabinActive:true,cabinClosed:false,cabinClosedAtMs:0,cabinClosedBy:'',lastOperation:{id:operationId,type,qty,atMs:nowMs,source:'terminal_cabina_pintura_v68'}};
+      tx.update(flowRef,{['phaseFlowV19.'+mapKey]:nextEntry,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v68'});
       return {entry:nextEntry,flow:next,before,operationId,note,commitMs:nowMs,reversalTargets};
     });
-    const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result.entry};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v67';
+    const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result.entry};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v68';
     return {...result,package:pkg};
   }
 
@@ -2136,15 +2191,15 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
         if(num(current.pintura)>0)throw new Error('Todavía quedan '+fmt(current.pintura)+' unidad(es) en Pintura.');
         const opId=uid('cabina_cierre_v67');
         const events=[...(Array.isArray(entry.events)?entry.events:[]),{id:uid('hist'),type:'terminal_pintura_cierre_manual',qty:0,date:at,operator:op,operationId:opId}].slice(-120);
-        const next={...entry,schema:1,cabinActive:true,cabinClosed:true,cabinClosedAtMs:nowMs,cabinClosedAtISO:at,cabinClosedBy:op,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v67',events,lastOperation:{id:opId,type:'terminal_pintura_cierre_manual',qty:0,atMs:nowMs,source:'terminal_cabina_pintura_v67'}};
-        tx.update(flowRef,{['phaseFlowV19.'+mapKey]:next,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v67'});
+        const next={...entry,schema:1,cabinActive:true,cabinClosed:true,cabinClosedAtMs:nowMs,cabinClosedAtISO:at,cabinClosedBy:op,revision:num(entry.revision)+1,updatedAtMs:nowMs,updatedAtISO:at,source:'terminal_cabina_pintura_v68',events,lastOperation:{id:opId,type:'terminal_pintura_cierre_manual',qty:0,atMs:nowMs,source:'terminal_cabina_pintura_v68'}};
+        tx.update(flowRef,{['phaseFlowV19.'+mapKey]:next,phaseFlowV19Schema:1,phaseFlowV19UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:at,source:'terminal_cabina_pintura_v68'});
         return next;
       });
-      const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v67';
-      state.flowPackage=pkg;state.lastLocalFlowCommitMs=nowMs;state.lastLocalFlowGuardUntil=Date.now()+8000;
+      const pkg={...(state.flowPackage||{})};pkg.phaseFlowV19={...(pkg.phaseFlowV19||{}),[mapKey]:result};pkg.updatedAtISO=at;pkg.source='terminal_cabina_pintura_v68';
+      state.flowPackage=pkg;state.lastLocalFlowCommitMs=nowMs;state.lastLocalFlowGuardUntil=Date.now()+8000;cabinStickyCloseV68(ref);
       renderWorks();renderControl();renderHistory();toast('Trabajo cerrado en Cabina.');
     }catch(error){
-      console.error('Cerrar trabajo Cabina V67',error);
+      console.error('Cerrar trabajo Cabina V68',error);
       if(button)button.disabled=false;
       alert('No se pudo cerrar el trabajo: '+String(error&&error.message||error));
     }
@@ -4143,7 +4198,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
        Al recibirlas recalculamos necesidad sin tocar Stock ni Fabricacion. */
     if(state.flowPackage){renderWorks();renderControl();}
   },e=>console.warn('Preparacion: no se pudieron leer lineas de material',e));
-  onSnapshot(deletedCol,snap=>{state.deletedRefs=new Set(snap.docs.map(d=>workIdentityKey(text((d.data()||{}).ref||(d.data()||{}).reference))).filter(Boolean));renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
+  onSnapshot(deletedCol,snap=>{state.deletedRefs=new Set();state.deletedRefMs=new Map();snap.docs.forEach(d=>{const data=d.data()||{},key=workIdentityKey(text(data.ref||data.reference));if(!key)return;state.deletedRefs.add(key);let ms=num(data.deletedAtMs);try{if(!ms&&data.deletedAt&&typeof data.deletedAt.toMillis==='function')ms=num(data.deletedAt.toMillis());}catch(_){ }if(!ms)ms=Date.parse(text(data.deletedAt))||0;state.deletedRefMs.set(key,ms);});cabinStickyPurgeDeletedV68();renderWorks();renderControl();renderStock();},e=>console.warn('deleted listener',e));
   function startStockWatch(){
     if(stockUnsub) return;
     stockUnsub=onSnapshot(stockMetaRef,()=>{if(state.stockAuthReady)loadStockPackage();},e=>console.warn('stock listener SDK no disponible; REST sigue activo',e));
@@ -4175,6 +4230,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 <!-- LDH_TERMINAL_CABINA_V64_RECUENTO_ENVASE_ABIERTO_20260826 -->
 <!-- LDH_TERMINAL_CABINA_V66_PHASE_MAP_20260903 -->
 <script>window.LDH_TERMINAL_CABINA_SYNC_V66='PHASE-MAP-ATOMIC-PER-OT-20260903';document.documentElement.dataset.ldhCabinaSync='V66';console.info('[Cabina V66] phaseFlowV19 autoritativo.');</script>
-<script id="LDH_TERMINAL_CABINA_V67_BUILD_20260903">window.LDH_TERMINAL_CABINA_SYNC_V67='PHASE-MAP-V19-VISIBLE-UNTIL-MANUAL-CLOSE-20260903';document.documentElement.dataset.ldhCabinaSync='V67';console.info('[Cabina V67] trabajos visibles hasta cierre manual + Rectificar PINTADO.');</script>
+<script id="LDH_TERMINAL_CABINA_V68_BUILD_20260903">window.LDH_TERMINAL_CABINA_SYNC_V68='PHASE-MAP-V19-STICKY-CABIN-20260903';document.documentElement.dataset.ldhCabinaSync='V68';console.info('[Cabina V68] trabajos activos estables hasta cierre manual; sin parpadeo por renders tardios.');</script>
 </body>
 </html>
