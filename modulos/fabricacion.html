@@ -818,6 +818,12 @@
       }
 
       const f = this.ensureFlow(item);
+      const beforeFlowV17 = {
+        fab:n(f.fab ?? f.fabricacion),
+        pintura:n(f.pintura),
+        almacen:n(f.almacen),
+        entregado:n(f.entregado)
+      };
       const max = n(from === "fab" ? (f.fab ?? f.fabricacion) : f[from]);
       const labels = {fab:"Fabricación", pintura:"Pintura", almacen:"Almacén", entregado:"Entregado"};
       const qty = this.askQty(`${labels[from] || from} → ${labels[to] || to}`, max);
@@ -838,6 +844,10 @@
       }
 
       item.flow = f;
+      const moveAtV17 = Date.now();
+      item.localFlowUpdatedAt = new Date(moveAtV17).toISOString();
+      item.fabricacionFlowUpdatedAtMs = moveAtV17;
+      item.fabricacionFlowSource = "fabricacion_move_v17";
       item.fase = to === "almacen" ? "almacen" : (to === "pintura" ? "pintura" : "fabricacion");
       item.estado = item.fase;
       item.status = "pendiente";
@@ -855,8 +865,28 @@
       this.updatePrepMeta(item);
       this.save(false);
       this.syncWorkflow(item,`fabricacion_${from}_a_${to}`,`${labels[from]||from} → ${labels[to]||to}: ${qty}`);
+
+      // V17: el movimiento no se deja a merced de la publicación global del paquete.
+      // Se encola una confirmación atómica de ESTA OT en taller_data/fabricacion.
+      // Terminal Cabina e Informativa leen exactamente ese documento.
+      try{
+        const afterFlowV17={fab:n(f.fab),pintura:n(f.pintura),almacen:n(f.almacen),entregado:n(f.entregado)};
+        const payloadV17={
+          ref:String(item.ref||item.referencia||""),
+          from:String(from||""),to:String(to||""),qty:n(qty),
+          before:beforeFlowV17,after:afterFlowV17,
+          total:n(item.total||item.unidades||0),atMs:moveAtV17
+        };
+        if(typeof window.LDH_fabricacionQueueDirectSyncV17==='function')
+          window.LDH_fabricacionQueueDirectSyncV17(payloadV17);
+        else{
+          window.__LDH_FAB_V17_PENDING=Array.isArray(window.__LDH_FAB_V17_PENDING)?window.__LDH_FAB_V17_PENDING:[];
+          window.__LDH_FAB_V17_PENDING.push(payloadV17);
+        }
+      }catch(error){ console.warn('[Fabricación V17] no se pudo encolar sincronización directa',error); }
+
       this.render();
-      this.toast("Movimiento guardado");
+      this.toast("Movimiento guardado · sincronizando nube");
     },
 
     syncWorkflow(item,source,note,preserveState=false){
@@ -2346,5 +2376,212 @@ console.info('[Fabricacion V16] movimientos locales se publican a taller_data/fa
 window.LDH_FABRICACION_FLUJO_LOCAL_V15='FABRICACION-V15-FLUJO-LOCAL-AUTORITATIVO-20260903';
 document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
 </script>
+
+
+<!-- LDH_FABRICACION_V17_SYNC_DIRECTA_OT_20260903 -->
+<script type="module" id="LDH_FABRICACION_V17_SYNC_DIRECTA_OT_20260903">
+(async function(){
+  'use strict';
+  if(window.__LDH_FAB_V17_DIRECT_ACTIVE) return;
+  window.__LDH_FAB_V17_DIRECT_ACTIVE=true;
+
+  const CFG={
+    apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
+    authDomain:'gestion-taller-v2.firebaseapp.com',
+    projectId:'gestion-taller-v2',
+    storageBucket:'gestion-taller-v2.firebasestorage.app',
+    messagingSenderId:'888590823508',
+    appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'
+  };
+  const POOLS=['deliveries','fabricacion','fab','trabajos'];
+  const DB_KEY='ldh_db', OV_KEY='ldh_fabricacion_flow_overrides_v1', INBOX_KEY='ldh_fabricacion_inbox_v1';
+  const txt=v=>String(v==null?'':v).trim();
+  const num=v=>{const x=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(x)?Math.max(0,x):0;};
+  const parse=(v,fb)=>{try{if(v&&typeof v==='object')return v;return v?JSON.parse(v):fb;}catch(_){return fb;}};
+  const refOf=o=>txt(o&&(o.ref||o.referencia||o.jobRef));
+  function key(v){
+    const raw=txt(v); if(!raw)return '';
+    const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+    if(m)return 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
+    return 'REF:'+raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  }
+  const same=(a,b)=>{const ka=key(a),kb=key(b);return !!ka&&ka===kb;};
+  function flow(o){
+    o=o&&typeof o==='object'?o:{}; const f=o.flow&&typeof o.flow==='object'?o.flow:{};
+    return {fab:num(f.fab??f.fabricacion??o.fab??o.enFabricacion),pintura:num(f.pintura??f.paint??o.pintura??o.enPintura),almacen:num(f.almacen??f.alm??o.almacen??o.enAlmacen),entregado:num(f.entregado??o.delivered??o.entregado)};
+  }
+  const canon=f=>({fab:num(f&&f.fab),fabricacion:num(f&&f.fab),pintura:num(f&&f.pintura),almacen:num(f&&f.almacen),entregado:num(f&&f.entregado)});
+  const sameFlow=(a,b)=>['fab','pintura','almacen','entregado'].every(k=>Math.abs(num(a&&a[k])-num(b&&b[k]))<0.000001);
+  function phase(f){if(num(f.entregado)>0&&num(f.fab)+num(f.pintura)+num(f.almacen)<=0)return'entregado';if(num(f.almacen)>0&&num(f.fab)+num(f.pintura)<=0)return'almacen';if(num(f.pintura)>0)return'pintura';return'fabricacion';}
+  const iso=()=>new Date().toISOString();
+  function readLocal(k){try{const v=localStorage.getItem(k);if(v!=null)return v;}catch(_){}try{const v=sessionStorage.getItem(k);if(v!=null)return v;}catch(_){}return '';}
+  function localItem(reference){
+    try{return (window.App?.allItems?.()||[]).find(row=>same(refOf(row),reference))||null;}catch(_){return null;}
+  }
+  function remoteCurrent(pkg,ldh,reference){
+    const ovs=parse(pkg&&pkg.overrides,{})||{};
+    const ok=Object.keys(ovs).find(r=>same(r,reference));
+    if(ok&&ovs[ok]&&ovs[ok].flow)return flow({flow:ovs[ok].flow});
+    let best=null,score=-1;
+    for(const p of POOLS){for(const row of (Array.isArray(ldh&&ldh[p])?ldh[p]:[])){if(!same(refOf(row),reference))continue;const f=flow(row),s=f.fab+f.pintura*2+f.almacen*3+f.entregado*4;if(s>score){best=f;score=s;}}}
+    if(best)return best;
+    const inbox=parse(pkg&&pkg.inbox,[]); const row=(Array.isArray(inbox)?inbox:[]).find(x=>same(refOf(x),reference));
+    return row?flow(row):null;
+  }
+  function counts(ldh){
+    const ks=new Set(); POOLS.forEach(p=>(Array.isArray(ldh[p])?ldh[p]:[]).forEach(r=>{const k=key(refOf(r));if(k)ks.add(k);}));
+    return {refs:ks.size,deliveries:(ldh.deliveries||[]).length,fabricacion:(ldh.fabricacion||[]).length,fab:(ldh.fab||[]).length,trabajos:(ldh.trabajos||[]).length};
+  }
+  function status(message,kind='ok'){
+    const el=document.getElementById('cloudStatus'); if(!el)return;
+    el.textContent=message; el.classList.remove('ok','warn','bad'); el.classList.add(kind);
+  }
+  function applyOp(base,p){
+    const out={...base}; let q=num(p.qty);
+    if(p.from==='fab'){q=Math.min(q,num(out.fab));out.fab=Math.max(0,num(out.fab)-q);}else if(p.from){q=Math.min(q,num(out[p.from]));out[p.from]=Math.max(0,num(out[p.from])-q);}
+    if(p.to==='fab')out.fab=num(out.fab)+q;else if(p.to)out[p.to]=num(out[p.to])+q;
+    return out;
+  }
+  function chooseTarget(remote,p){
+    const before=p.before||{}, after=p.after||{};
+    if(!remote)return {...after};
+    if(sameFlow(remote,after))return {...after};
+    // Si el tramo que otros módulos pueden modificar no cambió, la copia local exacta
+    // contiene también cualquier movimiento previo que todavía no llegó a Firebase.
+    const sameDownstream=Math.abs(num(remote.almacen)-num(after.almacen))<0.000001&&Math.abs(num(remote.entregado)-num(after.entregado))<0.000001;
+    const sameWorkshopTotal=Math.abs((num(remote.fab)+num(remote.pintura))-(num(after.fab)+num(after.pintura)))<0.000001;
+    if((p.from==='fab'&&p.to==='pintura')||(p.from==='pintura'&&p.to==='fab')){
+      if(sameDownstream&&sameWorkshopTotal)return {...after};
+      return applyOp(remote,p); // conserva PINTADO/ALM concurrente de Cabina.
+    }
+    // Para FAB -> ALM, si la nube coincide con el antes local usamos el después exacto;
+    // si no, aplicamos únicamente esta acción encima de la nube actual.
+    if(sameFlow(remote,before))return {...after};
+    return applyOp(remote,p);
+  }
+
+  const [{initializeApp,getApps},{getFirestore,doc,runTransaction,getDoc,serverTimestamp}] = await Promise.all([
+    import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')
+  ]);
+  let app=getApps().find(a=>a&&a.options&&a.options.projectId===CFG.projectId);
+  if(!app) app=initializeApp(CFG,'ldh-fabricacion-direct-v17');
+  const db=getFirestore(app), docRef=doc(db,'taller_data','fabricacion');
+
+  let chain=Promise.resolve();
+  async function commit(payload){
+    const p={...payload,ref:txt(payload&&payload.ref)}; if(!p.ref)return false;
+    status('Nube: confirmando '+key(p.ref)+'…','warn');
+    const result=await runTransaction(db,async tx=>{
+      const snap=await tx.get(docRef); const pkg=snap.exists()?{...(snap.data()||{})}:{};
+      const ldh=parse(pkg.ldh_db,{})||{}; POOLS.forEach(pool=>{if(!Array.isArray(ldh[pool]))ldh[pool]=[];});
+      const remote=remoteCurrent(pkg,ldh,p.ref); const target=chooseTarget(remote,p); const cf=canon(target); const at=iso();
+      const seed=localItem(p.ref)||{}; let representative=null;
+      POOLS.forEach(pool=>{
+        const arr=ldh[pool].slice(); let found=false;
+        for(let i=0;i<arr.length;i++){
+          if(!same(refOf(arr[i]),p.ref))continue; found=true;
+          const row={...arr[i],...seed}; const rr=refOf(arr[i])||refOf(seed)||p.ref;
+          row.ref=rr;row.referencia=rr;row.flow={...(row.flow||{}),...cf};row.delivered=cf.entregado;
+          row.fase=phase(cf);row.estado=row.fase;row.status='pendiente';row.archived=false;
+          row.keepInFab=cf.fab>0||cf.pintura>0;row.hideFromFab=!(cf.fab>0||cf.pintura>0);
+          row.localFlowUpdatedAt=at;row.fabricacionFlowUpdatedAtMs=Date.now();row.fabricacionFlowSource='fabricacion_direct_v17';row.updatedAt=at;
+          arr[i]=row; representative=row;
+        }
+        if(!found){
+          const rr=refOf(seed)||p.ref; const row={...seed,ref:rr,referencia:rr,flow:cf,delivered:cf.entregado,fase:phase(cf),estado:phase(cf),status:'pendiente',archived:false,keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),localFlowUpdatedAt:at,fabricacionFlowUpdatedAtMs:Date.now(),fabricacionFlowSource:'fabricacion_direct_v17',updatedAt:at};
+          arr.push(row); representative=row;
+        }
+        ldh[pool]=arr;
+      });
+      ldh.updatedAt=at;
+      pkg.ldh_db=JSON.stringify(ldh);
+      let ovs=parse(pkg.overrides,{})||{}; Object.keys(ovs).forEach(r=>{if(same(r,p.ref))delete ovs[r];});
+      const rr=refOf(representative)||p.ref;
+      ovs[rr]={flow:cf,fase:phase(cf),estado:phase(cf),status:'pendiente',keepInFab:cf.fab>0||cf.pintura>0,hideFromFab:!(cf.fab>0||cf.pintura>0),archived:false,updatedAt:at,fabricacionFlowUpdatedAtMs:Date.now(),fabricacionFlowSource:'fabricacion_direct_v17'};
+      pkg.overrides=JSON.stringify(ovs);
+      let inbox=parse(pkg.inbox,[]);if(!Array.isArray(inbox))inbox=[];inbox=inbox.filter(r=>!same(refOf(r),p.ref));if(representative)inbox.push(representative);pkg.inbox=JSON.stringify(inbox.slice(-200));
+      // Mantener el prep_meta local de la misma OT para que ninguna lectura posterior regenere el reparto anterior.
+      try{const raw=readLocal('prep_meta_'+p.ref);if(raw){pkg.prepMeta={...(pkg.prepMeta||{}),[p.ref]:raw};}}catch(_){ }
+      pkg.counts={...(pkg.counts||{}),...counts(ldh),prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:Number(pkg.counts?.prepMeta||0),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:Number(pkg.counts?.prepRecepcion||0)};
+      pkg.updatedAtISO=at; pkg.source='fabricacion_direct_v17';
+      pkg.lastFabricacionDirectV17={ref:rr,atMs:Date.now(),flow:cf,from:p.from||'',to:p.to||'',qty:num(p.qty)};
+      tx.set(docRef,{...pkg,updatedAt:serverTimestamp(),source:'fabricacion_direct_v17'},{merge:false});
+      return {ref:rr,flow:cf,at};
+    });
+
+    // Verificación real: no damos por sincronizado hasta volver a leer el documento
+    // que consumen Cabina e Informativa y comprobar exactamente esta OT.
+    const verify=await getDoc(docRef); if(!verify.exists())throw new Error('La escritura no aparece en Firebase.');
+    const vpkg=verify.data()||{}, vldh=parse(vpkg.ldh_db,{})||{}; const vf=remoteCurrent(vpkg,vldh,p.ref);
+    if(!vf||!sameFlow(vf,result.flow))throw new Error('Firebase devolvió otro reparto para '+p.ref+'.');
+
+    // Si una acción concurrente de Cabina obligó a combinar movimientos, reflejar el
+    // resultado confirmado también en esta pantalla y en Agenda.
+    try{
+      const current=localItem(p.ref); if(current){
+        current.flow=canon(result.flow); current.localFlowUpdatedAt=result.at; current.fabricacionFlowUpdatedAtMs=Date.now();current.fabricacionFlowSource='fabricacion_direct_v17';
+        current.fase=phase(result.flow);current.estado=current.fase;current.archived=false;current.keepInFab=result.flow.fab>0||result.flow.pintura>0;current.hideFromFab=!(result.flow.fab>0||result.flow.pintura>0);
+        window.App?.writeOverride?.(current);window.App?.upsertEveryPool?.(current);window.App?.updateInbox?.(current);window.App?.updatePrepMeta?.(current);window.App?.save?.(false,false);window.App?.render?.();
+        window.App?.syncWorkflow?.(current,'fabricacion_direct_v17','Flujo confirmado por Firebase',false);
+      }
+    }catch(e){console.warn('[Fabricación V17] reflejo local',e);}
+    status('Nube OK · '+num(result.flow.fab)+' FAB / '+num(result.flow.pintura)+' PINT / '+num(result.flow.almacen)+' ALM','ok');
+    return true;
+  }
+
+  function enqueue(payload){
+    chain=chain.then(()=>commit(payload)).catch(error=>{
+      console.error('[Fabricación V17] sincronización directa',error);
+      status('Nube ERROR · movimiento no confirmado','bad');
+      try{window.App?.toast?.('⚠ Movimiento local guardado, pero Firebase no lo confirmó');}catch(_){ }
+      return false;
+    });
+    return chain;
+  }
+  window.LDH_fabricacionQueueDirectSyncV17=enqueue;
+  window.LDH_fabricacionCommitDirectV17=commit;
+
+  const pending=Array.isArray(window.__LDH_FAB_V17_PENDING)?window.__LDH_FAB_V17_PENDING.splice(0):[];
+  pending.forEach(enqueue);
+
+  // Reparación de arranque para el caso que ya existe ahora mismo: Fabricación local
+  // tiene el movimiento correcto pero Firebase conserva la copia anterior.
+  async function repairExisting(){
+    try{
+      const snap=await getDoc(docRef); if(!snap.exists())return 0;
+      const pkg=snap.data()||{}, ldh=parse(pkg.ldh_db,{})||{}, rovs=parse(pkg.overrides,{})||{}, lovs=parse(readLocal(OV_KEY),{})||{};
+      let repaired=0;
+      for(const item of (window.App?.allItems?.()||[])){
+        const ref=refOf(item); if(!ref||item.deleted||item.archived)continue;
+        const local=flow(item), remote=remoteCurrent(pkg,ldh,ref); if(!remote||sameFlow(local,remote))continue;
+        const lk=Object.keys(lovs).find(r=>same(r,ref)), rk=Object.keys(rovs).find(r=>same(r,ref));
+        const lms=Date.parse(txt(lk&&lovs[lk]&&lovs[lk].updatedAt))||Number(lovs[lk]?.fabricacionFlowUpdatedAtMs||0)||0;
+        const rms=Date.parse(txt(rk&&rovs[rk]&&rovs[rk].updatedAt))||Number(rovs[rk]?.fabricacionFlowUpdatedAtMs||0)||0;
+        const downstreamSame=Math.abs(local.almacen-remote.almacen)<0.000001&&Math.abs(local.entregado-remote.entregado)<0.000001;
+        const workshopSame=Math.abs((local.fab+local.pintura)-(remote.fab+remote.pintura))<0.000001;
+        const localWorkshopScore=local.fab+local.pintura*2;
+        const remoteWorkshopScore=remote.fab+remote.pintura*2;
+        const localIsForward=localWorkshopScore>remoteWorkshopScore+0.000001;
+        // Si ALM/ENT y el total de taller coinciden, un reparto local más avanzado
+        // (más unidades ya en Pintura) repara la nube aunque una escritura global
+        // posterior haya refrescado el timestamp remoto. Para retrocesos PINT->FAB,
+        // en cambio, exigimos que el marcador local sea realmente el más reciente.
+        if(!downstreamSame||!workshopSame||!(localIsForward||(lms>0&&lms>=rms)))continue;
+        await commit({ref,from:'',to:'',qty:0,before:remote,after:local,total:num(item.total||item.unidades),atMs:lms});
+        repaired++;
+      }
+      return repaired;
+    }catch(error){console.warn('[Fabricación V17] reparación inicial',error);return 0;}
+  }
+  setTimeout(repairExisting,900);
+  setTimeout(repairExisting,3200);
+
+  window.LDH_FABRICACION_V17='SYNC-DIRECTA-OT-VERIFICADA-20260903';
+  document.documentElement.dataset.ldhFabricacionSync='V17';
+  console.info('[Fabricación V17] sincronización atómica por OT + verificación Firebase activa.');
+})();
+</script>
+
 </body>
 </html>
