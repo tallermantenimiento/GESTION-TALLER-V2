@@ -1718,6 +1718,30 @@ async function publish(force=false){
         const remoteStamp = String(remote.updatedAtISO || "");
         const remoteScore = localScore(remote);
         const authoritativePending = isAlmacenAuthoritative(remote) && (!remoteStamp || remoteStamp !== lastRemoteUpdated);
+
+        // V16: antes de decidir que el paquete remoto "gana" por fecha/tamano global,
+        // construimos el paquete seguro que conserva cualquier movimiento local reciente
+        // (FAB/PINT) y, a la vez, respeta los avances autoritativos de Cabina/Almacen.
+        // V15 ya conseguia que el movimiento no desapareciera de ESTA pantalla, pero
+        // publish() volvia a aplicar la nube antigua y salia sin escribir; por eso Cabina
+        // e Informativa continuaban viendo 49/3 mientras Fabricacion mostraba 46/6.
+        const safeRemoteForPublish = mergeLocalFlowStateIntoRemoteV15(
+          mergeLocalCompositeIntoRemoteV10(remote)
+        );
+        if(safeRemoteForPublish && safeRemoteForPublish.__ldhV15ProtectedLocal){
+          const outgoing={...safeRemoteForPublish};
+          delete outgoing.__ldhV15ProtectedLocal;
+          outgoing.updatedAtISO=new Date().toISOString();
+          outgoing.source="fabricacion.html";
+          await setDoc(DOC_REF, {
+            ...outgoing,
+            updatedAt: serverTimestamp()
+          }, {merge:false});
+          lastRemoteUpdated=outgoing.updatedAtISO;
+          status("Nube sincronizada · movimientos locales publicados", "ok");
+          return;
+        }
+
         if(applyRemotePerRefAdvancesV12(remote)){
           status("Nube reconciliada por OT · " + (remote.counts && remote.counts.refs || 0) + " refs", "ok");
           return;
@@ -1734,6 +1758,7 @@ async function publish(force=false){
         updatedAt: serverTimestamp(),
         source: "fabricacion.html"
       }, {merge:false});
+      lastRemoteUpdated=String(pkg.updatedAtISO || "");
       status("Nube conectada · " + (pkg.counts.refs || 0) + " refs", "ok");
     }catch(e){
       console.error("publish fabricacion error", e);
@@ -2307,6 +2332,13 @@ console.info('[Fabricación V10] Referencia visible separada de OT técnica; par
 <script id="LDH_FABRICACION_V11_BUILD_20260902">
 window.LDH_FABRICACION_IDENTIFICACION_VISUAL_V11='FABRICACION-V11-IDENTIFICACION-VISUAL-UNIFICADA-20260902';
 document.documentElement.dataset.ldhFabricacionBuild='V11';
+</script>
+
+<!-- LDH_FABRICACION_V16_PUBLICACION_FLUJO_TERMINAL_INFORMATIVA_20260903 -->
+<script id="LDH_FABRICACION_V16_BUILD_20260903">
+window.LDH_FABRICACION_SYNC_SALIDA_V16='FABRICACION-V16-SYNC-SALIDA-TERMINAL-INFORMATIVA-20260903';
+document.documentElement.dataset.ldhFabricacionSyncOut='V16';
+console.info('[Fabricacion V16] movimientos locales se publican a taller_data/fabricacion antes de aceptar una copia remota antigua.');
 </script>
 
 <!-- LDH_FABRICACION_V15_FLUJO_LOCAL_AUTORITATIVO_20260903 -->
