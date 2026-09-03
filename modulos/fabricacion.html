@@ -1504,43 +1504,160 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
     return pkg;
   }catch(error){console.warn('[Fabricación V10] no se pudo fusionar partida compuesta local',error);return pkg;}
 }
-function mergeLocalAdvancedFlowsIntoRemoteV14(pkg){
+function mergeLocalFlowStateIntoRemoteV15(pkg){
   try{
     if(!pkg || !pkg.ldh_db) return pkg;
-    const local=parse(getStore(DB_KEY),{})||{};
-    const remote=parse(pkg.ldh_db,{})||{};
-    const pools=['deliveries','fabricacion','fab','trabajos'];
 
-    pools.forEach(pool=>{
-      const localRows=Array.isArray(local[pool])?local[pool]:[];
-      const remoteRows=Array.isArray(remote[pool])?remote[pool].slice():[];
+    const localLdh=parse(getStore(DB_KEY),{})||{};
+    const remoteLdh=parse(pkg.ldh_db,{})||{};
+    const localOverrides=parse(getStore(OVERRIDE_KEY),{})||{};
+    const remoteOverrides=parse(pkg.overrides,{})||{};
+    const localOvByKey=overridesByIdentityV12(localOverrides);
+    const remoteOvByKey=overridesByIdentityV12(remoteOverrides);
+    const protectedKeys=new Set();
+    const now=Date.now();
+    const EPS=0.000001;
+    const RECENT_LOCAL_MS=120000;
+
+    const keyOfRow=row=>flowIdentityKeyV12(refValue(row));
+    const keyOfRef=ref=>flowIdentityKeyV12(String(ref||'').trim());
+    const remoteIsAlmacen=isAlmacenAuthoritative(pkg);
+
+    function ovStamp(entry){
+      return entry&&entry.ov ? flowStampV12(entry.ov) : 0;
+    }
+    function shouldKeepLocal(key,localRow,remoteRow){
+      const lOvEntry=localOvByKey.get(key);
+      const rOvEntry=remoteOvByKey.get(key);
+      const lOv=lOvEntry&&lOvEntry.ov;
+      const rOv=rOvEntry&&rOvEntry.ov;
+      const localEffective=effectiveRowV12(localRow,lOv);
+      const remoteEffective=effectiveRowV12(remoteRow,rOv);
+      const lf=flowV12(localEffective), rf=flowV12(remoteEffective);
+      const localScore=flowScoreV12(localEffective);
+      const remoteScore=flowScoreV12(remoteEffective);
+      const lIntent=ovStamp(lOvEntry), rIntent=ovStamp(rOvEntry);
+      const localIntentRecent=lIntent>0 && (now-lIntent)>=0 && (now-lIntent)<RECENT_LOCAL_MS;
+      const remoteIntentNewer=rIntent>lIntent+1;
+
+      // Almacen solo manda sobre ALM/ENT cuando realmente ha cambiado alguna de esas
+      // cantidades. Un snapshot de Almacen con el mismo ALM/ENT no puede devolver
+      // unidades de Pintura a Fabricacion por llevar una copia vieja de FAB/PINT.
+      if(remoteIsAlmacen && (Number(rf.almacen)!==Number(lf.almacen) || Number(rf.entregado)!==Number(lf.entregado))){
+        return false;
+      }
+
+      // Una accion local recien hecha (incluido volver a Fab) se conserva hasta que
+      // llegue una accion remota explicitamente posterior.
+      if(localIntentRecent && !remoteIntentNewer) return true;
+
+      // En ausencia de una accion remota posterior, nunca retroceder el avance de fase.
+      if(localScore>remoteScore+EPS) return true;
+
+      // Si el progreso es equivalente, conserva el registro local mas reciente.
+      if(Math.abs(localScore-remoteScore)<=EPS && flowStampV12(localEffective)>flowStampV12(remoteEffective) && !remoteIntentNewer) return true;
+      return false;
+    }
+
+    ['deliveries','fabricacion','fab','trabajos'].forEach(pool=>{
+      const localRows=Array.isArray(localLdh[pool])?localLdh[pool]:[];
+      const remoteRows=Array.isArray(remoteLdh[pool])?remoteLdh[pool].slice():[];
       localRows.forEach(localRow=>{
-        const lr=String(localRow&&(localRow.ref||localRow.referencia||localRow.jobRef)||'').trim();
-        if(!lr) return;
-        const idx=remoteRows.findIndex(row=>sameWorkRef(String(row&&(row.ref||row.referencia||row.jobRef)||'').trim(),lr));
+        const key=keyOfRow(localRow); if(!key) return;
+        const idx=remoteRows.findIndex(row=>keyOfRow(row)===key);
         if(idx<0){
-          // Si esta OT existe solo en este PC, no la destruimos por restaurar un paquete
-          // remoto que todavia no la contiene. La publicacion posterior la consolidara.
           remoteRows.push({...localRow});
+          protectedKeys.add(key);
           return;
         }
-        // mergeRawAliasRows elige como autoritativo el flujo mas avanzado; a igualdad
-        // de avance, conserva el registro con timestamp de flujo mas reciente.
-        // Por tanto un snapshot viejo 49 FAB / 3 PINT nunca puede pisar un 46 FAB / 6 PINT.
-        remoteRows[idx]=mergeRawAliasRows(remoteRows[idx],localRow);
+        const remoteRow=remoteRows[idx];
+        if(!shouldKeepLocal(key,localRow,remoteRow)) return;
+
+        const lOvEntry=localOvByKey.get(key);
+        const localEffective=effectiveRowV12(localRow,lOvEntry&&lOvEntry.ov);
+        const lf=flowV12(localEffective);
+        const merged={...remoteRow,...localRow};
+        merged.flow=canonicalFlowV12(lf);
+        merged.delivered=lf.entregado;
+        merged.fase=localEffective.fase||phaseV12(lf);
+        merged.estado=localEffective.estado||merged.fase;
+        if(localEffective.status!==undefined) merged.status=localEffective.status;
+        if(localEffective.keepInFab!==undefined) merged.keepInFab=localEffective.keepInFab;
+        if(localEffective.hideFromFab!==undefined) merged.hideFromFab=localEffective.hideFromFab;
+        if(localEffective.archived!==undefined) merged.archived=localEffective.archived;
+        merged.localFlowUpdatedAt=localEffective.localFlowUpdatedAt||localEffective.updatedAt||new Date().toISOString();
+        remoteRows[idx]=merged;
+        protectedKeys.add(key);
       });
-      remote[pool]=remoteRows;
+      remoteLdh[pool]=remoteRows;
     });
 
-    return {...pkg,ldh_db:JSON.stringify(dedupeLdhByIdentity(remote))};
+    // El fallo anterior estaba aqui: aunque ldh_db conservara el flujo nuevo,
+    // applyRemotePackage sustituia despues el override local por el override viejo de
+    // Firebase. applyOverride() volvia a imponer 49 FAB / 3 PINT sobre 46 / 6.
+    const mergedOverrides={...remoteOverrides};
+    Object.entries(localOverrides).forEach(([localRef,localOv])=>{
+      const key=keyOfRef(localRef); if(!key || !localOv || typeof localOv!=='object') return;
+      const remoteRef=Object.keys(mergedOverrides).find(ref=>keyOfRef(ref)===key);
+      const remoteOv=remoteRef ? mergedOverrides[remoteRef] : null;
+      const lStamp=flowStampV12(localOv), rStamp=flowStampV12(remoteOv||{});
+      const lScore=flowScoreV12(localOv), rScore=flowScoreV12(remoteOv||{});
+      const cloudDeleted=Array.from(deletedRefs).some(ref=>keyOfRef(ref)===key);
+      if(localOv.deleted && !cloudDeleted) return;
+      const localRecent=lStamp>0 && (now-lStamp)>=0 && (now-lStamp)<RECENT_LOCAL_MS;
+      const keepLocal=protectedKeys.has(key) || !remoteRef ||
+        (localRecent && rStamp<=lStamp+1) ||
+        (lScore>rScore+EPS) ||
+        (Math.abs(lScore-rScore)<=EPS && lStamp>=rStamp);
+      if(!keepLocal) return;
+      if(remoteRef && remoteRef!==localRef) delete mergedOverrides[remoteRef];
+      mergedOverrides[localRef]={...(remoteOv&&typeof remoteOv==='object'?remoteOv:{}),...localOv,flow:{...((remoteOv&&remoteOv.flow)||{}),...((localOv&&localOv.flow)||{})}};
+      protectedKeys.add(key);
+    });
+
+    // El inbox tambien puede contener la copia anterior de la misma OT. Para las
+    // referencias protegidas sustituimos esa fila por la copia local actual.
+    let remoteInbox=parse(pkg.inbox,[]); if(!Array.isArray(remoteInbox)) remoteInbox=[];
+    let localInbox=parse(getStore(INBOX_KEY),[]); if(!Array.isArray(localInbox)) localInbox=[];
+    localInbox.forEach(localRow=>{
+      const key=keyOfRow(localRow); if(!key || !protectedKeys.has(key)) return;
+      const idx=remoteInbox.findIndex(row=>keyOfRow(row)===key);
+      if(idx>=0) remoteInbox[idx]={...remoteInbox[idx],...localRow};
+      else remoteInbox.push({...localRow});
+    });
+
+    // Para la OT que acabamos de mover tampoco restauramos un prep_meta anterior.
+    const prepMeta={...(pkg.prepMeta||{})};
+    const prepRecepcion={...(pkg.prepRecepcion||{})};
+    if(protectedKeys.size){
+      storageKeys('prep_meta_').forEach(k=>{
+        const ref=refFromKey(k), key=keyOfRef(ref); if(!key || !protectedKeys.has(key)) return;
+        const raw=getStore(k); if(raw) prepMeta[ref]=raw;
+      });
+      storageKeys('prep_recepcion_').forEach(k=>{
+        const ref=refFromKey(k), key=keyOfRef(ref); if(!key || !protectedKeys.has(key)) return;
+        const raw=getStore(k); if(raw) prepRecepcion[ref]=raw;
+      });
+      remoteLdh.updatedAt=new Date().toISOString();
+    }
+
+    return {
+      ...pkg,
+      ldh_db:JSON.stringify(remoteLdh),
+      overrides:JSON.stringify(mergedOverrides),
+      inbox:JSON.stringify(remoteInbox.slice(-200)),
+      prepMeta,
+      prepRecepcion,
+      __ldhV15ProtectedLocal:protectedKeys.size>0
+    };
   }catch(error){
-    console.warn('[Fabricacion V14] proteccion anti-retroceso',error);
+    console.warn('[Fabricacion V15] proteccion de flujo local',error);
     return pkg;
   }
 }
 function applyRemotePackage(pkg){
   if(!pkg || !pkg.ldh_db) return false;
-  pkg = mergeLocalAdvancedFlowsIntoRemoteV14(mergeLocalCompositeIntoRemoteV10(withoutDeletedRefs(pkg)));
+  pkg = mergeLocalFlowStateIntoRemoteV15(mergeLocalCompositeIntoRemoteV10(withoutDeletedRefs(pkg)));
   const appliedStamp = String(pkg.updatedAtISO || "");
   if(appliedStamp) lastRemoteUpdated = appliedStamp;
   ignorePublish = true;
@@ -1557,6 +1674,9 @@ function applyRemotePackage(pkg){
       if(window.App && window.App.reload) window.App.reload(false);
     }catch(e){}
     ignorePublish = false;
+    if(pkg.__ldhV15ProtectedLocal){
+      setTimeout(()=>publish(true),80);
+    }
   }, 200);
   return true;
 }
@@ -2189,10 +2309,10 @@ window.LDH_FABRICACION_IDENTIFICACION_VISUAL_V11='FABRICACION-V11-IDENTIFICACION
 document.documentElement.dataset.ldhFabricacionBuild='V11';
 </script>
 
-<!-- LDH_FABRICACION_V14_ANTI_RETROCESO_FLUJO_20260903 -->
-<script id="LDH_FABRICACION_V14_BUILD_20260903">
-window.LDH_FABRICACION_ANTI_RETROCESO_V14='FABRICACION-V14-ANTI-RETROCESO-FLUJO-20260903';
-document.documentElement.dataset.ldhFabricacionSyncGuard='V14';
+<!-- LDH_FABRICACION_V15_FLUJO_LOCAL_AUTORITATIVO_20260903 -->
+<script id="LDH_FABRICACION_V15_BUILD_20260903">
+window.LDH_FABRICACION_FLUJO_LOCAL_V15='FABRICACION-V15-FLUJO-LOCAL-AUTORITATIVO-20260903';
+document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
 </script>
 </body>
 </html>
