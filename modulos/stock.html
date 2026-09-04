@@ -5357,6 +5357,36 @@ function LDH_verDeudasActivas(){
   openModal('Deudas activas', body, '');
 }
 
+/* V118 · El resumen superior de Reservado puede contener asignaciones históricas
+ * enlazadas a un ID antiguo de material. La fila principal ya unifica esos IDs por
+ * nombre exacto. Para que "Ver reservas" abra exactamente la misma ficha que la
+ * fila, resolvemos aquí el material canónico de la empresa activa.
+ * No modifica stock, reservas, asignaciones ni movimientos.
+ */
+function LDH_stockCanonicalMaterialIdV118(materialId){
+  const originalId=String(materialId||'');
+  if(!originalId) return originalId;
+  try{
+    // Si este ID ya tiene ficha de stock en la empresa activa, es el canónico.
+    if((db.stock||[]).some(s=>String(s.companyId||'')===String(activeCompany||'') && String(s.materialId||'')===originalId)){
+      return originalId;
+    }
+
+    const original=materialById(originalId)||{};
+    const originalName=_prepNormText(original.name||original.nombre||original.material||'');
+    if(!originalName) return originalId;
+
+    // Solo coincidencia por nombre COMPLETO normalizado. Nunca por medidas parciales.
+    const candidates=(db.stock||[])
+      .filter(s=>String(s.companyId||'')===String(activeCompany||''))
+      .map(s=>({s,m:materialById(s.materialId)}))
+      .filter(x=>x.m && x.m.type===activeType)
+      .filter(x=>_prepNormText(x.m.name||x.m.nombre||x.m.material||'')===originalName);
+
+    return candidates.length ? String(candidates[0].m.id||originalId) : originalId;
+  }catch(_){ return originalId; }
+}
+
 function LDH_verReservasActivas(){
   const items=[];
   (db.reservations||[]).forEach(r=>{
@@ -5364,12 +5394,14 @@ function LDH_verReservasActivas(){
     if(String(r.status||r.estado)!=='activa') return;
     // Mostrar también vínculos bloqueados por pintura; siguen siendo reserva activa, pero no prestable.
 
-    const m=materialById(r.materialId);
+    const rawId=r.materialId||r.matId||'';
+    const canonicalId=LDH_stockCanonicalMaterialIdV118(rawId);
+    const m=materialById(canonicalId)||materialById(rawId);
     if(!m || m.type!==activeType) return;
 
     const j=jobById(r.jobId)||{};
     const ref=r.ref||r.jobRef||j.ref||'Sin referencia';
-    items.push({r,m,j,ref,kind:'reserva'});
+    items.push({r,m,j,ref,kind:'reserva',canonicalId});
   });
 
   (db.assignments||[]).forEach(a=>{
@@ -5378,10 +5410,12 @@ function LDH_verReservasActivas(){
     const status=String(a.status||a.estado||'activa').toLowerCase();
     const phase=String(a.phase||a.fase||'preparacion').toLowerCase();
     if(status!=='activa' || !['preparacion','fabricacion'].includes(phase)) return;
-    const m=materialById(a.materialId||a.matId);
+    const rawId=a.materialId||a.matId||'';
+    const canonicalId=LDH_stockCanonicalMaterialIdV118(rawId);
+    const m=materialById(canonicalId)||materialById(rawId);
     if(!m || m.type!==activeType) return;
     const ref=a.ref||a.jobRef||a.consumerRef||'Sin referencia';
-    items.push({r:a,m,j:{},ref,kind:'asignacion'});
+    items.push({r:a,m,j:{},ref,kind:'asignacion',canonicalId});
   });
 
   if(!items.length){
@@ -5389,13 +5423,13 @@ function LDH_verReservasActivas(){
     return;
   }
 
-  const body = `<div class="ldh-kpi-list">${items.map(({r,m,ref})=>`
+  const body = `<div class="ldh-kpi-list">${items.map(({r,m,ref,canonicalId})=>`
     <div class="ldh-kpi-row">
       <div><b>${esc(m.name)}</b><div class="sub">${esc(m.family||'Sin familia')}</div></div>
       <div><span class="pill ${String(r.phase||r.fase)==='pintura'?'bad':(String(r.phase||r.fase)==='fabricacion'?'warn':'ok')}">${String(r.phase||r.fase)==='pintura'?'BLOQ. PINTURA':esc(r.phase||r.fase||'preparacion')}</span></div>
       <div class="qty">${fmt(r.qty||r.cantidad||0)} ${esc(m.unit||'')}</div>
       <div><b>${esc(ref)}</b>${LDH_stockWorkIdentHtmlV116(ref)}</div>
-      <button class="btn small" onclick="openDetail('${m.id}')">Ver</button>
+      <button class="btn small" onclick="openDetail('${canonicalId||m.id}')">Ver</button>
     </div>
   `).join('')}</div>`;
 
@@ -9281,5 +9315,6 @@ document.documentElement.dataset.ldhStockBuild='V116';
 console.info('[Stock V116] Préstamo interno OT visible, asignación restante correcta e identificación amarilla.');
 </script>
 <script>window.LDH_STOCK_V117='LECTURA-UNIFICADA-ID-EXACTO-FISICO-MAESTRO-20260904';document.documentElement.dataset.ldhStockV117='true';</script>
+<script>window.LDH_STOCK_V118='VER-RESERVAS-MATERIAL-CANONICO-20260904';document.documentElement.dataset.ldhStockV118='true';</script>
 </body>
 </html>
