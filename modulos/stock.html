@@ -9530,5 +9530,191 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
   try{ setTimeout(()=>{ if(typeof render==='function') render(); },0); }catch(_){ }
 })();
 </script>
+
+
+<!-- === LDH STOCK V122 · movimientos fisicos coherentes con maestro + ledger === -->
+<script id="LDH_STOCK_V122_MOVIMIENTOS_FISICOS_COHERENTES_20260904">
+(function(){
+  'use strict';
+
+  const _oldMvV122 = window.mv;
+  const _oldSaveMoveV122 = window.saveMove;
+
+  function normV122(v){
+    return String(v == null ? '' : v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9ø]+/g,' ').trim();
+  }
+  function numV122(v){
+    const n = Number(String(v == null ? '' : v).replace(',','.'));
+    return Number.isFinite(n) ? n : 0;
+  }
+  function matV122(id){
+    try{return materialById(id)||{};}catch(_){return {};}
+  }
+  function exactNameV122(id){
+    const m=matV122(id);
+    return normV122(m.name||m.nombre||m.material||m.mat||'');
+  }
+  function aliasIdsV122(materialId){
+    const target=exactNameV122(materialId);
+    const set=new Set([String(materialId||'')]);
+    if(!target) return set;
+    try{
+      (db.materials||[]).forEach(m=>{
+        if(normV122(m&& (m.name||m.nombre||m.material||m.mat||''))===target){
+          const id=String(m.id||m.materialId||m.matId||'');
+          if(id) set.add(id);
+        }
+      });
+    }catch(_){ }
+    return set;
+  }
+  function isProfileBarV122(companyId,materialId){
+    const m=matV122(materialId);
+    const type=normV122(m.type||m.tipo||m.stockType||'');
+    const unit=normV122(m.unit||m.unidad||'');
+    const family=normV122(m.family||m.familia||'');
+    if(type!=='hierro' || unit.indexOf('barra')<0) return false;
+    if(family.indexOf('pletina')>=0) return false;
+    try{
+      const ids=aliasIdsV122(materialId);
+      if((db.stock||[]).some(s=>
+        String(s.companyId||s.empresaId||'')===String(companyId||'') &&
+        ids.has(String(s.materialId||s.matId||'')) &&
+        normV122(s.lengthMode||s.unitBasis||'')==='mm'
+      )) return false;
+    }catch(_){ }
+    return true;
+  }
+  function moveSignV122(type){
+    const t=normV122(type||'').replace(/\s+/g,'_');
+    if(['entrada','in','ajuste_pos','devolucion','devolucion_fisica','stock_entrada','recepcion_stock','add_stock'].includes(t)) return 1;
+    if(['salida','out','ajuste_neg','consumo','consumo_terminal'].includes(t)) return -1;
+    return 0;
+  }
+  function stockRowsV122(companyId,materialId){
+    const ids=aliasIdsV122(materialId);
+    try{
+      return (db.stock||[]).filter(s=>
+        String(s.companyId||s.empresaId||'')===String(companyId||'') &&
+        ids.has(String(s.materialId||s.matId||''))
+      );
+    }catch(_){ return []; }
+  }
+  function writePhysicalMasterV122(companyId,materialId,next,meta){
+    if(!isProfileBarV122(companyId,materialId)) return false;
+    const rows=stockRowsV122(companyId,materialId);
+    if(!rows.length) return false;
+    const value=Math.max(0,numV122(next));
+    const stamp=(typeof now==='function'?now():new Date().toISOString());
+    rows.forEach(sr=>{
+      // Todas las variantes históricas del mismo nombre exacto deben representar
+      // el mismo físico. Esto evita que una ficha antigua vuelva a imponerse por max().
+      sr.physicalQty=value;
+      sr.qtyPhysical=value;
+      sr.fisico=value;
+      sr.realQty=value;
+      sr.stockFisico=value;
+      sr.stockReal=value;
+      sr.stockActual=value;
+      sr.existencias=value;
+      sr.actualQty=value;
+      sr.qty=value;
+      sr.cantidad=value;
+      sr.stock=value;
+      sr.real=value;
+      sr.physicalManualMaster=true;
+      sr.protectedStockSnapshot=true;
+      sr.physicalSource='movimiento_fisico_v122';
+      sr.physicalUpdatedAt=stamp;
+      sr.updatedAt=stamp;
+      sr.lastManualPhysicalMoveV122={
+        type:String(meta&&meta.type||''),
+        qty:numV122(meta&&meta.qty),
+        before:numV122(meta&&meta.before),
+        after:value,
+        at:stamp
+      };
+    });
+    return true;
+  }
+  function currentPhysicalV122(companyId,materialId){
+    try{
+      const n=Number(window.realStock(companyId,materialId));
+      return Number.isFinite(n)?Math.max(0,n):0;
+    }catch(_){ return 0; }
+  }
+
+  // Unifica TODAS las operaciones físicas que pasan por mv(): Entrada/Salida manual,
+  // stock inicial y devoluciones interempresa. Pintura y pletina/mm quedan fuera.
+  if(typeof _oldMvV122==='function'){
+    window.mv=function(companyId,materialId,type,qty,note){
+      const q=Math.max(0,numV122(qty));
+      const sign=moveSignV122(type);
+      let before=null, after=null;
+      if(sign && q>0 && isProfileBarV122(companyId,materialId)){
+        before=currentPhysicalV122(companyId,materialId);
+        after=Math.max(0,before + sign*q);
+        writePhysicalMasterV122(companyId,materialId,after,{type,qty:q,before});
+      }
+      const movement=_oldMvV122.apply(this,arguments);
+      if(movement && before!==null){
+        movement.physicalBeforeV122=before;
+        movement.physicalAfterV122=after;
+        movement.masterPhysicalSyncedV122=true;
+        movement.masterPhysicalSyncAtV122=(typeof now==='function'?now():new Date().toISOString());
+      }
+      return movement;
+    };
+  }
+
+  // La versión anterior no impedía una salida manual mayor que el físico en barras.
+  // Validamos ANTES de llamar a saveMove para no crear ni movimiento ni cambio maestro.
+  if(typeof _oldSaveMoveV122==='function'){
+    window.saveMove=function(type){
+      try{
+        const t=normV122(type||'').replace(/\s+/g,'_');
+        const isOut=['salida','out','ajuste_neg','consumo'].includes(t);
+        const matEl=document.getElementById('moveMat');
+        const qtyEl=document.getElementById('moveQty');
+        const mat=matEl?String(matEl.value||''):'';
+        const qty=numV122(qtyEl?qtyEl.value:0);
+        if(isOut && mat && qty>0 && isProfileBarV122(window.activeCompany||activeCompany,mat)){
+          const cid=window.activeCompany||activeCompany;
+          const physical=currentPhysicalV122(cid,mat);
+          if(qty>physical+1e-9){
+            alert('No puedes sacar '+(typeof fmt==='function'?fmt(qty):qty)+' barras.\n\nFísico disponible: '+(typeof fmt==='function'?fmt(physical):physical)+' barras.');
+            return;
+          }
+        }
+      }catch(e){
+        console.warn('[Stock V122] No se pudo validar salida; se usa la validación anterior.',e);
+      }
+      return _oldSaveMoveV122.apply(this,arguments);
+    };
+  }
+
+  // Diagnóstico interno no destructivo: permite comprobar desde consola las funciones clave
+  // sin alterar datos. No se ejecuta automáticamente.
+  window.LDH_stockSelfCheckV122=function(){
+    const result={
+      mv:typeof window.mv==='function',
+      saveMove:typeof window.saveMove==='function',
+      reserve:typeof window.saveReservation==='function',
+      edit:typeof window.saveEditMaterial==='function',
+      detail:typeof window.openDetail==='function',
+      deleteMaterial:typeof window.deleteMaterialFromCompany==='function',
+      debtReturn:typeof window.devolverDeudaDesdeDetalle==='function',
+      render:typeof window.render==='function'
+    };
+    result.ok=Object.values(result).every(Boolean);
+    return result;
+  };
+
+  window.LDH_STOCK_V122='MOVIMIENTOS-FISICOS-MAESTRO-LEDGER-COHERENTES-20260904';
+  document.documentElement.dataset.ldhStockV122='true';
+})();
+</script>
 </body>
 </html>
