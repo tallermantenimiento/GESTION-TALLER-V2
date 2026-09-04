@@ -9746,3 +9746,137 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 
 </body>
 </html>
+
+<!-- === LDH STOCK V124 · Stock Comun: no reservar OTs que ya salieron de Preparacion === -->
+<script id="LDH_STOCK_V124_STOCK_COMUN_FASE_REAL_20260904">
+(function(){
+  'use strict';
+
+  const _oldOwnAssignmentsV124 = window.LDH_stockOwnAssignmentsV116;
+  const _oldAssignedStockV124 = window.assignedStock;
+  const _oldVerReservasV124 = window.LDH_verReservasActivas;
+
+  function normV124(v){
+    return String(v == null ? '' : v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9ø]+/g,' ').trim();
+  }
+  function qtyV124(a){
+    const n=Number(a && (a.qty ?? a.cantidad ?? 0));
+    return Number.isFinite(n)?Math.max(0,n):0;
+  }
+  function isSharedStockAssignmentV124(a){
+    if(!a) return false;
+    const txt=normV124([a.assignmentType,a.reason,a.source].filter(Boolean).join(' '));
+    return a.sharedStock===true || a.sharedPool===true || a.debtExempt===true && txt.includes('stock comun') || txt.includes('stock comun');
+  }
+  function refV124(a){
+    return String(a && (a.consumerRef||a.jobRef||a.ref||a.reference||a.referencia) || '').trim();
+  }
+  function isBeyondPreparationV124(ref){
+    if(!ref) return false;
+    try{
+      if(typeof LDH_prepRefAlreadyBeyondPreparationV119==='function'){
+        return !!LDH_prepRefAlreadyBeyondPreparationV119(ref);
+      }
+    }catch(_){ }
+    return false;
+  }
+  function staleSharedStockAssignmentV124(a){
+    if(!isSharedStockAssignmentV124(a)) return false;
+    return isBeyondPreparationV124(refV124(a));
+  }
+  function isIronBarV124(materialId){
+    try{
+      const m=materialById(materialId)||{};
+      const type=normV124(m.type||m.tipo||m.stockType||'');
+      const unit=normV124(m.unit||m.unidad||'');
+      const family=normV124(m.family||m.familia||'');
+      return type==='hierro' && unit.includes('barra') && !family.includes('pletina');
+    }catch(_){ return false; }
+  }
+
+  window.LDH_stockOwnAssignmentsV116=function(companyId,materialId){
+    const rows=(typeof _oldOwnAssignmentsV124==='function' ? _oldOwnAssignmentsV124(companyId,materialId) : []) || [];
+    if(!isIronBarV124(materialId)) return rows;
+    return rows.filter(a=>!staleSharedStockAssignmentV124(a));
+  };
+
+  window.assignedStock=function(companyId,materialId){
+    if(!isIronBarV124(materialId)){
+      return typeof _oldAssignedStockV124==='function' ? _oldAssignedStockV124(companyId,materialId) : 0;
+    }
+    try{
+      return (window.LDH_stockOwnAssignmentsV116(companyId,materialId)||[])
+        .reduce((sum,a)=>sum+qtyV124(a),0);
+    }catch(_){
+      return typeof _oldAssignedStockV124==='function' ? _oldAssignedStockV124(companyId,materialId) : 0;
+    }
+  };
+
+  // El KPI superior debe usar exactamente la misma lista filtrada que la fila y el detalle.
+  window.LDH_verReservasActivas=function(){
+    try{
+      const items=[];
+      (db.reservations||[]).forEach(r=>{
+        if(String(r.companyId||r.empresaId||'')!==String(activeCompany||'')) return;
+        if(String(r.status||r.estado||'activa').toLowerCase()!=='activa') return;
+        try{ if(typeof isAutoReceivedPrepReservation==='function' && isAutoReceivedPrepReservation(r)) return; }catch(_){ }
+        const rawId=r.materialId||r.matId||'';
+        const canonicalId=typeof LDH_stockCanonicalMaterialIdV118==='function' ? LDH_stockCanonicalMaterialIdV118(rawId) : rawId;
+        const m=materialById(canonicalId)||materialById(rawId);
+        if(!m || m.type!==activeType) return;
+        const j=jobById(r.jobId)||{};
+        const ref=r.ref||r.jobRef||j.ref||'Sin referencia';
+        items.push({r,m,ref,canonicalId});
+      });
+
+      const seen=new Set();
+      (db.stock||[]).forEach(s=>{
+        if(String(s.companyId||s.empresaId||'')!==String(activeCompany||'')) return;
+        const rawId=s.materialId||s.matId||'';
+        const canonicalId=typeof LDH_stockCanonicalMaterialIdV118==='function' ? LDH_stockCanonicalMaterialIdV118(rawId) : rawId;
+        if(seen.has(canonicalId)) return;
+        seen.add(canonicalId);
+        const m=materialById(canonicalId)||materialById(rawId);
+        if(!m || m.type!==activeType) return;
+        const rows=(window.LDH_stockOwnAssignmentsV116(activeCompany,canonicalId)||[]);
+        rows.forEach(a=>{
+          const ref=a.ref||a.jobRef||a.consumerRef||'Sin referencia';
+          items.push({r:a,m,ref,canonicalId});
+        });
+      });
+
+      if(!items.length){
+        openModal('Reservas activas','<div class="empty">No hay reservas activas para este tipo de stock.</div>','');
+        return;
+      }
+
+      const body='<div class="ldh-kpi-list">'+items.map(({r,m,ref,canonicalId})=>{
+        let phase=String(r.phase||r.fase||'preparacion').toLowerCase();
+        try{
+          // Solo para presentación: si conocemos que la OT ya avanzó, no la etiquetamos PREP.
+          if(isSharedStockAssignmentV124(r) && isBeyondPreparationV124(ref)) phase='consumido';
+        }catch(_){ }
+        const pill=phase==='pintura'?'BLOQ. PINTURA':(phase==='fabricacion'?'FAB':(phase==='almacen'?'ALM':(phase==='consumido'?'CONSUMIDO':'PREP')));
+        const cls=phase==='pintura'?'bad':(phase==='fabricacion'?'warn':(phase==='almacen'?'ok':'ok'));
+        return '<div class="ldh-kpi-row">'
+          +'<div><b>'+esc(m.name)+'</b><div class="sub">'+esc(m.family||'Sin familia')+'</div></div>'
+          +'<div><span class="pill '+cls+'">'+esc(pill)+'</span></div>'
+          +'<div class="qty">'+fmt(r.qty||r.cantidad||0)+' '+esc(m.unit||'')+'</div>'
+          +'<div><b>'+esc(ref)+'</b>'+LDH_stockWorkIdentHtmlV116(ref)+'</div>'
+          +'<button class="btn small" onclick="openDetail(\''+(canonicalId||m.id)+'\')">Ver</button>'
+          +'</div>';
+      }).join('')+'</div>';
+      openModal('Reservado activo',body,'');
+    }catch(err){
+      console.warn('[Stock V124] fallo en Ver reservas; se usa comportamiento anterior',err);
+      if(typeof _oldVerReservasV124==='function') return _oldVerReservasV124();
+    }
+  };
+
+  window.LDH_STOCK_V124='STOCK-COMUN-FASE-REAL-SIN-RESERVA-FANTASMA-20260904';
+  document.documentElement.dataset.ldhStockV124='true';
+  try{setTimeout(()=>{if(typeof render==='function') render();},0);}catch(_){ }
+})();
+</script>
