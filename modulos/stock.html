@@ -2074,9 +2074,63 @@ function _stockAssignmentHasPhysicalConsumptionV68(assignment,companyId,material
     });
   }catch(_){return false;}
 }
+/* V119 · El fallback de prep_recepcion_ solo puede reservar mientras la OT siga en Preparación.
+ * Algunas OTs antiguas conservan qty_recibida/aplicado_qty después de pasar a
+ * Fabricación/Almacén. Esos datos son trazabilidad y no deben volver a sumar Reservado.
+ * No modifica ningún dato: únicamente corrige la lectura global del reservado.
+ */
+function LDH_prepRefAlreadyBeyondPreparationV119(ref){
+  try{
+    const isPost = (value)=>{
+      const v=_prepNormText(value||'');
+      if(!v) return false;
+      return [
+        'fabricacion','en fabricacion',
+        'pintura','en pintura',
+        'almacen','en almacen',
+        'terminado','entregado','archivado',
+        'cerrado','finalizado','eliminado','borrado','cancelado','cancelada'
+      ].includes(v);
+    };
+
+    // Fuente preferente: meta de Preparación. El estado genérico "pendiente"
+    // no manda sobre una fase explícita como fabricacion/almacen.
+    for(const store of [localStorage,sessionStorage]){
+      try{
+        const raw=store.getItem('prep_meta_'+String(ref||'').trim());
+        if(!raw) continue;
+        const meta=JSON.parse(raw)||{};
+        if(isPost(meta.phase) || isPost(meta.fase) || isPost(meta.estado)) return true;
+      }catch(_){ }
+    }
+
+    // Respaldo para OTs antiguas que ya no conservan prep_meta_.
+    try{
+      const raw=localStorage.getItem('ldh_db') || sessionStorage.getItem('ldh_db') || '';
+      if(raw){
+        const ldb=JSON.parse(raw||'{}')||{};
+        const pools=[]
+          .concat(Array.isArray(ldb.deliveries)?ldb.deliveries:[])
+          .concat(Array.isArray(ldb.trabajos)?ldb.trabajos:[])
+          .concat(Array.isArray(ldb.fabricacion)?ldb.fabricacion:[])
+          .concat(Array.isArray(ldb.fab)?ldb.fab:[])
+          .concat(Array.isArray(ldb.pintura)?ldb.pintura:[])
+          .concat(Array.isArray(ldb.almacen)?ldb.almacen:[])
+          .concat(Array.isArray(ldb.entregas)?ldb.entregas:[]);
+        const it=pools.find(x=>{
+          const rr=x&&(x.ref||x.referencia||x.jobRef)||'';
+          try{return _stockSameAssignedRefV68(rr,ref);}catch(_){return String(rr).trim()===String(ref||'').trim();}
+        });
+        if(it && (isPost(it.phase)||isPost(it.fase)||isPost(it.estado))) return true;
+      }
+    }catch(_){ }
+  }catch(_){ }
+  return false;
+}
+
 function prepAssignedStock(companyId,materialId){
-  // Fallback de seguridad de Preparación, descontando lo que ya tiene salida física
-  // confirmada. Así una OT en Fabricación no vuelve a aparecer como Reservado.
+  // Fallback de seguridad de Preparación. V119: solo mientras la OT siga realmente
+  // en Preparación; una ficha prep_recepcion_ de una OT ya avanzada no vuelve a reservar.
   try{
     let total = 0;
     const seen = new Set();
@@ -2092,6 +2146,10 @@ function prepAssignedStock(companyId,materialId){
       const refCompany = _refCompanyFromPrep(ref);
       if(refCompany && !_companyMatchesForPrep(refCompany, companyId)) continue;
       if(!refCompany) continue;
+
+      // Regla global V119: Fabricación/Pintura/Almacén/Entregado ya no son reserva.
+      if(LDH_prepRefAlreadyBeyondPreparationV119(ref)) continue;
+
       if(!_stockRefExistsOutsidePrepReception(ref)) continue;
       if(_activeBorrowDebtForRefMaterial(companyId, materialId, ref)) continue;
 
@@ -9316,5 +9374,7 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 </script>
 <script>window.LDH_STOCK_V117='LECTURA-UNIFICADA-ID-EXACTO-FISICO-MAESTRO-20260904';document.documentElement.dataset.ldhStockV117='true';</script>
 <script>window.LDH_STOCK_V118='VER-RESERVAS-MATERIAL-CANONICO-20260904';document.documentElement.dataset.ldhStockV118='true';</script>
+
+<script>window.LDH_STOCK_V119='RESERVA-PREP-SOLO-FASE-PREPARACION-GLOBAL-20260904';document.documentElement.dataset.ldhStockV119='true';</script>
 </body>
 </html>
