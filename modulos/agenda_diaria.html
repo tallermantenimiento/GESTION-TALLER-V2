@@ -10001,8 +10001,8 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 <!-- LDH_WORKFLOW_V2_FIX_RENDER_LOOP_20260730 -->
 
 
-<!-- LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V4_DEDUP_OT_20260814 -->
-<script type="module" id="LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V3_20260730">
+<!-- LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V26_PHASEFLOW_V19_20260904 -->
+<script type="module" id="LDH_DIRECT_FABRICATION_PHASES_BRIDGE_V26_20260904">
 (async function(){
   'use strict';
   if(window.__LDH_DIRECT_FAB_PHASES_V3) return;
@@ -10086,7 +10086,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       flow:{...((previous && previous.flow) || {}), ...((incoming && incoming.flow) || {})}
     };
   }
-  function addAggregate(map, key, flow, atMs, priority=0){
+  function addAggregate(map, key, flow, atMs, priority=0, authoritativeV19=false){
     key = text(key);
     if(!key) return;
     const candidate={
@@ -10095,11 +10095,12 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       almacen:number(flow.almacen),
       entregado:number(flow.entregado),
       atMs:number(atMs),
-      priority:number(priority)
+      priority:number(priority),
+      authoritativeV19:authoritativeV19===true
     };
     const current=map.get(key);
-    // V4: varias copias/alias de una misma OT son la MISMA unidad lógica.
-    // No se suman. Preferimos la referencia oficial corta y, a igualdad, la más reciente.
+    // V26: phaseFlowV19 gana siempre al paquete legacy. Entre copias de la misma
+    // fuente se conserva la referencia oficial y, a igualdad, la mas reciente.
     if(!current || candidate.priority>number(current.priority) ||
        (candidate.priority===number(current.priority) && candidate.atMs>=number(current.atMs))){
       map.set(key,candidate);
@@ -10126,6 +10127,9 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
 
     const nextById = new Map();
     const nextByRef = new Map();
+
+    // Compatibilidad: el paquete legacy sigue aportando flujo cuando una OT antigua
+    // todavia no dispone de entrada en phaseFlowV19.
     exact.forEach(item=>{
       const reference = text(item.ref || item.referencia || item.jobRef);
       const orderId = text(item.agendaOrderId || item.orderId || item.workOrderId || item.pedido_uid || item.pedido_id);
@@ -10135,10 +10139,44 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
       const canonical=refKey(reference);
       const official=text(reference).toUpperCase()===canonical;
       const priority=official?20:0;
-      // La clave por ID incluye también la partida para no mezclar A/B/C de un pedido compuesto.
-      if(orderId) addAggregate(nextById, orderId+'|'+canonical, flow, atMs, priority);
-      addAggregate(nextByRef, canonical, flow, atMs, priority);
+      // La clave por ID incluye tambien la partida para no mezclar A/B/C de un pedido compuesto.
+      if(orderId) addAggregate(nextById, orderId+'|'+canonical, flow, atMs, priority, false);
+      addAggregate(nextByRef, canonical, flow, atMs, priority, false);
     });
+
+    /* LDH_AGENDA_PHASEFLOW_V19_AUTHORITY_V26_20260904
+     * phaseFlowV19 es la fuente autoritativa de cantidades compartida por
+     * Fabricacion, Cabina y Almacen. Se aplica DESPUES del paquete legacy para
+     * impedir que una fotografia antigua (p.ej. ALM 64) vuelva a aparecer en Agenda.
+     * Agenda solo lee estas cantidades: no escribe ni modifica phaseFlowV19.
+     */
+    const phaseMap = payload && payload.phaseFlowV19 && typeof payload.phaseFlowV19 === 'object'
+      ? payload.phaseFlowV19
+      : {};
+    Object.values(phaseMap).forEach(raw=>{
+      const entry = raw && typeof raw === 'object' ? raw : null;
+      if(!entry || !entry.flow) return;
+      const reference = text(entry.workRef || entry.ref || entry.reference || entry.displayRef);
+      if(!reference) return;
+      const canonical = refKey(reference);
+      if(!canonical) return;
+      const orderId = text(entry.orderId || entry.agendaOrderId || entry.workOrderId || entry.pedido_uid || entry.pedido_id);
+      // En V19 el objeto flow ya es canonico. No aplicar el fallback legacy de flowOf(),
+      // porque una entrada V19 explicita a 0 debe seguir siendo 0 y no convertirse en FAB=total.
+      const ef = entry.flow && typeof entry.flow === 'object' ? entry.flow : {};
+      const flow = {
+        fabricacion:number(ef.fabricacion != null ? ef.fabricacion : ef.fab),
+        pintura:number(ef.pintura != null ? ef.pintura : ef.paint),
+        almacen:number(ef.almacen != null ? ef.almacen : ef.alm),
+        entregado:number(ef.entregado != null ? ef.entregado : ef.delivered)
+      };
+      const atMs = itemTime(entry);
+      // Prioridad muy superior a cualquier alias/copia legacy. Tambien se conservan
+      // entradas V19 a cero para poder limpiar pills antiguas si el reparto queda a 0.
+      if(orderId) addAggregate(nextById, orderId+'|'+canonical, flow, atMs, 1000, true);
+      addAggregate(nextByRef, canonical, flow, atMs, 1000, true);
+    });
+
     return {nextById, nextByRef};
   }
   function stateFromFlow(flow){
@@ -10234,10 +10272,13 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
         almacen:number(live.almacen),
         entregado:number(live.entregado)
       },order);
-      if(liveFlow.fabricacion + liveFlow.pintura + liveFlow.almacen + liveFlow.entregado <= 0) return;
+      const liveTotal = liveFlow.fabricacion + liveFlow.pintura + liveFlow.almacen + liveFlow.entregado;
+      // Legacy a cero no tiene autoridad para borrar un flujo. phaseFlowV19 si: una
+      // entrada V19 explicita a cero debe poder retirar pills antiguas de Agenda.
+      if(liveTotal <= 0 && live.authoritativeV19 !== true) return;
       const currentFlow = order.phaseFlowV2 && typeof order.phaseFlowV2 === 'object' ? order.phaseFlowV2 : {};
 
-      // Esta lectura directa de Fabricación SOLO actualiza el reparto FAB/PINT/ALM/ENT.
+      // Esta lectura directa de Fabricacion SOLO actualiza el reparto FAB/PINT/ALM/ENT.
       // El estado general se lee y escribe exclusivamente en el documento principal
       // de la orden (taller_data/work_orders/orders/{id}).
       if(!sameFlow(currentFlow, liveFlow)){
@@ -11000,4 +11041,11 @@ window.LDH_AGENDA_COMPOSITE_LABEL_QTY_V21='AGENDA-COMPOSITE-LABEL-QTY-20260902';
 console.info('[Agenda] Partidas compuestas: referencia técnica estable + identificación visible + cantidad reforzada.');
 </script>
 <!-- LDH_AGENDA_V25_IDENTIFICACION_VISUAL_UNIFICADA_20260902 -->
+
+<!-- LDH_AGENDA_V26_PHASEFLOW_V19_AUTORITATIVO_20260904 -->
+<script id="LDH_AGENDA_V26_PHASEFLOW_V19_BUILD_20260904">
+window.LDH_AGENDA_V26='PHASEFLOW-V19-AUTORITATIVO-20260904';
+document.documentElement.dataset.ldhAgendaPhaseSync='V26';
+console.info('[Agenda V26] pills FAB/PINT/ALM/ENT leen phaseFlowV19 como fuente autoritativa; legacy queda solo como compatibilidad.');
+</script>
 </body></html>
