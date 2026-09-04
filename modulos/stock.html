@@ -1755,26 +1755,44 @@ function materialById(id){return db.materials.find(m=>m.id===id)}
 function companyById(id){return db.companies.find(c=>c.id===id)}
 function stockRow(companyId,materialId){return db.stock.find(s=>s.companyId===companyId&&s.materialId===materialId)}
 function jobById(id){return db.jobs.find(j=>j.id===id)}
-function realStock(companyId,materialId){
-  // V114 · Las pletinas modernas gestionadas en mm tienen su físico autoritativo
-  // en la propia fila Stock. No se mezcla con el ledger legacy de barras.
+function LDH_directPhysicalV117(companyId,materialId){
   try{
-    const sr = stockRow(companyId,materialId);
-    if(sr && String(sr.lengthMode||'').toLowerCase()==='mm'){
-      const mm = Number(sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm ?? 0);
-      return Number.isFinite(mm) ? Math.max(0,mm) : 0;
+    const sr=stockRow(companyId,materialId);
+    if(!sr) return {found:false,qty:0};
+    const mat=materialById(materialId)||{};
+    // La pintura conserva su cálculo por movimientos: Cabina puede modificarla
+    // con más frecuencia que algunas instantáneas físicas antiguas.
+    if(String(mat.type||mat.tipo||mat.stockType||'').toLowerCase()==='pintura') return {found:false,qty:0};
+    if(String(sr.lengthMode||'').toLowerCase()==='mm'){
+      const raw=sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm;
+      if(raw!==undefined && raw!==null && String(raw)!==''){
+        const n=Number(raw); if(Number.isFinite(n)) return {found:true,qty:Math.max(0,n)};
+      }
     }
-  }catch(e){}
-  return db.movements
-   .filter(m=>m.companyId===companyId&&m.materialId===materialId)
+    // V117 · Cuando la ficha tiene un físico maestro explícito, éste manda sobre
+    // un histórico compactado que puede no contener la entrada inicial completa.
+    const fields=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','real','stock'];
+    for(const k of fields){
+      if(sr[k]===undefined || sr[k]===null || String(sr[k])==='') continue;
+      const n=Number(sr[k]);
+      if(Number.isFinite(n)) return {found:true,qty:Math.max(0,n)};
+    }
+  }catch(_){ }
+  return {found:false,qty:0};
+}
+function realStock(companyId,materialId){
+  const direct=LDH_directPhysicalV117(companyId,materialId);
+  if(direct.found) return direct.qty;
+  return (db.movements||[])
+   .filter(m=>String(m.companyId||m.empresaId||'')===String(companyId||'') && String(m.materialId||m.matId||'')===String(materialId||''))
    .reduce((a,m)=>{
       const t=String(m.type||m.tipo||'entrada').toLowerCase();
-      const q=Number(m.qty||m.cantidad||0);
+      const q=Number(m.qty??m.cantidad??0)||0;
       if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
       if(t==='entrada'||t==='ajuste_pos'||t==='devolucion'||t==='in') return a+q;
       if(t==='salida'||t==='ajuste_neg'||t==='consumo'||t==='out') return a-q;
       return a+q;
-    },0)
+    },0);
 }
 
 function isAutoReceivedPrepReservation(r){
@@ -2101,9 +2119,12 @@ function prepAssignedStock(companyId,materialId){
 }
 function _ownAssignmentDBStock(companyId,materialId){
   return (db.assignments||[])
-   .filter(a=>String(a.companyId||'')===String(companyId)&&String(a.materialId||'')===String(materialId))
-   .filter(a=>['preparacion','fabricacion'].includes(String(a.phase||a.fase||'preparacion')))
-   .filter(a=>String(a.status||a.estado)==='activa')
+   .filter(a=>String(a.companyId||a.empresaId||'')===String(companyId))
+   // V117 · admite IDs duplicados antiguos únicamente si el nombre completo es idéntico.
+   // No hace coincidencias parciales por medidas.
+   .filter(a=>LDH_sameMaterialNameV117(a.materialId||a.matId||'',materialId))
+   .filter(a=>['preparacion','fabricacion'].includes(String(a.phase||a.fase||'preparacion').toLowerCase()))
+   .filter(a=>String(a.status||a.estado||'activa').toLowerCase()==='activa')
    .filter(a=>!_isLoanAssignment(a))
    .filter(a=>!_stockAssignmentHasPhysicalConsumptionV68(a,companyId,materialId))
    .reduce((sum,a)=>sum+Number(a.qty||a.cantidad||0),0)
@@ -2229,18 +2250,25 @@ function _prepNormText(v){
 }
 function _prepLineMaterialMatch(line, materialId){
   try{
+    const ids=[line&&line.stockMatId,line&&line.stockId,line&&line.matId,line&&line.linked_matId,line&&line.linkedMatId,line&&line.materialId,line&&line.stock_matId]
+      .map(x=>String(x||'')).filter(Boolean);
+    // V117 · Si Preparación conoce el ID, el ID manda. Esto impide, por ejemplo,
+    // que "contera 40x20 blanca" se sume al perfil "40x20x1.5".
+    if(ids.length) return ids.includes(String(materialId||''));
     const m = materialById(materialId) || {};
     const matName = _prepNormText(m.name || m.nombre || m.material || materialId);
     const lineName = _prepNormText(line && (line.mat || line.material || line.name || ''));
     if(!matName || !lineName) return false;
-    if(matName === lineName || matName.includes(lineName) || lineName.includes(matName)) return true;
-
-    const mp = matName.match(/\d+\s*x\s*\d+(?:\s*x\s*\d+)?/);
-    const lp = lineName.match(/\d+\s*x\s*\d+(?:\s*x\s*\d+)?/);
-    return !!(mp && lp && (mp[0] === lp[0] || mp[0].startsWith(lp[0]) || lp[0].startsWith(mp[0])));
-  }catch(e){
-    return false;
-  }
+    // Fallback para fichas antiguas sin IDs: solo nombre exacto normalizado.
+    return matName === lineName;
+  }catch(e){ return false; }
+}
+function LDH_sameMaterialNameV117(idA,idB){
+  if(String(idA||'')===String(idB||'')) return true;
+  const a=materialById(idA)||{}, b=materialById(idB)||{};
+  const an=_prepNormText(a.name||a.nombre||a.material||'');
+  const bn=_prepNormText(b.name||b.nombre||b.material||'');
+  return !!(an && bn && an===bn);
 }
 function _prepLoadLinesForRef(ref){
   try{
@@ -3476,7 +3504,7 @@ function LDH_stockOwnAssignmentsV116(companyId,materialId){
   try{
     return (db.assignments||[]).filter(a=>{
       if(String(a.companyId||a.empresaId||'')!==String(companyId||'')) return false;
-      if(String(a.materialId||a.matId||'')!==String(materialId||'')) return false;
+      if(!LDH_sameMaterialNameV117(a.materialId||a.matId||'',materialId)) return false;
       const phase=String(a.phase||a.fase||'preparacion').toLowerCase();
       const status=String(a.status||a.estado||'activa').toLowerCase();
       if(!['preparacion','fabricacion'].includes(phase) || status!=='activa') return false;
@@ -9252,5 +9280,6 @@ window.LDH_STOCK_V116='STOCK-V116-PRESTAMO-INTERNO-VISIBLE-IDENTIFICACION-202609
 document.documentElement.dataset.ldhStockBuild='V116';
 console.info('[Stock V116] Préstamo interno OT visible, asignación restante correcta e identificación amarilla.');
 </script>
+<script>window.LDH_STOCK_V117='LECTURA-UNIFICADA-ID-EXACTO-FISICO-MAESTRO-20260904';document.documentElement.dataset.ldhStockV117='true';</script>
 </body>
 </html>
