@@ -1933,7 +1933,7 @@ function reservedStock(companyId,materialId){
   return db.reservations
    .filter(r=>r.companyId===companyId&&r.materialId===materialId&&String(r.status||r.estado||'activa')==='activa')
    .filter(r=>!isAutoReceivedPrepReservation(r))
-   .reduce((a,r)=>a+LDH_operationalPendingQtyV120(r,companyId,materialId),0)
+   .reduce((a,r)=>a+Number(r.qty||r.cantidad||0),0)
 }
 function _isLoanAssignment(a){
   const typ = String((a && (a.assignmentType || a.reason)) || '').toLowerCase();
@@ -2185,7 +2185,7 @@ function _ownAssignmentDBStock(companyId,materialId){
    .filter(a=>String(a.status||a.estado||'activa').toLowerCase()==='activa')
    .filter(a=>!_isLoanAssignment(a))
    .filter(a=>!_stockAssignmentHasPhysicalConsumptionV68(a,companyId,materialId))
-   .reduce((sum,a)=>sum+LDH_operationalPendingQtyV120(a,companyId,materialId),0)
+   .reduce((sum,a)=>sum+Number(a.qty||a.cantidad||0),0)
 }
 function assignedStock(companyId,materialId){
   // Asignado propio: máximo entre lo registrado en Stock y lo recibido vivo en Preparación.
@@ -2299,39 +2299,6 @@ function assignmentPendingQty(a){
     return Math.max(0, Number(explicitPending || 0));
   }
   return Math.max(0, original - returned);
-}
-
-/* V120 · Cantidad operativa realmente pendiente para Reservado.
- * Regla global para hierro:
- *  - si existe pendingQty/qtyPending/pendiente, ese valor es autoritativo;
- *  - un pending explícito 0 nunca vuelve a reservar por conservar qty histórico;
- *  - en registros antiguos sin pending explícito, si la OT ya salió de Preparación,
- *    la cantidad queda como trazabilidad y no como reserva activa.
- * Pintura queda fuera de esta regla para no interferir con Cabina/préstamos de pintura.
- */
-function LDH_operationalPendingQtyV120(row,companyId,materialId){
-  try{
-    if(!row) return 0;
-    const original=Math.max(0,Number(row.qty??row.cantidad??0)||0);
-    const returned=Math.max(0,Number(row.returnedQty??row.qtyReturned??row.devuelto??0)||0);
-
-    const mat=typeof materialById==='function' ? (materialById(materialId)||{}) : {};
-    const type=String(mat.type||mat.tipo||mat.stockType||'').toLowerCase();
-    if(type==='hierro'){
-      const ref=String(row.ref||row.jobRef||row.consumerRef||row.reference||row.referencia||'').trim();
-      // Regla global del taller: al salir de Preparación el hierro deja de ser reserva.
-      // La fase real de la OT manda incluso si un registro histórico conserva pendingQty > 0.
-      if(ref && typeof LDH_prepRefAlreadyBeyondPreparationV119==='function' && LDH_prepRefAlreadyBeyondPreparationV119(ref)){
-        return 0;
-      }
-    }
-
-    const explicit=row.pendingQty ?? row.qtyPending ?? row.pendiente;
-    if(explicit!==undefined && explicit!==null && String(explicit)!==''){
-      return Math.max(0,Number(explicit||0)||0);
-    }
-    return Math.max(0,original-returned);
-  }catch(_){ return Math.max(0,Number(row&&(row.qty??row.cantidad)||0)||0); }
 }
 
 function _prepNormText(v){
@@ -3601,7 +3568,7 @@ function LDH_stockOwnAssignmentsV116(companyId,materialId){
       if(!['preparacion','fabricacion'].includes(phase) || status!=='activa') return false;
       try{ if(_isLoanAssignment(a)) return false; }catch(_){ }
       try{ if(_stockAssignmentHasPhysicalConsumptionV68(a,companyId,materialId)) return false; }catch(_){ }
-      return LDH_operationalPendingQtyV120(a,companyId,materialId)>0;
+      return Number(a.qty||a.cantidad||0)>0;
     });
   }catch(_){ return []; }
 }
@@ -3627,14 +3594,14 @@ function rowHTML(s,m){
         min=Number(s.min||0);
   const cls=free<=0?'stock-bad':(free<=min?'stock-warn':'stock-ok');
 
-  const reservations=db.reservations.filter(r=>r.companyId===activeCompany&&r.materialId===m.id&&String(r.status||r.estado)==='activa'&&LDH_operationalPendingQtyV120(r,activeCompany,m.id)>0);
+  const reservations=db.reservations.filter(r=>r.companyId===activeCompany&&r.materialId===m.id&&String(r.status||r.estado)==='activa');
   const assignments=LDH_stockOwnAssignmentsV116(activeCompany,m.id);
   const internalReplenishments=LDH_stockInternalReplenishmentsV116(activeCompany,m.id);
   const debts=visibleReservationDebts(activeCompany,m.id);
   const borrowedDebts=borrowedDebtRows(activeCompany,m.id);
   const lentDebts=lentDebtRows(activeCompany,m.id);
 
-  const totalResQty = reservations.reduce((a,r)=>a+LDH_operationalPendingQtyV120(r,activeCompany,m.id),0) + assignments.reduce((a,r)=>a+LDH_operationalPendingQtyV120(r,activeCompany,m.id),0);
+  const totalResQty = reservations.reduce((a,r)=>a+Number(r.qty||r.cantidad||0),0) + assignments.reduce((a,r)=>a+Number(r.qty||r.cantidad||0),0);
   const totalReplenishQty = internalReplenishments.reduce((a,r)=>a+Number(r.pendingQty||r.qtyPending||0),0);
   const totalDebtQty = debts.reduce((a,d)=>a+debtPendingQty(d),0) + borrowedDebts.reduce((a,d)=>a+Number(d.qty||0),0);
   const totalLentQty = lentDebts.reduce((a,d)=>a+Number(d.qty||0),0);
@@ -5114,7 +5081,7 @@ function openDetail(materialId){
     .slice()
     .sort((a,b)=>moveDate(b)-moveDate(a));
 
-  const reserves=db.reservations.filter(x=>x.companyId===activeCompany&&x.materialId===materialId&&x.status==='activa'&&!isAutoReceivedPrepReservation(x)&&LDH_operationalPendingQtyV120(x,activeCompany,materialId)>0);
+  const reserves=db.reservations.filter(x=>x.companyId===activeCompany&&x.materialId===materialId&&x.status==='activa'&&!isAutoReceivedPrepReservation(x));
   const assignments=LDH_stockOwnAssignmentsV116(activeCompany,materialId);
   const internalReplenishments=LDH_stockInternalReplenishmentsV116(activeCompany,materialId);
   const debtInfo=_deudasDetalleMaterial(materialId);
@@ -5157,8 +5124,8 @@ function openDetail(materialId){
   </div>
   <div class="section-title">Reservas / asignaciones</div>
   ${(reserves.length||assignments.length) ? [
-    ...reserves.map(r=>{const j=jobById(r.jobId)||{};const rr=j.ref||r.ref||r.jobRef||'';return `<div class="resrow detail-res-row"><div class="detail-res-main"><span class="pill ${r.phase==='fabricacion'?'warn':'ok'}">${String(r.phase||r.fase)==='fabricacion'?'FAB':'RES'}</span><b>${esc(rr)}</b>${LDH_stockWorkIdentHtmlV116(rr)}<span>${fmt(LDH_operationalPendingQtyV120(r,activeCompany,materialId))} ${esc(m.unit)}</span></div><button class="btn small danger" onclick="liberarReservaDesdeDetalle('${r.id}','${materialId}')">Liberar</button></div>`;}),
-    ...assignments.map(a=>{const rr=a.ref||a.jobRef||a.consumerRef||'';const phase=String(a.phase||a.fase||'preparacion').toLowerCase();return `<div class="resrow detail-res-row"><div class="detail-res-main"><span class="pill ${phase==='fabricacion'?'warn':'ok'}">${phase==='fabricacion'?'FAB':'PREP'}</span><b>${esc(rr)}</b>${LDH_stockWorkIdentHtmlV116(rr)}<span>${fmt(LDH_operationalPendingQtyV120(a,activeCompany,materialId))} ${esc(m.unit)} asignadas</span></div><button class="btn small disabled" disabled>Desde preparación</button></div>`;})
+    ...reserves.map(r=>{const j=jobById(r.jobId)||{};const rr=j.ref||r.ref||r.jobRef||'';return `<div class="resrow detail-res-row"><div class="detail-res-main"><span class="pill ${r.phase==='fabricacion'?'warn':'ok'}">${String(r.phase||r.fase)==='fabricacion'?'FAB':'RES'}</span><b>${esc(rr)}</b>${LDH_stockWorkIdentHtmlV116(rr)}<span>${fmt(r.qty||r.cantidad)} ${esc(m.unit)}</span></div><button class="btn small danger" onclick="liberarReservaDesdeDetalle('${r.id}','${materialId}')">Liberar</button></div>`;}),
+    ...assignments.map(a=>{const rr=a.ref||a.jobRef||a.consumerRef||'';const phase=String(a.phase||a.fase||'preparacion').toLowerCase();return `<div class="resrow detail-res-row"><div class="detail-res-main"><span class="pill ${phase==='fabricacion'?'warn':'ok'}">${phase==='fabricacion'?'FAB':'PREP'}</span><b>${esc(rr)}</b>${LDH_stockWorkIdentHtmlV116(rr)}<span>${fmt(a.qty||a.cantidad)} ${esc(m.unit)} asignadas</span></div><button class="btn small disabled" disabled>Desde preparación</button></div>`;})
   ].join('') : '<p class="muted">Sin reservas ni asignaciones activas.</p>'}
   ${internalReplenishments.length ? `<div class="section-title">Pendiente de reposición interna</div>${internalReplenishments.map(r=>{const rr=r.currentDebtorRef||r.currentDebtorStorageRef||r.originalRef||'';return `<div class="resrow detail-res-row ldh-internal-replenish-v116"><div class="detail-res-main"><span class="pill warn">REPONER</span><b>${esc(rr)}</b>${LDH_stockWorkIdentHtmlV116(rr)}<span>${fmt(r.pendingQty||r.qtyPending||0)} ${esc(m.unit)} pendientes</span><span class="muted">Orden: ${esc(r.orderedBy||'—')} · Recoge: ${esc(r.collectedBy||'—')} · Destino: ${esc(r.destination||'—')}</span></div><button class="btn small disabled" disabled>Desde preparación</button></div>`;}).join('')}` : ''}
   <div class="section-title">Debo</div>
@@ -5487,7 +5454,6 @@ function LDH_verReservasActivas(){
 
     const rawId=r.materialId||r.matId||'';
     const canonicalId=LDH_stockCanonicalMaterialIdV118(rawId);
-    if(LDH_operationalPendingQtyV120(r,activeCompany,canonicalId||rawId)<=0) return;
     const m=materialById(canonicalId)||materialById(rawId);
     if(!m || m.type!==activeType) return;
 
@@ -5504,7 +5470,6 @@ function LDH_verReservasActivas(){
     if(status!=='activa' || !['preparacion','fabricacion'].includes(phase)) return;
     const rawId=a.materialId||a.matId||'';
     const canonicalId=LDH_stockCanonicalMaterialIdV118(rawId);
-    if(LDH_operationalPendingQtyV120(a,activeCompany,canonicalId||rawId)<=0) return;
     const m=materialById(canonicalId)||materialById(rawId);
     if(!m || m.type!==activeType) return;
     const ref=a.ref||a.jobRef||a.consumerRef||'Sin referencia';
@@ -5520,7 +5485,7 @@ function LDH_verReservasActivas(){
     <div class="ldh-kpi-row">
       <div><b>${esc(m.name)}</b><div class="sub">${esc(m.family||'Sin familia')}</div></div>
       <div><span class="pill ${String(r.phase||r.fase)==='pintura'?'bad':(String(r.phase||r.fase)==='fabricacion'?'warn':'ok')}">${String(r.phase||r.fase)==='pintura'?'BLOQ. PINTURA':esc(r.phase||r.fase||'preparacion')}</span></div>
-      <div class="qty">${fmt(LDH_operationalPendingQtyV120(r,activeCompany,canonicalId||m.id))} ${esc(m.unit||'')}</div>
+      <div class="qty">${fmt(r.qty||r.cantidad||0)} ${esc(m.unit||'')}</div>
       <div><b>${esc(ref)}</b>${LDH_stockWorkIdentHtmlV116(ref)}</div>
       <button class="btn small" onclick="openDetail('${canonicalId||m.id}')">Ver</button>
     </div>
@@ -9411,6 +9376,159 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 <script>window.LDH_STOCK_V118='VER-RESERVAS-MATERIAL-CANONICO-20260904';document.documentElement.dataset.ldhStockV118='true';</script>
 
 <script>window.LDH_STOCK_V119='RESERVA-PREP-SOLO-FASE-PREPARACION-GLOBAL-20260904';document.documentElement.dataset.ldhStockV119='true';</script>
-<script>window.LDH_STOCK_V120='PENDIENTE-AUTORITATIVO-RESERVADO-GLOBAL-HIERRO-20260904';document.documentElement.dataset.ldhStockV120='true';</script>
+
+
+<!-- === LDH STOCK V121 · coherencia Stock/Preparacion para hierro en barras === -->
+<script>
+(function(){
+  'use strict';
+  const _oldRealStockV121 = window.realStock;
+  const _oldReservedStockV121 = window.reservedStock;
+  const _oldAssignedStockV121 = window.assignedStock;
+  const _oldOwnAssignmentsV121 = window.LDH_stockOwnAssignmentsV116;
+
+  function normV121(v){
+    return String(v == null ? '' : v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9ø]+/g,' ').trim();
+  }
+  function numV121(v){
+    const n=Number(String(v == null ? '' : v).replace(',','.'));
+    return Number.isFinite(n)?n:0;
+  }
+  function matV121(id){
+    try{return materialById(id)||{};}catch(_){return {};}
+  }
+  function exactNameV121(id){
+    const m=matV121(id);
+    return normV121(m.name||m.nombre||m.material||m.mat||'');
+  }
+  function aliasIdsV121(materialId){
+    const target=exactNameV121(materialId);
+    const set=new Set([String(materialId||'')]);
+    if(!target) return set;
+    try{
+      (db.materials||[]).forEach(m=>{
+        if(normV121(m&& (m.name||m.nombre||m.material||m.mat||''))===target){
+          const id=String(m.id||m.materialId||m.matId||'');
+          if(id) set.add(id);
+        }
+      });
+    }catch(_){ }
+    return set;
+  }
+  function isProfileBarV121(companyId,materialId){
+    const m=matV121(materialId);
+    const type=normV121(m.type||m.tipo||m.stockType||'');
+    const unit=normV121(m.unit||m.unidad||'');
+    const family=normV121(m.family||m.familia||'');
+    if(type!=='hierro' || unit.indexOf('barra')<0) return false;
+    // Las pletinas/mm conservan su logica especifica actual.
+    if(family.indexOf('pletina')>=0) return false;
+    try{
+      const ids=aliasIdsV121(materialId);
+      if((db.stock||[]).some(s=>String(s.companyId||s.empresaId||'')===String(companyId||'') && ids.has(String(s.materialId||s.matId||'')) && normV121(s.lengthMode||s.unitBasis||'')==='mm')) return false;
+    }catch(_){ }
+    return true;
+  }
+  function movementSignV121(type){
+    const t=normV121(type||'entrada').replace(/\s+/g,'_');
+    if(['entrada','in','ajuste_pos','devolucion','devolucion_fisica','entrada_preparacion','entrada_prep','entrada_desde_preparacion','stock_entrada','recepcion_stock','add_stock'].includes(t)) return 1;
+    if(['salida','out','ajuste_neg','consumo','consumo_terminal'].includes(t)) return -1;
+    return 0;
+  }
+  function masterPhysicalV121(row){
+    if(!row) return {found:false,value:0};
+    const vals=[];
+    const fields=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','real','stock','qty','cantidad'];
+    fields.forEach(k=>{
+      if(row[k]===undefined || row[k]===null || String(row[k]).trim()==='') return;
+      const n=numV121(row[k]);
+      if(Number.isFinite(n)) vals.push(n);
+    });
+    return vals.length?{found:true,value:Math.max(0,...vals)}:{found:false,value:0};
+  }
+  function realProfileBarV121(companyId,materialId){
+    const ids=aliasIdsV121(materialId);
+    let directFound=false, direct=0;
+    try{
+      (db.stock||[]).forEach(s=>{
+        if(String(s.companyId||s.empresaId||'')!==String(companyId||'')) return;
+        if(!ids.has(String(s.materialId||s.matId||''))) return;
+        const q=masterPhysicalV121(s);
+        if(q.found){ directFound=true; direct=Math.max(direct,q.value); }
+      });
+    }catch(_){ }
+
+    let ledger=0, hasPhysicalMovement=false;
+    try{
+      (db.movements||[]).forEach(m=>{
+        if(String(m.companyId||m.empresaId||'')!==String(companyId||'')) return;
+        const mid=String(m.materialId||m.matId||m.material_id||'');
+        if(!ids.has(mid)) return;
+        const sign=movementSignV121(m.type||m.tipo||'');
+        if(!sign) return;
+        hasPhysicalMovement=true;
+        ledger += sign*numV121(m.qty ?? m.cantidad ?? m.amount ?? 0);
+      });
+    }catch(_){ }
+
+    // Criterio unificado V121:
+    // - un fisico maestro POSITIVO no se pierde por un ledger compactado incompleto;
+    // - una ficha maestra a 0 no tapa entradas fisicas reales posteriores;
+    // - nunca se reconstruye un negativo como stock disponible.
+    const byLedger=hasPhysicalMovement?Math.max(0,ledger):0;
+    return Math.max(0, directFound?direct:0, byLedger);
+  }
+  function activeOwnAssignmentsV121(companyId,materialId){
+    const ids=aliasIdsV121(materialId);
+    try{
+      return (db.assignments||[]).filter(a=>{
+        if(String(a.companyId||a.empresaId||'')!==String(companyId||'')) return false;
+        if(!ids.has(String(a.materialId||a.matId||a.material_id||''))) return false;
+        const status=normV121(a.status||a.estado||'activa');
+        const phase=normV121(a.phase||a.fase||'preparacion');
+        if(status!=='activa' || !['preparacion','fabricacion'].includes(phase)) return false;
+        try{ if(typeof _isLoanAssignment==='function' && _isLoanAssignment(a)) return false; }catch(_){ }
+        return numV121(a.qty ?? a.cantidad ?? 0)>0;
+      });
+    }catch(_){ return []; }
+  }
+  function activeReservationsV121(companyId,materialId){
+    const ids=aliasIdsV121(materialId);
+    try{
+      return (db.reservations||[]).filter(r=>{
+        if(String(r.companyId||r.empresaId||'')!==String(companyId||'')) return false;
+        if(!ids.has(String(r.materialId||r.matId||r.material_id||''))) return false;
+        if(normV121(r.status||r.estado||'activa')!=='activa') return false;
+        try{ if(typeof isAutoReceivedPrepReservation==='function' && isAutoReceivedPrepReservation(r)) return false; }catch(_){ }
+        return numV121(r.qty ?? r.cantidad ?? 0)>0;
+      });
+    }catch(_){ return []; }
+  }
+
+  window.realStock = function(companyId,materialId){
+    if(!isProfileBarV121(companyId,materialId)) return _oldRealStockV121(companyId,materialId);
+    return realProfileBarV121(companyId,materialId);
+  };
+  window.reservedStock = function(companyId,materialId){
+    if(!isProfileBarV121(companyId,materialId)) return _oldReservedStockV121(companyId,materialId);
+    return activeReservationsV121(companyId,materialId).reduce((s,r)=>s+numV121(r.qty ?? r.cantidad ?? 0),0);
+  };
+  window.LDH_stockOwnAssignmentsV116 = function(companyId,materialId){
+    if(!isProfileBarV121(companyId,materialId)) return _oldOwnAssignmentsV121(companyId,materialId);
+    return activeOwnAssignmentsV121(companyId,materialId);
+  };
+  window.assignedStock = function(companyId,materialId){
+    if(!isProfileBarV121(companyId,materialId)) return _oldAssignedStockV121(companyId,materialId);
+    return activeOwnAssignmentsV121(companyId,materialId).reduce((s,a)=>s+numV121(a.qty ?? a.cantidad ?? 0),0);
+  };
+
+  window.LDH_STOCK_V121='COHERENCIA-PREPARACION-PERFILES-BARRA-20260904';
+  document.documentElement.dataset.ldhStockV121='true';
+  // Recalcular toda la vista con las funciones definitivas, sin tocar ningun dato.
+  try{ setTimeout(()=>{ if(typeof render==='function') render(); },0); }catch(_){ }
+})();
+</script>
 </body>
 </html>
