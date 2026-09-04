@@ -30063,11 +30063,12 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   if(window.__LDH_PREP_V147_INTERNAL_OT__) return;
   window.__LDH_PREP_V147_INTERNAL_OT__=true;
 
-  const BUILD='PREPARACION-V150-PRESTAMOS-INTERNOS-OT-REPARACION-FISICO-ROBUSTA-20260904';
+  const BUILD='PREPARACION-V151-REPONER-PENDIENTE-INTERNO-PARCIAL-20260904';
   const FIELD='internalOtReplenishmentsV1';
-  const SOURCE='preparacion_prestamo_interno_ot_v150';
+  const SOURCE='preparacion_prestamo_interno_ot_v151';
   let activeExitCtx=null;
   let activeCoverCtx=null;
+  let activeReplenishCtx=null;
   let busy=false;
 
   const txt=v=>String(v==null?'':v).trim();
@@ -30202,6 +30203,22 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   function mutateLineCovered(line,qty,fromRef,recordId){
     const ped=Math.max(0,num(line.qty_pedida??line.pedida??line.qty)),before=Math.max(0,num(line.qty_recibida??line.recibida));const after=ped>0?Math.min(ped,before+num(qty)):before+num(qty);line.qty_recibida=after;line.recibida=after;line.aplicado_qty=Math.min(after,Math.max(0,num(line.aplicado_qty))+num(qty));line.ok=ped>0&&after>=ped;line.completo=line.ok;line.done=line.ok;line.isDone=line.ok;line.isCompleted=line.ok;if(line._internalOtAutoBuyV147){line.toBuy=false;delete line._internalOtAutoBuyV147;}if(!Array.isArray(line.trace))line.trace=[];line.trace.push({at:now(),qty:num(qty),source:'transferencia_desde_ot_interna_v147',fromRef,internalLoanId:recordId});return {before,after,ped};
   }
+  function mutateLineReplenishedV151(line,qty,recordId){
+    const ped=Math.max(0,num(line.qty_pedida??line.pedida??line.qty));
+    const before=Math.max(0,num(line.qty_recibida??line.recibida));
+    const missing=Math.max(0,ped-before);
+    const add=Math.min(Math.max(0,num(qty)),missing);
+    if(add<=0)throw new Error('Esta linea ya no tiene cantidad pendiente de reponer.');
+    const after=before+add;
+    line.qty_recibida=after;line.recibida=after;
+    line.aplicado_qty=Math.min(after,Math.max(0,num(line.aplicado_qty))+add);
+    line.stock_consumed_qty=Math.min(after,Math.max(0,num(line.stock_consumed_qty)));
+    line.ok=ped>0&&after+0.000001>=ped;line.completo=line.ok;line.done=line.ok;line.isDone=line.ok;line.isCompleted=line.ok;
+    if(line.ok){line.toBuy=false;delete line._internalOtAutoBuyV147;}else{line._internalOtAutoBuyV147=true;line.toBuy=true;}
+    if(!Array.isArray(line.trace))line.trace=[];
+    line.trace.push({at:now(),qty:add,source:'reposicion_prestamo_interno_ot_v151',internalLoanId:recordId});
+    return {before,after,ped,added:add};
+  }
   function updateMetaFromLines(meta,lines){meta=meta||{};const complete=(lines||[]).length>0&&(lines||[]).every(l=>num(l.qty_recibida??l.recibida)>=num(l.qty_pedida??l.pedida??l.qty));meta.recepcion_completa=complete;if(!complete)meta._notified_complete=false;meta.lastUpdate=now();return meta;}
   function writePrep(ref,lines,meta){setAnyV147('prep_recepcion_'+ref,JSON.stringify(lines||[]));setAnyV147('prep_meta_'+ref,JSON.stringify(meta||{}));}
   async function pushPrepCloud(entries,reason){
@@ -30222,6 +30239,57 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
         db[FIELD].push({id:recordId,kind:'internal_ot_replenishment',schema:2,status:'pendiente',pendingQty:data.qty,qtyOriginal:data.qty,companyId:cid,companyName:ctx.companyName,materialId:mid,materialName:ctx.materialName,unit:'barra',originalRef:ctx.ref,originalStorageRef:ctx.ref,currentDebtorRef:ctx.ref,currentDebtorStorageRef:ctx.ref,orderedBy:data.orderedBy,collectedBy:data.collectedBy,destination:data.destination,note:data.note||'',physicalBeforeMaster:phys,physicalAfterMaster:after,physicalMasterMode:'stock_row',createdAt:stamp,updatedAt:stamp,chainRefs:[techRef(ctx.ref)],history:[{type:'salida_fisica',at:stamp,ref:ctx.ref,qty:data.qty,orderedBy:data.orderedBy,collectedBy:data.collectedBy,destination:data.destination,note:data.note||'',movementId,physicalBeforeMaster:phys,physicalAfterMaster:after}]});return {recordId,cid,mid,physicalBefore:phys,physicalAfter:after};
       });
       const lines=currentLines(),line=lines[ctx.index];if(!line)throw new Error('La salida se guardo en Stock, pero la linea ya no esta abierta. Recarga Preparacion.');mutateLineShortfall(line,data.qty,recordId);const meta=updateMetaFromLines(currentMeta(),lines);try{if(typeof guardarEstadoLocal==='function')guardarEstadoLocal();if(typeof saveMetaActual==='function')saveMetaActual();}catch(_){ }await syncPrep([{ref:ctx.ref,lines,meta}],SOURCE+'_salida_prep');notifyStockChanged(SOURCE+'_salida');closeModal('ldhV147ExitModal');try{renderTabla();cargarLista();}catch(_){ }alert('Salida registrada.\n\n'+data.qty+' '+unitLabel(data.qty)+' de '+ctx.materialName+' quedan pendientes de reposicion.\nOrden de: '+data.orderedBy+'\nRecoge: '+data.collectedBy+'\nDestino: '+data.destination);return result;
+    }finally{busy=false;}
+  }
+
+  async function replenishPendingV151(ctx,qty){
+    if(busy)return;
+    const amount=Math.floor(num(qty));
+    if(amount<1)throw new Error('Indica al menos 1 barra.');
+    const localLine=currentLines()[ctx.index];
+    if(!localLine||!sameRef(currentRef(),ctx.ref))throw new Error('La OT ya no esta abierta. Recarga Preparacion.');
+    const localMissing=Math.max(0,num(localLine.qty_pedida??localLine.pedida??localLine.qty)-num(localLine.qty_recibida??localLine.recibida));
+    if(amount>localMissing+0.000001)throw new Error('Solo faltan '+localMissing+' '+unitLabel(localMissing)+' en esta OT.');
+    busy=true;
+    const stamp=now(),movementId='mov_iot_replenish_v151_'+safeId(ctx.ref)+'_'+safeId(ctx.record.id)+'_'+Date.now().toString(36);
+    try{
+      const result=await window.LDH_prepRunStockMutationV129(SOURCE+'_reposicion_proveedor',async db=>{
+        db[FIELD]=Array.isArray(db[FIELD])?db[FIELD]:[];
+        const rec=db[FIELD].find(r=>txt(r&&r.id)===txt(ctx.record.id));
+        if(!rec||num(rec.pendingQty)<=0)throw new Error('Este pendiente ya esta regularizado.');
+        if(!sameRef(rec.currentDebtorRef||rec.currentDebtorStorageRef,ctx.ref))throw new Error('El pendiente se ha trasladado a otra OT. Actualiza Preparacion.');
+        const pending=num(rec.pendingQty);
+        if(amount>pending+0.000001)throw new Error('Solo quedan '+pending+' '+unitLabel(pending)+' pendientes.');
+        const company=companyBy(db,rec.companyId||rec.companyName||ctx.companyName);
+        const material=(db.materials||[]).find(m=>txt(m.id||m.materialId||m.matId)===txt(rec.materialId))||materialByLine(db,ctx.line);
+        if(!company||!material)throw new Error('No se encuentra con seguridad la empresa/material en Stock.');
+        const cid=companyId(company),mid=materialId(material),phys=physical(db,cid,mid),after=phys+amount;
+        updateStockMirror(db,cid,mid,after,'reposicion_prestamo_interno_ot_v151');
+        addAllocation(db,cid,mid,ctx.ref,amount,rec.materialName||lineName(ctx.line),rec.companyName||ctx.companyName);
+        (db.movements||(db.movements=[])).push({
+          id:movementId,movementId,companyId:cid,empresaId:cid,empresa:rec.companyName||ctx.companyName,company:rec.companyName||ctx.companyName,
+          materialId:mid,matId:mid,material:rec.materialName||lineName(ctx.line),materialName:rec.materialName||lineName(ctx.line),
+          type:'entrada',tipo:'entrada',qty:amount,cantidad:amount,date:stamp,ref:ctx.ref,jobRef:ctx.ref,source:SOURCE,
+          reason:'reposicion_proveedor_prestamo_interno_ot',internalOtReplenishmentId:rec.id,createdAt:stamp,updatedAt:stamp
+        });
+        const rest=Math.max(0,pending-amount);
+        rec.pendingQty=rest;rec.updatedAt=stamp;rec.replenishedQty=num(rec.replenishedQty)+amount;
+        rec.history=Array.isArray(rec.history)?rec.history:[];
+        rec.history.push({type:'reposicion_proveedor',at:stamp,ref:ctx.ref,qty:amount,movementId,physicalBeforeMaster:phys,physicalAfterMaster:after});
+        if(rest<=0.000001){rec.pendingQty=0;rec.status='repuesto';rec.resolvedAt=stamp;rec.resolvedRef=ctx.ref;}else{rec.status='pendiente';}
+        return {pendingBefore:pending,pendingAfter:rest,physicalBefore:phys,physicalAfter:after,recordId:rec.id};
+      });
+      const lines=currentLines(),line=lines[ctx.index];
+      if(!line||!sameRef(currentRef(),ctx.ref))throw new Error('La reposicion se guardo en Stock, pero la OT ya no esta abierta. Recarga Preparacion.');
+      mutateLineReplenishedV151(line,amount,ctx.record.id);
+      const meta=updateMetaFromLines(currentMeta(),lines);
+      try{if(typeof guardarEstadoLocal==='function')guardarEstadoLocal();if(typeof saveMetaActual==='function')saveMetaActual();}catch(_){ }
+      await syncPrep([{ref:ctx.ref,lines,meta}],SOURCE+'_reposicion_prep');
+      notifyStockChanged(SOURCE+'_reposicion_proveedor');
+      closeModal('ldhV151ReplenishModal');
+      try{renderTabla();cargarLista();}catch(_){ }
+      alert('Reposicion registrada.\n\nHan llegado '+amount+' '+unitLabel(amount)+' de '+ctx.record.materialName+'.\nFisico: '+result.physicalBefore+' -> '+result.physicalAfter+'\nPendiente: '+result.pendingAfter+' '+unitLabel(result.pendingAfter)+'.');
+      return result;
     }finally{busy=false;}
   }
 
@@ -30307,15 +30375,17 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
       #ldhV147Banner{display:none;margin:12px 24px 4px;padding:12px 14px;border:2px solid #f59e0b;border-radius:15px;background:linear-gradient(135deg,rgba(120,53,15,.86),rgba(69,26,3,.9));color:#fff7ed;box-shadow:0 10px 24px rgba(0,0,0,.22)}
       #ldhV147Banner.show{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}#ldhV147Banner b{font-size:14px}#ldhV147Banner small{display:block;color:#fde68a;margin-top:3px}
       .ldh-v147-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:900;border:1px solid rgba(251,191,36,.65);background:rgba(120,53,15,.42);color:#fde68a}.ldh-v147-pill.moved{border-color:#38bdf8;background:rgba(7,89,133,.3);color:#bae6fd}
-      .ldh-v147-action{border-color:#f59e0b!important;color:#fde68a!important}.ldh-v147-cover{border-color:#38bdf8!important;color:#bae6fd!important;background:rgba(7,89,133,.22)!important}
+      .ldh-v147-action{border-color:#f59e0b!important;color:#fde68a!important}.ldh-v147-cover{border-color:#38bdf8!important;color:#bae6fd!important;background:rgba(7,89,133,.22)!important}.ldh-v151-replenish{border-color:#22c55e!important;color:#dcfce7!important;background:rgba(20,83,45,.42)!important;font-weight:900!important}
       .ldh-v147-overlay{position:fixed;inset:0;z-index:1000000;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);backdrop-filter:blur(4px);padding:18px}.ldh-v147-overlay.show{display:flex}.ldh-v147-modal{width:min(760px,96vw);max-height:88vh;overflow:auto;background:#0f172a;border:1px solid rgba(255,255,255,.16);border-radius:18px;padding:18px;box-shadow:0 24px 70px rgba(0,0,0,.65);color:#e6edf7}.ldh-v147-modal h3{margin:0 0 6px;font-size:20px}.ldh-v147-sub{font-size:12px;color:#9fb0c8;margin-bottom:14px}.ldh-v147-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.ldh-v147-field{display:flex;flex-direction:column;gap:5px}.ldh-v147-field.full{grid-column:1/-1}.ldh-v147-field label{font-size:11px;font-weight:900;color:#9fb0c8;text-transform:uppercase}.ldh-v147-field input,.ldh-v147-field textarea{width:100%;box-sizing:border-box;background:#020617;border:1px solid rgba(255,255,255,.18);color:#fff;border-radius:10px;padding:10px;font:inherit}.ldh-v147-field textarea{min-height:76px;resize:vertical}.ldh-v147-info{margin:10px 0;padding:10px;border-radius:12px;background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.25);font-size:12px;line-height:1.45}.ldh-v147-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}.ldh-v147-candidates{display:flex;flex-direction:column;gap:8px}.ldh-v147-candidate{width:100%;text-align:left;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:13px;background:#07162e;color:#fff;cursor:pointer}.ldh-v147-candidate:hover{border-color:#38bdf8}.ldh-v147-candidate b{display:block;color:#fde68a}.ldh-v147-candidate small{display:block;color:#9fb0c8;margin-top:4px}.ldh-v147-track{padding:12px;border:1px solid rgba(245,158,11,.35);border-radius:14px;background:rgba(69,26,3,.24);margin-bottom:10px}.ldh-v147-track b{color:#fde68a}.ldh-v147-track .meta{margin-top:6px;font-size:12px;color:#cbd5e1;line-height:1.5}.ldh-v147-track .chain{margin-top:7px;font-size:11px;color:#93c5fd}.ldh-v147-empty{padding:24px;text-align:center;color:#9fb0c8;border:1px dashed rgba(255,255,255,.16);border-radius:14px}@media(max-width:700px){.ldh-v147-grid{grid-template-columns:1fr}.ldh-v147-field.full{grid-column:auto}}
     `;document.head.appendChild(st);}
     if(!document.getElementById('ldhV147Banner')){const b=document.createElement('div');b.id='ldhV147Banner';b.innerHTML='<div><b id="ldhV147BannerTitle"></b><small id="ldhV147BannerSub"></small></div><button class="btn" id="ldhV147BannerBtn" type="button">Ver seguimiento</button>';const top=document.querySelector('.ldh-prep-topbar');if(top&&top.parentNode)top.parentNode.insertBefore(b,top.nextSibling);else document.body.prepend(b);b.querySelector('#ldhV147BannerBtn').onclick=openTracker;}
     if(!document.getElementById('ldhV147ExitModal'))document.body.insertAdjacentHTML('beforeend','<div class="ldh-v147-overlay" id="ldhV147ExitModal"><div class="ldh-v147-modal"><h3>Prestar material de esta OT</h3><div class="ldh-v147-sub" id="ldhV147ExitSub"></div><div class="ldh-v147-info">Esta salida reduce el stock f\u00edsico y deja esta OT pendiente de reposici\u00f3n. Despu\u00e9s puedes cubrirla desde otra OT del mismo material o recibir la reposici\u00f3n del proveedor.</div><div class="ldh-v147-grid"><div class="ldh-v147-field"><label>Cantidad de barras</label><input id="ldhV147Qty" type="number" min="1" step="1"></div><div class="ldh-v147-field"><label>Orden de</label><input id="ldhV147OrderedBy" autocomplete="off" placeholder="Ej.: Toni"></div><div class="ldh-v147-field"><label>Recoge</label><input id="ldhV147CollectedBy" autocomplete="off" placeholder="Ej.: David"></div><div class="ldh-v147-field full"><label>Destino / uso</label><input id="ldhV147Destination" autocomplete="off" placeholder="Ej.: soporte pladur sala Lemon Villalonga"></div><div class="ldh-v147-field full"><label>Observaciones (opcional)</label><textarea id="ldhV147Note"></textarea></div></div><div class="ldh-v147-actions"><button class="btn" type="button" data-v147-close="ldhV147ExitModal">Cancelar</button><button class="btn btn-success" id="ldhV147ExitConfirm" type="button">Registrar salida</button></div></div></div>');
     if(!document.getElementById('ldhV147CoverModal'))document.body.insertAdjacentHTML('beforeend','<div class="ldh-v147-overlay" id="ldhV147CoverModal"><div class="ldh-v147-modal"><h3>Cubrir desde otra OT</h3><div class="ldh-v147-sub" id="ldhV147CoverSub"></div><div class="ldh-v147-info">No cambia el stock f\u00edsico: se trasladan las barras reservadas y el pendiente de reposici\u00f3n pasa a la OT que las cede.</div><div id="ldhV147CandidateList" class="ldh-v147-candidates"></div><div class="ldh-v147-actions"><button class="btn" type="button" data-v147-close="ldhV147CoverModal">Cerrar</button></div></div></div>');
+    if(!document.getElementById('ldhV151ReplenishModal'))document.body.insertAdjacentHTML('beforeend','<div class="ldh-v147-overlay" id="ldhV151ReplenishModal"><div class="ldh-v147-modal"><h3>Reponer pendiente</h3><div class="ldh-v147-sub" id="ldhV151ReplenishSub"></div><div class="ldh-v147-info">Usa esta accion solo cuando llegue material nuevo del proveedor. La entrada suma stock fisico y queda reservada automaticamente para la OT que actualmente soporta el faltante.</div><div class="ldh-v147-grid"><div class="ldh-v147-field"><label>Barras recibidas ahora</label><input id="ldhV151ReplenishQty" type="number" min="1" step="1"></div></div><div class="ldh-v147-actions"><button class="btn" type="button" data-v147-close="ldhV151ReplenishModal">Cancelar</button><button class="btn btn-success ldh-v151-replenish" id="ldhV151ReplenishConfirm" type="button">Registrar reposicion</button></div></div></div>');
     if(!document.getElementById('ldhV147TrackerModal'))document.body.insertAdjacentHTML('beforeend','<div class="ldh-v147-overlay" id="ldhV147TrackerModal"><div class="ldh-v147-modal"><h3>Pr\u00e9stamos internos pendientes</h3><div class="ldh-v147-sub">Seguimiento de material retirado de una OT y pendiente de reposici\u00f3n.</div><div id="ldhV147TrackerList"></div><div class="ldh-v147-actions"><button class="btn" type="button" data-v147-close="ldhV147TrackerModal">Cerrar</button></div></div></div>');
     document.querySelectorAll('[data-v147-close]').forEach(b=>{if(!b.__v147){b.__v147=true;b.onclick=()=>closeModal(b.dataset.v147Close);}});document.querySelectorAll('.ldh-v147-overlay').forEach(o=>{if(!o.__v147){o.__v147=true;o.addEventListener('click',e=>{if(e.target===o)closeModal(o.id);});}});
     const c=document.getElementById('ldhV147ExitConfirm');if(c&&!c.__v147){c.__v147=true;c.onclick=async()=>{if(!activeExitCtx)return;const qty=Math.floor(num(document.getElementById('ldhV147Qty').value)),orderedBy=txt(document.getElementById('ldhV147OrderedBy').value),collectedBy=txt(document.getElementById('ldhV147CollectedBy').value),destination=txt(document.getElementById('ldhV147Destination').value),note=txt(document.getElementById('ldhV147Note').value);if(qty<1||qty>Math.floor(activeExitCtx.maxQty))return alert('Indica una cantidad entera entre 1 y '+Math.floor(activeExitCtx.maxQty)+'.');if(!orderedBy)return alert('Indica quien ordena la salida.');if(!collectedBy)return alert('Indica quien recoge el material.');if(!destination)return alert('Indica el destino o uso del material.');c.disabled=true;try{await createExit(activeExitCtx,{qty,orderedBy,collectedBy,destination,note});}catch(e){console.error('[Preparacion V147] salida',e);alert('No se ha realizado la salida.\n\n'+String(e&&e.message||e));}finally{c.disabled=false;}};}
+    const rc=document.getElementById('ldhV151ReplenishConfirm');if(rc&&!rc.__v151){rc.__v151=true;rc.onclick=async()=>{if(!activeReplenishCtx)return;const qty=Math.floor(num(document.getElementById('ldhV151ReplenishQty').value));if(qty<1||qty>Math.floor(activeReplenishCtx.maxQty))return alert('Indica una cantidad entera entre 1 y '+Math.floor(activeReplenishCtx.maxQty)+'.');rc.disabled=true;try{await replenishPendingV151(activeReplenishCtx,qty);}catch(e){console.error('[Preparacion V151] reposicion',e);alert('No se ha registrado la reposicion.\n\n'+String(e&&e.message||e));}finally{rc.disabled=false;}};}
   }
   function openModal(id){ensureUi();const e=document.getElementById(id);if(e)e.classList.add('show');}
   function closeModal(id){const e=document.getElementById(id);if(e)e.classList.remove('show');}
@@ -30324,6 +30394,22 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
     ensureUi();const ref=currentRef(),lines=currentLines(),line=lines[index],meta=currentMeta(),db=stockDb();if(!ref||!line||!db)return alert('Stock todavia no esta disponible. Pulsa actualizar o recarga.');if(advancedMeta(meta))return alert('Esta OT ya ha avanzado de Preparacion. No se puede prestar material desde aqui.');if(!isBarLine(line))return alert('Esta funcion se limita a barras de perfileria.');if(activeForRefLine(db,ref,line).length)return alert('Esta linea ya tiene un pendiente de reposicion activo.');try{if(typeof LDH_debtForCurrentLine==='function'&&LDH_debtForCurrentLine(line))return alert('Esta linea tiene una deuda entre empresas. Regularizala antes de hacer un prestamo interno.');}catch(_){ }
     const company=companyBy(db,meta.empresa||meta.company),material=materialByLine(db,line);if(!company||!material)return alert('No se puede identificar con seguridad la empresa/material en Stock.');const cid=companyId(company),mid=materialId(material),held=ownHeld(db,cid,mid,ref),received=num(line.qty_recibida??line.recibida),requested=num(line.qty_pedida??line.pedida??line.qty);if(requested<=0||received+0.000001<requested)return alert('Solo se puede prestar desde una linea que ahora mismo este completa.');const maxQty=Math.floor(Math.min(received,held));if(maxQty<1)return alert('Esta OT no tiene barras propias realmente reservadas que puedan salir.');activeExitCtx={index,ref,line,meta,companyName:txt(company.name||company.nombre||meta.empresa||meta.company),materialId:mid,materialName:txt(material.name||material.nombre||lineName(line)),maxQty};document.getElementById('ldhV147ExitSub').textContent=ref+' - '+activeExitCtx.materialName+' - maximo '+maxQty+' '+unitLabel(maxQty);const q=document.getElementById('ldhV147Qty');q.max=String(maxQty);q.value=String(Math.min(1,maxQty));['ldhV147OrderedBy','ldhV147CollectedBy','ldhV147Destination','ldhV147Note'].forEach(id=>document.getElementById(id).value='');openModal('ldhV147ExitModal');
   }
+  function openReplenishV151(index,recordId){
+    ensureUi();
+    const db=stockDb(),ref=currentRef(),line=currentLines()[index],meta=currentMeta();
+    const record=activeRecords(db).find(r=>txt(r&&r.id)===txt(recordId));
+    if(!record||!line)return alert('El pendiente ya no esta activo.');
+    if(!sameRef(record.currentDebtorRef||record.currentDebtorStorageRef,ref))return alert('Este faltante se ha trasladado a otra OT. Actualiza Preparacion.');
+    const company=companyBy(db,meta.empresa||meta.company||record.companyId||record.companyName);
+    if(!company)return alert('No se identifica la empresa de esta OT.');
+    const ped=num(line.qty_pedida??line.pedida??line.qty),rec=num(line.qty_recibida??line.recibida),missing=Math.max(0,ped-rec),pending=num(record.pendingQty),maxQty=Math.floor(Math.min(missing,pending));
+    if(maxQty<1)return alert('Esta linea ya no tiene barras pendientes de reponer.');
+    activeReplenishCtx={index,ref,line,meta,record,companyName:txt(company.name||company.nombre||meta.empresa||meta.company),maxQty};
+    document.getElementById('ldhV151ReplenishSub').textContent=(record.materialName||lineName(line))+' - '+ref+' - pendiente '+pending+' '+unitLabel(pending);
+    const q=document.getElementById('ldhV151ReplenishQty');q.max=String(maxQty);q.value=String(maxQty);
+    openModal('ldhV151ReplenishModal');
+  }
+
   function openCover(index,recordId){
     ensureUi();
     const db=stockDb();
@@ -30340,7 +30426,7 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
     document.getElementById('ldhV147CoverSub').textContent=record.materialName+' - faltan '+record.pendingQty+' '+unitLabel(record.pendingQty)+' en '+ref;
     const root=document.getElementById('ldhV147CandidateList');
     if(!candidates.length){
-      root.innerHTML='<div class="ldh-v147-empty">No hay otra OT en Preparacion, de la misma empresa y material, que pueda cubrir todo el faltante sin quedar en conflicto.<br><br>La reposicion puede hacerse normalmente con el boton RECIBIDO cuando llegue del proveedor.</div>';
+      root.innerHTML='<div class="ldh-v147-empty">No hay otra OT en Preparacion, de la misma empresa y material, que pueda cubrir todo el faltante sin quedar en conflicto.<br><br>La reposicion se hace con el boton REPONER PENDIENTE de la OT responsable cuando llegue material del proveedor.</div>';
     }else{
       root.innerHTML=candidates.map((c,i)=>'<button class="ldh-v147-candidate" type="button" data-v147-cand="'+i+'"><b>'+esc(c.label)+'</b><small>'+esc(c.ident)+'</small><small>Reservadas: '+esc(c.held)+' - despues quedaran '+esc(c.received-record.pendingQty)+' de '+esc(c.pedida)+'</small></button>').join('');
       root.querySelectorAll('[data-v147-cand]').forEach(b=>{
@@ -30385,13 +30471,19 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
 
   function injectRows(){
     const tbody=document.getElementById('tbodyBarras'),lines=currentLines(),ref=currentRef(),db=stockDb(),meta=currentMeta();if(!tbody||!lines.length||!ref||!db)return;let rowPos=0;
-    lines.forEach((line,index)=>{const belongs=isPletinaMm(line)||norm(line&&(line.unit||line.unidad))==='barra';if(!belongs)return;const tr=tbody.children[rowPos++];if(!tr||!isBarLine(line))return;const action=tr.children[4],mini=tr.querySelector('.stock-mini');if(!action||!mini)return;
-      // V148: idempotencia. Si otra sincronizacion refresca la tabla, reconstruimos
-      // nuestros controles en la MISMA llamada de render, antes de que el navegador pinte.
-      action.querySelectorAll('.ldh-v147-action,.ldh-v147-cover,.ldh-v147-trackbtn').forEach(el=>el.remove());
+    lines.forEach((line,index)=>{const belongs=isPletinaMm(line)||norm(line&&(line.unit||line.unidad))==='barra';if(!belongs)return;const tr=tbody.children[rowPos++];if(!tr||!isBarLine(line))return;const action=tr.children[4],receivedCell=tr.children[3],mini=tr.querySelector('.stock-mini');if(!action||!mini)return;
+      action.querySelectorAll('.ldh-v147-action,.ldh-v147-cover,.ldh-v147-trackbtn,.ldh-v151-replenish').forEach(el=>el.remove());
       mini.querySelectorAll('.ldh-v147-pill').forEach(el=>el.remove());
-      const current=activeForRefLine(db,ref,line),related=activeRecords(db).filter(r=>materialMatchesLine(r,line)&&(sameRef(r.originalRef,ref)||(r.chainRefs||[]).some(x=>sameRef(x,ref))));if(current.length){const total=current.reduce((s,r)=>s+num(r.pendingQty),0),r=current[0],pill=document.createElement('span');pill.className='ldh-v147-pill';pill.innerHTML='&#9888; PENDIENTE REPONER <b>'+esc(total)+'</b> '+unitLabel(total)+' - Orden '+esc(r.orderedBy)+' - Recoge '+esc(r.collectedBy)+' - '+esc(r.destination);mini.appendChild(pill);const b=document.createElement('button');b.className='btn-mini ldh-v147-cover';b.type='button';b.textContent='Cubrir desde otra OT';b.onclick=()=>openCover(index,r.id);action.appendChild(b);const t=document.createElement('button');t.className='btn-mini ldh-v147-trackbtn';t.type='button';t.textContent='Ver seguimiento';t.onclick=openTracker;action.appendChild(t);}
-      else if(related.length){const last=related[related.length-1],pill=document.createElement('span');pill.className='ldh-v147-pill moved';pill.textContent='Faltante trasladado a '+txt(last.currentDebtorRef);mini.appendChild(pill);}
+      const current=activeForRefLine(db,ref,line),related=activeRecords(db).filter(r=>materialMatchesLine(r,line)&&(sameRef(r.originalRef,ref)||(r.chainRefs||[]).some(x=>sameRef(x,ref))));
+      if(current.length){
+        const total=current.reduce((sum,r)=>sum+num(r.pendingQty),0),r=current[0],pill=document.createElement('span');
+        pill.className='ldh-v147-pill';pill.innerHTML='&#9888; PENDIENTE REPONER <b>'+esc(total)+'</b> '+unitLabel(total)+' - Orden '+esc(r.orderedBy)+' - Recoge '+esc(r.collectedBy)+' - '+esc(r.destination);mini.appendChild(pill);
+        if(receivedCell){const inp=receivedCell.querySelector('input[type="number"]');if(inp){inp.readOnly=true;inp.title='Usa REPONER PENDIENTE para registrar material nuevo del proveedor.';}const rb=receivedCell.querySelector('.ldh-recibido-btn');if(rb){rb.disabled=true;rb.title='Esta linea tiene una reposicion interna activa. Usa REPONER PENDIENTE.';}}
+        action.querySelectorAll('button').forEach(btn=>{const tx=norm(btn.textContent||'');if(tx.includes('anadir a stock')||tx.includes('consumir reservado')||tx.includes('asignar libre')||tx.includes('asignar de otra empresa')){btn.disabled=true;btn.title='Mientras exista esta reposicion interna usa REPONER PENDIENTE o CUBRIR DESDE OTRA OT.';}});
+        const rp=document.createElement('button');rp.className='btn-mini ldh-v151-replenish';rp.type='button';rp.textContent='Reponer pendiente · '+total+' '+unitLabel(total);rp.onclick=()=>openReplenishV151(index,r.id);action.appendChild(rp);
+        const b=document.createElement('button');b.className='btn-mini ldh-v147-cover';b.type='button';b.textContent='Cubrir desde otra OT';b.onclick=()=>openCover(index,r.id);action.appendChild(b);
+        const t=document.createElement('button');t.className='btn-mini ldh-v147-trackbtn';t.type='button';t.textContent='Ver seguimiento';t.onclick=openTracker;action.appendChild(t);
+      }else if(related.length){const last=related[related.length-1],pill=document.createElement('span');pill.className='ldh-v147-pill moved';pill.textContent='Faltante trasladado a '+txt(last.currentDebtorRef);mini.appendChild(pill);}
       const received=num(line.qty_recibida??line.recibida),requested=num(line.qty_pedida??line.pedida??line.qty);if(!current.length&&!advancedMeta(meta)&&requested>0&&received+0.000001>=requested){let held=0;try{const c=companyBy(db,meta.empresa||meta.company),m=materialByLine(db,line);if(c&&m)held=ownHeld(db,companyId(c),materialId(m),ref);}catch(_){ }if(held>=1){const b=document.createElement('button');b.className='btn-mini ldh-v147-action';b.type='button';b.textContent='Prestar material de esta OT';b.onclick=()=>openExit(index);action.appendChild(b);}}
     });
   }
@@ -30399,8 +30491,8 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   function refreshUi(){ensureUi();refreshBanner();injectRows();}
 
   function wrapRender(){const old=window.renderTabla;if(typeof old!=='function'||old.__v148)return;const w=function(){const out=old.apply(this,arguments);refreshUi();return out;};w.__v147=true;w.__v148=true;window.renderTabla=w;try{renderTabla=w;}catch(_){ }}
-  function wrapReceived(){const old=window.LDH_marcarRecibidoCompleto;if(typeof old!=='function'||old.__v147)return;const w=async function(index){const out=await old.apply(this,arguments);try{await resolveCurrentLineIfReplenished(index,'recibido_proveedor_v147');}catch(e){console.warn('[Preparacion V147] cierre reposicion',e);}setTimeout(refreshUi,0);return out;};w.__v147=true;window.LDH_marcarRecibidoCompleto=w;}
-  function blockIfPending(action){const rows=activeForRef(stockDb(),currentRef());if(!rows.length)return false;const total=rows.reduce((s,r)=>s+num(r.pendingQty),0);alert('No se puede '+action+' mientras esta OT tenga material pendiente de reposicion.\n\nPendiente: '+total+' '+unitLabel(total)+'.\n\nRepone el material con RECIBIDO o cubre el faltante desde otra OT.');return true;}
+  function wrapReceived(){const old=window.LDH_marcarRecibidoCompleto;if(typeof old!=='function'||old.__v151)return;const w=async function(index){const line=currentLines()[index];if(line&&activeForRefLine(stockDb(),currentRef(),line).length){alert('Esta linea tiene material pendiente de reposicion interna.\n\nUsa REPONER PENDIENTE cuando llegue del proveedor o CUBRIR DESDE OTRA OT.');return;}return old.apply(this,arguments);};w.__v151=true;w.__v147=true;window.LDH_marcarRecibidoCompleto=w;}
+  function blockIfPending(action){const rows=activeForRef(stockDb(),currentRef());if(!rows.length)return false;const total=rows.reduce((sum,r)=>sum+num(r.pendingQty),0);alert('No se puede '+action+' mientras esta OT tenga material pendiente de reposicion.\n\nPendiente: '+total+' '+unitLabel(total)+'.\n\nUsa REPONER PENDIENTE o CUBRIR DESDE OTRA OT.');return true;}
   function wrapSafety(name,label){const old=window[name];if(typeof old!=='function'||old.__v147)return;const w=function(){if(blockIfPending(label))return;return old.apply(this,arguments);};w.__v147=true;window[name]=w;try{if(name==='confirmarTodoRecepcion')confirmarTodoRecepcion=w;if(name==='mandarAFabricacion')mandarAFabricacion=w;if(name==='eliminarPedido')eliminarPedido=w;}catch(_){ }}
 
   ensureUi();wrapRender();wrapReceived();wrapSafety('confirmarTodoRecepcion','mandar a Fabricacion');wrapSafety('mandarAFabricacion','mandar a Fabricacion');wrapSafety('eliminarPedido','eliminar la OT');refreshUi();
@@ -30409,8 +30501,9 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   window.LDH_PREP_V147_OPEN_INTERNAL_TRACKER=openTracker;
   window.LDH_PREP_V147_INTERNAL_OT=BUILD;
   window.LDH_PREP_V150_REPAIR_CURRENT_CASE=repairKnownV148Case;
-  document.documentElement.dataset.ldhPreparacionInternalOt='V150';
-  console.info('[Preparacion V150] Prestamos internos entre OTs activos; reparacion robusta del fisico 1 -> 7 y campos maestros sincronizados.');
+  window.LDH_PREP_V151_REPLENISH_PENDING=replenishPendingV151;
+  document.documentElement.dataset.ldhPreparacionInternalOt='V151';
+  console.info('[Preparacion V151] Prestamos internos entre OTs activos; reposicion parcial del proveedor vinculada a la OT responsable actual.');
 })();
 </script>
 
