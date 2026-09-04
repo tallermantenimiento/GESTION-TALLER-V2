@@ -29906,4 +29906,151 @@ window.LDH_PREP_V145_RESTAURA_FISICO_PREMATURO='PREPARACION-V145-RESTAURA-FISICO
 document.documentElement.dataset.ldhPreparacionPhysicalGuard='V145';
 console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; se restauran consumos prematuros V117/V127/V129 y se bloquean sus reparadores antiguos.');
 </script>
+
+
+<!-- LDH_PREP_V146_LIMPIA_PLETINAS_HUERFANAS_OT260724004_20260903 -->
+<script id="LDH_PREP_V146_LIMPIA_PLETINAS_HUERFANAS_OT260724004_20260903">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V146_ORPHAN_PLETINA__) return;
+  window.__LDH_PREP_V146_ORPHAN_PLETINA__ = true;
+
+  const TARGET_OT = 'OT-260724-004';
+  const TARGETS = [
+    {
+      staleId:'asg_prep_v48_OT-260724-004_PARKING_PATINETES_Y_BICICLETAS_VARIOS_emp_jku45mmllb_mat_wm5ottgzxx',
+      materialId:'mat_wm5ottgzxx', materialName:'pletina 100x10', staleQty:12000, liveQty:11520
+    },
+    {
+      staleId:'asg_prep_v48_OT-260724-004_PARKING_PATINETES_Y_BICICLETAS_VARIOS_emp_jku45mmllb_mat_kdureenzxx',
+      materialId:'mat_kdureenzxx', materialName:'pletina 60x10', staleQty:6000, liveQty:3600
+    },
+    {
+      staleId:'asg_prep_v48_OT-260724-004_PARKING_PATINETES_Y_BICICLETAS_VARIOS_emp_jku45mmllb_mat_3txfkjxo1f',
+      materialId:'mat_3txfkjxo1f', materialName:'pletina 40x10', staleQty:12000, liveQty:7200
+    }
+  ];
+
+  let busy=false;
+  let finished=false;
+
+  function s(v){ return String(v ?? '').trim(); }
+  function n(v){ const x=Number.parseFloat(String(v ?? 0).replace(',','.')); return Number.isFinite(x)?x:0; }
+  function ot(v){ const m=s(v).toUpperCase().match(/\bOT-\d{6}-\d{3}\b/); return m?m[0]:''; }
+  function currentRef(){
+    try{
+      return s((typeof refActual!=='undefined' && refActual) || window.refActual || new URL(location.href).searchParams.get('openRef') || '');
+    }catch(_){ return s((typeof refActual!=='undefined' && refActual) || window.refActual || ''); }
+  }
+  function isClosed(a){
+    const st=s(a?.status ?? a?.estado ?? '').toLowerCase();
+    return ['cancelada','cancelado','consumida','consumido','liberada','liberado','anulada','anulado','cerrada','cerrado','devuelta','devuelto'].includes(st);
+  }
+  function rowRef(a){ return s(a?.consumerRef ?? a?.jobRef ?? a?.ref ?? a?.reference ?? ''); }
+  function exactLiveReplacement(assignments,t){
+    return assignments.find(a=>{
+      if(!a || isClosed(a)) return false;
+      if(s(a?.id ?? a?.assignmentId)==t.staleId) return false;
+      if(s(a?.materialId ?? a?.matId)!==t.materialId) return false;
+      if(ot(rowRef(a))!==TARGET_OT) return false;
+      if(rowRef(a).toUpperCase().includes('(VARIOS)')) return false;
+      if(String(a?.lengthMode ?? a?.unitBasis ?? a?.unit ?? '').toLowerCase()!=='mm') return false;
+      if(a?.pletinaMm!==true && String(a?.unitBasis??'').toLowerCase()!=='mm') return false;
+      return Math.abs(n(a?.qty ?? a?.cantidad)-t.liveQty)<0.000001;
+    }) || null;
+  }
+
+  async function clean(){
+    if(busy || finished) return;
+    if(ot(currentRef())!==TARGET_OT) return;
+    if(typeof window.LDH_prepRunStockMutationV129!=='function') return;
+    busy=true;
+    try{
+      const result=await window.LDH_prepRunStockMutationV129(
+        'preparacion_v146_limpia_pletinas_huerfanas_ot260724004',
+        async db=>{
+          const assignments=Array.isArray(db?.assignments)?db.assignments:[];
+          const now=new Date().toISOString();
+          const changed=[];
+
+          for(const t of TARGETS){
+            const stale=assignments.find(a=>s(a?.id ?? a?.assignmentId)===t.staleId) || null;
+            if(!stale || isClosed(stale)) continue;
+
+            // Barreras de seguridad: solo las tres asignaciones legacy exactas.
+            if(s(stale?.materialId ?? stale?.matId)!==t.materialId)
+              throw new Error(t.materialName+': material inesperado; no se ha tocado nada.');
+            if(Math.abs(n(stale?.qty ?? stale?.cantidad)-t.staleQty)>0.000001)
+              throw new Error(t.materialName+': cantidad legacy distinta; no se ha tocado nada.');
+            if(!rowRef(stale).toUpperCase().includes('(VARIOS)'))
+              throw new Error(t.materialName+': la referencia ya no es la legacy (VARIOS); no se ha tocado nada.');
+            if(String(stale?.source ?? '')!=='stock_v48_reconciliacion_preparacion')
+              throw new Error(t.materialName+': origen inesperado; no se ha tocado nada.');
+
+            const live=exactLiveReplacement(assignments,t);
+            if(!live)
+              throw new Error(t.materialName+': no existe la asignación actual de '+t.liveQty+' mm; no se ha tocado nada.');
+
+            stale.status='cancelada';
+            stale.estado='cancelada';
+            stale.pendingQty=0;
+            stale.qtyPending=0;
+            stale.orphanedLegacyAssignment=true;
+            stale.orphanedLegacyCleanupVersion='V146';
+            stale.cancelledAt=now;
+            stale.cancelledReason='duplicado_legacy_varios_reemplazado_por_ref_actual_v146';
+            stale.supersededBy=s(live?.id ?? live?.assignmentId);
+            stale.updatedAt=now;
+            changed.push({material:t.materialName,removed:t.staleQty,kept:t.liveQty,staleId:t.staleId,liveId:stale.supersededBy});
+          }
+
+          db.assignments=assignments;
+          if(changed.length){
+            db.updatedAt=now;
+            db.lastRepair={
+              at:now,
+              source:'preparacion_v146_limpia_pletinas_huerfanas_ot260724004',
+              ref:TARGET_OT,
+              changed:changed.map(x=>({material:x.material,removed:x.removed,kept:x.kept}))
+            };
+          }
+          return {changedCount:changed.length,changed};
+        }
+      );
+
+      const count=Number(result?.changedCount||0);
+      if(count>0){
+        try{ if(typeof window.renderTabla==='function') window.renderTabla(); }catch(_){ }
+        console.info('[Preparación V146] Reservas legacy de pletina canceladas',result.changed);
+        alert(
+          '✅ Reservas huérfanas de pletina limpiadas.\n\n'+
+          'Solo se han cancelado las tres asignaciones antiguas "(VARIOS)" de OT-260724-004.\n'+
+          'No se ha modificado el stock físico ni las asignaciones actuales.'
+        );
+      }else{
+        console.info('[Preparación V146] No quedan reservas legacy de pletina que limpiar.');
+      }
+      finished=true;
+    }catch(error){
+      console.error('[Preparación V146] No se ha limpiado ninguna reserva huérfana',error);
+      alert('No se ha realizado la limpieza de pletinas.\n\n'+String(error?.message||error));
+    }finally{
+      busy=false;
+    }
+  }
+
+  window.LDH_PREP_V146_LIMPIAR_PLETINAS_HUERFANAS=clean;
+  window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(clean,180));
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',()=>[900,1800,3200,5200,8500].forEach(ms=>setTimeout(clean,ms)),{once:true});
+  }else{
+    [500,1400,2800,5000].forEach(ms=>setTimeout(clean,ms));
+  }
+
+  window.LDH_PREP_V146_LIMPIA_PLETINAS_HUERFANAS='PREPARACION-V146-LIMPIA-3-PLETINAS-LEGACY-OT260724004-20260903';
+  document.documentElement.dataset.ldhPreparacionOrphanPletina='V146';
+  console.info('[Preparación V146] Limpieza selectiva preparada para las 3 reservas legacy (VARIOS) de OT-260724-004.');
+})();
+</script>
+
 </body></html>
