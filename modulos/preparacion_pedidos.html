@@ -30055,17 +30055,17 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
 
 
 
-<!-- LDH_PREP_V149_PRESTAMOS_INTERNOS_OT_FISICO_MAESTRO_20260904 -->
-<meta name="ldh-prep-internal-ot-build" content="PREPARACION-V149-PRESTAMOS-INTERNOS-OT-FISICO-MAESTRO-20260904">
+<!-- LDH_PREP_V150_PRESTAMOS_INTERNOS_OT_REPARACION_FISICO_ROBUSTA_20260904 -->
+<meta name="ldh-prep-internal-ot-build" content="PREPARACION-V150-PRESTAMOS-INTERNOS-OT-REPARACION-FISICO-ROBUSTA-20260904">
 <script id="LDH_PREP_V147_PRESTAMOS_INTERNOS_OT_20260904">
 (function(){
   'use strict';
   if(window.__LDH_PREP_V147_INTERNAL_OT__) return;
   window.__LDH_PREP_V147_INTERNAL_OT__=true;
 
-  const BUILD='PREPARACION-V149-PRESTAMOS-INTERNOS-OT-FISICO-MAESTRO-20260904';
+  const BUILD='PREPARACION-V150-PRESTAMOS-INTERNOS-OT-REPARACION-FISICO-ROBUSTA-20260904';
   const FIELD='internalOtReplenishmentsV1';
-  const SOURCE='preparacion_prestamo_interno_ot_v149';
+  const SOURCE='preparacion_prestamo_interno_ot_v150';
   let activeExitCtx=null;
   let activeCoverCtx=null;
   let busy=false;
@@ -30165,9 +30165,16 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   // movimientos puede ser parcial por regularizaciones/snapshots antiguos.
   function stockRows(db,cid,mid){return (Array.isArray(db&&db.stock)?db.stock:[]).filter(r=>rowCompany(r)===cid&&rowMaterial(r)===mid);}
   function masterStockRow(db,cid,mid){const rows=stockRows(db,cid,mid);return rows.find(r=>r&&r.physicalManualMaster===true)||rows[0]||null;}
+  const MASTER_PHYSICAL_FIELDS=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad'];
   function directPhysicalFromRow(row){
     if(!row)return null;
-    for(const k of ['physicalQty','fisico','qty','cantidad','stock','real']){
+    for(const k of MASTER_PHYSICAL_FIELDS){
+      if(row[k]!==undefined&&row[k]!==null&&String(row[k]).trim()!==''){
+        const v=Number.parseFloat(String(row[k]).replace(',','.'));if(Number.isFinite(v))return Math.max(0,v);
+      }
+    }
+    // Espejos de compatibilidad, nunca por delante de los campos maestros de Stock.
+    for(const k of ['stock','real']){
       if(row[k]!==undefined&&row[k]!==null&&String(row[k]).trim()!==''){
         const v=Number.parseFloat(String(row[k]).replace(',','.'));if(Number.isFinite(v))return Math.max(0,v);
       }
@@ -30178,7 +30185,12 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   function physical(db,cid,mid){const direct=directPhysicalFromRow(masterStockRow(db,cid,mid));return direct!==null?direct:Math.max(0,movementPhysical(db,cid,mid));}
   function updateStockMirror(db,cid,mid,value,source){
     const row=masterStockRow(db,cid,mid);if(!row)throw new Error('No existe la ficha fisica de este material en Stock.');
-    const v=Math.max(0,num(value));['qty','cantidad','stock','real','fisico','physicalQty'].forEach(k=>row[k]=v);row.updatedAt=now();row.physicalUpdatedAt=now();row.physicalSource=source||'prestamo_interno_ot_v149';return row;
+    const v=Math.max(0,num(value));
+    MASTER_PHYSICAL_FIELDS.forEach(k=>row[k]=v);
+    // Compatibilidad con lectores historicos de Preparacion.
+    row.stock=v;row.real=v;
+    row.physicalManualMaster=true;
+    row.updatedAt=now();row.physicalUpdatedAt=now();row.physicalSource=source||'prestamo_interno_ot_v150';return row;
   }
   function materialContext(db,line,meta,ref){
     const company=companyBy(db,meta&&(meta.empresa||meta.company));if(!company)throw new Error('No se encuentra la empresa de esta OT en Stock.');const material=materialByLine(db,line);if(!material)throw new Error('No se encuentra de forma inequ\u00edvoca el material vinculado en Stock.');const cid=companyId(company),mid=materialId(material);if(!cid||!mid)throw new Error('Empresa o material sin identificador.');return {company,material,cid,mid,companyName:txt(company.name||company.nombre||company.code||cid),materialName:txt(material.name||material.nombre||lineName(line)),held:ownHeld(db,cid,mid,ref)};
@@ -30241,33 +30253,53 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
     const ids=matches.map(r=>r.id),stamp=now();await window.LDH_prepRunStockMutationV129(SOURCE+'_repuesto',async remote=>{remote[FIELD]=Array.isArray(remote[FIELD])?remote[FIELD]:[];for(const r of remote[FIELD]){if(!ids.includes(r.id)||num(r.pendingQty)<=0)continue;const q=num(r.pendingQty);r.pendingQty=0;r.status='repuesto';r.resolvedAt=stamp;r.updatedAt=stamp;r.resolvedRef=ref;r.history=Array.isArray(r.history)?r.history:[];r.history.push({type:'reposicion_recibida',at:stamp,ref,qty:q,source:source||'recibido'});}return {resolved:ids};});if(line._internalOtAutoBuyV147){line.toBuy=false;delete line._internalOtAutoBuyV147;}if(!Array.isArray(line.trace))line.trace=[];line.trace.push({at:stamp,qty:matches.reduce((s,r)=>s+num(r.pendingQty),0),source:'reposicion_prestamo_interno_ot_v147'});const meta=updateMetaFromLines(currentMeta(),lines);try{if(typeof guardarEstadoLocal==='function')guardarEstadoLocal();if(typeof saveMetaActual==='function')saveMetaActual();}catch(_){ }await syncPrep([{ref,lines,meta}],SOURCE+'_repuesto_prep');notifyStockChanged(SOURCE+'_repuesto');refreshUi();return true;
   }
 
-  // V149 · Reparacion acotada del caso que V148 ya dejo grabado.
-  // El backup maestro de las 09:01:55 conserva 9 barras; la salida valida fue 2,
-  // por tanto el fisico correcto despues de esa salida es 7. Solo se corrige si
-  // coinciden empresa, material, OT, cantidad, movimiento y la marca de V147.
-  const V149_KNOWN_REPAIR={companyId:'emp_a0agxt00x1',materialId:'mat_zc7wr2zq1d',originalRef:'OT-260904-001',pendingQty:2,corruptPhysical:1,correctPhysical:7,backupCreatedAt:'2026-09-04T07:01:55.457Z'};
-  let repairV149Busy=false;
+  // V150 · Reparacion acotada del unico caso generado durante la prueba V148.
+  // El backup maestro de las 09:01:55 conserva 9 barras y la salida valida fue 2:
+  // el fisico correcto es 7. La firma NO depende de physicalSource, porque el
+  // sincronizador de Stock puede reescribir esa etiqueta sin alterar los datos.
+  const V150_KNOWN_REPAIR={companyId:'emp_a0agxt00x1',materialId:'mat_zc7wr2zq1d',originalRef:'OT-260904-001',pendingQty:2,corruptPhysical:1,correctPhysical:7,backupCreatedAt:'2026-09-04T07:01:55.457Z'};
+  let repairV150Busy=false;
   function knownRepairSignature(db){
-    if(!db)return null;const k=V149_KNOWN_REPAIR;
-    const rec=activeRecords(db).find(r=>txt(r.companyId)===k.companyId&&txt(r.materialId)===k.materialId&&sameRef(r.originalRef,k.originalRef)&&Math.abs(num(r.pendingQty)-k.pendingQty)<0.000001);if(!rec)return null;
+    if(!db)return null;const k=V150_KNOWN_REPAIR;
+    const rec=activeRecords(db).find(r=>txt(r.companyId)===k.companyId&&txt(r.materialId)===k.materialId&&sameRef(r.originalRef,k.originalRef)&&Math.abs(num(r.pendingQty)-k.pendingQty)<0.000001);
+    if(!rec)return null;
     const row=masterStockRow(db,k.companyId,k.materialId),direct=directPhysicalFromRow(row);
-    const badSource=norm(row&&row.physicalSource).includes('prestamo interno ot v147');
-    const mov=(db.movements||[]).find(m=>txt(m.internalOtReplenishmentId)===txt(rec.id)&&rowCompany(m)===k.companyId&&rowMaterial(m)===k.materialId&&Math.abs(num(m.qty??m.cantidad)-k.pendingQty)<0.000001&&movementSign(m.type||m.tipo)===-1);
-    return row&&badSource&&mov&&Math.abs(num(direct)-k.corruptPhysical)<0.000001?{rec,row}:null;
+    const mov=(db.movements||[]).find(m=>
+      txt(m.internalOtReplenishmentId)===txt(rec.id)&&
+      rowCompany(m)===k.companyId&&rowMaterial(m)===k.materialId&&
+      sameRef(rowRef(m),k.originalRef)&&
+      Math.abs(num(m.qty??m.cantidad)-k.pendingQty)<0.000001&&
+      movementSign(m.type||m.tipo)===-1&&
+      norm(m.reason||'').includes('salida fisica material reservado ot para uso interno')
+    );
+    if(!row||!mov||Math.abs(num(direct)-k.corruptPhysical)>=0.000001)return null;
+    return {rec,row,mov};
   }
   async function repairKnownV148Case(){
-    if(repairV149Busy||typeof window.LDH_prepRunStockMutationV129!=='function'||!knownRepairSignature(stockDb()))return false;repairV149Busy=true;
+    if(repairV150Busy||typeof window.LDH_prepRunStockMutationV129!=='function')return false;
+    const localSig=knownRepairSignature(stockDb());if(!localSig)return false;
+    repairV150Busy=true;
     try{
-      const k=V149_KNOWN_REPAIR;
-      const result=await window.LDH_prepRunStockMutationV129('preparacion_v149_repara_fisico_v148',async db=>{
+      const k=V150_KNOWN_REPAIR;
+      const result=await window.LDH_prepRunStockMutationV129('preparacion_v150_repara_fisico_v148',async db=>{
         const sig=knownRepairSignature(db);if(!sig)return {repaired:false};
-        updateStockMirror(db,k.companyId,k.materialId,k.correctPhysical,'reparacion_v149_desde_backup_pre_v147');
-        sig.row.v149Repair={at:now(),from:k.corruptPhysical,to:k.correctPhysical,backupCreatedAt:k.backupCreatedAt,reason:'V148 reconstruyo fisico desde movimientos parciales'};
-        sig.rec.physicalBeforeMaster=9;sig.rec.physicalAfterMaster=7;sig.rec.physicalMasterMode='backup_repair_v149';sig.rec.updatedAt=now();sig.rec.history=Array.isArray(sig.rec.history)?sig.rec.history:[];sig.rec.history.push({type:'reparacion_fisico_v149',at:now(),from:k.corruptPhysical,to:k.correctPhysical,backupCreatedAt:k.backupCreatedAt});
+        updateStockMirror(db,k.companyId,k.materialId,k.correctPhysical,'reparacion_v150_desde_backup_pre_v147');
+        sig.row.v150Repair={at:now(),from:k.corruptPhysical,to:k.correctPhysical,backupCreatedAt:k.backupCreatedAt,reason:'V148 uso movimientos parciales en vez de la ficha fisica maestra'};
+        sig.rec.physicalBeforeMaster=9;sig.rec.physicalAfterMaster=7;sig.rec.physicalMasterMode='backup_repair_v150';sig.rec.updatedAt=now();
+        sig.rec.history=Array.isArray(sig.rec.history)?sig.rec.history:[];
+        if(!sig.rec.history.some(h=>h&&h.type==='reparacion_fisico_v150'))sig.rec.history.push({type:'reparacion_fisico_v150',at:now(),from:k.corruptPhysical,to:k.correctPhysical,backupCreatedAt:k.backupCreatedAt});
         return {repaired:true,from:k.corruptPhysical,to:k.correctPhysical};
       });
-      if(result&&result.repaired){notifyStockChanged('preparacion_v149_repara_fisico_v148');try{renderTabla();}catch(_){ }console.info('[Preparacion V149] Reparado fisico PROCEED 60x40x1.5: 1 -> 7.');return true;}return false;
-    }catch(e){console.warn('[Preparacion V149] Reparacion V148 no aplicada',e);return false;}finally{repairV149Busy=false;}
+      if(result&&result.repaired){
+        notifyStockChanged('preparacion_v150_repara_fisico_v148');
+        try{renderTabla();}catch(_){ }
+        console.info('[Preparacion V150] Reparado fisico PROCEED 60x40x1.5: 1 -> 7.');
+        return true;
+      }
+      return false;
+    }catch(e){
+      console.warn('[Preparacion V150] Reparacion V148 no aplicada',e);return false;
+    }finally{repairV150Busy=false;}
   }
 
   function ensureUi(){
@@ -30372,13 +30404,13 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   function wrapSafety(name,label){const old=window[name];if(typeof old!=='function'||old.__v147)return;const w=function(){if(blockIfPending(label))return;return old.apply(this,arguments);};w.__v147=true;window[name]=w;try{if(name==='confirmarTodoRecepcion')confirmarTodoRecepcion=w;if(name==='mandarAFabricacion')mandarAFabricacion=w;if(name==='eliminarPedido')eliminarPedido=w;}catch(_){ }}
 
   ensureUi();wrapRender();wrapReceived();wrapSafety('confirmarTodoRecepcion','mandar a Fabricacion');wrapSafety('mandarAFabricacion','mandar a Fabricacion');wrapSafety('eliminarPedido','eliminar la OT');refreshUi();
-  window.addEventListener('ldh:stock-cloud-updated',()=>{setTimeout(refreshUi,100);setTimeout(repairKnownV148Case,180);});window.addEventListener('storage',e=>{if(e&&e.key==='ldh_v2_company_stock_v1'){setTimeout(refreshUi,120);setTimeout(repairKnownV148Case,180);}});setInterval(refreshBanner,4000);
-  [250,900,2200].forEach(ms=>setTimeout(repairKnownV148Case,ms));
+  window.addEventListener('ldh:stock-cloud-updated',()=>{setTimeout(refreshUi,100);setTimeout(repairKnownV148Case,120);setTimeout(repairKnownV148Case,700);});window.addEventListener('storage',e=>{if(e&&e.key==='ldh_v2_company_stock_v1'){setTimeout(refreshUi,120);setTimeout(repairKnownV148Case,120);setTimeout(repairKnownV148Case,700);}});setInterval(refreshBanner,4000);
+  [80,250,700,1500,3000,6000].forEach(ms=>setTimeout(repairKnownV148Case,ms));
   window.LDH_PREP_V147_OPEN_INTERNAL_TRACKER=openTracker;
   window.LDH_PREP_V147_INTERNAL_OT=BUILD;
-  window.LDH_PREP_V149_REPAIR_CURRENT_CASE=repairKnownV148Case;
-  document.documentElement.dataset.ldhPreparacionInternalOt='V149';
-  console.info('[Preparacion V149] Prestamos internos entre OTs activos; fisico siempre desde la ficha maestra de Stock.');
+  window.LDH_PREP_V150_REPAIR_CURRENT_CASE=repairKnownV148Case;
+  document.documentElement.dataset.ldhPreparacionInternalOt='V150';
+  console.info('[Preparacion V150] Prestamos internos entre OTs activos; reparacion robusta del fisico 1 -> 7 y campos maestros sincronizados.');
 })();
 </script>
 
