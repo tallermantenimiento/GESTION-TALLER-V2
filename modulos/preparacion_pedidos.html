@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
-<meta name="ldh-fix-quota" content="PREPARACION-V146-CIERRE-EVENTOS-SIN-POLLING-20260905" />
+<meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -17645,6 +17645,8 @@ async function LDH_prepPublishCommonAssignmentsV31(assignmentOrAssignments) {
     throw new Error("Stock nube todavía no está autenticado.");
   }
 
+  // V152 · Una sola tentativa: si Firestore devuelve 429, falla rapido y no
+  // multiplica lecturas mediante los reintentos internos del SDK.
   const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
     const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
     const metaSnap = await transaction.get(metaRef);
@@ -19534,7 +19536,7 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
     }, { merge: true });
 
     return { remoteDB, consumedQty, consumedAssignments, ignoredHistoricalAssignments };
-  });
+  }, { maxAttempts: 1 });
 
   if (result.consumedAssignments > 0) {
     const rawText = JSON.stringify(result.remoteDB);
@@ -19575,6 +19577,7 @@ async function LDH_prepRestorePrematureConsumptionV106(workRef){
 
   LDH_PREP_RESTORE_PREMATURE_LOCK_V106.add(reference);
   try{
+    // V152 · Sin reintentos internos ante RESOURCE_EXHAUSTED/429.
     const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
       const metaRef=doc(LDH_PREP_STOCK_DB_V28,"taller_data","stock");
       const remoteDB=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
@@ -19678,7 +19681,7 @@ async function LDH_prepRestorePrematureConsumptionV106(workRef){
         transaction,metaRef,remoteDB,"preparacion_v106_restaura_consumo_prematuro_v51"
       );
       return {remoteDB,restoredQty,restoredAssignments,changed:true};
-    });
+    }, { maxAttempts: 1 });
 
     if(result.changed){
       const rawText=JSON.stringify(result.remoteDB);
@@ -27689,13 +27692,10 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   }
 
   const previousList=window.cargarLista;
-  if(typeof previousList === 'function'){
-    window.cargarLista=function(){
-      const result=previousList.apply(this,arguments);
-      setTimeout(()=>{ refreshAfterCleanup(); },120);
-      return result;
-    };
-  }
+  /* V152 · cargarLista es solo renderizado.
+     NO abre transacciones de Stock ni agenda cierres automaticos.
+     El cierre seguro ya se invoca desde los eventos reales: envio a Fabricacion
+     y recepcion del ultimo material cuando la OT ya esta en una fase avanzada. */
 
   const previousSend=window.mandarAFabricacion;
   if(typeof previousSend === 'function'){
@@ -27747,20 +27747,20 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   }
   function start(){
     markBuild();
-    // V146 · Un unico barrido inicial, ya con la pagina cargada. No polling continuo.
-    setTimeout(function(){ refreshAfterCleanup(); },1200);
+    // V152 · CERO barridos de Stock al arrancar.
+    // La pagina puede abrir/listar/refrescar sin consumir cuota de transacciones.
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',start,{once:true});
   else start();
   [900,2200,5000,10000,18000].forEach(delay => setTimeout(markBuild,delay));
   setInterval(markBuild,1600);
-  // V146 · ELIMINADO: setInterval(refreshAfterCleanup,3000).
-  // Los cierres se disparan por eventos reales (cargar lista, cambio de storage, envio/recepcion)
-  // y refreshAfterCleanup limita cualquier barrido automatico a uno por minuto.
-  window.addEventListener('storage',function(){ setTimeout(refreshAfterCleanup,350); });
+  // V152 · Sin polling, sin cierre al cargarLista y sin cierre por evento storage.
+  // Solo los eventos funcionales explicitos llaman a LDH_finalizarPreparacionV114.
   window.LDH_finalizarPreparacionV114=finalizeAndRemoveFromPreparation;
   window.LDH_prepCleanupAdvancedOnceV146=function(){ return refreshAfterCleanup(true); };
-  console.info('[Preparacion V146] Cierre seguro activo sin polling de Firestore cada 3 segundos');
+  window.LDH_prepCleanupAdvancedOnceV147=function(){ return refreshAfterCleanup(true); };
+  window.LDH_prepCleanupAdvancedOnceV152=function(){ return refreshAfterCleanup(true); };
+  console.info('[Preparacion V152] Cierre seguro por eventos reales; sin barridos automaticos de Firestore');
 })();
 </script>
 
