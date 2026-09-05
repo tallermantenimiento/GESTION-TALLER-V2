@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
+<meta name="ldh-fix-quota" content="PREPARACION-V146-CIERRE-EVENTOS-SIN-POLLING-20260905" />
 <title>Preparación de pedidos</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
@@ -3603,12 +3604,8 @@ function cargarLista() {
       ));
     }catch(_){ }
     if(totalLines>0 && completeLines===totalLines && advancedStageV141 && !debtPendingV141){
-      // No borramos a ciegas: V114/V115 mantiene el consumo seguro y el tombstone.
-      try{
-        if(typeof window.LDH_finalizarPreparacionV114==='function'){
-          setTimeout(()=>{ try{ window.LDH_finalizarPreparacionV114(ref); }catch(_){ } },0);
-        }
-      }catch(_){ }
+      // V146 · No abrir una transaccion de Stock por cada tarjeta durante cargarLista().
+      // El wrapper V114/V146 agenda un unico barrido secuencial y limitado al terminar la lista.
       return;
     }
 
@@ -27547,6 +27544,24 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   // antes de confirmar el consumo físico en Stock. Corrige la antigua V80 que
   // podía borrar prep_recepcion_ sin pasar por V106.
   const finalizingV114=new Set();
+  const LDH_PREP_AUTO_CLOSE_MIN_GAP_V146=60000;
+  const LDH_PREP_QUOTA_COOLDOWN_V146=120000;
+  function isStockQuotaErrorV146(error){
+    const code=String(error?.code ?? error?.status ?? '').toLowerCase();
+    const message=String(error?.message ?? error ?? '').toLowerCase();
+    return code.includes('resource-exhausted') || code==='429' ||
+      message.includes('quota exceeded') || message.includes('too many requests') ||
+      message.includes('resource_exhausted') || message.includes('resource-exhausted');
+  }
+  function stockQuotaBlockedV146(){
+    return Number(window.__LDH_PREP_STOCK_QUOTA_COOLDOWN_UNTIL_V146 || 0) > Date.now();
+  }
+  function armStockQuotaCooldownV146(error){
+    if(!isStockQuotaErrorV146(error)) return false;
+    window.__LDH_PREP_STOCK_QUOTA_COOLDOWN_UNTIL_V146=Date.now()+LDH_PREP_QUOTA_COOLDOWN_V146;
+    console.warn('[Preparacion V146] Stock temporalmente bloqueado por cuota; se detienen reintentos automaticos durante 2 minutos.');
+    return true;
+  }
   async function finalizeAndRemoveFromPreparation(ref){
     /* V121 · No retirar automáticamente la OT que Fabricación acaba de abrir
        para revisión/reparación. El resto de pedidos conserva exactamente el
@@ -27555,6 +27570,9 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
       const holdRef=String(window.__LDH_PREP_REPAIR_HOLD_REF_V121||'').trim();
       if(holdRef && sameRef(holdRef,ref)) return false;
     }catch(_){ }
+    // V146 · Si Firestore acaba de responder RESOURCE_EXHAUSTED/429, no iniciar
+    // nuevas transacciones automaticas hasta que termine el enfriamiento.
+    if(stockQuotaBlockedV146()) return false;
     const info=closeInfo(ref);
     if(!info || finalizingV114.has(ref)) return false;
     const consumeFn=window.LDH_consumirStockAsignadoAlMandarFabricacion
@@ -27570,6 +27588,7 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
           await window.LDH_prepRestorePrematureConsumptionV106(ref);
         }
       }catch(error){
+        if(armStockQuotaCooldownV146(error)) throw error;
         console.warn('[Preparacion V114] No se pudo normalizar consumo prematuro',ref,error);
       }
 
@@ -27642,6 +27661,7 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
       return true;
     }catch(error){
       // Regla de seguridad: si falla Stock, la OT SE QUEDA en Preparación.
+      armStockQuotaCooldownV146(error);
       console.warn('[Preparacion V114] Cierre aplazado; no se retira Preparación',ref,error);
       return false;
     }finally{
@@ -27696,13 +27716,19 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   }
 
   let cleanupRunningV114=false;
-  async function refreshAfterCleanup(){
-    if(window.__LDH_PREP_V115_SEND_LOCK__) return;
-    if(cleanupRunningV114) return;
+  let cleanupLastRunV146=0;
+  async function refreshAfterCleanup(force){
+    if(window.__LDH_PREP_V115_SEND_LOCK__) return 0;
+    if(cleanupRunningV114) return 0;
+    if(stockQuotaBlockedV146()) return 0;
+    const now=Date.now();
+    if(force!==true && (now-cleanupLastRunV146)<LDH_PREP_AUTO_CLOSE_MIN_GAP_V146) return 0;
+    cleanupLastRunV146=now;
     cleanupRunningV114=true;
     try{
       const removed=await cleanupAdvancedCompletedOrders();
       if(removed && typeof previousList === 'function') previousList();
+      return removed;
     }finally{
       cleanupRunningV114=false;
     }
@@ -27721,16 +27747,20 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   }
   function start(){
     markBuild();
-    refreshAfterCleanup();
+    // V146 · Un unico barrido inicial, ya con la pagina cargada. No polling continuo.
+    setTimeout(function(){ refreshAfterCleanup(); },1200);
   }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',start,{once:true});
   else start();
-  [900,2200,5000,10000,18000].forEach(delay => setTimeout(function(){ markBuild(); refreshAfterCleanup(); },delay));
+  [900,2200,5000,10000,18000].forEach(delay => setTimeout(markBuild,delay));
   setInterval(markBuild,1600);
-  setInterval(refreshAfterCleanup,3000);
-  window.addEventListener('storage',function(){ setTimeout(refreshAfterCleanup,180); });
+  // V146 · ELIMINADO: setInterval(refreshAfterCleanup,3000).
+  // Los cierres se disparan por eventos reales (cargar lista, cambio de storage, envio/recepcion)
+  // y refreshAfterCleanup limita cualquier barrido automatico a uno por minuto.
+  window.addEventListener('storage',function(){ setTimeout(refreshAfterCleanup,350); });
   window.LDH_finalizarPreparacionV114=finalizeAndRemoveFromPreparation;
-  console.info('[Preparacion V114] Cierre seguro activo: consumir Stock antes de retirar Preparación');
+  window.LDH_prepCleanupAdvancedOnceV146=function(){ return refreshAfterCleanup(true); };
+  console.info('[Preparacion V146] Cierre seguro activo sin polling de Firestore cada 3 segundos');
 })();
 </script>
 
