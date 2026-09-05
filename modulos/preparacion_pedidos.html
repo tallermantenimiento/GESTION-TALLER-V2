@@ -2105,17 +2105,15 @@ function devolverNoAsignado(matId, maxQty){
 function fbEnsure(){
   if(fbApp) return;
   fbApp = firebase.initializeApp(firebaseConfig);
-  fbAuth = firebase.auth();
-  fbDb   = firebase.firestore();
+  /* V153 · En gestion-taller-v2 el proveedor Anónimo está deshabilitado.
+     No inicializamos Auth compat aquí: Firestore de esta capa ya funcionaba
+     sin sesión y evitamos el 400 repetitivo + la carga innecesaria de gapi. */
+  fbAuth = null;
+  fbDb   = firebase.firestore(fbApp);
 }
 async function fsLoginHidden(){
-  try{
-    if(!fbAuth.currentUser){
-      await fbAuth.signInAnonymously();
-    }
-  }catch(e){
-    console.warn("Auth anónimo no disponible:", e);
-  }
+  // V153 · Sin reintentos de Auth anónimo legacy en gestion-taller-v2.
+  return false;
 }
 function fsDocRef(){
   return fbDb.collection(FIRESTORE_DOC_PATH.col).doc(FIRESTORE_DOC_PATH.doc);
@@ -10199,15 +10197,10 @@ init();
   }
 
   async function ensureAuth(){
-    try{
-      if(!firebase.auth) return;
-      const auth = firebase.auth();
-      if(!auth.currentUser){
-        await auth.signInAnonymously();
-      }
-    }catch(e){
-      // si reglas permiten sin auth, no bloqueamos
-    }
+    /* V153 · Auth anónimo legacy deshabilitado en gestion-taller-v2.
+       Esta sincronización continúa usando las reglas Firestore existentes,
+       sin generar un POST accounts:signUp 400 en cada ciclo. */
+    return false;
   }
 
   async function backupAll(reason){
@@ -15962,7 +15955,8 @@ function LDH_prepVolverMenu(){
   }
   function docRef(){ return db().collection(COL).doc(DOC); }
   async function ensureAuth(){
-    try{ if(firebase.auth && !firebase.auth().currentUser) await firebase.auth().signInAnonymously(); }catch(e){}
+    // V153 · No reintentar Auth anónimo compat en gestion-taller-v2.
+    return false;
   }
 
   function storageKeys(store){
@@ -23518,14 +23512,25 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
       const signature=JSON.stringify(payload);
       if(sent.get(key)===signature) continue;
       sent.set(key,signature);
-      try{const ok=await window.LDH_WorkflowV2.markCompositePart(payload);if(!ok)sent.delete(key);}catch(error){sent.delete(key);console.warn('[Pedido compuesto] estado de partida no sincronizado',error);}
+      try{
+        const ok=await window.LDH_WorkflowV2.markCompositePart(payload);
+        if(!ok) sent.delete(key);
+      }catch(error){
+        /* V153 · No borrar la firma al fallar la misma petición. Antes, el
+           setInterval de 5 s volvía a enviar indefinidamente un payload que
+           Firestore rechazaba con commit 400. La misma firma queda bloqueada
+           hasta que cambie de verdad la meta de la partida o se recargue. */
+        console.warn('[Pedido compuesto] estado de partida no sincronizado; no se reintentará sin cambios',{
+          code:error?.code||'', message:error?.message||String(error||''), key, payload
+        });
+      }
     }
   }
   window.LDH_syncCompositePartStatusesV56=scan;
   window.addEventListener('storage',()=>setTimeout(scan,300));
   document.addEventListener('DOMContentLoaded',()=>setTimeout(scan,1200),{once:true});
   window.addEventListener('load',()=>setTimeout(scan,1600),{once:true});
-  setInterval(scan,5000);
+  // V153 · Sin polling cada 5 s: sincronización de partidas solo por eventos reales.
 })();
 </script>
 
@@ -25800,7 +25805,9 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
       const app=(firebase.apps || []).find(item=>item?.options?.projectId==='gestion-taller-v2') || firebase.initializeApp({
         apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',authDomain:'gestion-taller-v2.firebaseapp.com',projectId:'gestion-taller-v2',storageBucket:'gestion-taller-v2.firebasestorage.app',messagingSenderId:'888590823508',appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'
       },'prep-v74-rest-fallback');
-      try{const auth=firebase.auth(app);if(!auth.currentUser) await auth.signInAnonymously();}catch(_){ }
+      /* V153 · No inicializar Auth compat para gestion-taller-v2: el proveedor
+         anónimo está deshabilitado y esta ruta REST/Firestore debe fallar por
+         sus reglas reales, no por intentos repetidos de alta anónima. */
       const database=firebase.firestore(app);
       const receptionKey='prep_recepcion_'+reference;
       const metaKey='prep_meta_'+reference;
@@ -27761,6 +27768,7 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   window.LDH_prepCleanupAdvancedOnceV147=function(){ return refreshAfterCleanup(true); };
   window.LDH_prepCleanupAdvancedOnceV152=function(){ return refreshAfterCleanup(true); };
   console.info('[Preparacion V152] Cierre seguro por eventos reales; sin barridos automaticos de Firestore');
+  console.info('[Preparacion V153] Auth legacy sin reintentos y partidas compuestas sin polling de 5 s');
 })();
 </script>
 
