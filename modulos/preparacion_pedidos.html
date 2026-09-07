@@ -6,7 +6,7 @@
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
-<meta name="ldh-prep-reimport-build" content="PREPARACION-V161-GENERACION-OT-PROTEGIDA-20260907" />
+<meta name="ldh-prep-reimport-build" content="PREPARACION-V162-REIMPORTACION-AUTORITATIVA-SIN-TOMBSTONE-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
@@ -3086,8 +3086,19 @@ if (existsAny) {
   existUid = String(metaExist.pedido_uid || metaExist.pedidoUid || metaExist.uid || '').trim();
 }
 
-// UID FINAL: preferimos el UID existente (si lo hay), si no el entrante, si no uno nuevo.
-const pedidoUid = existUid || incomingUid || ('P'+Date.now().toString(36)+Math.random().toString(36).slice(2,6));
+// V162: si la referencia existente es un tombstone/cierre y Cálculo trae un
+// pedido_uid NUEVO, estamos ante una generación nueva de la OT. En ese caso el
+// UID entrante es autoritativo; reutilizar el UID del tombstone hacía que la
+// nueva ficha pareciera ser exactamente la generación borrada y desapareciera.
+const sourceV162 = String(snap && snap.source || '').trim().toLowerCase();
+const explicitCalcImportV162 = sourceV162 === 'calculo_modulo_limpio' || sourceV162.indexOf('calculo') === 0;
+const existingTombstoneV162 = !!(metaExist && (metaExist.deleted_from_preparation === true || metaExist.closed_from_preparation === true));
+const deletedUidV162 = String(metaExist && (metaExist.preparation_deleted_pedido_uid || metaExist.pedido_uid || metaExist.pedidoUid || metaExist.uid) || '').trim();
+const newGenerationV162 = !!(explicitCalcImportV162 && existingTombstoneV162 && incomingUid && (!deletedUidV162 || incomingUid !== deletedUidV162));
+
+// UID FINAL: una reimportación explícita tras borrado usa el UID nuevo; una
+// recalculación normal de una OT todavía viva conserva el UID existente.
+const pedidoUid = newGenerationV162 ? incomingUid : (existUid || incomingUid || ('P'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)));
 
 // IMPORTANTE: al importar desde Cálculo queremos 1 solo pedido por referencia.
 // Si existe ya el pedido, lo sobreescribimos (NO generamos "#2").
@@ -3122,6 +3133,19 @@ try{
 }catch(e){}
 
       let metaParaGuardar = JSON.parse(getAny(KM(ref)) || "{}");
+      // V162: una orden explícitamente reenviada desde Cálculo con UID nuevo no
+      // hereda el tombstone ni el cierre de la generación anterior. Esta limpieza
+      // afecta solo a la meta de ESTA referencia; no toca Stock ni otras OTs.
+      if(newGenerationV162){
+        [
+          'deleted_from_preparation','preparation_deleted_at','preparation_deleted_by',
+          'preparation_deleted_pedido_uid','preparation_deleted_order_id',
+          'closed_from_preparation','preparation_closed_at','preparation_closed_by',
+          'stock_consumed_on_close','stock_consumed_qty'
+        ].forEach(key=>{ try{ delete metaParaGuardar[key]; }catch(_){ metaParaGuardar[key]=undefined; } });
+        metaParaGuardar.reopened_after_delete_v162 = true;
+        metaParaGuardar.reopened_after_delete_at = new Date().toISOString();
+      }
       metaParaGuardar.referencia = ref;
       // V137 · La OT técnica sigue siendo la clave interna. La identificación escrita
       // en Agenda/Cálculo se conserva solo como referencia visible.
@@ -3652,6 +3676,23 @@ function cargarLista() {
     // en copias antiguas deleted:true de Fabricación/Almacén. Una misma OT puede
     // borrarse y volver a calcularse legítimamente desde Agenda/Cálculo.
     // El borrado persistente manual sigue protegido por deleted_from_preparation.
+
+    // V162 · Si quedó el flag deleted_from_preparation de una generación vieja,
+    // pero el pedido_uid actual es distinto del UID que fue borrado, el tombstone
+    // ya no pertenece a esta ficha y no puede retirarla de la lista.
+    if(meta && meta.deleted_from_preparation === true){
+      const currentUidV162=String(meta.pedido_uid||meta.pedidoUid||meta.uid||'').trim();
+      const deletedUidV162=String(meta.preparation_deleted_pedido_uid||'').trim();
+      if(currentUidV162 && deletedUidV162 && currentUidV162 !== deletedUidV162){
+        [
+          'deleted_from_preparation','preparation_deleted_at','preparation_deleted_by',
+          'preparation_deleted_pedido_uid','preparation_deleted_order_id'
+        ].forEach(key=>{ try{ delete meta[key]; }catch(_){ } });
+        meta.reopened_after_delete_v162=true;
+        meta.reopened_after_delete_at=meta.reopened_after_delete_at||new Date().toISOString();
+        try{ setAny(KM(ref),JSON.stringify(meta)); }catch(_){ }
+      }
+    }
 
     // V139 · Una OT cerrada correctamente al entrar en Fabricación no puede
     // volver a aparecer en Preparación aunque una copia remota antigua conserve
@@ -30987,5 +31028,11 @@ window.LDH_PREP_V160='REIMPORTAR-OT-BORRADA-MISMA-REFERENCIA-20260907';
 window.LDH_PREP_V161='GENERACION-OT-PROTEGIDA-POR-UID-20260907';
 document.documentElement.dataset.ldhPrepReimport='V161';
 console.info('[Preparacion V161] Nueva generacion de una OT protegida por pedido_uid frente a tombstones remotos antiguos, incluso tras caducar el guard temporal.');
+</script>
+
+<script id="LDH_PREP_V162_REIMPORT_AUTHORITATIVE_20260907">
+window.LDH_PREP_V162='REIMPORTACION-AUTORITATIVA-SIN-TOMBSTONE-20260907';
+document.documentElement.dataset.ldhPrepReimport='V162';
+console.info('[Preparacion V162] Reimportacion explicita desde Calculo usa pedido_uid nuevo y no hereda tombstones/cierres de una generacion anterior.');
 </script>
 </body></html>
