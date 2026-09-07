@@ -8,6 +8,7 @@
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
 <meta name="ldh-prep-reimport-build" content="PREPARACION-V164-OPENREF-CALCULO-NO-ACTIVA-V120-FABRICACION-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
+<meta name="ldh-prep-debt-list-build" content="PREPARACION-V165-DEUDA-VISIBLE-CABECERA-TARJETA-20260907" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -13496,6 +13497,14 @@ init();
     const all = local.length ? local : global;
     return (all || []).filter(it => _n(it.qtyPending ?? it.pending ?? it.pendingQty ?? it.qty_pending) > 0);
   }
+  function formatDebtQtyV165(value){
+    const n = _n(value);
+    try{
+      return n.toLocaleString("es-ES", {minimumFractionDigits:0, maximumFractionDigits:3});
+    }catch(_){
+      return String(Math.round(n * 1000) / 1000).replace(".", ",");
+    }
+  }
   function debtSummary(ref){
     const items = debtItemsFromMeta(ref);
     const by = {};
@@ -13509,9 +13518,11 @@ init();
     const keys = Object.keys(by);
     return {
       items,
+      by,
       count: items.length,
       total: keys.reduce((a,k)=>a+by[k],0),
-      label: keys.length ? keys.map(k=>`${k} (+${by[k]})`).join(" · ") : ""
+      label: keys.length ? keys.map(k=>`${k} (+${formatDebtQtyV165(by[k])})`).join(" · ") : "",
+      cardLabel: keys.length ? keys.map(k=>`${k} · ${formatDebtQtyV165(by[k])}`).join(" · ") : ""
     };
   }
   function hasDebt(ref){
@@ -13591,23 +13602,32 @@ init();
         document.querySelectorAll("#lista .item").forEach(item=>{
           const ref = item.dataset.ref || "";
           if(!ref) return;
-          const top = item.querySelector("div[style*='justify-content:space-between']");
-          const badges = top ? top.querySelector("div[style*='justify-content:flex-end']") : null;
+          // V165 · Las tarjetas actuales usan .ldh-card-status. El selector legacy
+          // por estilos inline dejó de encontrar la cabecera y por eso la deuda solo
+          // aparecía dentro del detalle, no en la lista principal.
+          const modernBadges = item.querySelector(".ldh-card-status");
+          const legacyTop = item.querySelector("div[style*='justify-content:space-between']");
+          const badges = modernBadges || (legacyTop ? legacyTop.querySelector("div[style*='justify-content:flex-end']") : null);
           if(!badges) return;
 
-          const st = getTrabajoStage(ref);
-          if(!badges.querySelector(".flow-stage-list")){
-            const sp = document.createElement("span");
-            sp.className = "badge flow-stage-list " + stageClass(st);
-            sp.innerHTML = `<span class="dot"></span> ${stageLabel(st)}`;
-            badges.insertBefore(sp, badges.firstChild);
+          // Mantener la antigua pill de fase solo para tarjetas legacy. Las tarjetas
+          // modernas ya pintan su estado en cargarLista() y no debemos duplicarlo.
+          if(!modernBadges){
+            const st = getTrabajoStage(ref);
+            if(!badges.querySelector(".flow-stage-list")){
+              const sp = document.createElement("span");
+              sp.className = "badge flow-stage-list " + stageClass(st);
+              sp.innerHTML = `<span class="dot"></span> ${stageLabel(st)}`;
+              badges.insertBefore(sp, badges.firstChild);
+            }
           }
 
           const ds = debtSummary(ref);
           if(ds.total > 0 && !badges.querySelector(".flow-debt-list")){
             const dp = document.createElement("span");
             dp.className = "badge b-debt-pill flow-debt-list";
-            dp.innerHTML = `DEUDOR · ${ds.total}`;
+            dp.innerHTML = `DEUDOR · ${ds.cardLabel || formatDebtQtyV165(ds.total)}`;
+            dp.title = "Abrir regularización de deuda";
             dp.onclick = (ev)=>{ ev.stopPropagation(); openPrepFromDebt(ref); };
             badges.insertBefore(dp, badges.firstChild);
           }
