@@ -2959,6 +2959,8 @@ function saveLinkMap(){
   // 0) URL hash/query: transporte directo desde Cálculo.
   // Añadido sobre base buena sin tocar render/stock v2.
   let snap = null;
+  // V157 · Distinguir una navegación real desde Cálculo de un snapshot local antiguo.
+  let snapDirectV157 = false;
   try{
     const hash = String(window.location.hash || '').replace(/^#/, '');
     let rawUrlPayload = '';
@@ -2973,6 +2975,7 @@ function saveLinkMap(){
       rawUrlPayload = qp.get('ldhPrep') || qp.get('payload') || '';
     }
     if(rawUrlPayload){
+      snapDirectV157 = true;
       snap = JSON.parse(rawUrlPayload);
       try{
         const clean = window.location.pathname + window.location.search;
@@ -2985,6 +2988,7 @@ function saveLinkMap(){
   try{
     const nm = String(window.name || "").trim();
     if(nm.startsWith("LDH_PREP|")){
+      snapDirectV157 = true;
       snap = JSON.parse(nm.slice("LDH_PREP|".length));
       // limpiar para evitar reimportar al refrescar
       try{ window.name = ""; }catch(_){}
@@ -3067,6 +3071,25 @@ function saveLinkMap(){
           }
         }
       }catch(error){}
+
+      /* V157 · Una meta cerrada es un tombstone autoritativo.
+         Un snapshot que solo sobrevive en latest_materials_v1/pedido_en_preparacion
+         no puede reabrir una OT ya entregada. Una navegación REAL desde Cálculo
+         (payload URL/window.name) sí puede hacerlo de forma explícita. */
+      try{
+        const closedV157 = JSON.parse(getAny(KM(refBase)) || '{}') || {};
+        if(closedV157.closed_from_preparation === true && !snapDirectV157){
+          const guardTsV157 = Number(getAny('prep_import_guard_ts') || 0) || 0;
+          const guardRefV157 = String(getAny('prep_last_import_ref') || getAny('prep_focus_ref') || '').trim();
+          const techV157 = v => (typeof LDH_extractTechnicalRefV143 === 'function' ? LDH_extractTechnicalRefV143(v) : String(v||'').trim().toUpperCase());
+          const freshSameV157 = !!(guardTsV157 && (Date.now()-guardTsV157)<120000 && techV157(guardRefV157)===techV157(refBase));
+          if(!freshSameV157){
+            ['latest_materials_v1','pedido_en_preparacion','prep_pedido_payload','prep_materiales'].forEach(k=>{ try{ removeAny(k); }catch(_){ } });
+            console.info('[Preparacion V157] Snapshot local antiguo ignorado para OT ya cerrada:', refBase);
+            return;
+          }
+        }
+      }catch(_){ }
 
 // UID de pedido:
 // - Si el pedido ya existe con esa referencia, REUTILIZAMOS su UID para NO crear "#2".
@@ -16543,7 +16566,18 @@ function LDH_prepVolverMenu(){
       const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
       if(!raw) return;
       const m = JSON.parse(raw) || {};
-      if(m.en_fabricacion || m.fabricacion_ts || String(m.fase||"").includes("fabric")){
+      // V157 · Este bloque legacy solo puede normalizar una OT que de verdad siga en Fabricación.
+      // Nunca puede borrar un estado superior ni un cierre autoritativo.
+      let authoritativeStageV157 = '';
+      try{ if(typeof window.LDH_getTrabajoStage === 'function') authoritativeStageV157 = String(window.LDH_getTrabajoStage(ref)||'').toLowerCase().trim(); }catch(_){ }
+      const metaStageV157 = String(m.fase || m.estado || m.status || m.workflow_stage || '').toLowerCase();
+      if(
+        m.closed_from_preparation === true || m.entregado || m.en_entregado || m.entregado_ts ||
+        m.en_almacen || m.almacen_ts || m.en_pintura || m.pintura_ts ||
+        metaStageV157.includes('entreg') || metaStageV157.includes('almacen') || metaStageV157.includes('pint') ||
+        ['pintura','almacen','entregado'].includes(authoritativeStageV157)
+      ) return;
+      if(m.en_fabricacion || m.fabricacion_ts || metaStageV157.includes("fabric")){
         let changed = false;
         ["entregado","en_entregado","entregado_ts","en_almacen","almacen_ts","en_pintura","pintura_ts"].forEach(k=>{ if(k in m){ delete m[k]; changed = true; } });
         if(m.fase !== "fabricacion"){ m.fase = "fabricacion"; changed = true; }
@@ -30771,6 +30805,167 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   window.LDH_PREP_V151_REPLENISH_PENDING=replenishPendingV151;
   document.documentElement.dataset.ldhPreparacionInternalOt='V151';
   console.info('[Preparacion V151] Prestamos internos entre OTs activos; reposicion parcial del proveedor vinculada a la OT responsable actual.');
+})();
+</script>
+
+
+
+<!-- LDH_PREP_V157_CIERRE_TERMINAL_AUTORITATIVO_20260907 -->
+<meta name="ldh-prep-terminal-guard" content="PREPARACION-V157-CIERRE-TERMINAL-AUTORITATIVO-20260907">
+<script id="LDH_PREP_V157_CIERRE_TERMINAL_AUTORITATIVO_20260907">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V157_TERMINAL_GUARD__) return;
+  window.__LDH_PREP_V157_TERMINAL_GUARD__=true;
+
+  const BUILD='PREPARACION-V157-CIERRE-TERMINAL-AUTORITATIVO-20260907';
+  const TERMINAL_PAYLOAD_KEYS=['latest_materials_v1','pedido_en_preparacion','prep_pedido_payload','prep_materiales'];
+  const FOCUS_KEYS=['prep_focus_ref','prep_focus_hash_ref','prep_auto_open_ref','prep_last_import_ref'];
+  const num=v=>{const x=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const txt=v=>String(v==null?'':v).trim();
+  const norm=v=>txt(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  const parse=(raw,fb)=>{try{return raw?JSON.parse(raw):fb;}catch(_){return fb;}};
+  function techRef(v){
+    const raw=txt(v);const m=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?\b/);
+    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw.toUpperCase();
+  }
+  function sameRef(a,b){const x=techRef(a),y=techRef(b);return !!(x&&y&&x===y);}
+  function getKey(k){
+    try{if(typeof getAny==='function'){const v=getAny(k);if(v!==null&&v!==undefined)return v;}}catch(_){ }
+    try{const v=localStorage.getItem(k);if(v!==null)return v;}catch(_){ }
+    try{return sessionStorage.getItem(k);}catch(_){return null;}
+  }
+  function setKey(k,v){
+    try{if(typeof setAny==='function'){setAny(k,v);return true;}}catch(_){ }
+    let ok=false;try{localStorage.setItem(k,v);ok=true;}catch(_){ }try{sessionStorage.setItem(k,v);ok=true;}catch(_){ }return ok;
+  }
+  function delKey(k){
+    try{if(typeof removeAny==='function'){removeAny(k);return;}}catch(_){ }
+    try{localStorage.removeItem(k);}catch(_){ }try{sessionStorage.removeItem(k);}catch(_){ }
+  }
+  function rowRef(row){return txt(row&&(row.ref||row.referencia||row.reference||row.technical_ref||row.technicalRef||row.pedidoRef||row.jobRef||row.idPedido));}
+  function terminalFromRow(row,pool){
+    if(!row||typeof row!=='object') return false;
+    if(row.archived===true||row.archivado===true) return true;
+    const st=norm([row.fase,row.phase,row.estado,row.status,row.workflow_stage,row.stage,row.etapa].filter(Boolean).join(' '));
+    if(st.includes('entreg')||st.includes('archiv')||st.includes('finaliz')) return true;
+    if(['entregados','completados','entregas'].includes(pool)) return true;
+    const total=Math.max(0,num(row.total||row.unidades||row.uds||row.qty||row.cantidad));
+    const flow=row.flow||row.flujo||row.phaseCounts||row.fases||{};
+    const delivered=Math.max(num(row.delivered||row.entregado||row.entregadas),num(flow.entregado||flow.ent||flow.delivered));
+    return total>0&&delivered+0.000001>=total;
+  }
+  function authoritativeTerminal(ref,meta){
+    meta=meta&&typeof meta==='object'?meta:{};
+    if(meta.closed_from_preparation===true) return {terminal:true,source:'meta_closed'};
+    const mst=norm([meta.fase,meta.estado,meta.status,meta.workflow_stage].filter(Boolean).join(' '));
+    if(meta.entregado||meta.en_entregado||meta.entregado_ts||mst.includes('entreg')) return {terminal:true,source:'meta_entregado'};
+    try{
+      if(typeof window.LDH_getTrabajoStage==='function'){
+        const st=norm(window.LDH_getTrabajoStage(ref));
+        if(st==='entregado'||st.includes('entreg')) return {terminal:true,source:'workflow_stage'};
+      }
+    }catch(_){ }
+    const db=parse(getKey('ldh_db')||getKey('TallerFlowDB'),{});
+    const pools=['entregados','completados','entregas','almacen','almacenes','pintura','pinturas','fabricacion','fab','deliveries','trabajos'];
+    for(const pool of pools){
+      const rows=Array.isArray(db&&db[pool])?db[pool]:[];
+      for(const row of rows){
+        if(!sameRef(rowRef(row),ref)) continue;
+        if(terminalFromRow(row,pool)) return {terminal:true,source:'ldh_db:'+pool,row};
+      }
+    }
+    return {terminal:false,source:''};
+  }
+  function pendingBorrow(payload){
+    return !!(payload&&Array.isArray(payload.items)&&payload.items.some(it=>num(it&&(it.qtyPending??it.pending??it.pendingQty??it.qty_pending))>0));
+  }
+  function stockDbV157(){const pack=parse(getKey('ldh_v2_company_stock_v1'),{});return pack&&pack.db&&typeof pack.db==='object'?pack.db:pack;}
+  function hasDebt(ref,meta,stockDb){
+    if(pendingBorrow(meta&&meta.unassignedBorrow)) return true;
+    try{if(typeof getGlobalBorrow==='function'&&pendingBorrow(getGlobalBorrow(ref))) return true;}catch(_){ }
+    try{if(typeof window.LDH_trabajoTieneDeuda==='function'&&window.LDH_trabajoTieneDeuda(ref)) return true;}catch(_){ }
+    const rows=Array.isArray(stockDb&&stockDb.internalOtReplenishmentsV1)?stockDb.internalOtReplenishmentsV1:[];
+    return rows.some(r=>r&&num(r.pendingQty)>0&&!['repuesto','cerrado','cancelado'].includes(norm(r.status))&&sameRef(r.currentDebtorRef||r.currentDebtorStorageRef||r.originalRef,ref));
+  }
+  function freshImportFor(ref){
+    const ts=Number(getKey('prep_import_guard_ts')||0)||0;
+    if(!ts||(Date.now()-ts)>=120000) return false;
+    const r=txt(getKey('prep_last_import_ref')||getKey('prep_focus_ref')||'');
+    return sameRef(r,ref);
+  }
+  function clearPayloadIfSame(ref){
+    TERMINAL_PAYLOAD_KEYS.forEach(k=>{
+      const raw=getKey(k);if(!raw)return;const p=parse(raw,null);if(!p||typeof p!=='object')return;
+      const pr=txt(p.technical_ref||p.technicalRef||p.composite_part_reference||p.partReference||p.ref||p.referencia);
+      if(pr&&sameRef(pr,ref)) delKey(k);
+    });
+    try{
+      const nm=txt(window.name);
+      if(nm.startsWith('LDH_PREP|')){const p=parse(nm.slice('LDH_PREP|'.length),null);const pr=p&&txt(p.technical_ref||p.composite_part_reference||p.ref||p.referencia);if(pr&&sameRef(pr,ref))window.name='';}
+    }catch(_){ }
+  }
+  function closeTerminalResidue(ref,meta,lines,terminal){
+    const keyR='prep_recepcion_'+ref,keyM='prep_meta_'+ref;
+    const stamp=new Date().toISOString();
+    const incomplete=(Array.isArray(lines)?lines:[]).filter(l=>num(l&&(l.qty_recibida??l.recibida))<num(l&&(l.qty_pedida??l.pedida??l.qty))).length;
+    const closed={
+      ...(meta||{}),
+      entregado:true,en_entregado:true,en_fabricacion:false,en_pintura:false,en_almacen:false,
+      fase:'entregado',estado:'entregado',status:'entregado',workflow_stage:'entregado',
+      closed_from_preparation:true,
+      preparation_closed_at:stamp,
+      preparation_closed_by:BUILD,
+      preparation_terminal_cleanup_v157:true,
+      preparation_terminal_cleanup_source_v157:terminal&&terminal.source||'terminal',
+      preparation_terminal_cleanup_line_count_v157:Array.isArray(lines)?lines.length:0,
+      preparation_terminal_cleanup_incomplete_lines_v157:incomplete,
+      // No marcamos stock_consumed_on_close: esta reparación NO vuelve a consumir Stock.
+      terminal_cleanup_no_stock_reconsume_v157:true
+    };
+    delKey(keyR);
+    setKey(keyM,JSON.stringify(closed));
+    FOCUS_KEYS.forEach(k=>{const v=txt(getKey(k));if(v&&sameRef(v,ref))delKey(k);});
+    clearPayloadIfSame(ref);
+    return true;
+  }
+  function prepRefs(){
+    const out=new Set();
+    for(const store of [localStorage,sessionStorage]){
+      try{for(let i=0;i<store.length;i++){const k=store.key(i)||'';if(k.startsWith('prep_recepcion_'))out.add(k.slice('prep_recepcion_'.length));}}catch(_){ }
+    }
+    return [...out];
+  }
+  function pruneTerminalResidues(){
+    let changed=0;const stockDb=stockDbV157();
+    for(const ref of prepRefs()){
+      const meta=parse(getKey('prep_meta_'+ref),{})||{};
+      if(freshImportFor(ref)) continue;
+      const terminal=authoritativeTerminal(ref,meta);
+      if(!terminal.terminal||hasDebt(ref,meta,stockDb)) continue;
+      const lines=parse(getKey('prep_recepcion_'+ref),[]);
+      if(closeTerminalResidue(ref,meta,Array.isArray(lines)?lines:[],terminal)){
+        changed++;
+        console.info('[Preparacion V157] Residuo terminal retirado sin reconsumir Stock:',ref,terminal.source);
+      }
+    }
+    if(changed){
+      window.__LDH_PREP_SUPPRESS_AUTO_OPEN_UNTIL=Date.now()+4000;
+      setTimeout(()=>{try{if(window.__ldhPrepSyncNow)window.__ldhPrepSyncNow('terminal_cleanup_v157');}catch(_){ }},80);
+    }
+    return changed;
+  }
+  window.LDH_prepCleanupTerminalResiduesV157=pruneTerminalResidues;
+
+  const baseList=window.cargarLista;
+  if(typeof baseList==='function'&&!baseList.__ldhTerminalV157){
+    const wrapped=function(){pruneTerminalResidues();return baseList.apply(this,arguments);};
+    wrapped.__ldhTerminalV157=true;wrapped.__ldhTerminalV157Base=baseList;window.cargarLista=wrapped;
+  }
+  const run=()=>{const changed=pruneTerminalResidues();if(changed&&typeof window.cargarLista==='function'){try{window.cargarLista();}catch(_){ }}};
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(run,120),{once:true});else setTimeout(run,120);
+  setTimeout(run,1200);
+  console.info('[Preparacion V157] Cierre terminal autoritativo activo; entregadas/archivadas no vuelven a Preparacion y no se reconsume Stock.');
 })();
 </script>
 
