@@ -6,7 +6,7 @@
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
-<meta name="ldh-prep-reimport-build" content="PREPARACION-V160-REIMPORTAR-OT-BORRADA-20260907" />
+<meta name="ldh-prep-reimport-build" content="PREPARACION-V161-GENERACION-OT-PROTEGIDA-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
@@ -16218,6 +16218,25 @@ function LDH_prepVolverMenu(){
       return !!(meta && (meta.closed_from_preparation === true || meta.deleted_from_preparation === true));
     }catch(_){ return false; }
   }
+  function metaObjV161(raw){
+    try{ return raw && typeof raw === "object" ? raw : JSON.parse(String(raw || "{}")) || {}; }
+    catch(_){ return {}; }
+  }
+  function localGenerationOverridesRemoteDeleteV161(localRaw,remoteRaw){
+    const local=metaObjV161(localRaw), remote=metaObjV161(remoteRaw);
+    if(!remote || remote.deleted_from_preparation !== true) return false;
+    if(!local || local.deleted_from_preparation === true) return false;
+
+    const localUid=String(local.pedido_uid||local.pedidoUid||local.uid||"").trim();
+    const deletedUid=String(remote.preparation_deleted_pedido_uid||remote.pedido_uid||remote.pedidoUid||remote.uid||"").trim();
+    if(localUid && deletedUid) return localUid !== deletedUid;
+
+    // Compatibilidad si el tombstone antiguo no guardaba UID.
+    if(local.reopened_after_delete_v25 === true) return true;
+    const localTs=Date.parse(local.createdAt||local.created_at||local.fecha||0)||0;
+    const deleteTs=Date.parse(remote.preparation_deleted_at||remote.deletedAt||0)||0;
+    return !!(localTs && deleteTs && localTs > deleteTs);
+  }
   function refFromPrepKeyV139(k,prefix){
     return String(k || "").slice(String(prefix || "").length);
   }
@@ -16237,6 +16256,7 @@ function LDH_prepVolverMenu(){
     let changed = false;
     let preservedFreshImport = false;
     let preservedClosedV139 = false;
+    let preservedNewGenerationV161 = false;
     applyingRemote = true;
     try{
       Array.from(all).forEach(k => {
@@ -16252,15 +16272,21 @@ function LDH_prepVolverMenu(){
           return;
         }
 
-        // V139 · Si una referencia ya fue cerrada en Preparación, una nube
-        // antigua no puede reponer su ficha de recepción. Miramos tanto la meta
-        // local como la meta del propio snapshot remoto para que funcione también
-        // en otro PC que reciba el cierre por primera vez.
+        // V139/V161 · Un cierre/borrado remoto antiguo no puede reponer ni
+        // borrar arbitrariamente una generación distinta de la misma OT.
+        // El UID guardado en el tombstone decide si el borrado pertenece a la
+        // generación local actual, incluso cuando ya han pasado los 90 s del guard.
         if(k.indexOf("prep_recepcion_") === 0){
           const ref = refFromPrepKeyV139(k,"prep_recepcion_");
           const metaKey = "prep_meta_" + ref;
-          const localClosed = closedMetaV139(getValue(metaKey));
-          const remoteClosed = closedMetaV139(rdata[metaKey]);
+          const localMetaRaw = getValue(metaKey);
+          const remoteMetaRaw = rdata[metaKey];
+          if(localGenerationOverridesRemoteDeleteV161(localMetaRaw,remoteMetaRaw)){
+            preservedNewGenerationV161 = true;
+            return;
+          }
+          const localClosed = closedMetaV139(localMetaRaw);
+          const remoteClosed = closedMetaV139(remoteMetaRaw);
           if(localClosed || remoteClosed){
             if(getValue(k) !== null){ removeBoth(k); changed = true; }
             preservedClosedV139 = true;
@@ -16268,8 +16294,14 @@ function LDH_prepVolverMenu(){
           }
         }
         if(k.indexOf("prep_meta_") === 0){
-          const localClosed = closedMetaV139(getValue(k));
-          const remoteClosed = closedMetaV139(rdata[k]);
+          const localRaw = getValue(k);
+          const remoteRaw = rdata[k];
+          if(localGenerationOverridesRemoteDeleteV161(localRaw,remoteRaw)){
+            preservedNewGenerationV161 = true;
+            return;
+          }
+          const localClosed = closedMetaV139(localRaw);
+          const remoteClosed = closedMetaV139(remoteRaw);
           if(localClosed && !remoteClosed){
             preservedClosedV139 = true;
             return;
@@ -16308,6 +16340,11 @@ function LDH_prepVolverMenu(){
     if(changed) refreshViews(true);
     if(preservedFreshImport && booted){
       setTimeout(function(){ pushNow("fresh_import_preserved_v55:" + freshInfo.guardRef); }, 80);
+    }
+    if(preservedNewGenerationV161 && booted){
+      // Aunque el guard temporal haya caducado, publicar la generación nueva
+      // para retirar de la nube el tombstone de la generación anterior.
+      setTimeout(function(){ pushNow("new_generation_overrides_delete_v161"); }, 90);
     }
     if(preservedClosedV139 && booted){
       // Publica enseguida el estado sin prep_recepcion_<REF>; doc.set merge:false
@@ -30945,9 +30982,10 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
 </script>
 
 
-<script id="LDH_PREP_V160_REIMPORT_DELETED_20260907">
+<script id="LDH_PREP_V161_REIMPORT_DELETED_20260907">
 window.LDH_PREP_V160='REIMPORTAR-OT-BORRADA-MISMA-REFERENCIA-20260907';
-document.documentElement.dataset.ldhPrepReimport='V160';
-console.info('[Preparacion V160] Recalculo de OT borrada: importacion fresca prevalece sobre tombstone remoto antiguo; sin auto-borrado por copias deleted:true de Fabricacion.');
+window.LDH_PREP_V161='GENERACION-OT-PROTEGIDA-POR-UID-20260907';
+document.documentElement.dataset.ldhPrepReimport='V161';
+console.info('[Preparacion V161] Nueva generacion de una OT protegida por pedido_uid frente a tombstones remotos antiguos, incluso tras caducar el guard temporal.');
 </script>
 </body></html>
