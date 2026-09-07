@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
+<meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
@@ -2959,8 +2960,6 @@ function saveLinkMap(){
   // 0) URL hash/query: transporte directo desde Cálculo.
   // Añadido sobre base buena sin tocar render/stock v2.
   let snap = null;
-  // V157 · Distinguir una navegación real desde Cálculo de un snapshot local antiguo.
-  let snapDirectV157 = false;
   try{
     const hash = String(window.location.hash || '').replace(/^#/, '');
     let rawUrlPayload = '';
@@ -2975,7 +2974,6 @@ function saveLinkMap(){
       rawUrlPayload = qp.get('ldhPrep') || qp.get('payload') || '';
     }
     if(rawUrlPayload){
-      snapDirectV157 = true;
       snap = JSON.parse(rawUrlPayload);
       try{
         const clean = window.location.pathname + window.location.search;
@@ -2988,7 +2986,6 @@ function saveLinkMap(){
   try{
     const nm = String(window.name || "").trim();
     if(nm.startsWith("LDH_PREP|")){
-      snapDirectV157 = true;
       snap = JSON.parse(nm.slice("LDH_PREP|".length));
       // limpiar para evitar reimportar al refrescar
       try{ window.name = ""; }catch(_){}
@@ -3071,25 +3068,6 @@ function saveLinkMap(){
           }
         }
       }catch(error){}
-
-      /* V157 · Una meta cerrada es un tombstone autoritativo.
-         Un snapshot que solo sobrevive en latest_materials_v1/pedido_en_preparacion
-         no puede reabrir una OT ya entregada. Una navegación REAL desde Cálculo
-         (payload URL/window.name) sí puede hacerlo de forma explícita. */
-      try{
-        const closedV157 = JSON.parse(getAny(KM(refBase)) || '{}') || {};
-        if(closedV157.closed_from_preparation === true && !snapDirectV157){
-          const guardTsV157 = Number(getAny('prep_import_guard_ts') || 0) || 0;
-          const guardRefV157 = String(getAny('prep_last_import_ref') || getAny('prep_focus_ref') || '').trim();
-          const techV157 = v => (typeof LDH_extractTechnicalRefV143 === 'function' ? LDH_extractTechnicalRefV143(v) : String(v||'').trim().toUpperCase());
-          const freshSameV157 = !!(guardTsV157 && (Date.now()-guardTsV157)<120000 && techV157(guardRefV157)===techV157(refBase));
-          if(!freshSameV157){
-            ['latest_materials_v1','pedido_en_preparacion','prep_pedido_payload','prep_materiales'].forEach(k=>{ try{ removeAny(k); }catch(_){ } });
-            console.info('[Preparacion V157] Snapshot local antiguo ignorado para OT ya cerrada:', refBase);
-            return;
-          }
-        }
-      }catch(_){ }
 
 // UID de pedido:
 // - Si el pedido ya existe con esa referencia, REUTILIZAMOS su UID para NO crear "#2".
@@ -16566,18 +16544,7 @@ function LDH_prepVolverMenu(){
       const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
       if(!raw) return;
       const m = JSON.parse(raw) || {};
-      // V157 · Este bloque legacy solo puede normalizar una OT que de verdad siga en Fabricación.
-      // Nunca puede borrar un estado superior ni un cierre autoritativo.
-      let authoritativeStageV157 = '';
-      try{ if(typeof window.LDH_getTrabajoStage === 'function') authoritativeStageV157 = String(window.LDH_getTrabajoStage(ref)||'').toLowerCase().trim(); }catch(_){ }
-      const metaStageV157 = String(m.fase || m.estado || m.status || m.workflow_stage || '').toLowerCase();
-      if(
-        m.closed_from_preparation === true || m.entregado || m.en_entregado || m.entregado_ts ||
-        m.en_almacen || m.almacen_ts || m.en_pintura || m.pintura_ts ||
-        metaStageV157.includes('entreg') || metaStageV157.includes('almacen') || metaStageV157.includes('pint') ||
-        ['pintura','almacen','entregado'].includes(authoritativeStageV157)
-      ) return;
-      if(m.en_fabricacion || m.fabricacion_ts || metaStageV157.includes("fabric")){
+      if(m.en_fabricacion || m.fabricacion_ts || String(m.fase||"").includes("fabric")){
         let changed = false;
         ["entregado","en_entregado","entregado_ts","en_almacen","almacen_ts","en_pintura","pintura_ts"].forEach(k=>{ if(k in m){ delete m[k]; changed = true; } });
         if(m.fase !== "fabricacion"){ m.fase = "fabricacion"; changed = true; }
@@ -18097,64 +18064,133 @@ async function LDH_prepPublishIntercompanyV45(payload) {
       throw new Error("La empresa de origen y la de destino no pueden ser la misma.");
     }
 
-    let material = remoteDB.materials.find((row) =>
-      LDH_prepMaterialMatchesV45(
-        row,
-        payload.sourceMaterialId,
-        payload.materialName
-      )
-    );
-    if (!material) {
-      const materialId = String(
-        payload.sourceMaterialId
-        || `mat_intercompany_${Date.now().toString(36)}`
+    /* V158 · Préstamos/donaciones entre empresas con materiales copiados.
+     * Cada empresa puede tener una ficha distinta (materialId diferente) para el
+     * mismo material. El modal ya lo resolvía por empresa + nombre real, pero la
+     * transacción V45 exigía el mismo materialId en origen y destino. Eso hacía
+     * fallar, por ejemplo, pintura RAL 7035 de SKLUM -> WOODS aunque Stock mostrase
+     * físico/libre correcto. Aquí resolvemos PRIMERO la fila real de Stock de cada
+     * empresa y conservamos sus IDs propios. */
+    const materialIdOfV158 = (row) => String(
+      row?.materialId ?? row?.matId ?? row?.material_id ?? row?.idMaterial ?? ""
+    ).trim();
+    const materialObjByIdV158 = (id) => {
+      const wanted = String(id || "").trim();
+      return remoteDB.materials.find((row) => String(
+        row?.id ?? row?.materialId ?? row?.matId ?? ""
+      ).trim() === wanted) || null;
+    };
+    const rowCompanyMatchesV158 = (row, company, canonicalId, label) => {
+      const values = [
+        row?.companyId, row?.empresaId, row?.company, row?.empresa,
+        row?.companyName, row?.empresaNombre
+      ].filter((v) => v !== undefined && v !== null && String(v).trim() !== "");
+      if (values.some((value) => LDH_prepCompanyMatchesV45(company, value))) return true;
+      const targets = [canonicalId, label].map(LDH_prepNormCloudV30).filter(Boolean);
+      return values.map(LDH_prepNormCloudV30).filter(Boolean).some((value) => targets.includes(value));
+    };
+    const rowMaterialMatchesV158 = (row, requestedId, requestedName) => {
+      const rowId = materialIdOfV158(row);
+      const wantedId = String(requestedId || "").trim();
+      if (wantedId && rowId && rowId === wantedId) return true;
+      const linkedMaterial = rowId ? materialObjByIdV158(rowId) : null;
+      if (linkedMaterial && LDH_prepMaterialMatchesV45(linkedMaterial, "", requestedName)) return true;
+      const rowName = String(
+        row?.materialName ?? row?.material_nombre ?? row?.nombreMaterial
+        ?? row?.material ?? row?.mat ?? row?.name ?? row?.nombre ?? ""
       );
-      material = {
-        id: materialId,
-        materialId,
-        name: String(payload.materialName || materialId),
-        nombre: String(payload.materialName || materialId),
-        unit: String(payload.unit || "ud"),
-        unidad: String(payload.unit || "ud"),
-        type: String(payload.unit || "").toLowerCase().includes("barra")
-          ? "hierro"
-          : "ferreteria",
-        createdFrom: "preparacion_intercompany_v45",
-        createdAt: now
-      };
-      remoteDB.materials.push(material);
-    }
-    const materialId = String(
-      material.id ?? material.materialId ?? material.matId
-      ?? payload.sourceMaterialId
-    );
-    if (!materialId) throw new Error("El material no tiene identificador válido.");
+      const targetName = LDH_prepNormCloudV30(requestedName);
+      return !!(targetName && LDH_prepNormCloudV30(rowName) === targetName);
+    };
+    const resolveStockRowV158 = (company, companyId, companyName, requestedId, requestedName) => {
+      const companyRows = remoteDB.stock.filter((row) =>
+        rowCompanyMatchesV158(row, company, companyId, companyName)
+      );
+      const wantedId = String(requestedId || "").trim();
+      return companyRows.find((row) => wantedId && materialIdOfV158(row) === wantedId)
+        || companyRows.find((row) => rowMaterialMatchesV158(row, requestedId, requestedName))
+        || null;
+    };
 
-    const sourceStockRow = remoteDB.stock.find((row) =>
-      String(row?.companyId ?? row?.empresaId ?? "") === sourceCompanyId
-      && String(row?.materialId ?? row?.matId ?? "") === materialId
+    let sourceStockRow = resolveStockRowV158(
+      sourceCompany,
+      sourceCompanyId,
+      payload.sourceCompanyName,
+      payload.sourceMaterialId,
+      payload.materialName
     );
     if (!sourceStockRow) {
       throw new Error("La empresa de origen no tiene este material en su Stock.");
     }
 
-    let destinationStockRow = remoteDB.stock.find((row) =>
-      String(row?.companyId ?? row?.empresaId ?? "") === destinationCompanyId
-      && String(row?.materialId ?? row?.matId ?? "") === materialId
+    let sourceMaterialId = materialIdOfV158(sourceStockRow);
+    let material = sourceMaterialId ? materialObjByIdV158(sourceMaterialId) : null;
+    if (!material) {
+      material = remoteDB.materials.find((row) =>
+        LDH_prepMaterialMatchesV45(row, payload.sourceMaterialId, payload.materialName)
+      ) || null;
+    }
+    if (!sourceMaterialId) {
+      sourceMaterialId = String(
+        material?.id ?? material?.materialId ?? material?.matId
+        ?? payload.sourceMaterialId ?? ""
+      ).trim();
+      if (sourceMaterialId) sourceStockRow.materialId = sourceMaterialId;
+    }
+    if (!sourceMaterialId) throw new Error("El material de origen no tiene identificador válido.");
+    if (!material) {
+      material = {
+        id: sourceMaterialId,
+        materialId: sourceMaterialId,
+        name: String(payload.materialName || sourceMaterialId),
+        nombre: String(payload.materialName || sourceMaterialId),
+        unit: String(payload.unit || "ud"),
+        unidad: String(payload.unit || "ud"),
+        type: String(payload.unit || "").toLowerCase().includes("barra") ? "hierro" : "ferreteria",
+        createdFrom: "preparacion_intercompany_v158_repair",
+        createdAt: now
+      };
+      remoteDB.materials.push(material);
+    }
+
+    let destinationStockRow = resolveStockRowV158(
+      destinationCompany,
+      destinationCompanyId,
+      payload.destinationCompanyName,
+      payload.destinationMaterialId,
+      payload.materialName
     );
+    let destinationMaterialId = destinationStockRow ? materialIdOfV158(destinationStockRow) : "";
+    if (!destinationMaterialId) {
+      const explicitDestinationMaterial = materialObjByIdV158(payload.destinationMaterialId);
+      const destinationMaterial = explicitDestinationMaterial
+        || remoteDB.materials.find((row) =>
+          LDH_prepMaterialMatchesV45(row, payload.destinationMaterialId, payload.materialName)
+        )
+        || material;
+      destinationMaterialId = String(
+        destinationMaterial?.id ?? destinationMaterial?.materialId ?? destinationMaterial?.matId
+        ?? payload.destinationMaterialId ?? sourceMaterialId
+      ).trim();
+    }
+    if (!destinationMaterialId) destinationMaterialId = sourceMaterialId;
     if (!destinationStockRow) {
       destinationStockRow = {
-        id: `st_intercompany_${destinationCompanyId}_${materialId}`
+        id: `st_intercompany_${destinationCompanyId}_${destinationMaterialId}`
           .replace(/[^a-zA-Z0-9_-]+/g, "_"),
         companyId: destinationCompanyId,
-        materialId,
+        materialId: destinationMaterialId,
         min: 0,
         location: "",
-        createdFrom: "preparacion_intercompany_v45",
+        createdFrom: "preparacion_intercompany_v158",
         createdAt: now
       };
       remoteDB.stock.push(destinationStockRow);
     }
+
+    // Compatibilidad con la V45: materialId representa desde aquí la ficha REAL
+    // del origen. El destino conserva destinationMaterialId (puede ser distinto).
+    const materialId = sourceMaterialId;
 
     /*
      * Nunca se acepta como saldo definitivo el valor que vio el navegador al
@@ -18262,7 +18298,7 @@ async function LDH_prepPublishIntercompanyV45(payload) {
           destinationCompany.name ?? destinationCompany.nombre
           ?? payload.destinationCompanyName ?? destinationCompanyId
         ),
-        toMaterialId: materialId,
+        toMaterialId: destinationMaterialId,
         qty,
         cantidad: qty,
         pendingQty: qty,
@@ -18333,7 +18369,7 @@ async function LDH_prepPublishIntercompanyV45(payload) {
         remoteDB.movements.push({
           id: inId,
           companyId: destinationCompanyId,
-          materialId,
+          materialId: destinationMaterialId,
           type: "entrada",
           tipo: "entrada",
           qty,
@@ -18358,7 +18394,7 @@ async function LDH_prepPublishIntercompanyV45(payload) {
       LDH_prepUpsertRemoteV45(remoteDB.assignments, {
         id: destinationAssignmentId,
         companyId: destinationCompanyId,
-        materialId,
+        materialId: destinationMaterialId,
         qty,
         cantidad: qty,
         phase: "preparacion",
@@ -18391,6 +18427,8 @@ async function LDH_prepPublishIntercompanyV45(payload) {
         toCompanyId: destinationCompanyId,
         toEmpresa: destinationName,
         materialId,
+        sourceMaterialId,
+        destinationMaterialId,
         material: String(payload.materialName || ""),
         qty,
         cantidad: qty,
@@ -18414,7 +18452,8 @@ async function LDH_prepPublishIntercompanyV45(payload) {
     return {
       remoteDB,
       chunks,
-      destinationMaterialId: materialId,
+      sourceMaterialId,
+      destinationMaterialId,
       destinationAssignmentId
     };
   });
@@ -23686,6 +23725,7 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   console.info('[Preparacion V154] Estado compuesto legacy sin commits automaticos; sync V56 disponible solo manual');
 console.info('[Preparacion V155] Pletinas: recibido autoritativo desde Stock nube y tope de asignacion por mm');
 console.info('[Preparacion V156] Pletinas: desbloqueo de tombstone tras recepcion confirmada y reconciliacion local segura');
+console.info('[Preparacion V158] Prestamos interempresa: origen/destino resueltos por Stock real con IDs propios por empresa');
 })();
 </script>
 
@@ -30805,167 +30845,6 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
   window.LDH_PREP_V151_REPLENISH_PENDING=replenishPendingV151;
   document.documentElement.dataset.ldhPreparacionInternalOt='V151';
   console.info('[Preparacion V151] Prestamos internos entre OTs activos; reposicion parcial del proveedor vinculada a la OT responsable actual.');
-})();
-</script>
-
-
-
-<!-- LDH_PREP_V157_CIERRE_TERMINAL_AUTORITATIVO_20260907 -->
-<meta name="ldh-prep-terminal-guard" content="PREPARACION-V157-CIERRE-TERMINAL-AUTORITATIVO-20260907">
-<script id="LDH_PREP_V157_CIERRE_TERMINAL_AUTORITATIVO_20260907">
-(function(){
-  'use strict';
-  if(window.__LDH_PREP_V157_TERMINAL_GUARD__) return;
-  window.__LDH_PREP_V157_TERMINAL_GUARD__=true;
-
-  const BUILD='PREPARACION-V157-CIERRE-TERMINAL-AUTORITATIVO-20260907';
-  const TERMINAL_PAYLOAD_KEYS=['latest_materials_v1','pedido_en_preparacion','prep_pedido_payload','prep_materiales'];
-  const FOCUS_KEYS=['prep_focus_ref','prep_focus_hash_ref','prep_auto_open_ref','prep_last_import_ref'];
-  const num=v=>{const x=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(x)?x:0;};
-  const txt=v=>String(v==null?'':v).trim();
-  const norm=v=>txt(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
-  const parse=(raw,fb)=>{try{return raw?JSON.parse(raw):fb;}catch(_){return fb;}};
-  function techRef(v){
-    const raw=txt(v);const m=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?\b/);
-    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw.toUpperCase();
-  }
-  function sameRef(a,b){const x=techRef(a),y=techRef(b);return !!(x&&y&&x===y);}
-  function getKey(k){
-    try{if(typeof getAny==='function'){const v=getAny(k);if(v!==null&&v!==undefined)return v;}}catch(_){ }
-    try{const v=localStorage.getItem(k);if(v!==null)return v;}catch(_){ }
-    try{return sessionStorage.getItem(k);}catch(_){return null;}
-  }
-  function setKey(k,v){
-    try{if(typeof setAny==='function'){setAny(k,v);return true;}}catch(_){ }
-    let ok=false;try{localStorage.setItem(k,v);ok=true;}catch(_){ }try{sessionStorage.setItem(k,v);ok=true;}catch(_){ }return ok;
-  }
-  function delKey(k){
-    try{if(typeof removeAny==='function'){removeAny(k);return;}}catch(_){ }
-    try{localStorage.removeItem(k);}catch(_){ }try{sessionStorage.removeItem(k);}catch(_){ }
-  }
-  function rowRef(row){return txt(row&&(row.ref||row.referencia||row.reference||row.technical_ref||row.technicalRef||row.pedidoRef||row.jobRef||row.idPedido));}
-  function terminalFromRow(row,pool){
-    if(!row||typeof row!=='object') return false;
-    if(row.archived===true||row.archivado===true) return true;
-    const st=norm([row.fase,row.phase,row.estado,row.status,row.workflow_stage,row.stage,row.etapa].filter(Boolean).join(' '));
-    if(st.includes('entreg')||st.includes('archiv')||st.includes('finaliz')) return true;
-    if(['entregados','completados','entregas'].includes(pool)) return true;
-    const total=Math.max(0,num(row.total||row.unidades||row.uds||row.qty||row.cantidad));
-    const flow=row.flow||row.flujo||row.phaseCounts||row.fases||{};
-    const delivered=Math.max(num(row.delivered||row.entregado||row.entregadas),num(flow.entregado||flow.ent||flow.delivered));
-    return total>0&&delivered+0.000001>=total;
-  }
-  function authoritativeTerminal(ref,meta){
-    meta=meta&&typeof meta==='object'?meta:{};
-    if(meta.closed_from_preparation===true) return {terminal:true,source:'meta_closed'};
-    const mst=norm([meta.fase,meta.estado,meta.status,meta.workflow_stage].filter(Boolean).join(' '));
-    if(meta.entregado||meta.en_entregado||meta.entregado_ts||mst.includes('entreg')) return {terminal:true,source:'meta_entregado'};
-    try{
-      if(typeof window.LDH_getTrabajoStage==='function'){
-        const st=norm(window.LDH_getTrabajoStage(ref));
-        if(st==='entregado'||st.includes('entreg')) return {terminal:true,source:'workflow_stage'};
-      }
-    }catch(_){ }
-    const db=parse(getKey('ldh_db')||getKey('TallerFlowDB'),{});
-    const pools=['entregados','completados','entregas','almacen','almacenes','pintura','pinturas','fabricacion','fab','deliveries','trabajos'];
-    for(const pool of pools){
-      const rows=Array.isArray(db&&db[pool])?db[pool]:[];
-      for(const row of rows){
-        if(!sameRef(rowRef(row),ref)) continue;
-        if(terminalFromRow(row,pool)) return {terminal:true,source:'ldh_db:'+pool,row};
-      }
-    }
-    return {terminal:false,source:''};
-  }
-  function pendingBorrow(payload){
-    return !!(payload&&Array.isArray(payload.items)&&payload.items.some(it=>num(it&&(it.qtyPending??it.pending??it.pendingQty??it.qty_pending))>0));
-  }
-  function stockDbV157(){const pack=parse(getKey('ldh_v2_company_stock_v1'),{});return pack&&pack.db&&typeof pack.db==='object'?pack.db:pack;}
-  function hasDebt(ref,meta,stockDb){
-    if(pendingBorrow(meta&&meta.unassignedBorrow)) return true;
-    try{if(typeof getGlobalBorrow==='function'&&pendingBorrow(getGlobalBorrow(ref))) return true;}catch(_){ }
-    try{if(typeof window.LDH_trabajoTieneDeuda==='function'&&window.LDH_trabajoTieneDeuda(ref)) return true;}catch(_){ }
-    const rows=Array.isArray(stockDb&&stockDb.internalOtReplenishmentsV1)?stockDb.internalOtReplenishmentsV1:[];
-    return rows.some(r=>r&&num(r.pendingQty)>0&&!['repuesto','cerrado','cancelado'].includes(norm(r.status))&&sameRef(r.currentDebtorRef||r.currentDebtorStorageRef||r.originalRef,ref));
-  }
-  function freshImportFor(ref){
-    const ts=Number(getKey('prep_import_guard_ts')||0)||0;
-    if(!ts||(Date.now()-ts)>=120000) return false;
-    const r=txt(getKey('prep_last_import_ref')||getKey('prep_focus_ref')||'');
-    return sameRef(r,ref);
-  }
-  function clearPayloadIfSame(ref){
-    TERMINAL_PAYLOAD_KEYS.forEach(k=>{
-      const raw=getKey(k);if(!raw)return;const p=parse(raw,null);if(!p||typeof p!=='object')return;
-      const pr=txt(p.technical_ref||p.technicalRef||p.composite_part_reference||p.partReference||p.ref||p.referencia);
-      if(pr&&sameRef(pr,ref)) delKey(k);
-    });
-    try{
-      const nm=txt(window.name);
-      if(nm.startsWith('LDH_PREP|')){const p=parse(nm.slice('LDH_PREP|'.length),null);const pr=p&&txt(p.technical_ref||p.composite_part_reference||p.ref||p.referencia);if(pr&&sameRef(pr,ref))window.name='';}
-    }catch(_){ }
-  }
-  function closeTerminalResidue(ref,meta,lines,terminal){
-    const keyR='prep_recepcion_'+ref,keyM='prep_meta_'+ref;
-    const stamp=new Date().toISOString();
-    const incomplete=(Array.isArray(lines)?lines:[]).filter(l=>num(l&&(l.qty_recibida??l.recibida))<num(l&&(l.qty_pedida??l.pedida??l.qty))).length;
-    const closed={
-      ...(meta||{}),
-      entregado:true,en_entregado:true,en_fabricacion:false,en_pintura:false,en_almacen:false,
-      fase:'entregado',estado:'entregado',status:'entregado',workflow_stage:'entregado',
-      closed_from_preparation:true,
-      preparation_closed_at:stamp,
-      preparation_closed_by:BUILD,
-      preparation_terminal_cleanup_v157:true,
-      preparation_terminal_cleanup_source_v157:terminal&&terminal.source||'terminal',
-      preparation_terminal_cleanup_line_count_v157:Array.isArray(lines)?lines.length:0,
-      preparation_terminal_cleanup_incomplete_lines_v157:incomplete,
-      // No marcamos stock_consumed_on_close: esta reparación NO vuelve a consumir Stock.
-      terminal_cleanup_no_stock_reconsume_v157:true
-    };
-    delKey(keyR);
-    setKey(keyM,JSON.stringify(closed));
-    FOCUS_KEYS.forEach(k=>{const v=txt(getKey(k));if(v&&sameRef(v,ref))delKey(k);});
-    clearPayloadIfSame(ref);
-    return true;
-  }
-  function prepRefs(){
-    const out=new Set();
-    for(const store of [localStorage,sessionStorage]){
-      try{for(let i=0;i<store.length;i++){const k=store.key(i)||'';if(k.startsWith('prep_recepcion_'))out.add(k.slice('prep_recepcion_'.length));}}catch(_){ }
-    }
-    return [...out];
-  }
-  function pruneTerminalResidues(){
-    let changed=0;const stockDb=stockDbV157();
-    for(const ref of prepRefs()){
-      const meta=parse(getKey('prep_meta_'+ref),{})||{};
-      if(freshImportFor(ref)) continue;
-      const terminal=authoritativeTerminal(ref,meta);
-      if(!terminal.terminal||hasDebt(ref,meta,stockDb)) continue;
-      const lines=parse(getKey('prep_recepcion_'+ref),[]);
-      if(closeTerminalResidue(ref,meta,Array.isArray(lines)?lines:[],terminal)){
-        changed++;
-        console.info('[Preparacion V157] Residuo terminal retirado sin reconsumir Stock:',ref,terminal.source);
-      }
-    }
-    if(changed){
-      window.__LDH_PREP_SUPPRESS_AUTO_OPEN_UNTIL=Date.now()+4000;
-      setTimeout(()=>{try{if(window.__ldhPrepSyncNow)window.__ldhPrepSyncNow('terminal_cleanup_v157');}catch(_){ }},80);
-    }
-    return changed;
-  }
-  window.LDH_prepCleanupTerminalResiduesV157=pruneTerminalResidues;
-
-  const baseList=window.cargarLista;
-  if(typeof baseList==='function'&&!baseList.__ldhTerminalV157){
-    const wrapped=function(){pruneTerminalResidues();return baseList.apply(this,arguments);};
-    wrapped.__ldhTerminalV157=true;wrapped.__ldhTerminalV157Base=baseList;window.cargarLista=wrapped;
-  }
-  const run=()=>{const changed=pruneTerminalResidues();if(changed&&typeof window.cargarLista==='function'){try{window.cargarLista();}catch(_){ }}};
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(run,120),{once:true});else setTimeout(run,120);
-  setTimeout(run,1200);
-  console.info('[Preparacion V157] Cierre terminal autoritativo activo; entregadas/archivadas no vuelven a Preparacion y no se reconsume Stock.');
 })();
 </script>
 
