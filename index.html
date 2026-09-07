@@ -2913,6 +2913,10 @@ h2{font-size:34px;line-height:1.05;margin:0 0 10px;letter-spacing:-.04em}
 
 <script id="LDH_INDEX_ESTADISTICA_HIERRO_EMPRESAS_JS_1206">
 (function(){
+  // V5 2026-09-07: motor legacy desactivado. El motor avanzado posterior es la unica fuente de la estadistica.
+  // Evita que un fallo/retraso del motor avanzado deje visible el calculo antiguo (pletinas tratadas como barras).
+  console.info('[Inicio][Hierro V5] Motor estadistico legacy desactivado.');
+  return;
   const KEY = "ldh_v2_company_stock_v1";
   const DEMO_FLAG = "ldh_iron_stats_demo_loaded_v1";
   const BAR_LENGTH_M = 6;
@@ -4164,8 +4168,8 @@ function collectAssignments(db){
     db.updatedAt = now();
     localStorage.setItem(KEY, JSON.stringify(db));
   }
-  function materialById(db, id){ return (db.materials||[]).find(m => String(m.id || m.materialId) === String(id)); }
-  function jobById(db, id){ return (db.jobs||[]).find(j => String(j.id || j.jobId) === String(id)); }
+  function materialById(db, id){ return (db.materials||[]).find(m => m && String(m.id || m.materialId) === String(id)); }
+  function jobById(db, id){ return (db.jobs||[]).find(j => j && String(j.id || j.jobId) === String(id)); }
   function readCompanyMaster(){
     try{
       const raw = localStorage.getItem("ldh_company_master_v1") || sessionStorage.getItem("ldh_company_master_v1") || "";
@@ -4339,9 +4343,19 @@ function collectAssignments(db){
     const unit = norm(line.unitBasis || line.lengthMode || line.unit || line.unidad || "");
     const schema = norm(line.lengthQtySchemaV64 || line.lengthQtySchema || "");
     const source = norm([line.source,line.reason,line.assignmentType,line.createdFrom,line.origin].join(" "));
-    return line.pletinaMm === true || line.pletina_mm === true || line.gestion_mm === true ||
+    const explicitMm = line.pletinaMm === true || line.pletina_mm === true || line.gestion_mm === true ||
       schema === "mm" || unit === "mm" || unit === "milimetro" || unit === "milimetros" ||
       source.includes("pletina_mm") || source.includes("pletina mm");
+    if(explicitMm) return true;
+
+    // Compatibilidad con reservas/asignaciones legacy reconciliadas: algunas guardaron mm reales
+    // (6000, 7200, 11520...) pero conservaron unit='barra' y sin bandera pletinaMm.
+    // 500 o mas "barras" de pletina no es una cantidad operativa razonable; se interpreta como mm.
+    const legacyQty = Math.max(
+      num(line.mmAllocated), num(line.lineMm), num(line.mmAssigned), num(line.total_mm), num(line.totalMm), num(line.mm),
+      num(line.qty_pedida), num(line.pedida), num(line.qty), num(line.cantidad)
+    );
+    return legacyQty >= 500;
   }
   function statsBarLengthMm(line){
     const v = Math.round(num(line && (line.barLengthMm || line.commercial_bar_mm || line.longitudBarraMm || 6000)));
@@ -4812,12 +4826,15 @@ function collectAssignments(db){
       const m = materialById(db, materialId);
       if(!m || !isIronMaterial(m)) return;
 
-      const commonStock = isCommonStockAssignment(a);
+      const rawCompanyId = a.companyId || a.fromCompanyId || a.toCompanyId || "";
+      const rawCompany = (db.companies||[]).find(c => c && String(c.id || c.companyId || c.name || c.nombre || "") === String(rawCompanyId));
+      const commonStock = isCommonStockAssignment(a) || isCommonStockCompany(rawCompany) || norm(companyName(db, rawCompanyId)) === "stock comun";
       let companyId = a.companyId || a.toCompanyId || "";
       let compName = "";
 
       if(commonStock){
         const consumer = commonStockConsumer(db, a);
+        // STOCK COMUN es origen, nunca empresa consumidora. Si no puede resolverse el destino, no se imputa.
         if(!consumer) return;
         companyId = consumer.companyId;
         compName = consumer.company;
@@ -4873,14 +4890,22 @@ function collectAssignments(db){
       if(!m || !isIronMaterial(m)) return;
       const qty = num(r.qty || r.cantidad || 0);
       if(qty <= 0) return;
-      const companyId = r.companyId || "";
-      if(!companyId) return;
-      const compName = companyName(db, companyId);
-      if(!companyIsActive(db, companyId, compName)) return;
+      const rawCompanyId = r.companyId || r.fromCompanyId || "";
+      const rawCompany = (db.companies||[]).find(c => c && String(c.id || c.companyId || c.name || c.nombre || "") === String(rawCompanyId));
+      const commonStock = isCommonStockAssignment(r) || isCommonStockCompany(rawCompany) || norm(companyName(db, rawCompanyId)) === "stock comun";
+      let companyId = r.companyId || "";
+      let compName = companyName(db, companyId);
+      if(commonStock){
+        const consumer = commonStockConsumer(db, r);
+        if(!consumer) return;
+        companyId = consumer.companyId;
+        compName = consumer.company;
+      }
+      if(!companyId || !companyIsActive(db, companyId, compName)) return;
       const dateObj = getLineDate(db, r, r.jobId);
       const recordId = String(r.id || r.reservationId || r.reservaId || "");
       rows.push({
-        source:"Reserva",
+        source:commonStock ? "STOCK COMÚN · reserva" : "Reserva",
         sourceType:"reservation",
         recordId,
         rowKey:recordId ? "reservation:" + recordId : "",
@@ -5573,7 +5598,7 @@ function collectAssignments(db){
 
   function printReport(){
     render();
-    setTimeout(()=>window.print(), 120);
+    window.print();
   }
   function setMode(next){
     mode = next || "total";
@@ -5583,6 +5608,8 @@ function collectAssignments(db){
   window.LDH_IRON_STATS_DEDUP_V3 = true;
   window.__LDH_IRON_STATS_PLETINA_DEDUP_V4 = true;
   window.LDH_IRON_STATS_PLETINA_MM_V4 = true;
+  window.LDH_IRON_STATS_V5_20260907 = true;
+  console.info('[Inicio][Hierro V5] Motor avanzado unico · pletina/mm legacy y Stock comun corregidos.');
   try{ document.documentElement.dataset.ldhIronStatsPletinaMm = "V4-20260814"; }catch(e){}
   window.LDH_IronStats_dedupeCrossSources = LDH_IronStats_dedupeCrossSources;
   window.LDH_IronStats_render = render;
