@@ -23651,6 +23651,7 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
   window.LDH_PREP_V154_COMPOSITE_LEGACY_MANUAL_ONLY=true;
   console.info('[Preparacion V154] Estado compuesto legacy sin commits automaticos; sync V56 disponible solo manual');
 console.info('[Preparacion V155] Pletinas: recibido autoritativo desde Stock nube y tope de asignacion por mm');
+console.info('[Preparacion V156] Pletinas: desbloqueo de tombstone tras recepcion confirmada y reconciliacion local segura');
 })();
 </script>
 
@@ -27956,6 +27957,102 @@ console.info('[Preparacion V155] Pletinas: recibido autoritativo desde Stock nub
     return Math.max(0,q*barMm);
   }
   function barLengthFromRow(row,line){return Math.max(1,Math.round(n(row&&row.barLengthMm)||n(line&&line.commercial_bar_mm)||6000));}
+
+  /* V156 · Una recepción explícita de pletina debe levantar el tombstone creado
+     por LIMPIAR PRUEBA solo DESPUÉS de que Stock nube haya confirmado la operación.
+     Si no se quita ese bloqueo, V62 vuelve a forzar qty_recibida a 0 en cada render. */
+  function clearPletinaCleanupLockV156(line){
+    if(!line) return;
+    try{
+      const cleanup=window.LDH_prepCleanupLockV62;
+      if(cleanup&&typeof cleanup.clearLock==='function') cleanup.clearLock(line);
+    }catch(_){ }
+    try{delete line._ldh_cleanup_tombstone_v62_at;}catch(_){line._ldh_cleanup_tombstone_v62_at='';}
+    try{delete line._ldh_cleanup_tombstone_v62_ref;}catch(_){line._ldh_cleanup_tombstone_v62_ref='';}
+    try{delete line._ldh_cleanup_tombstone_v62_material;}catch(_){line._ldh_cleanup_tombstone_v62_material='';}
+  }
+
+  function pletinaReceiptAssignmentsV156(line,pack,barMm){
+    if(!line||!pack) return [];
+    const ref=norm(currentRef());
+    const targetName=norm(lineName(line));
+    const ids=new Set(lineIds(line).map(String));
+    return (pack.assignments||pack.db?.assignments||[]).filter(a=>{
+      if(!isActive(a)) return false;
+      const aRef=norm(a.consumerRef||a.ref||a.jobRef||a.trabajoRef||'');
+      if(!ref||aRef!==ref) return false;
+      const source=norm(a.source||'');
+      const reason=norm(a.reason||'');
+      const type=norm(a.assignmentType||'');
+      const isReceipt=(source==='preparacion pedidos pletina mm v84')&&
+        (reason==='asignado stock comun pletina mm'||reason==='asignado empresa pletina mm recibida'||
+         type==='stock comun pletina mm'||type==='pletina empresa mm recibida');
+      if(!isReceipt) return false;
+      const mid=String(rowMaterialId(a)||'');
+      if(ids.size&&mid&&ids.has(mid)) return true;
+      const nm=norm(a.materialName||a.material||a.mat||a.name||materialLabel(pack,mid));
+      return !!targetName&&nm===targetName;
+    });
+  }
+
+  function pletinaReceiptAssignedMmV156(line,pack,barMm){
+    return pletinaReceiptAssignmentsV156(line,pack,barMm)
+      .reduce((sum,a)=>sum+qtyMm(a,barMm),0);
+  }
+
+  function pletinaCleanupStampV156(line){
+    const stamps=[
+      line&&line._ldh_cleanup_tombstone_v62_at,
+      line&&line._cleaned_test_consumption_v57_at,
+      line&&line._ldh_test_cleanup_v60_at,
+      line&&line._cleaned_test_consumption_at
+    ].map(v=>Date.parse(String(v||''))).filter(Number.isFinite);
+    return stamps.length?Math.max(...stamps):0;
+  }
+
+  function syncPletinaReceivedFromCloudV156(){
+    const lines=window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]);
+    if(!Array.isArray(lines)||!lines.length||!currentRef()) return false;
+    const pack=stockPack();
+    if(!pack) return false;
+    let changed=false;
+    lines.forEach((line,index)=>{
+      if(!isPletinaMmLine(line)) return;
+      const src=sourceInfo(line);
+      const barMm=Math.max(1,src.barMm||6000);
+      const rows=pletinaReceiptAssignmentsV156(line,pack,barMm);
+      if(!rows.length) return;
+      const ped=Math.max(0,n(line.qty_pedida));
+      const assigned=Math.min(ped,rows.reduce((sum,a)=>sum+qtyMm(a,barMm),0));
+      if(!(assigned>0)) return;
+
+      let locked=false;
+      try{locked=!!(window.LDH_prepCleanupLockV62?.isLocked?.(line));}catch(_){ }
+      if(locked){
+        const cleanupAt=pletinaCleanupStampV156(line);
+        const newest=Math.max(...rows.map(a=>Date.parse(String(a.createdAt||a.updatedAt||''))||0));
+        // Solo levantamos automáticamente el bloqueo si existe una recepción V84
+        // posterior a LIMPIAR PRUEBA. Una asignación antigua nunca resucita la línea.
+        if(!cleanupAt||newest<=cleanupAt) return;
+        clearPletinaCleanupLockV156(line);
+      }
+
+      const before=Math.max(0,n(line.qty_recibida));
+      if(Math.abs(before-assigned)<0.000001) return;
+      line.qty_recibida=assigned; line.recibida=assigned;
+      line.aplicado_qty=Math.min(ped,assigned); line.stock_consumed_qty=Math.min(ped,assigned);
+      line.ok=ped>0&&assigned>=ped; line.completo=line.ok; line.done=line.ok; line.isDone=line.ok; line.isCompleted=line.ok;
+      if(!Array.isArray(line.trace)) line.trace=[];
+      line.trace.push({at:new Date().toISOString(),qty:assigned-before,unit:'mm',source:'pletina_cloud_receipt_sync_v156',absoluteReceivedMm:assigned});
+      changed=true;
+    });
+    if(changed){
+      try{guardarEstadoLocal();}catch(_){ }
+      try{if(window.__ldhPrepSyncNow)Promise.resolve(window.__ldhPrepSyncNow('pletina_sync_v156:'+currentRef())).catch(()=>{});}catch(_){ }
+    }
+    return changed;
+  }
+  window.LDH_prepSyncPletinaReceivedV156=syncPletinaReceivedFromCloudV156;
   function activeOwnAssigned(pack,cid,mid,barMm){return (pack.assignments||pack.db?.assignments||[]).filter(a=>isActive(a)&&rowCompanyId(a)===cid&&rowMaterialId(a)===mid).filter(a=>{try{return typeof LDH_stockEsAsignacionPrestamo==='function'?!LDH_stockEsAsignacionPrestamo(a):!(norm(a.assignmentType||a.reason).includes('otra empresa')||a.toCompanyId);}catch(_){return !a.toCompanyId;}}).reduce((s,a)=>s+qtyMm(a,barMm),0);}
   function activeLent(pack,cid,mid,barMm){return (pack.assignments||pack.db?.assignments||[]).filter(a=>isActive(a)&&String(a.companyId||a.fromCompanyId||'')===cid&&rowMaterialId(a)===mid).filter(a=>{try{return typeof LDH_stockEsAsignacionPrestamo==='function'?LDH_stockEsAsignacionPrestamo(a):(norm(a.assignmentType||a.reason).includes('otra empresa')||!!a.toCompanyId);}catch(_){return !!a.toCompanyId;}}).reduce((s,a)=>s+qtyMm(a,barMm),0);}
   function activeReserved(pack,cid,mid,barMm){return (pack.reservations||[]).filter(r=>isActive(r)&&rowCompanyId(r)===cid&&rowMaterialId(r)===mid).reduce((s,r)=>s+qtyMm(r,barMm),0);}
@@ -28017,7 +28114,11 @@ console.info('[Preparacion V155] Pletinas: recibido autoritativo desde Stock nub
     const rawFree=n(common.physical)-n(common.reserved)-n(common.assigned)-n(common.lent||0); return Math.min(own,Math.max(0,rawFree+own));
   }
   function purchaseInfo(line,neededOverride){
-    const src=sourceInfo(line); const need=neededOverride===undefined?Math.max(0,n(line&&line.qty_pedida)-n(line&&line.qty_recibida)):Math.max(0,n(neededOverride));
+    const src=sourceInfo(line);
+    const pack=(src.company&&src.company.pack)||(src.common&&src.common.pack)||stockPack();
+    const confirmedCloud=Math.min(Math.max(0,n(line&&line.qty_pedida)),pletinaReceiptAssignedMmV156(line,pack,src.barMm));
+    const effectiveReceived=Math.max(Math.max(0,n(line&&line.qty_recibida)),confirmedCloud);
+    const need=neededOverride===undefined?Math.max(0,n(line&&line.qty_pedida)-effectiveReceived):Math.max(0,n(neededOverride));
     const commonFree=src.common&&src.common.ok?Math.max(0,n(src.common.free)):0; const commonOwn=commonOwnReservedUsable(line,src.common,src.barMm);
     const companyFree=src.company&&src.company.ok?Math.max(0,n(src.company.freeMm)):0; const companyOwn=src.company&&src.company.ok?Math.max(0,n(src.company.ownReservedUsableMm)):0;
     const availableMm=commonFree+commonOwn+companyFree+companyOwn; const deficitMm=Math.max(0,need-availableMm); const barsToBuy=deficitMm>0?Math.ceil(deficitMm/src.barMm):0;
@@ -28064,19 +28165,19 @@ console.info('[Preparacion V155] Pletinas: recibido autoritativo desde Stock nub
   window.LDH_pletinaUsarEmpresa=async function(index){
     const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(!line||!isPletinaMmLine(line))return;const info=companyInfo(line);if(!info.ok||!info.materialId)return alert('Esta empresa no tiene ficha de esta pletina.');const falta=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida));if(!falta)return alert('La línea ya está completa.');const mm=Math.min(falta,Math.max(0,n(info.freeMm)));if(mm<=0)return alert('No hay milímetros libres de esta pletina en la empresa del pedido.');
     if(!confirm(`Usar ${fmt(mm)} mm de ${info.company.name||info.company.nombre||'la empresa'} para este trabajo?`))return;
-    try{if(typeof window.LDH_prepAssignPletinaCompanyV81!=='function')throw new Error('El conector PLETINA/MM todavía no está listo.');const res=await window.LDH_prepAssignPletinaCompanyV81({mmAllocated:mm,barLengthMm:info.barLengthMm,companyId:info.companyId,companyName:info.company.name||info.company.nombre||'',materialId:info.materialId,materialName:lineName(line),ref:currentRef(),lineIndex:index});completeMm(index,mm,'pletina_empresa_mm',{barLengthMm:info.barLengthMm,assignmentId:res.assignment&&res.assignment.id});alert(`✅ Asignados ${fmt(mm)} mm desde ${info.company.name||info.company.nombre||'la empresa'}.`);}catch(e){console.error(e);alert('No se ha asignado la pletina.\n\n'+String(e&&e.message||e));}
+    try{if(typeof window.LDH_prepAssignPletinaCompanyV81!=='function')throw new Error('El conector PLETINA/MM todavía no está listo.');const res=await window.LDH_prepAssignPletinaCompanyV81({mmAllocated:mm,barLengthMm:info.barLengthMm,companyId:info.companyId,companyName:info.company.name||info.company.nombre||'',materialId:info.materialId,materialName:lineName(line),ref:currentRef(),lineIndex:index});clearPletinaCleanupLockV156(line);completeMm(index,mm,'pletina_empresa_mm',{barLengthMm:info.barLengthMm,assignmentId:res.assignment&&res.assignment.id});alert(`✅ Asignados ${fmt(mm)} mm desde ${info.company.name||info.company.nombre||'la empresa'}.`);}catch(e){console.error(e);alert('No se ha asignado la pletina.\n\n'+String(e&&e.message||e));}
   };
 
   window.LDH_pletinaUsarReservaEmpresa=async function(index){
     const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(!line||!isPletinaMmLine(line))return;const info=companyInfo(line);const falta=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida));if(!info.ok||!falta)return;const rows=(info.ownReservations||[]).filter(r=>qtyMm(r,info.barLengthMm)>0);if(!rows.length)return alert('No hay una reserva activa de esta pletina para este trabajo.');const r=rows[0];const available=Math.min(qtyMm(r,info.barLengthMm),info.ownReservedUsableMm);const mm=Math.min(falta,available);if(mm<=0)return alert('La reserva existe, pero no está respaldada por stock físico suficiente.');if(!confirm(`Usar ${fmt(mm)} mm de la reserva de ${info.company.name||info.company.nombre||'la empresa'}?`))return;
-    try{const res=await window.LDH_prepAssignPletinaCompanyV81({mmAllocated:mm,barLengthMm:info.barLengthMm,companyId:info.companyId,companyName:info.company.name||info.company.nombre||'',materialId:info.materialId,materialName:lineName(line),ref:currentRef(),lineIndex:index,reservationId:String(r.id||r.reservationId||'')});completeMm(index,mm,'pletina_reserva_empresa_mm',{barLengthMm:info.barLengthMm,assignmentId:res.assignment&&res.assignment.id,reservationId:String(r.id||r.reservationId||'')});}catch(e){console.error(e);alert('No se ha podido usar la reserva.\n\n'+String(e&&e.message||e));}
+    try{const res=await window.LDH_prepAssignPletinaCompanyV81({mmAllocated:mm,barLengthMm:info.barLengthMm,companyId:info.companyId,companyName:info.company.name||info.company.nombre||'',materialId:info.materialId,materialName:lineName(line),ref:currentRef(),lineIndex:index,reservationId:String(r.id||r.reservationId||'')});clearPletinaCleanupLockV156(line);completeMm(index,mm,'pletina_reserva_empresa_mm',{barLengthMm:info.barLengthMm,assignmentId:res.assignment&&res.assignment.id,reservationId:String(r.id||r.reservationId||'')});}catch(e){console.error(e);alert('No se ha podido usar la reserva.\n\n'+String(e&&e.message||e));}
   };
 
   window.LDH_pletinaUsarOtraEmpresa=async function(index){
     const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(!line||!isPletinaMmLine(line))return;const pack=stockPack();const own=companyInfo(line);if(!pack||!own.ok)return alert('Stock no disponible.');const candidates=(pack.companies||[]).filter(c=>!isCommonCompany(c)&&String((typeof _v2IdOfCompany==='function'?_v2IdOfCompany(c):(c.id||c.companyId||c.name))||'')!==String(own.companyId)).map(c=>companyInfo(line,c)).filter(x=>x.ok&&x.materialId&&x.freeMm>0);if(!candidates.length)return alert('No hay otra empresa con mm libres de esta pletina.');
     const menu=candidates.map((x,i)=>`${i+1}. ${x.company.name||x.company.nombre} · libre ${fmt(x.freeMm)} mm`).join('\n');const rawPick=prompt(`Elegir empresa de origen:\n\n${menu}`,'1');if(rawPick===null)return;const pick=candidates[Math.max(0,Math.min(candidates.length-1,Math.round(n(rawPick))-1))];if(!pick)return;const falta=Math.max(0,n(line.qty_pedida)-n(line.qty_recibida));const max=Math.min(falta,pick.freeMm);const raw=prompt(`Milímetros a tomar de ${pick.company.name||pick.company.nombre} (máx. ${fmt(max)}):`,String(Math.round(max)));if(raw===null)return;const mm=Math.round(n(raw));if(mm<=0||mm>max)return alert('Cantidad incorrecta.');
     const operationId='asg_pletina_otra_mm_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);if(typeof window.LDH_publicarPrestamoODonacionEnFirebase!=='function')return alert('La conexión segura con Stock todavía no está lista.');const loanAssignment={id:operationId,companyId:pick.companyId,materialId:pick.materialId,qty:mm,cantidad:mm,phase:'preparacion',fase:'preparacion',status:'activa',estado:'activa',ref:currentRef(),jobRef:currentRef(),assignmentType:'otra_empresa_pletina_mm',reason:'pletina_desde_otra_empresa_mm',fromEmpresa:pick.company.name||pick.company.nombre||'',fromCompanyId:pick.companyId,toCompanyId:own.companyId,toEmpresa:own.company.name||own.company.nombre||'',toMaterialId:own.materialId,unit:'mm',unidad:'mm',unitBasis:'mm',lengthMode:'mm',lengthQtySchemaV64:'mm',pletinaMm:true,mmAllocated:mm,lineMm:mm,barLengthMm:pick.barLengthMm,createdAt:new Date().toISOString(),source:'preparacion_pedidos_pletina_mm_v84',debtExempt:false,returnRequired:true};
-    try{const result=await window.LDH_publicarPrestamoODonacionEnFirebase({operation:'prestamo',sourceMode:'libre',operationId,qty:mm,ref:currentRef(),concept:(window.metaActual||metaActual||{}).concepto||'',sourceCompanyId:pick.companyId,sourceCompanyName:pick.company.name||pick.company.nombre||'',destinationCompanyId:own.companyId,destinationCompanyName:own.company.name||own.company.nombre||'',sourceMaterialId:pick.materialId,destinationMaterialId:own.materialId,materialName:lineName(line),unit:'mm',loanAssignment});if(result&&result.remoteDB){try{setAny(STOCK_KEY,JSON.stringify(result.remoteDB));}catch(_){ }}try{const meta=window.metaActual||(typeof metaActual!=='undefined'?metaActual:null);if(meta&&typeof ensureUnassigned==='function'){const ub=ensureUnassigned(meta);ub.items.push({key:typeof _uaMatchKey==='function'?_uaMatchKey(line):'',matId:own.materialId,name:lineName(line),unit:'mm',qtyPending:mm,pendingQty:mm,fromEmpresa:pick.company.name||pick.company.nombre||'',fromCompanyId:pick.companyId,v2MaterialId:own.materialId,toEmpresa:own.company.name||own.company.nombre||'',toCompanyId:own.companyId,ref:currentRef(),reason:'pletina_otra_empresa_mm_usada',assignmentId:operationId,cloudConfirmed:true,createdAt:Date.now(),lastActionAt:Date.now()});meta.unassignedBorrow=ub;if(typeof saveMetaActual==='function')saveMetaActual();}}catch(_){ }completeMm(index,mm,'pletina_otra_empresa_mm',{barLengthMm:pick.barLengthMm,assignmentId:operationId,fromEmpresa:pick.company.name||pick.company.nombre||''});alert(`✅ Prestados ${fmt(mm)} mm por ${pick.company.name||pick.company.nombre}.\nQueda pendiente devolver ${fmt(mm)} mm.`);}catch(e){console.error(e);alert('No se ha realizado el préstamo.\n\n'+String(e&&e.message||e));}
+    try{const result=await window.LDH_publicarPrestamoODonacionEnFirebase({operation:'prestamo',sourceMode:'libre',operationId,qty:mm,ref:currentRef(),concept:(window.metaActual||metaActual||{}).concepto||'',sourceCompanyId:pick.companyId,sourceCompanyName:pick.company.name||pick.company.nombre||'',destinationCompanyId:own.companyId,destinationCompanyName:own.company.name||own.company.nombre||'',sourceMaterialId:pick.materialId,destinationMaterialId:own.materialId,materialName:lineName(line),unit:'mm',loanAssignment});if(result&&result.remoteDB){try{setAny(STOCK_KEY,JSON.stringify(result.remoteDB));}catch(_){ }}try{const meta=window.metaActual||(typeof metaActual!=='undefined'?metaActual:null);if(meta&&typeof ensureUnassigned==='function'){const ub=ensureUnassigned(meta);ub.items.push({key:typeof _uaMatchKey==='function'?_uaMatchKey(line):'',matId:own.materialId,name:lineName(line),unit:'mm',qtyPending:mm,pendingQty:mm,fromEmpresa:pick.company.name||pick.company.nombre||'',fromCompanyId:pick.companyId,v2MaterialId:own.materialId,toEmpresa:own.company.name||own.company.nombre||'',toCompanyId:own.companyId,ref:currentRef(),reason:'pletina_otra_empresa_mm_usada',assignmentId:operationId,cloudConfirmed:true,createdAt:Date.now(),lastActionAt:Date.now()});meta.unassignedBorrow=ub;if(typeof saveMetaActual==='function')saveMetaActual();}}catch(_){ }clearPletinaCleanupLockV156(line);completeMm(index,mm,'pletina_otra_empresa_mm',{barLengthMm:pick.barLengthMm,assignmentId:operationId,fromEmpresa:pick.company.name||pick.company.nombre||''});alert(`✅ Prestados ${fmt(mm)} mm por ${pick.company.name||pick.company.nombre}.\nQueda pendiente devolver ${fmt(mm)} mm.`);}catch(e){console.error(e);alert('No se ha realizado el préstamo.\n\n'+String(e&&e.message||e));}
   };
 
   const receiveLock=new Set();
@@ -28086,16 +28187,18 @@ console.info('[Preparacion V155] Pletinas: recibido autoritativo desde Stock nub
     let destination=choices[0];if(choices.length>1){const menu=choices.map((c,i)=>`${i+1}. ${c.label}`).join('\n');const raw=prompt(`¿Dónde registrar la barra recibida?\n\n${menu}`, '1');if(raw===null)return;destination=choices[Math.max(0,Math.min(choices.length-1,Math.round(n(raw))-1))]||choices[0];}
     if(!confirm(`Confirmar recepción física\n\n${lineName(line)}\n1 barra completa = ${fmt(barMm)} mm\nDestino: ${destination.label}\n\nSe sumará la barra completa y el trabajo tomará solo los mm que necesite. El sobrante quedará disponible en ${destination.label}.`))return;
     receiveLock.add(key);const btn=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;const old=btn&&btn.textContent;if(btn){btn.disabled=true;btn.textContent='Guardando barra…';}
-    try{if(typeof window.LDH_prepReceivePletinaBarV81!=='function')throw new Error('El conector PLETINA/MM todavía no está listo.');const res=await window.LDH_prepReceivePletinaBarV81(line,index,destination);completeMm(index,res.allocatedMm,'pletina_barra_recibida_v155',{barsReceived:res.reconciledOnly?0:1,barLengthMm:res.barLengthMm,assignmentId:res.assignmentId,operationId:res.operationId,destination:res.companyName,absoluteReceivedMm:res.authoritativeReceivedMm,releasedMm:res.releasedMm});const current=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]||line;const rem=Math.max(0,n(current.qty_pedida)-n(current.qty_recibida));if(res.reconciledOnly){alert(`✅ Pletina reconciliada.\n\nNO se ha añadido otra barra física.\nRecibido confirmado para la OT: ${fmt(res.authoritativeReceivedMm)} mm${res.releasedMm>0?`\nReserva sobrante liberada: ${fmt(res.releasedMm)} mm`:''}${res.unresolvedExcessMm>0?`\n⚠️ Quedan ${fmt(res.unresolvedExcessMm)} mm de exceso no atribuible a recepciones V84.`:''}`);}else{alert(`✅ Barra recibida en ${res.companyName}.\n+${fmt(res.barLengthMm)} mm físicos\nAplicados al trabajo: ${fmt(res.allocatedMm)} mm\nRecibido total confirmado: ${fmt(res.authoritativeReceivedMm)} mm\nLibre después: ${fmt(res.freeAfter)} mm${rem>0?`\n\nAún faltan ${fmt(rem)} mm para este trabajo.`:''}`);}}catch(e){console.error(e);alert('No se ha registrado la barra.\n\n'+String(e&&e.message||e));}finally{receiveLock.delete(key);if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=old||'Recibir 1 barra';}}
+    try{if(typeof window.LDH_prepReceivePletinaBarV81!=='function')throw new Error('El conector PLETINA/MM todavía no está listo.');const res=await window.LDH_prepReceivePletinaBarV81(line,index,destination);clearPletinaCleanupLockV156(line);completeMm(index,res.allocatedMm,'pletina_barra_recibida_v156',{barsReceived:res.reconciledOnly?0:1,barLengthMm:res.barLengthMm,assignmentId:res.assignmentId,operationId:res.operationId,destination:res.companyName,absoluteReceivedMm:res.authoritativeReceivedMm,releasedMm:res.releasedMm});const current=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index]||line;const rem=Math.max(0,n(current.qty_pedida)-n(current.qty_recibida));if(res.reconciledOnly){alert(`✅ Pletina reconciliada.\n\nNO se ha añadido otra barra física.\nRecibido confirmado para la OT: ${fmt(res.authoritativeReceivedMm)} mm${res.releasedMm>0?`\nReserva sobrante liberada: ${fmt(res.releasedMm)} mm`:''}${res.unresolvedExcessMm>0?`\n⚠️ Quedan ${fmt(res.unresolvedExcessMm)} mm de exceso no atribuible a recepciones V84.`:''}`);}else{alert(`✅ Barra recibida en ${res.companyName}.\n+${fmt(res.barLengthMm)} mm físicos\nAplicados al trabajo: ${fmt(res.allocatedMm)} mm\nRecibido total confirmado: ${fmt(res.authoritativeReceivedMm)} mm\nLibre después: ${fmt(res.freeAfter)} mm${rem>0?`\n\nAún faltan ${fmt(rem)} mm para este trabajo.`:''}`);}}catch(e){console.error(e);alert('No se ha registrado la barra.\n\n'+String(e&&e.message||e));}finally{receiveLock.delete(key);if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=old||'Recibir 1 barra';}}
   };
 
   function installReceivedOverride(){const current=window.LDH_marcarRecibidoCompleto;if(typeof current!=="function"||current.__ldhPletinaMmV84)return;const base=current;const wrapped=function(index){const line=(window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]))[index];if(isPletinaMmLine(line))return window.LDH_pletinaRecibirBarra(index);return base.apply(this,arguments);};wrapped.__ldhPletinaMmV84=true;wrapped.__ldhPletinaMmV84Base=base;window.LDH_marcarRecibidoCompleto=wrapped;}
   function markBuild(){window.__LDH_PREP_CANONICAL_BUILD='PREPARACION-V91-FISICO-LEGACY-ID-NOMBRE-20260813';document.documentElement.dataset.ldhPrepBuild=window.__LDH_PREP_CANONICAL_BUILD;document.documentElement.dataset.ldhPrepPletina='v86';const selectors=['#ldhPrepSyncStatusV6','#ldhPrepSyncStatusV5','#ldhPrepSyncStatusV2','#ldhPrepSyncStatus'];for(const selector of selectors){const status=document.querySelector(selector);if(!status)continue;const base=String(status.textContent||'Preparación').replace(/(?:\s*·\s*V\d+)+\s*$/i,'').trim();status.textContent=(base||'Preparación')+' · V91';break;}}
   try{localStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');sessionStorage.setItem('LDH_PREP_PLETINA_MM_READY_V1','1');}catch(_){ }
-  function refresh(){try{installReceivedOverride();markBuild();if(typeof renderTabla==='function'&&currentRef())renderTabla();}catch(_){ }}
+  function refresh(){try{installReceivedOverride();markBuild();const synced=syncPletinaReceivedFromCloudV156();if(typeof renderTabla==='function'&&currentRef())renderTabla();if(synced&&typeof cargarLista==='function')cargarLista();}catch(_){ }}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));},{once:true});else[80,350,1200,3000].forEach(d=>setTimeout(refresh,d));
+  window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(refresh,80));
   setInterval(function(){installReceivedOverride();markBuild();},500);
   console.info('[Preparación V84] PLETINA global en mm: empresa + STOCK COMÚN; compra/recepción por barras');
+  console.info('[Preparación V156] PLETINA: Limpiar prueba ya no bloquea recepciones nuevas; recibido sincronizado desde asignaciones V84 confirmadas');
 })();
 </script>
 <!-- LDH_PREP_PLETINA_MM_V84_GLOBAL_20260813 -->
