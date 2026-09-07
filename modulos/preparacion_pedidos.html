@@ -6,7 +6,7 @@
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
-<meta name="ldh-prep-reimport-build" content="PREPARACION-V162-REIMPORTACION-AUTORITATIVA-SIN-TOMBSTONE-20260907" />
+<meta name="ldh-prep-reimport-build" content="PREPARACION-V163-REIMPORTACION-NUEVA-GENERACION-SIN-FAB-FANTASMA-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
@@ -3216,13 +3216,20 @@ try{
       // Importante: pedido nuevo/reimportado desde Cálculo SIEMPRE queda en Preparación.
       // No debe heredar estados antiguos de la misma referencia.
       if(snap.source !== 'fabricacion_deudor'){
+        // V163 · Una entrada explícita desde Cálculo es SIEMPRE una generación viva en Preparación.
+        // No puede heredar ninguna fase/cierre histórico de una ejecución anterior de la misma OT.
         metaParaGuardar.en_fabricacion = false;
         metaParaGuardar.en_pintura = false;
         metaParaGuardar.en_almacen = false;
         metaParaGuardar.entregado = false;
+        delete metaParaGuardar.en_entregado;
         delete metaParaGuardar.fabricacion_ts;
         delete metaParaGuardar.pintura_ts;
         delete metaParaGuardar.almacen_ts;
+        delete metaParaGuardar.entregado_ts;
+        metaParaGuardar.fase = "preparacion";
+        metaParaGuardar.workflow_stage = "preparacion";
+        metaParaGuardar.workflow_stage_label = "En preparación";
         metaParaGuardar.estado = "pendiente";
         metaParaGuardar.status = "pendiente";
         metaParaGuardar.recepcion_completa = false;
@@ -16231,7 +16238,15 @@ function LDH_prepVolverMenu(){
   function freshImportInfo(){
     try{
       const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
-      const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || "").trim();
+      let urlRef = "";
+      try{
+        const q = new URLSearchParams(location.search || "");
+        urlRef = String(q.get("openRef") || q.get("ref") || q.get("referencia") || "").trim();
+      }catch(_){ }
+      // V163 · getFocusRef() consume prep_focus_ref/prep_last_import_ref al abrir la ficha.
+      // Mantener openRef como respaldo evita que el primer snapshot remoto viejo pise
+      // la generación que acaba de entrar desde Cálculo durante esos mismos segundos.
+      const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || urlRef || "").trim();
       return {
         guardTs,
         guardRef,
@@ -16265,11 +16280,14 @@ function LDH_prepVolverMenu(){
   }
   function localGenerationOverridesRemoteDeleteV161(localRaw,remoteRaw){
     const local=metaObjV161(localRaw), remote=metaObjV161(remoteRaw);
-    if(!remote || remote.deleted_from_preparation !== true) return false;
-    if(!local || local.deleted_from_preparation === true) return false;
+    // V163 · un cierre remoto de una generación anterior (closed_from_preparation)
+    // es igual de peligroso que un tombstone de borrado: no puede eliminar una
+    // generación nueva con pedido_uid distinto.
+    if(!remote || (remote.deleted_from_preparation !== true && remote.closed_from_preparation !== true)) return false;
+    if(!local || local.deleted_from_preparation === true || local.closed_from_preparation === true) return false;
 
     const localUid=String(local.pedido_uid||local.pedidoUid||local.uid||"").trim();
-    const deletedUid=String(remote.preparation_deleted_pedido_uid||remote.pedido_uid||remote.pedidoUid||remote.uid||"").trim();
+    const deletedUid=String(remote.preparation_deleted_pedido_uid||remote.preparation_closed_pedido_uid||remote.pedido_uid||remote.pedidoUid||remote.uid||"").trim();
     if(localUid && deletedUid) return localUid !== deletedUid;
 
     // Compatibilidad si el tombstone antiguo no guardaba UID.
@@ -16717,6 +16735,10 @@ function LDH_prepVolverMenu(){
       const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
       if(!raw) return;
       const m = JSON.parse(raw) || {};
+      // V163 · Este bloque legacy solo puede normalizar una OT que YA NO tenga ficha viva
+      // en Preparación. Si existe prep_recepcion_<REF>, no puede degradarla a Fabricación.
+      const livePrep = localStorage.getItem("prep_recepcion_" + ref) || sessionStorage.getItem("prep_recepcion_" + ref);
+      if(livePrep) return;
       if(m.en_fabricacion || m.fabricacion_ts || String(m.fase||"").includes("fabric")){
         let changed = false;
         ["entregado","en_entregado","entregado_ts","en_almacen","almacen_ts","en_pintura","pintura_ts"].forEach(k=>{ if(k in m){ delete m[k]; changed = true; } });
@@ -29959,17 +29981,13 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
     return '';
   }
   function requestRef(){
-    // Fabricación usa esta clave y navega SIN query. Es la fuente prioritaria.
+    // V163 · Este bloque V120 pertenece EXCLUSIVAMENTE a aperturas solicitadas
+    // desde Fabricación. Fabricación ya deja KEY y navega sin query.
+    // Un openRef genérico también lo usa Cálculo; tratarlo como Fabricación podía
+    // rehidratar una ejecución histórica y marcar la OT nueva como EN FABRICACIÓN.
     let r='';
     try{ r=s(sessionStorage.getItem(KEY)); if(r) return r; }catch(_){ }
     try{ r=s(localStorage.getItem(KEY)); if(r) return r; }catch(_){ }
-    r=s(window.__LDH_PREP_EXPLICIT_OPEN_REF_V119 || window.__LDH_PREP_EXPLICIT_OPEN_REF_V118 || '');
-    if(r) return r;
-    try{
-      const q=new URLSearchParams(location.search||'');
-      r=s(q.get('openRef')||q.get('ref')||q.get('referencia')||'');
-      if(r) return r;
-    }catch(_){ }
     return '';
   }
 
@@ -31034,5 +31052,11 @@ console.info('[Preparacion V161] Nueva generacion de una OT protegida por pedido
 window.LDH_PREP_V162='REIMPORTACION-AUTORITATIVA-SIN-TOMBSTONE-20260907';
 document.documentElement.dataset.ldhPrepReimport='V162';
 console.info('[Preparacion V162] Reimportacion explicita desde Calculo usa pedido_uid nuevo y no hereda tombstones/cierres de una generacion anterior.');
+</script>
+
+<script id="LDH_PREP_V163_GUARD_REIMPORT_FASE_20260907">
+window.LDH_PREP_V163='PREPARACION-V163-REIMPORTACION-NUEVA-GENERACION-SIN-FAB-FANTASMA-20260907';
+document.documentElement.dataset.ldhPrepReimport='V163';
+console.info('[Preparacion V163] Reimportacion de Calculo protegida frente a cierres/fases antiguas de la misma OT.');
 </script>
 </body></html>
