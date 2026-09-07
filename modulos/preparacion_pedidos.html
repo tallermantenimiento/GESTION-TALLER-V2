@@ -6,7 +6,7 @@
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
-<meta name="ldh-prep-reimport-build" content="PREPARACION-V163-REIMPORTACION-NUEVA-GENERACION-SIN-FAB-FANTASMA-20260907" />
+<meta name="ldh-prep-reimport-build" content="PREPARACION-V164-OPENREF-CALCULO-NO-ACTIVA-V120-FABRICACION-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
@@ -29864,10 +29864,12 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   const SAFE_REQUESTED = safeResolve(REQUESTED) || REQUESTED;
   window.__LDH_PREP_EXPLICIT_OPEN_REF_RESOLVED_V119 = SAFE_REQUESTED;
 
-  // Cualquier llave residual de una apertura anterior queda subordinada al openRef actual.
+  // V164 · openRef es generico: lo usan Calculo, Agenda y Fabricacion.
+  // NUNCA debemos convertir un openRef generico en la llave exclusiva de Fabricacion
+  // `ldh_open_prep_after_init_ref`. V119 solo protege la apertura solicitada.
+  // La llave de Fabricacion la debe crear exclusivamente Fabricacion antes de navegar.
   function seedAuthoritativeKeys(){
     for(const st of [sessionStorage,localStorage]){
-      try{ st.setItem('ldh_open_prep_after_init_ref', SAFE_REQUESTED); }catch(_){ }
       try{ st.removeItem('prep_focus_ref'); }catch(_){ }
       try{ st.removeItem('prep_focus_hash_ref'); }catch(_){ }
       try{ st.removeItem('prep_auto_open_ref'); }catch(_){ }
@@ -29929,14 +29931,9 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   }
   [80,220,600,1200,2200].forEach(ms=>setTimeout(forceRequestedOpen,ms));
 
-  // Al terminar la ventana inicial retiramos solo las llaves de auto-apertura;
-  // no tocamos la ficha ni los datos del pedido.
+  // V164 · V119 tampoco elimina la llave exclusiva de Fabricacion.
+  // Si existe, pertenece al flujo que la creo y V120 gestiona su ciclo de vida.
   setTimeout(function(){
-    for(const st of [sessionStorage,localStorage]){
-      try{
-        if(s(st.getItem('ldh_open_prep_after_init_ref'))===SAFE_REQUESTED) st.removeItem('ldh_open_prep_after_init_ref');
-      }catch(_){ }
-    }
     try{ delete window.__LDH_PREP_LOCK_DETAIL_REF; }catch(_){ }
   },AUTH_MS+300);
 
@@ -29958,6 +29955,36 @@ console.info('[Preparación V118] openRef de Fabricación tiene prioridad sobre 
   const START=Date.now();
   let wrapping=false;
   let tempCreated=false;
+
+  // V164 · V120 es EXCLUSIVO de Fabricacion. Calculo tambien navega con ?openRef=
+  // y ademas deja #ldhPrep=... / guard de importacion. Si detectamos ese handoff,
+  // una llave KEY residual no puede rehidratar la OT desde un registro historico de
+  // Fabricacion ni marcarla en Fabricacion.
+  function isCalculationHandoffV164(){
+    try{
+      const hash=String(location.hash||'');
+      if(hash.indexOf('#ldhPrep=')===0 || hash.indexOf('ldhPrep=')>=0) return true;
+    }catch(_){ }
+    try{
+      const q=new URLSearchParams(location.search||'');
+      const ref=String(q.get('openRef')||q.get('ref')||q.get('referencia')||'').trim();
+      const guardTs=Number((typeof window.getAny==='function'?window.getAny('prep_import_guard_ts'):localStorage.getItem('prep_import_guard_ts'))||0)||0;
+      if(ref && guardTs && (Date.now()-guardTs)<90000){
+        const rk='prep_recepcion_'+ref, mk='prep_meta_'+ref;
+        const rr=(typeof window.getAny==='function'?window.getAny(rk):localStorage.getItem(rk));
+        const mr=(typeof window.getAny==='function'?window.getAny(mk):localStorage.getItem(mk));
+        let meta={}; try{ meta=mr?JSON.parse(mr):{}; }catch(_){ meta={}; }
+        const prepStage=!meta.en_fabricacion&&!meta.fabricacion_ts&&!meta.en_pintura&&!meta.pintura_ts&&!meta.en_almacen&&!meta.almacen_ts&&!meta.entregado&&!meta.en_entregado;
+        if(rr && prepStage) return true;
+      }
+    }catch(_){ }
+    return false;
+  }
+  if(isCalculationHandoffV164()){
+    for(const st of [sessionStorage,localStorage]){ try{ st.removeItem(KEY); }catch(_){ } }
+    console.info('[Preparacion V164] Handoff de Calculo detectado: V120 Fabricacion no se activa.');
+    return;
+  }
 
   function s(v){ return String(v==null?'':v).trim(); }
   function norm(v){
@@ -31054,9 +31081,9 @@ document.documentElement.dataset.ldhPrepReimport='V162';
 console.info('[Preparacion V162] Reimportacion explicita desde Calculo usa pedido_uid nuevo y no hereda tombstones/cierres de una generacion anterior.');
 </script>
 
-<script id="LDH_PREP_V163_GUARD_REIMPORT_FASE_20260907">
-window.LDH_PREP_V163='PREPARACION-V163-REIMPORTACION-NUEVA-GENERACION-SIN-FAB-FANTASMA-20260907';
-document.documentElement.dataset.ldhPrepReimport='V163';
-console.info('[Preparacion V163] Reimportacion de Calculo protegida frente a cierres/fases antiguas de la misma OT.');
+<script id="LDH_PREP_V164_OPENREF_CALCULO_NO_V120_20260907">
+window.LDH_PREP_V164='PREPARACION-V164-OPENREF-CALCULO-NO-ACTIVA-V120-FABRICACION-20260907';
+document.documentElement.dataset.ldhPrepReimport='V164';
+console.info('[Preparacion V164] openRef de Calculo ya no crea ni activa la llave exclusiva de apertura desde Fabricacion.');
 </script>
 </body></html>
