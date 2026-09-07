@@ -6,6 +6,7 @@
 <meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
+<meta name="ldh-prep-reimport-build" content="PREPARACION-V160-REIMPORTAR-OT-BORRADA-20260907" />
 <meta name="ldh-fix-quota" content="PREPARACION-V152-CIERRE-SOLO-POR-EVENTO-SIN-REINTENTOS-20260905" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
@@ -3602,6 +3603,8 @@ function LDH_prepSetDeletionTombstoneV159(ref,meta,source){
       const val=String(getAny(key)||'').trim();
       if(!val || LDH_prepTechnicalRefV159(val)===LDH_prepTechnicalRefV159(reference)) removeAny(key);
     });
+    // V160: un borrado manual anula cualquier ventana de importación anterior.
+    try{ removeAny('prep_import_guard_ts'); }catch(_){ }
   }catch(_){ }
   try{
     if(window.__ldhPrepSyncNow){
@@ -3645,12 +3648,10 @@ function cargarLista() {
 
     const meta = JSON.parse(getAny(KM(ref)) || "{}");
 
-    // V159 · Si la misma OT/orderId ya está borrada en la fuente productiva,
-    // no debe sobrevivir como residuo en Preparación. No se toca Stock.
-    if(LDH_prepAuthoritativelyDeletedV159(ref,meta)){
-      try{ LDH_prepSetDeletionTombstoneV159(ref,meta,'authoritative_deleted_v159'); }catch(_){ }
-      return;
-    }
+    // V160 · NO borrar una entrada actual de Preparación basándonos únicamente
+    // en copias antiguas deleted:true de Fabricación/Almacén. Una misma OT puede
+    // borrarse y volver a calcularse legítimamente desde Agenda/Cálculo.
+    // El borrado persistente manual sigue protegido por deleted_from_preparation.
 
     // V139 · Una OT cerrada correctamente al entrar en Fabricación no puede
     // volver a aparecer en Preparación aunque una copia remota antigua conserve
@@ -16241,6 +16242,16 @@ function LDH_prepVolverMenu(){
       Array.from(all).forEach(k => {
         if(!isPrepKey(k)) return;
 
+        // V160 · Una importación recién creada por Cálculo es una NUEVA generación
+        // de la OT y tiene prioridad durante la ventana de 90 s. Esto permite
+        // reutilizar una referencia borrada sin que el tombstone remoto anterior
+        // elimine inmediatamente prep_recepcion_/prep_meta_. Después se publica
+        // el estado nuevo completo y la nube deja de contener el tombstone viejo.
+        if(isFreshImportKey(k, freshInfo) && getValue(k) !== null){
+          preservedFreshImport = true;
+          return;
+        }
+
         // V139 · Si una referencia ya fue cerrada en Preparación, una nube
         // antigua no puede reponer su ficha de recepción. Miramos tanto la meta
         // local como la meta del propio snapshot remoto para que funcione también
@@ -16263,15 +16274,6 @@ function LDH_prepVolverMenu(){
             preservedClosedV139 = true;
             return;
           }
-        }
-
-        // V54: una partida recién importada desde Cálculo es la autoridad para
-        // sus dos claves, aunque Firebase conserve una versión anterior de la
-        // misma referencia. Así nunca reaparecen cantidades recibidas antiguas
-        // y la nueva partida no desaparece antes de subirse a la nube.
-        if(isFreshImportKey(k, freshInfo) && getValue(k) !== null){
-          preservedFreshImport = true;
-          return;
         }
 
         if(Object.prototype.hasOwnProperty.call(rdata, k)){
@@ -30942,4 +30944,10 @@ console.info('[Preparación V145] Las OTs vivas mantienen físico + reservado; s
 })();
 </script>
 
+
+<script id="LDH_PREP_V160_REIMPORT_DELETED_20260907">
+window.LDH_PREP_V160='REIMPORTAR-OT-BORRADA-MISMA-REFERENCIA-20260907';
+document.documentElement.dataset.ldhPrepReimport='V160';
+console.info('[Preparacion V160] Recalculo de OT borrada: importacion fresca prevalece sobre tombstone remoto antiguo; sin auto-borrado por copias deleted:true de Fabricacion.');
+</script>
 </body></html>

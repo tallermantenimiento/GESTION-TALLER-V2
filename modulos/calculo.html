@@ -1,6 +1,8 @@
 <!doctype html>
 <html lang="es">
 <head>
+<meta name="ldh-calc-prep-reopen-build" content="CALCULO-V25-REABRIR-OT-BORRADA-20260907" />
+
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Cálculo · Gestión Taller</title>
@@ -658,10 +660,26 @@
   function uniquePrepRef(baseRef){
     const base = String(baseRef || "").trim();
     if(!base) return "";
+
+    // V25: una meta-tombstone creada al borrar manualmente una OT NO ocupa la
+    // referencia. Si el usuario vuelve a calcular esa misma OT desde Agenda,
+    // debe reutilizar OT-xxxxxx-xxx y no crear artificialmente "(1)".
     const exists = (r) => {
-      try{ if(localStorage.getItem("prep_recepcion_" + r) !== null || localStorage.getItem("prep_meta_" + r) !== null) return true; }catch(e){}
-      try{ if(sessionStorage.getItem("prep_recepcion_" + r) !== null || sessionStorage.getItem("prep_meta_" + r) !== null) return true; }catch(e){}
-      return false;
+      let hasReception = false;
+      const metas = [];
+      for(const storage of [localStorage, sessionStorage]){
+        try{
+          if(storage.getItem("prep_recepcion_" + r) !== null) hasReception = true;
+          const raw = storage.getItem("prep_meta_" + r);
+          if(raw !== null){
+            try{ metas.push(JSON.parse(raw) || {}); }catch(_){ metas.push({}); }
+          }
+        }catch(_){ }
+      }
+      if(hasReception) return true;
+      if(!metas.length) return false;
+      if(metas.some(meta => meta && meta.deleted_from_preparation === true)) return false;
+      return true;
     };
     if(!exists(base)) return base;
 
@@ -680,6 +698,19 @@
   function writePrepDirect(payload){
     const ref = String(payload && (payload.ref || payload.referencia) || "").trim();
     if(!ref) return false;
+
+    // V25: detectar si esta referencia estaba borrada en Preparación. La nueva
+    // pulsación desde Cálculo crea una generación nueva y sustituye el tombstone.
+    let reopenedAfterDeleteV25 = false;
+    for(const storage of [localStorage, sessionStorage]){
+      try{
+        const raw = storage.getItem("prep_meta_" + ref);
+        if(raw !== null){
+          const oldMeta = JSON.parse(raw) || {};
+          if(oldMeta.deleted_from_preparation === true) reopenedAfterDeleteV25 = true;
+        }
+      }catch(_){ }
+    }
 
     const lines = Array.isArray(payload.materiales) ? payload.materiales : [
       ...(Array.isArray(payload.barras) ? payload.barras : []),
@@ -724,8 +755,13 @@
       workIdentification: String(payload.identification || payload.workIdentification || payload.workLabel || payload.referenceLabel || payload.composite_part_description || '').trim(),
       workLabel: String(payload.identification || payload.workIdentification || payload.workLabel || payload.referenceLabel || payload.composite_part_description || '').trim(),
       original_ref: payload.original_ref || payload.referencia_original || "",
+      orderId: String(payload.orderId || payload.agenda_order_id || "").trim(),
+      agendaOrderId: String(payload.orderId || payload.agenda_order_id || "").trim(),
+      agenda_order_id: String(payload.agenda_order_id || payload.orderId || "").trim(),
       pedido_uid: payload.pedido_uid || payload.uid || uid(),
       pedido_id: "pid_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,8),
+      reopened_after_delete_v25: reopenedAfterDeleteV25,
+      reopened_after_delete_at: reopenedAfterDeleteV25 ? new Date().toISOString() : "",
       concepto: payload.concepto || payload.concept || "",
       empresa: payload.empresa || payload.company || "",
       company: payload.company || payload.empresa || "",
@@ -1647,6 +1683,11 @@ console.info('[Cálculo V20] Acepta concepto + cantidad de OT simple y conserva 
 <script id="LDH_CALC_REAL_COMPOSITE_LABEL_QTY_V21_MARKER">
 window.LDH_CALC_REAL_COMPOSITE_LABEL_QTY_V21='CALC-REAL-COMPOSITE-LABEL-QTY-20260902';
 console.info('[Cálculo real] Partida: OT técnica separada de identificación visible; cantidad reforzada desde Agenda.');
+</script>
+
+<script id="LDH_CALC_V25_REOPEN_DELETED_20260907">
+window.LDH_CALC_V25='REABRIR-OT-BORRADA-MISMA-REFERENCIA-20260907';
+console.info('[Calculo V25] Una OT borrada en Preparacion puede recalcularse con la misma referencia; tombstone antiguo sustituido por nueva generacion.');
 </script>
 </body>
 </html>
