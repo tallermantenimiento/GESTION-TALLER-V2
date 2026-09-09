@@ -1470,7 +1470,12 @@ body.ldh-module-standalone .main{width:100%!important; margin:0!important; paddi
 <style id="LDH_WORKFLOW_V2_VIEW_20260730">
 .wo-view-dialog{width:min(900px,96vw)}.wo-view-content{padding:20px}.wo-view-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wo-view-card{border:1px solid rgba(148,163,184,.22);border-radius:13px;background:rgba(2,8,23,.55);padding:13px}.wo-view-card.wide{grid-column:1/-1}.wo-view-label{color:#93a4ba;font-size:10px;font-weight:950;letter-spacing:.07em;text-transform:uppercase;margin-bottom:6px}.wo-view-value{color:#fff;font-size:14px;font-weight:850;white-space:pre-wrap;overflow-wrap:anywhere}.wo-view-flow{display:flex;gap:6px;flex-wrap:wrap}.wo-view-history{display:grid;gap:7px}.wo-view-history-row{padding:9px 10px;border:1px solid rgba(148,163,184,.16);border-radius:10px;background:rgba(15,23,42,.55);color:#dbeafe;font-size:12px}.wo-view-history-row small{display:block;margin-top:3px;color:#94a3b8}.wo-view-check{margin-top:8px;color:#86efac;font-size:11px;font-weight:850}.wo-view-check.bad{color:#fca5a5}@media(max-width:700px){.wo-view-grid{grid-template-columns:1fr}}
 </style>
-<meta name="ldh-build" content="AGENDA-V26-INSTALANDO-AVISO-OPERATIVO-20260908">
+<meta name="ldh-build" content="AGENDA-V27-PINTURA-DIRECTA-20260908">
+<meta name="ldh-agenda-v27" content="AGENDA-V27-PINTURA-DIRECTA-CANAL-AISLADO-20260908">
+<style id="LDH_AGENDA_V27_PINTURA_DIRECTA_CSS_20260908">
+.wo-direct-paint-pill{display:flex;width:max-content;max-width:430px;align-items:center;gap:6px;margin-top:6px;padding:4px 8px;border:1px solid #fbbf24;border-radius:999px;background:#4b370d;color:#fff7d6;font-family:ui-sans-serif,system-ui,sans-serif;font-size:10px;font-weight:950;letter-spacing:.04em;line-height:1.25;white-space:normal;overflow-wrap:anywhere;box-shadow:0 0 0 3px rgba(251,191,36,.07)}
+.wo-direct-paint-pill.done{border-color:#34d399;background:#065f46;color:#d1fae5}.wo-direct-paint-send-btn{border-color:#fbbf24!important;background:linear-gradient(180deg,#8a5c0b,#5c3c08)!important;color:#fff7d6!important}.wo-direct-paint-active-btn{border-color:#fbbf24!important;background:#3f2d0c!important;color:#fde68a!important;cursor:default!important;opacity:1!important}.wo-direct-paint-view{border-color:#fbbf2455!important;background:rgba(75,55,13,.34)!important}.wo-direct-paint-view.done{border-color:#34d39955!important;background:rgba(6,95,70,.22)!important}
+</style>
 
 <style id="LDH_HOME_FOCUS_HIGHLIGHT_CSS_20260812">
   tr.ldh-focus-target,
@@ -7977,10 +7982,45 @@ window.ejecutarDevolucion = function(matId, maxQty){
     };
   }
 
+  function normalizeDirectPaintV1(raw){
+    const d = raw && typeof raw === 'object' ? raw : null;
+    if(!d) return null;
+    let status = normText(d.status || d.estado).toLowerCase();
+    if(!['pending','completed','cancelled'].includes(status)) status = d.active === false ? 'completed' : 'pending';
+    const active = status === 'pending' && d.active !== false;
+    return {
+      version:1,
+      active,
+      status,
+      reference:normText(d.reference),
+      identification:normText(d.identification || d.workIdentification || d.workLabel),
+      description:normText(d.description),
+      companyId:normText(d.companyId),
+      companyName:normText(d.companyName),
+      quantity:Math.max(1,Number(d.quantity)||1),
+      ral:normText(d.ral),
+      sentAtMs:Number(d.sentAtMs)||0,
+      sentBy:normText(d.sentBy)||'agenda',
+      finishedAtMs:Number(d.finishedAtMs)||0,
+      finishedBy:normText(d.finishedBy),
+      consumedBotesEq:Math.max(0,Number(d.consumedBotesEq)||0),
+      consumedLiters:Math.max(0,Number(d.consumedLiters)||0),
+      source:normText(d.source)||'agenda_direct_paint_v1'
+    };
+  }
+  function directPaintPill(order){
+    const d=normalizeDirectPaintV1(order&&order.directPaintV1);
+    if(!d)return '';
+    const done=d.status==='completed'||!d.active;
+    const txt=done?'🎨 PINTURA DIRECTA · FINALIZADA':'🎨 PINTURA DIRECTA · EN CABINA';
+    return `<span class="wo-direct-paint-pill${done?' done':''}">${txt}</span>`;
+  }
+
   function normalizeOrder(raw){
     const o = raw && typeof raw === 'object' ? raw : {};
     const workflowState = normalizeWorkflowState(o);
     const cancellationRequestV1 = normalizeCancellationRequest(o.cancellationRequestV1);
+    const directPaintV1 = normalizeDirectPaintV1(o.directPaintV1 || o.paintDirectV1 || o.directPaint);
     return {
       id: normText(o.id) || uid(),
       reference: normText(o.reference),
@@ -8002,6 +8042,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
       ral: normText(o.ral),
       operationalNoticeV1: normText(o.operationalNoticeV1 || o.operationalNotice || o.avisoOperativo || o.aviso),
       operationalNoticeUpdatedAtMs: Number(o.operationalNoticeUpdatedAtMs || o.avisoUpdatedAtMs)||0,
+      directPaintV1,
+      directPaintActiveV1: !!(directPaintV1 && directPaintV1.active),
       priority: Math.max(1, Math.round(Number(o.priority)||1)),
       status: normText(o.status) || 'pending',
       workflowState,
@@ -8729,13 +8771,16 @@ window.ejecutarDevolucion = function(matId, maxQty){
           const visibleNotice = newOrderNotice || priorityNotice;
           const workflow = workflowView(o);
           const cancellationPending = !!normalizeCancellationRequest(o.cancellationRequestV1);
+          const directPaint = normalizeDirectPaintV1(o.directPaintV1);
+          const directPending = !!(directPaint && directPaint.active && directPaint.status==='pending');
+          const directEligible = !directPaint && !o.compositeV1 && workflow.state==='' && (()=>{const f=phaseFlow(o);return (f.fabricacion+f.pintura+f.almacen+f.entregado)<=0;})();
           const rowClasses = [
             workflow.rowClass,
             newOrderNotice ? 'wo-new-order-row' : (priorityNotice ? 'wo-new-order-row' : '')
           ].filter(Boolean).join(' ');
           return `<tr data-ldh-order-id="${esc(o.id)}" data-ldh-order-ref="${esc(o.reference || '')}"${rowClasses ? ` class="${rowClasses}"` : ''}>
             <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:rows.length},(_,position)=>`<option value="${position+1}"${position===index?' selected':''}>${position+1}</option>`).join('')}</select></td>
-            <td class="wo-reference">${orderRefHtml(o)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${o.operationalNoticeV1?`<span class="wo-operational-notice-pill">⚠ AVISO · ${esc(o.operationalNoticeV1)}</span>`:''}${phasePills(o)}${cancellationPending?'<span class="wo-cancel-request-pill">⚠ ANULACIÓN PENDIENTE</span>':''}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}${priorityNotice?'<span class="wo-new-order-pill">↕ CAMBIO PRIORIDAD</span>':''}</td>
+            <td class="wo-reference">${orderRefHtml(o)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${directPaintPill(o)}${o.operationalNoticeV1?`<span class="wo-operational-notice-pill">⚠ AVISO · ${esc(o.operationalNoticeV1)}</span>`:''}${phasePills(o)}${cancellationPending?'<span class="wo-cancel-request-pill">⚠ ANULACIÓN PENDIENTE</span>':''}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}${priorityNotice?'<span class="wo-new-order-pill">↕ CAMBIO PRIORIDAD</span>':''}</td>
             <td>${esc(fmtDate(o.entryDate))}</td>
             <td>${esc(fmtDate(o.deliveryDate))}</td>
             <td class="wo-company">${esc(o.companyName)}</td>
@@ -8744,17 +8789,19 @@ window.ejecutarDevolucion = function(matId, maxQty){
             <td>${esc(finishText(o))}</td>
             <td><div class="wo-actions">
               ${visibleNotice?`<button type="button" class="wo-small-btn wo-seen-new-btn" onclick="WorkOrders.acknowledgeOrderNotifications('${esc(o.id)}',this)">✓ VISTO</button>`:''}
-              ${['','preparing'].includes(workflow.state)?`<button type="button" class="wo-small-btn wo-send-calc-btn" onclick="WorkOrders.sendToCalculation('${esc(o.id)}')">${workflow.state === 'preparing' ? '↗ ABRIR CÁLCULO' : '➡ MANDAR A CÁLCULO'}</button>`:''}
+              ${!directPending && ['','preparing'].includes(workflow.state)?`<button type="button" class="wo-small-btn wo-send-calc-btn" onclick="WorkOrders.sendToCalculation('${esc(o.id)}')">${workflow.state === 'preparing' ? '↗ ABRIR CÁLCULO' : '➡ MANDAR A CÁLCULO'}</button>`:''}
+              ${directEligible?`<button type="button" class="wo-small-btn wo-direct-paint-send-btn" onclick="WorkOrders.sendDirectToPaint('${esc(o.id)}')">🎨 ENVIAR SOLO A PINTURA</button>`:''}
+              ${directPending?`<button type="button" class="wo-small-btn wo-direct-paint-active-btn" disabled>🎨 EN CABINA</button>`:''}
               <button type="button" class="wo-small-btn" onclick="WorkOrders.viewOrder('${esc(o.id)}')">Ver</button>
               <button type="button" class="wo-small-btn wo-notice-btn" onclick="WorkOrders.editOperationalNotice('${esc(o.id)}')">📝 AVISO</button>
-              <button type="button" class="wo-small-btn wo-state-corrector-btn" onclick="WorkOrders.openStatePicker('${esc(o.id)}')">↻ CAMBIAR ESTADO</button>
+              ${!directPending?`<button type="button" class="wo-small-btn wo-state-corrector-btn" onclick="WorkOrders.openStatePicker('${esc(o.id)}')">↻ CAMBIAR ESTADO</button>`:''}
               ${workflow.state==='finished'
                 ? `<button type="button" class="wo-small-btn wo-archive-btn" onclick="WorkOrders.archiveOrder('${esc(o.id)}')">📁 Archivar</button>`
-                : workflow.state==='cancelled'
+                : workflow.state==='cancelled' || directPending
                   ? ''
                   : `<button type="button" class="wo-small-btn wo-finish-btn" onclick="WorkOrders.finishOrder('${esc(o.id)}')">✓ Terminar</button>`}
               <button type="button" class="wo-small-btn" onclick="WorkOrders.printExisting('${esc(o.id)}')">🖨 Imprimir</button>
-              <button type="button" class="wo-small-btn" onclick="WorkOrders.openEdit('${esc(o.id)}')">✎ Editar</button>
+              ${!directPending?`<button type="button" class="wo-small-btn" onclick="WorkOrders.openEdit('${esc(o.id)}')">✎ Editar</button>`:''}
               <button type="button" class="wo-small-btn wo-danger-btn" onclick="WorkOrders.cancelOrder('${esc(o.id)}')">${cancellationPending?'APROBAR ANULACIÓN':'Anular'}</button>
             </div></td>
           </tr>`;
@@ -8924,6 +8971,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
     openEdit(id){
       const o = this.orders.find(x=>x.id===id);
       if(!o) return;
+      if(o.directPaintV1 && o.directPaintV1.active){
+        alert('Este trabajo está activo en PINTURA DIRECTA. Finalízalo en la Terminal de Cabina o anúlalo antes de editar empresa, cantidad o RAL.');
+        return;
+      }
       document.getElementById('woEditId').value = o.id;
       document.getElementById('woModalTitle').textContent = 'Editar orden de trabajo';
       document.getElementById('woEntryDate').value = o.entryDate;
@@ -8993,6 +9044,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
     openStatePicker(id){
       const order = this.orders.find(item=>item.id===id && item.status === 'pending');
       if(!order) return;
+      if(order.directPaintV1 && order.directPaintV1.active){
+        alert('Este trabajo está en PINTURA DIRECTA. El estado se cerrará automáticamente desde la Terminal de Cabina.');
+        return;
+      }
       this.statePickerOrderId = order.id;
       const current = workflowView(order);
       const f = phaseFlow(order);
@@ -9066,6 +9121,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
         row.archivedAtMs = Number(existing.archivedAtMs)||0;
         row.operationalNoticeV1 = normText(existing.operationalNoticeV1);
         row.operationalNoticeUpdatedAtMs = Number(existing.operationalNoticeUpdatedAtMs)||0;
+        row.directPaintV1 = existing.directPaintV1 ? normalizeDirectPaintV1(existing.directPaintV1) : null;
+        row.directPaintActiveV1 = !!(row.directPaintV1 && row.directPaintV1.active);
         row.compositeV1 = existing.compositeV1 ? normalizeCompositeV1(existing.compositeV1,existing) : null;
       }
       row.updatedAtMs = Date.now();
@@ -9239,9 +9296,74 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return true;
     },
 
+    async sendDirectToPaint(id){
+      const order = this.orders.find(item=>item.id===id && item.status === 'pending');
+      if(!order) return;
+      if(!this.cloud?.saveOrders && !this.cloud?.saveOrder){
+        alert('Espera a que aparezca “Sincronización: conectada” antes de enviar el trabajo directamente a Pintura. No se ha cambiado ningún dato.');
+        return;
+      }
+      const currentState=normalizeWorkflowState(order);
+      const f=phaseFlow(order),flowTotal=f.fabricacion+f.pintura+f.almacen+f.entregado;
+      if(currentState || flowTotal>0){
+        alert('Solo se puede usar PINTURA DIRECTA antes de que la OT entre en Cálculo, Preparación o Fabricación. Esta orden ya tiene estado o cantidades de fase.');
+        return;
+      }
+      if(order.compositeV1){
+        alert('Los pedidos compuestos continúan por el flujo normal. PINTURA DIRECTA está reservada para una OT simple.');
+        return;
+      }
+      if(!normText(order.ral)){
+        alert('Esta OT no tiene RAL. Indica primero el Lacado RAL en la orden antes de enviarla directamente a Cabina.');
+        return;
+      }
+      const qty=Math.max(1,Math.round(Number(order.quantity)||1));
+      const ident=orderIdentification(order);
+      const msg=`¿Enviar SOLO A PINTURA?
+
+Referencia: ${order.reference}
+Empresa: ${order.companyName}
+Cantidad: ${qty}
+RAL: ${order.ral}
+${ident?'Identificación: '+ident+'\n':''}
+Este circuito NO pasa por Cálculo, Preparación ni Fabricación y NO crea cantidades FAB/PINT/ALM/ENT. El consumo real se registrará después desde la Terminal de Cabina.`;
+      if(!confirm(msg)) return;
+      const previous=order.directPaintV1 ? normalizeDirectPaintV1(order.directPaintV1) : null;
+      const now=Date.now();
+      order.directPaintV1=normalizeDirectPaintV1({
+        version:1,active:true,status:'pending',reference:order.reference,
+        identification:ident,description:order.description,
+        companyId:order.companyId,companyName:order.companyName,
+        quantity:qty,ral:order.ral,sentAtMs:now,sentBy:'agenda',
+        source:'agenda_direct_paint_v1'
+      });
+      order.directPaintActiveV1=true;
+      order.updatedAtMs=now;
+      writeOrders(this.orders);
+      this.render();
+      try{
+        if(this.cloud.saveOrder) await this.cloud.saveOrder(order);
+        else await this.cloud.saveOrders([order]);
+        this.updateSyncStatus(`Sincronización: ${order.reference} enviada SOLO A PINTURA`,true);
+      }catch(error){
+        console.error('No se pudo enviar la OT a Pintura directa',error);
+        order.directPaintV1=previous;
+        order.directPaintActiveV1=!!(previous&&previous.active);
+        order.updatedAtMs=Date.now();
+        writeOrders(this.orders);
+        this.render();
+        this.updateSyncStatus('No se pudo confirmar el envío directo a Pintura',false);
+        alert('No se ha confirmado el envío en la nube. La OT permanece en Agenda sin entrar en Pintura directa.');
+      }
+    },
+
     async sendToCalculation(id){
       const order = this.orders.find(item=>item.id===id && item.status === 'pending');
       if(!order) return;
+      if(order.directPaintV1 && order.directPaintV1.active){
+        alert('Esta OT ya está activa en PINTURA DIRECTA. Finalízala en Cabina o anúlala antes de usar el flujo normal.');
+        return;
+      }
       if(!this.cloud?.saveOrders && !this.cloud?.saveOrder){
         alert('Espera a que aparezca “Sincronización: conectada” antes de mandar el trabajo a Cálculo. No se ha cambiado ningún dato.');
         return;
@@ -9362,6 +9484,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
     async finishOrder(id){
       const order = this.orders.find(o=>o.id===id && o.status === 'pending');
       if(!order) return;
+      if(order.directPaintV1 && order.directPaintV1.active){
+        alert('Esta OT está en PINTURA DIRECTA. Debe finalizarse desde la Terminal de Cabina para registrar antes el consumo real de pintura.');
+        return;
+      }
       if(!confirm(`¿Marcar como TERMINADO el trabajo ${order.reference}? Seguirá visible hasta que pulses Archivar.`)) return;
       return this.saveWorkflowState(order,'finished',{fabricacion:0,pintura:0,almacen:Number(order.quantity)||1,entregado:0},'agenda_manual_terminado');
     },
@@ -9391,6 +9517,10 @@ window.ejecutarDevolucion = function(matId, maxQty){
       const order=this.orders.find(o=>o.id===id); if(!order)return;
       const f=phaseFlow(order), view=workflowView(order);
       const sum=f.fabricacion+f.pintura+f.almacen+f.entregado;
+      const direct=normalizeDirectPaintV1(order.directPaintV1);
+      const directPhaseHtml=direct
+        ? `<span class="wo-direct-paint-pill${direct.status==='completed'?' done':''}">${direct.status==='completed'?'🎨 PINTURA DIRECTA · FINALIZADA':'🎨 PINTURA DIRECTA · EN CABINA'}</span><div style="margin-top:7px;color:#cbd5e1;font-size:11px">Circuito independiente Agenda → Cabina. No genera cantidades FAB/PINT/ALM/ENT.</div>`
+        : `${phasePills(order)||'<span style="color:#94a3b8">Sin unidades en fases</span>'}<div class="wo-view-check ${sum===Number(order.quantity)?'':'bad'}">Suma: ${esc(sum)} / Total: ${esc(order.quantity)}</div>`;
       const stateLabel=value=>workflowView({workflowStateV2:value}).label || String(value||'SIN ESTADO').toUpperCase();
       const history=(order.workflowHistoryV2||[]).slice(-10).reverse();
       const content=document.getElementById('woViewContent');
@@ -9398,10 +9528,11 @@ window.ejecutarDevolucion = function(matId, maxQty){
       if(title) title.textContent=`${order.reference}${orderIdentification(order)?' · '+orderIdentification(order):''} · ${view.label||'SIN ESTADO'}`;
       if(content) content.innerHTML=`<div class="wo-view-grid">
         <div class="wo-view-card"><div class="wo-view-label">Estado general</div><div class="wo-view-value">${view.label?`<span class="wo-workflow-pill ${view.pillClass}"><span class="wo-workflow-dot"></span>${esc(view.label)}</span>`:'SIN ESTADO'}</div></div>
-        <div class="wo-view-card"><div class="wo-view-label">Reparto por fases</div><div class="wo-view-flow">${phasePills(order)||'<span style="color:#94a3b8">Sin unidades en fases</span>'}</div><div class="wo-view-check ${sum===Number(order.quantity)?'':'bad'}">Suma: ${esc(sum)} / Total: ${esc(order.quantity)}</div></div>
+        <div class="wo-view-card${direct?' wo-direct-paint-view'+(direct.status==='completed'?' done':''):''}"><div class="wo-view-label">Reparto / circuito</div><div class="wo-view-flow">${directPhaseHtml}</div></div>
         <div class="wo-view-card"><div class="wo-view-label">Empresa</div><div class="wo-view-value">${esc(order.companyName||'—')}</div></div>
         <div class="wo-view-card"><div class="wo-view-label">Identificación</div><div class="wo-view-value" style="color:#fde68a">${esc(orderIdentification(order)||'—')}</div></div>
         <div class="wo-view-card"><div class="wo-view-label">Fechas</div><div class="wo-view-value">Entrada: ${esc(fmtDate(order.entryDate))}<br>Entrega prevista: ${esc(fmtDate(order.deliveryDate))}</div></div>
+        ${direct?`<div class="wo-view-card wide wo-direct-paint-view${direct.status==='completed'?' done':''}"><div class="wo-view-label">Pintura directa</div><div class="wo-view-value">RAL: ${esc(direct.ral||order.ral||'—')} · Cantidad: ${esc(direct.quantity||order.quantity)}${direct.status==='completed'?`<br>Consumo registrado: ${esc((Number(direct.consumedBotesEq)||0).toLocaleString('es-ES',{maximumFractionDigits:3}))} botes eq de 4 L (${esc((Number(direct.consumedLiters)||0).toLocaleString('es-ES',{maximumFractionDigits:3}))} L)`:''}</div></div>`:''}
         <div class="wo-view-card wide"><div class="wo-view-label">Aviso operativo</div><div class="wo-view-value" style="color:#fde68a">${esc(order.operationalNoticeV1||'—')}</div></div>
         <div class="wo-view-card wide"><div class="wo-view-label">Material</div><div class="wo-view-value">${esc(order.material||'—')}</div></div>
         <div class="wo-view-card wide"><div class="wo-view-label">Descripción / observaciones</div><div class="wo-view-value">${esc(order.description||'—')}</div></div>
@@ -11095,5 +11226,10 @@ console.info('[Agenda] Partidas compuestas: referencia técnica estable + identi
 window.LDH_AGENDA_V26='PHASEFLOW-V19-AUTORITATIVO-20260904';
 document.documentElement.dataset.ldhAgendaPhaseSync='V26';
 console.info('[Agenda V26] pills FAB/PINT/ALM/ENT leen phaseFlowV19 como fuente autoritativa; legacy queda solo como compatibilidad.');
+</script>
+<script id="LDH_AGENDA_V27_PINTURA_DIRECTA_20260908">
+window.LDH_AGENDA_V27='PINTURA-DIRECTA-AGENDA-A-CABINA-AISLADA-20260908';
+document.documentElement.dataset.ldhAgendaDirectPaint='V27';
+console.info('[Agenda V27] circuito SOLO PINTURA aislado: Agenda → Cabina, sin tocar Cálculo, Preparación, Fabricación ni phaseFlow.');
 </script>
 </body></html>
