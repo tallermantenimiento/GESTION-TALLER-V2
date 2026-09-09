@@ -11,6 +11,7 @@
 <meta name="ldh-prep-debt-list-build" content="PREPARACION-V165-DEUDA-VISIBLE-CABECERA-TARJETA-20260907" />
 <meta name="ldh-prep-debt-global-build" content="PREPARACION-V166-ALERTA-GLOBAL-DEUDA-HIERRO-PINTURA-20260907" />
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
+<meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -31347,4 +31348,432 @@ console.info('[Preparacion V167] Observaciones por linea: borrador protegido + p
 window.LDH_PREP_V168_MENU_SIEMPRE_LISTA='PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908';
 console.info('[Preparacion V168] Menú abre lista; claves de navegación transitorias fuera de Firebase; apertura Fabricación V120 conservada.');
 </script>
+
+
+<!-- LDH_PREP_V169_DEUDA_PINTURA_RECIPROCA_CABINA_20260909 -->
+<script id="LDH_PREP_V169_DEUDA_PINTURA_RECIPROCA_CABINA_20260909">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V169_DEUDA_PINTURA_RECIPROCA__) return;
+  window.__LDH_PREP_V169_DEUDA_PINTURA_RECIPROCA__=true;
+
+  const BUILD='PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909';
+  const STOCK_KEY='ldh_v2_company_stock_v1';
+  const GLOBAL_KEY='unassigned_borrow_global_v1';
+  const EPS=0.000001;
+  let installed=false;
+  let installAttempts=0;
+  let reconciling=false;
+  let rerendering=false;
+
+  const s=v=>String(v==null?'':v).trim();
+  const n=v=>{const x=Number.parseFloat(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const norm=v=>s(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  const safe=v=>s(v).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'_').replace(/^_+|_+$/g,'').slice(0,110)||'x';
+  const now=()=>new Date().toISOString();
+
+  function refKey(v){
+    const raw=s(v).toUpperCase();
+    const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]))?\b/);
+    if(m) return 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
+    return norm(raw);
+  }
+  function sameRef(a,b){const aa=refKey(a),bb=refKey(b);return !!aa&&!!bb&&aa===bb;}
+
+  function parse(raw,fallback){try{return JSON.parse(raw||'')||fallback;}catch(_){return fallback;}}
+  function getAnyV169(key){
+    try{if(typeof window.getAny==='function'){const v=window.getAny(key);if(v!=null&&v!=='')return v;}}catch(_){ }
+    try{const v=localStorage.getItem(key);if(v!=null&&v!=='')return v;}catch(_){ }
+    try{const v=sessionStorage.getItem(key);if(v!=null&&v!=='')return v;}catch(_){ }
+    return '';
+  }
+  function setAnyV169(key,value){
+    try{if(typeof window.setAny==='function'){window.setAny(key,value);return true;}}catch(_){ }
+    let ok=false;
+    try{localStorage.setItem(key,value);ok=true;}catch(_){ }
+    try{sessionStorage.setItem(key,value);ok=true;}catch(_){ }
+    return ok;
+  }
+
+  function cloudDB(){
+    const state=window.__LDH_PREP_STOCK_FIREBASE_STATE||{};
+    const db=window.__LDH_PREP_STOCK_CLOUD_DB||null;
+    if(state.connected===true && db && typeof db==='object') return db;
+    return null;
+  }
+
+  function statusClosed(row){
+    const st=norm(row&&(row.status??row.estado));
+    return ['devuelta','devuelto','compensada','compensado','rectificada','rectificado','cancelada','cancelado','cancelada prueba','cerrada','cerrado','liberada','liberado'].includes(st);
+  }
+  function pendingAssignment(row){
+    if(!row) return 0;
+    const explicit=row.pendingQty??row.qtyPending??row.pending??row.pendiente;
+    if(explicit!==undefined&&explicit!==null&&String(explicit)!=='') return Math.max(0,n(explicit));
+    return Math.max(0,n(row.qty??row.cantidad)-n(row.returnedQty??row.qtyReturned??row.devuelto));
+  }
+  function pendingDebt(row){
+    if(!row) return 0;
+    const explicit=row.pendingQty??row.qtyPending??row.pending??row.pendiente;
+    if(explicit!==undefined&&explicit!==null&&String(explicit)!=='') return Math.max(0,n(explicit));
+    return Math.max(0,
+      n(row.qty??row.cantidad)
+      -n(row.returnedQty??row.qtyReturned??row.devuelto)
+      -n(row.compensatedQty??row.qtyCompensated??row.compensado)
+      -n(row.reversedQty??row.qtyReversed??row.rectificado)
+    );
+  }
+  function assignmentActive(row){return !!row&&!statusClosed(row)&&pendingAssignment(row)>EPS;}
+  function debtActive(row){return !!row&&!statusClosed(row)&&pendingDebt(row)>EPS;}
+
+  function companyName(db,value){
+    const raw=s(value);if(!raw)return 'origen';const k=norm(raw);
+    const c=(Array.isArray(db&&db.companies)?db.companies:[]).find(row=>[
+      row&&row.id,row&&row.companyId,row&&row.empresaId,row&&row.name,row&&row.nombre,row&&row.empresa,row&&row.code,row&&row.codigo
+    ].map(norm).filter(Boolean).includes(k));
+    return s(c&&(c.name||c.nombre||c.empresa||c.code||c.codigo))||raw;
+  }
+  function materialName(db,id,fallback){
+    const wanted=s(id);
+    const m=(Array.isArray(db&&db.materials)?db.materials:[]).find(row=>s(row&&(row.id||row.materialId||row.matId))===wanted);
+    return s(m&&(m.name||m.nombre||m.material))||s(fallback)||wanted;
+  }
+
+  function itemIds(item){return [item&&item.assignmentId,item&&item.loanAssignmentId,item&&item.v2MaterialId,item&&item.matId,item&&item.materialId,item&&item.toMaterialId,item&&item.stockMatId,item&&item.stockLinkId].map(s).filter(Boolean);}
+  function materialIds(item){return [item&&item.v2MaterialId,item&&item.matId,item&&item.materialId,item&&item.toMaterialId,item&&item.stockMatId,item&&item.stockLinkId].map(s).filter(Boolean);}
+  function lineIds(line){
+    const ids=[line&&line.linked_matId,line&&line.linkedMatId,line&&line.stockMatId,line&&line.stock_matId,line&&line.stockLinkId,line&&line.stockId,line&&line.matId,line&&line.v2MaterialId,line&&line.stockMaterialId].map(s).filter(Boolean);
+    try{if(typeof window.getLinkedMatIdForLine==='function'){const id=window.getLinkedMatIdForLine(line);if(id)ids.push(s(id));}}catch(_){ }
+    return Array.from(new Set(ids));
+  }
+  function itemLooksIntercompany(item){
+    if(!item)return false;
+    if(s(item.assignmentId||item.loanAssignmentId||item.fromCompanyId||item.fromEmpresa))return true;
+    const t=norm([item.reason,item.source,item.assignmentType].filter(Boolean).join(' '));
+    return t.includes('prestam')||t.includes('otra empresa')||t.includes('reserva ajena')||t.includes('deuda');
+  }
+  function rowRefMatches(row,ref){
+    return [row&&row.ref,row&&row.jobRef,row&&row.consumerRef,row&&row.paintWorkRef,row&&row.workRef,row&&row.usedByRef,row&&row.refConsumidor,row&&row.toRef].some(v=>sameRef(v,ref));
+  }
+  function rowMaterialMatches(row,item){
+    const ids=materialIds(item);
+    const rids=[row&&row.toMaterialId,row&&row.materialId,row&&row.matId,row&&row.fromMaterialId,row&&row.debtorMaterialId].map(s).filter(Boolean);
+    if(ids.length&&rids.length&&ids.some(id=>rids.includes(id)))return true;
+    const a=norm(item&&(item.name||item.matName||item.materialName||item.material||item.mat));
+    const b=norm(row&&(row.materialName||row.sourceMaterialName||row.material||row.name));
+    return !!a&&!!b&&(a===b||a.includes(b)||b.includes(a));
+  }
+  function rowCompanyMatches(row,item){
+    const from=norm(item&&(item.fromCompanyId||item.fromEmpresa||item.fromCompany));
+    if(!from)return true;
+    return [row&&row.companyId,row&&row.fromCompanyId,row&&row.fromEmpresa,row&&row.companyFrom].map(norm).filter(Boolean).some(v=>v===from);
+  }
+
+  function evidenceForItem(db,ref,item){
+    const assignments=Array.isArray(db&&db.assignments)?db.assignments:[];
+    const debts=Array.isArray(db&&db.reservationDebts)?db.reservationDebts:[];
+    const aid=s(item&&(item.assignmentId||item.loanAssignmentId));
+    let aRows=[],dRows=[];
+    if(aid){
+      aRows=assignments.filter(row=>s(row&&(row.id||row.assignmentId))===aid);
+      dRows=debts.filter(row=>s(row&&(row.loanAssignmentId||row.assignmentId))===aid);
+    }else{
+      aRows=assignments.filter(row=>rowRefMatches(row,ref)&&rowMaterialMatches(row,item)&&rowCompanyMatches(row,item));
+      dRows=debts.filter(row=>rowRefMatches(row,ref)&&rowMaterialMatches(row,item)&&rowCompanyMatches(row,item));
+    }
+    const known=aRows.length>0||dRows.length>0;
+    const pending=Math.max(
+      0,
+      ...aRows.map(row=>assignmentActive(row)?pendingAssignment(row):0),
+      ...dRows.map(row=>debtActive(row)?pendingDebt(row):0)
+    );
+    return {known,pending,aRows,dRows};
+  }
+
+  function markResolved(item,at){
+    if(!item||typeof item!=='object')return false;
+    const before=n(item.qtyPending??item.pendingQty??item.pending??item.qty_pending);
+    if(before<=EPS)return false;
+    item.qtyPending=0;item.pendingQty=0;item.pending=0;item.qty_pending=0;
+    item.resolvedByStock=true;item.resolvedByStockAt=at;item.status='resuelta_stock';item.estado='resuelta_stock';
+    return true;
+  }
+  function reconcileBorrow(ref,borrow,db,at){
+    if(!borrow||!Array.isArray(borrow.items))return false;
+    let changed=false;
+    borrow.items.forEach(item=>{
+      if(!itemLooksIntercompany(item))return;
+      const ev=evidenceForItem(db,ref,item);
+      if(ev.known&&ev.pending<=EPS){if(markResolved(item,at))changed=true;}
+    });
+    if(changed)borrow.updatedAt=Date.now();
+    return changed;
+  }
+  function positiveBorrow(borrow){return !!(borrow&&Array.isArray(borrow.items)&&borrow.items.some(it=>n(it&&(it.qtyPending??it.pendingQty??it.pending??it.qty_pending))>EPS));}
+
+  function reconcileRef(ref,db){
+    if(!db||!ref)return false;
+    const at=now();let changed=false;
+    const metaKey='prep_meta_'+ref;
+    const meta=parse(getAnyV169(metaKey),{})||{};
+    if(reconcileBorrow(ref,meta.unassignedBorrow,db,at)){
+      setAnyV169(metaKey,JSON.stringify(meta));changed=true;
+      try{if(typeof refActual!=='undefined'&&sameRef(refActual,ref)&&typeof metaActual!=='undefined')metaActual=meta;}catch(_){ }
+    }
+
+    const global=parse(getAnyV169(GLOBAL_KEY),{})||{};
+    const gKey=Object.keys(global).find(k=>sameRef(k,ref));
+    if(gKey&&reconcileBorrow(ref,global[gKey],db,at)){
+      if(!positiveBorrow(global[gKey]))delete global[gKey];
+      setAnyV169(GLOBAL_KEY,JSON.stringify(global));changed=true;
+    }
+
+    const ldh=parse(getAnyV169('ldh_db'),null);
+    if(ldh&&typeof ldh==='object'){
+      let dbChanged=false;
+      ['deliveries','trabajos','fabricacion','fab','pintura','paint','almacen','store','preparacion'].forEach(pool=>{
+        const rows=Array.isArray(ldh[pool])?ldh[pool]:[];
+        rows.forEach(row=>{
+          if(!row||!sameRef(row.ref||row.referencia||row.reference,ref))return;
+          ['unassignedBorrow','unassigned_borrow','noAsignado','materialNoAsignado'].forEach(key=>{
+            const borrow=row[key];
+            if(!borrow||!Array.isArray(borrow.items))return;
+            if(reconcileBorrow(ref,borrow,db,at))dbChanged=true;
+            if(!positiveBorrow(borrow)){try{delete row[key];dbChanged=true;}catch(_){ }}
+          });
+        });
+      });
+      if(dbChanged){setAnyV169('ldh_db',JSON.stringify(ldh));changed=true;}
+    }
+    return changed;
+  }
+
+  function refsToCheck(){
+    const refs=new Set();
+    for(const st of [localStorage,sessionStorage]){
+      try{for(let i=0;i<st.length;i++){const k=st.key(i)||'';if(k.startsWith('prep_meta_'))refs.add(k.slice('prep_meta_'.length));}}catch(_){ }
+    }
+    const global=parse(getAnyV169(GLOBAL_KEY),{})||{};Object.keys(global).forEach(r=>refs.add(r));
+    try{document.querySelectorAll('#lista .item[data-ref]').forEach(el=>{if(s(el.dataset.ref))refs.add(s(el.dataset.ref));});}catch(_){ }
+    try{if(typeof refActual!=='undefined'&&s(refActual))refs.add(s(refActual));}catch(_){ }
+    return Array.from(refs);
+  }
+
+  function requestPrepSync(reason){
+    try{if(typeof window.__ldhPrepSyncNow==='function')Promise.resolve(window.__ldhPrepSyncNow(reason)).catch(()=>{});}catch(_){ }
+  }
+  function refreshDebtUi(){
+    if(rerendering)return;rerendering=true;
+    setTimeout(()=>{
+      try{if(typeof window.LDH_renderGlobalDebtAlertsV166==='function')window.LDH_renderGlobalDebtAlertsV166();}catch(_){ }
+      try{if(typeof window.LDH_repaintDeudaTarjetaNeta==='function')window.LDH_repaintDeudaTarjetaNeta();}catch(_){ }
+      try{if(typeof window.LDH_renderFlowHeader==='function')window.LDH_renderFlowHeader();}catch(_){ }
+      try{if(typeof window.renderTabla==='function'&&typeof refActual!=='undefined'&&s(refActual))window.renderTabla();}catch(_){ }
+      try{if(typeof window.cargarLista==='function')window.cargarLista();}catch(_){ }
+      rerendering=false;
+    },40);
+  }
+  function reconcileAll(render=true){
+    if(reconciling)return false;
+    const db=cloudDB();if(!db)return false;
+    reconciling=true;let changed=false;
+    try{refsToCheck().forEach(ref=>{if(reconcileRef(ref,db))changed=true;});}
+    finally{reconciling=false;}
+    if(changed){requestPrepSync('deuda_pintura_reconciliada_stock_v169');if(render)refreshDebtUi();}
+    return changed;
+  }
+
+  function localBorrowItemForLine(line){
+    let meta={};
+    try{meta=(typeof metaActual!=='undefined'&&metaActual)||{};}catch(_){meta={};}
+    const items=meta&&meta.unassignedBorrow&&Array.isArray(meta.unassignedBorrow.items)?meta.unassignedBorrow.items:[];
+    const lids=lineIds(line),lname=norm(line&&(line.mat||line.material||line.name));
+    return items.find(it=>{
+      if(n(it&&(it.qtyPending??it.pendingQty??it.pending??it.qty_pending))<=EPS)return false;
+      const mids=materialIds(it);if(lids.length&&mids.length&&lids.some(id=>mids.includes(id)))return true;
+      const iname=norm(it&&(it.name||it.matName||it.materialName||it.material||it.mat));
+      return !!lname&&!!iname&&(lname===iname||lname.includes(iname)||iname.includes(lname));
+    })||null;
+  }
+  function paintDebtForLine(db,line,ref){
+    if(!db)return null;
+    const local=localBorrowItemForLine(line);
+    const aid=s(local&&(local.assignmentId||local.loanAssignmentId));
+    const lids=lineIds(line),lname=norm(line&&(line.mat||line.material||line.name));
+    let rows=(Array.isArray(db.reservationDebts)?db.reservationDebts:[]).filter(d=>d&&d.paintLoanDebt===true&&debtActive(d)&&rowRefMatches(d,ref));
+    if(aid){const exact=rows.find(d=>s(d.loanAssignmentId||d.assignmentId)===aid);if(exact)return exact;}
+    rows=rows.filter(d=>{
+      const dids=[d.toMaterialId,d.materialId,d.matId,d.fromMaterialId].map(s).filter(Boolean);
+      if(lids.length&&dids.length&&lids.some(id=>dids.includes(id)))return true;
+      const dn=norm(d.materialName||d.sourceMaterialName||d.material);
+      return !!lname&&!!dn&&(lname===dn||lname.includes(dn)||dn.includes(lname));
+    });
+    return rows.length===1?rows[0]:(rows[0]||null);
+  }
+
+  function physicalMovementSign(type){
+    const t=norm(type).replace(/ /g,'_');
+    if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion','reserva','reservado','asignacion','asignado','traza'].includes(t))return 0;
+    if(['salida','out','ajuste_neg','consumo','consumo_terminal','prestamo'].includes(t))return -1;
+    return 1;
+  }
+  function rowCid(row){return s(row&&(row.companyId||row.empresaId||row.company||row.empresa));}
+  function rowMid(row){return s(row&&(row.materialId||row.matId||row.material_id||row.material));}
+  function physical(db,cid,mid){
+    const movs=(Array.isArray(db.movements)?db.movements:[]).filter(m=>rowCid(m)===s(cid)&&rowMid(m)===s(mid)&&physicalMovementSign(m.type||m.tipo)!==0);
+    if(movs.length)return Math.max(0,movs.reduce((sum,m)=>sum+physicalMovementSign(m.type||m.tipo)*n(m.qty??m.cantidad),0));
+    const row=(Array.isArray(db.stock)?db.stock:[]).find(r=>rowCid(r)===s(cid)&&rowMid(r)===s(mid));
+    return Math.max(0,n(row&&(row.physicalQty??row.physical??row.fisico??row.real??row.qty??row.cantidad)));
+  }
+  function ensureBaseline(db,cid,mid,before,stamp,label){
+    db.movements=Array.isArray(db.movements)?db.movements:[];
+    const has=db.movements.some(m=>rowCid(m)===s(cid)&&rowMid(m)===s(mid)&&physicalMovementSign(m.type||m.tipo)!==0);
+    if(has||before<=EPS)return;
+    const id='mov_prep_paintloan_base_v169_'+safe(cid)+'_'+safe(mid);
+    if(db.movements.some(m=>s(m.id||m.movementId)===id))return;
+    db.movements.push({id,movementId:id,companyId:cid,materialId:mid,type:'entrada',tipo:'entrada',qty:before,cantidad:before,date:stamp,source:'preparacion_pintura_prestamo_v169_baseline',note:'Base física preservada antes de devolver deuda de pintura'+(label?' · '+label:'')});
+  }
+  function updateStockMirror(db,cid,mid,value,stamp){
+    db.stock=Array.isArray(db.stock)?db.stock:[];
+    const row=db.stock.find(r=>rowCid(r)===s(cid)&&rowMid(r)===s(mid));
+    if(!row)return;
+    row.qty=value;row.cantidad=value;row.physicalQty=value;row.physical=value;row.fisico=value;row.real=value;row.updatedAt=stamp;
+  }
+  function samePaintRelation(a,b){
+    if(!a||!b)return false;
+    return s(a.fromCompanyId)===s(b.fromCompanyId)
+      && s(a.toCompanyId||a.companyId)===s(b.toCompanyId||b.companyId)
+      && s(a.fromMaterialId)===s(b.fromMaterialId)
+      && s(a.toMaterialId||a.materialId)===s(b.toMaterialId||b.materialId);
+  }
+  function addCredit(db,template,amount,stamp,operationId){
+    amount=Math.max(0,n(amount));if(amount<=EPS)return null;
+    db.reservationDebts=Array.isArray(db.reservationDebts)?db.reservationDebts:[];
+    const holderCid=s(template.toCompanyId||template.companyId),againstCid=s(template.fromCompanyId),holderMid=s(template.toMaterialId||template.materialId),againstMid=s(template.fromMaterialId);
+    const id='credit_paint_v72_'+safe(holderCid+'_'+againstCid+'_'+holderMid+'_'+againstMid);
+    let c=db.reservationDebts.find(x=>x&&x.paintLoanCredit===true&&s(x.id||x.creditId)===id);
+    if(!c){
+      c={id,creditId:id,paintLoanCredit:true,hiddenFromStockText:true,holderCompanyId:holderCid,holderEmpresa:companyName(db,holderCid),againstCompanyId:againstCid,againstEmpresa:companyName(db,againstCid),holderMaterialId:holderMid,againstMaterialId:againstMid,materialId:holderMid,sourceMaterialId:againstMid,materialName:materialName(db,holderMid,template.materialName),sourceMaterialName:materialName(db,againstMid,template.sourceMaterialName),unit:'bote_eq_4l',unidad:'bote_eq_4l',unitBasis:'equivalente_4l',qty:0,cantidad:0,pendingQty:0,qtyPending:0,usedQty:0,status:'activo',estado:'activo',createdAt:stamp,source:'terminal_cabina_pintura_saldo_v72',reason:'exceso_devolucion_bote_entero'};
+      db.reservationDebts.push(c);
+    }
+    c.qty=n(c.qty)+amount;c.cantidad=c.qty;c.pendingQty=n(c.pendingQty??c.qtyPending)+amount;c.qtyPending=c.pendingQty;c.creditLiters=c.pendingQty*4;c.status='activo';c.estado='activo';c.updatedAt=stamp;c.lastCreditOperationId=operationId;c.lastWorkRef=s(template.paintWorkRef||template.workRef||'');
+    return c;
+  }
+
+  async function compensatePaintDebt(debt,qty){
+    const id=s(debt.id||debt.debtId),ref=s(debt.paintWorkRef||debt.workRef||'');
+    return window.LDH_prepRunStockMutationV129('preparacion_pintura_prestamo_v169_compensacion',async db=>{
+      db.reservationDebts=Array.isArray(db.reservationDebts)?db.reservationDebts:[];db.movements=Array.isArray(db.movements)?db.movements:[];
+      const row=db.reservationDebts.find(x=>s(x&&(x.id||x.debtId))===id&&x&&x.paintLoanDebt===true);if(!row)throw new Error('La deuda de pintura ya no existe.');
+      const pending=pendingDebt(row),applied=Math.min(pending,Math.max(0,n(qty)));if(applied<=EPS)throw new Error('La deuda ya está saldada.');
+      const stamp=now();row.compensatedQty=n(row.compensatedQty)+applied;row.pendingQty=Math.max(0,pending-applied);row.qtyPending=row.pendingQty;row.debtLiters=row.pendingQty*4;row.updatedAt=stamp;
+      if(row.pendingQty<=EPS){row.pendingQty=0;row.qtyPending=0;row.debtLiters=0;row.status='compensada';row.estado='compensada';row.compensatedAt=stamp;}
+      db.movements.push({id:'trace_prep_paint_comp_v169_'+safe(id)+'_'+Date.now(),movementId:'trace_prep_paint_comp_v169_'+safe(id)+'_'+Date.now(),type:'traza',tipo:'traza',qty:0,cantidad:0,date:stamp,source:'preparacion_pintura_prestamo_v169_compensacion',ref,jobRef:ref,paintLoanDebtId:id,note:'Deuda de pintura compensada desde Preparación sin movimiento físico: '+applied+' botes eq ('+(applied*4)+' L).'});
+      return {remaining:row.pendingQty,applied};
+    });
+  }
+
+  async function returnPaintDebtBottles(debt,bottles){
+    const selectedId=s(debt.id||debt.debtId);
+    return window.LDH_prepRunStockMutationV129('preparacion_pintura_prestamo_v169_devolucion_bote_entero',async db=>{
+      db.reservationDebts=Array.isArray(db.reservationDebts)?db.reservationDebts:[];db.movements=Array.isArray(db.movements)?db.movements:[];db.stock=Array.isArray(db.stock)?db.stock:[];
+      const selected=db.reservationDebts.find(x=>s(x&&(x.id||x.debtId))===selectedId&&x&&x.paintLoanDebt===true);if(!selected)throw new Error('La deuda de pintura ya no existe.');
+      const active=db.reservationDebts.filter(d=>d&&d.paintLoanDebt===true&&debtActive(d)&&samePaintRelation(d,selected)).sort((a,b)=>s(a.id||a.debtId)===selectedId?-1:s(b.id||b.debtId)===selectedId?1:(Date.parse(s(a.createdAt))||0)-(Date.parse(s(b.createdAt))||0));
+      const totalDebt=active.reduce((sum,d)=>sum+pendingDebt(d),0);if(totalDebt<=EPS)throw new Error('La deuda ya está saldada.');
+      const srcCid=s(selected.fromCompanyId),srcMid=s(selected.fromMaterialId),dstCid=s(selected.toCompanyId||selected.companyId),dstMid=s(selected.toMaterialId||selected.materialId);
+      if(!srcCid||!srcMid||!dstCid||!dstMid)throw new Error('La deuda no contiene las fichas de Stock de origen/destino.');
+      const dstBefore=physical(db,dstCid,dstMid);if(bottles>dstBefore+EPS)throw new Error(companyName(db,dstCid)+' solo tiene '+dstBefore+' botes equivalentes. Registra primero la pintura recibida.');
+      const srcBefore=physical(db,srcCid,srcMid),stamp=now(),opId='mov_prep_paint_return_v169_'+safe(selectedId)+'_'+Date.now();
+      ensureBaseline(db,dstCid,dstMid,dstBefore,stamp,'empresa deudora');ensureBaseline(db,srcCid,srcMid,srcBefore,stamp,'empresa acreedora');
+      let remainingPayment=bottles,totalPaid=0;
+      for(const row of active){if(remainingPayment<=EPS)break;const pending=pendingDebt(row),paid=Math.min(pending,remainingPayment);if(paid<=EPS)continue;row.returnedQty=n(row.returnedQty)+paid;row.pendingQty=Math.max(0,pending-paid);row.qtyPending=row.pendingQty;row.debtLiters=row.pendingQty*4;row.physicalReturnedBotesV72=n(row.physicalReturnedBotesV72)+(s(row.id||row.debtId)===selectedId?bottles:0);row.updatedAt=stamp;row.lastReturnOperationId=opId;if(row.pendingQty<=EPS){row.pendingQty=0;row.qtyPending=0;row.debtLiters=0;row.status='devuelta';row.estado='devuelta';row.returnedAt=stamp;}remainingPayment-=paid;totalPaid+=paid;}
+      const credit=remainingPayment>EPS?addCredit(db,selected,remainingPayment,stamp,opId):null;
+      db.movements.push({id:opId+'_out',movementId:opId+'_out',companyId:dstCid,materialId:dstMid,type:'salida',tipo:'salida',qty:bottles,cantidad:bottles,date:stamp,source:'preparacion_pintura_prestamo_v169_devolucion_bote_entero',paintLoanDebtId:selectedId,ref:s(selected.paintWorkRef||selected.workRef),jobRef:s(selected.paintWorkRef||selected.workRef),note:'Devolución física desde Preparación: '+bottles+' bote(s) a '+companyName(db,srcCid)+'; deuda aplicada '+totalPaid+' botes eq; saldo a favor '+Math.max(0,remainingPayment)+' botes eq.'});
+      db.movements.push({id:opId+'_in',movementId:opId+'_in',companyId:srcCid,materialId:srcMid,type:'entrada',tipo:'entrada',qty:bottles,cantidad:bottles,date:stamp,source:'preparacion_pintura_prestamo_v169_devolucion_bote_entero',paintLoanDebtId:selectedId,ref:s(selected.paintWorkRef||selected.workRef),jobRef:s(selected.paintWorkRef||selected.workRef),note:'Recibidos '+bottles+' bote(s) devueltos desde '+companyName(db,dstCid)+' mediante Preparación.'});
+      updateStockMirror(db,dstCid,dstMid,Math.max(0,dstBefore-bottles),stamp);updateStockMirror(db,srcCid,srcMid,srcBefore+bottles,stamp);
+      return {debtPaid:totalPaid,creditQty:credit?remainingPayment:0,remainingRelation:Math.max(0,totalDebt-totalPaid)};
+    });
+  }
+
+  function install(){
+    if(installed)return;
+    if(typeof window.LDH_prepRunStockMutationV129!=='function'){
+      installAttempts+=1;
+      if(installAttempts<=8)setTimeout(install,120);
+      else console.warn('[Preparación V169] No se encontró el puente de transacción de Stock; V169 no se instala.');
+      return;
+    }
+    installed=true;
+
+    const baseDebtForLine=window.LDH_debtForCurrentLine;
+    const baseReturn=window.LDH_devolverDeudaStockDesdePrep;
+
+    window.LDH_debtForCurrentLine=function(line){
+      try{const base=typeof baseDebtForLine==='function'?baseDebtForLine.call(this,line):null;if(base&&n(base.pending)>EPS)return base;}catch(_){ }
+      const db=cloudDB();if(!db)return null;
+      let ref='';try{ref=s(refActual);}catch(_){ }
+      if(!ref)return null;
+      const debt=paintDebtForLine(db,line,ref);if(!debt)return null;
+      const pending=pendingDebt(debt);if(pending<=EPS)return null;
+      return {pending,item:{assignmentId:s(debt.loanAssignmentId||debt.assignmentId),debtId:s(debt.id||debt.debtId),matId:s(debt.toMaterialId||debt.materialId),v2MaterialId:s(debt.fromMaterialId||debt.materialId),name:s(debt.materialName||debt.sourceMaterialName||line&&line.mat),unit:s(debt.unit||'bote_eq_4l'),qtyPending:pending,pendingQty:pending,fromEmpresa:companyName(db,debt.fromCompanyId||debt.fromEmpresa),fromCompanyId:s(debt.fromCompanyId),toEmpresa:companyName(db,debt.toCompanyId||debt.companyId),toCompanyId:s(debt.toCompanyId||debt.companyId),ref:s(debt.paintWorkRef||debt.workRef||ref),reason:'deuda_pintura_consumida_entre_empresas',paintLoanDebt:true}};
+    };
+
+    window.LDH_devolverDeudaStockDesdePrep=async function(lineIndex){
+      const line=(typeof estadoMateriales!=='undefined'&&Array.isArray(estadoMateriales))?estadoMateriales[lineIndex]:null;if(!line)return;
+      const db=cloudDB();let ref='';try{ref=s(refActual);}catch(_){ }
+      const debt=db?paintDebtForLine(db,line,ref):null;
+      if(!debt){
+        const changed=reconcileAll(true);
+        const after=cloudDB()?paintDebtForLine(cloudDB(),line,ref):null;
+        if(!after){
+          const local=localBorrowItemForLine(line),ev=(local&&cloudDB())?evidenceForItem(cloudDB(),ref,local):null;
+          if(local&&ev&&ev.known&&ev.pending<=EPS){alert('✅ Esta deuda ya está saldada en Stock/Cabina. Preparación se ha actualizado.');return;}
+          if(typeof baseReturn==='function')return baseReturn.call(this,lineIndex);
+          alert('No encuentro una deuda activa para esta línea.');return;
+        }
+      }
+      const current=debt||paintDebtForLine(cloudDB(),line,ref);if(!current)return;
+      const pending=pendingDebt(current),from=companyName(cloudDB(),current.fromCompanyId||current.fromEmpresa),to=companyName(cloudDB(),current.toCompanyId||current.companyId),mat=materialName(cloudDB(),current.toMaterialId||current.materialId,current.materialName);
+      const action=s(prompt('DEUDA REAL DE PINTURA\n\n'+to+' debe a '+from+'\n'+mat+'\nPendiente: '+pending.toFixed(3)+' botes eq ('+(pending*4).toFixed(3)+' L)\n\nD = DEVOLVER físicamente botes enteros\nC = COMPENSAR sin mover Stock\n\nEscribe D o C:','D')).toUpperCase();
+      if(!action)return;
+      if(action==='C'){
+        const answer=prompt('Cantidad a compensar (botes equivalentes)\n\nPendiente: '+pending.toFixed(3),String(Math.round(pending*1000)/1000));if(answer===null)return;const qty=n(answer);if(qty<=EPS||qty>pending+EPS){alert('Cantidad incorrecta. Máximo: '+pending.toFixed(3));return;}
+        if(!confirm('¿Compensar '+qty+' botes eq ('+(qty*4).toFixed(3)+' L) SIN mover Stock físico?'))return;
+        try{const result=await compensatePaintDebt(current,qty);reconcileAll(false);refreshDebtUi();alert('✅ Deuda de pintura compensada.\n\nCabina y Preparación leen ahora el mismo saldo.\nPendiente: '+Math.max(0,n(result&&result.remaining)).toFixed(3)+' botes eq.');}
+        catch(e){console.error('[Preparación V169] compensación',e);alert('No se ha modificado nada.\n\n'+s(e&&e.message||e));}
+        return;
+      }
+      if(action==='D'){
+        const suggested=Math.max(1,Math.ceil(pending-EPS));const answer=prompt('Nº de BOTES ENTEROS que devuelves ahora\n\nLa deuda exacta es '+pending.toFixed(3)+' botes eq ('+(pending*4).toFixed(3)+' L).\nSi entregas más de lo debido, el exceso quedará como saldo a favor igual que en Cabina.',String(suggested));if(answer===null)return;const bottles=Number(answer);if(!Number.isInteger(bottles)||bottles<1){alert('Indica un número entero de botes.');return;}
+        if(!confirm('¿Confirmar devolución física de '+bottles+' bote'+(bottles===1?'':'s')+'?\n\nSe descontará del Stock de '+to+' y se sumará al Stock de '+from+'.'))return;
+        try{const result=await returnPaintDebtBottles(current,bottles);reconcileAll(false);refreshDebtUi();const credit=n(result&&result.creditQty);alert('✅ Devolución registrada en Stock.\n\nCabina y Preparación quedan sincronizadas.'+(credit>EPS?'\nSaldo a favor: '+credit.toFixed(3)+' botes eq ('+(credit*4).toFixed(3)+' L).':''));}
+        catch(e){console.error('[Preparación V169] devolución',e);alert('No se ha modificado nada.\n\n'+s(e&&e.message||e));}
+        return;
+      }
+      alert('Escribe D para devolver o C para compensar.');
+    };
+    window.devolverNoAsignadoLinea=window.LDH_devolverDeudaStockDesdePrep;
+
+    const oldList=window.cargarLista;
+    if(typeof oldList==='function'&&!oldList.__ldhV169DebtReconcile){
+      const wrapped=function(){try{reconcileAll(false);}catch(_){ }return oldList.apply(this,arguments);};wrapped.__ldhV169DebtReconcile=true;wrapped.__ldhV169Base=oldList;window.cargarLista=wrapped;try{cargarLista=wrapped;}catch(_){ }
+    }
+    const oldOpen=window.abrirPedido;
+    if(typeof oldOpen==='function'&&!oldOpen.__ldhV169DebtReconcile){
+      const wrappedOpen=function(ref){try{const db=cloudDB();if(db)reconcileRef(s(ref),db);}catch(_){ }return oldOpen.apply(this,arguments);};wrappedOpen.__ldhV169DebtReconcile=true;wrappedOpen.__ldhV169Base=oldOpen;window.abrirPedido=wrappedOpen;try{abrirPedido=wrappedOpen;}catch(_){ }
+    }
+
+    window.addEventListener('ldh:stock-cloud-updated',()=>{reconcileAll(true);});
+    window.addEventListener('storage',ev=>{if(ev&&ev.key===STOCK_KEY)setTimeout(()=>reconcileAll(true),60);});
+    reconcileAll(true);
+    window.LDH_PREP_V169_DEUDA_PINTURA_RECIPROCA=BUILD;
+    document.documentElement.dataset.ldhPrepDebtReciprocal='V169';
+    console.info('[Preparación V169] deuda de pintura recíproca con Cabina: Stock nube autoritativo; devolución/compensación sincronizada en ambos sentidos.');
+  }
+
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});
+  else setTimeout(install,0);
+})();
+</script>
+
 </body></html>
