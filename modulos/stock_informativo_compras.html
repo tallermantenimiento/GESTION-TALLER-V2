@@ -614,6 +614,7 @@ body.ldh-help-active [data-ldh-helpable="1"]{cursor:help!important}
 }
 </style>
 
+<!-- LDH_INFORMATIVA_V60_RESERVADO_IGUAL_STOCK_20260909 -->
 </head>
 <body>
 <header>
@@ -1214,16 +1215,32 @@ function normalizePackage(db0){
     );
   }
 
+  function operationalNorm(value){
+    return low(value).normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  }
+
   function activeOperational(row){
-    const status = low(row.status ?? row.estado ?? 'activa');
-    const phase = low(row.phase ?? row.fase ?? 'preparacion');
+    const status = operationalNorm(row.status ?? row.estado ?? 'activa');
+    const phase = operationalNorm(row.phase ?? row.fase ?? 'preparacion');
     /*
-     * Igual que Stock principal: únicamente cuenta registros ACTIVOS.
-     * Una reserva recibida/liberada/cancelada es histórico, no reservado.
+     * V60 · Mismo criterio que Stock principal:
+     * acepta estados activos actuales y legacy; recibido/liberado/cancelado no reserva.
      */
-    const active = status === 'activa';
+    const active = ['activa','activo','active','abierta','open'].includes(status);
     return active &&
       (!phase || phase === 'preparacion' || phase === 'fabricacion');
+  }
+
+  function isLoanOperational(row){
+    if(!row || typeof row !== 'object') return false;
+    const loanText = operationalNorm([
+      row.assignmentType,row.reason,row.source,row.tipo
+    ].filter(Boolean).join(' '));
+    return Boolean(
+      loanText.includes('otra empresa') || loanText.includes('prestamo') ||
+      row.toCompanyId || row.toEmpresa || row.fromCompanyId || row.fromEmpresa ||
+      row.fromAssignmentId || row.originalAssignmentId
+    );
   }
 
   function operationalQty(row){
@@ -1247,7 +1264,10 @@ function normalizePackage(db0){
       .filter(row => !isAutoReceivedPrepReservation(row))
       .reduce((sum,row)=>sum+operationalQty(row),0);
     const assigned = assignmentArr
-      .filter(sameMaterial).filter(activeOperational)
+      .filter(sameMaterial)
+      .filter(activeOperational)
+      // Igual que Stock principal: un préstamo entre empresas no es reservado propio.
+      .filter(row => !isLoanOperational(row))
       .reduce((sum,row)=>sum+operationalQty(row),0);
     return {reserved,assigned};
   }
