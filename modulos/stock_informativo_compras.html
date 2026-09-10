@@ -1303,6 +1303,70 @@ function normalizePackage(db0){
     ));
   }
 
+
+  /* V66 · Para PERFILERIA/BARRAS la reserva existe solo mientras la OT sigue en
+   * Preparacion. En cuanto entra en Fabricacion, el material pasa a consumo fisico
+   * y NO debe seguir apareciendo como reservado, aunque sobreviva una fila legacy.
+   * Pintura/disolvente conservan su flujo propio hasta Cabina. */
+  function isProfileBarMaterialV66(materialId){
+    const m=matMap.get(s(materialId)) || {};
+    const type=operationalNorm(m.type || m.tipo || m.stockType || '');
+    const unit=operationalNorm(m.unit || m.unidad || '');
+    const fam=operationalNorm(m.family || m.familia || '');
+    return type==='hierro' && unit.includes('barra') && !fam.includes('pletina');
+  }
+  function prepMetaByRefV66(ref){
+    const tech=refKeyV61(ref);
+    const direct='prep_meta_'+String(ref||'').trim();
+    try{
+      const raw=prepCloudDataV62 && prepCloudDataV62[direct];
+      if(raw!==undefined && raw!==null) return typeof raw==='string' ? (JSON.parse(raw)||{}) : (raw||{});
+    }catch(_){ }
+    try{
+      for(const key of Object.keys(prepCloudDataV62||{})){
+        if(!key.startsWith('prep_meta_') || refKeyV61(key.slice(10))!==tech) continue;
+        const raw=prepCloudDataV62[key];
+        return typeof raw==='string' ? (JSON.parse(raw)||{}) : (raw||{});
+      }
+    }catch(_){ }
+    for(const store of [localStorage,sessionStorage]){
+      try{
+        const raw=store.getItem(direct);
+        if(raw) return JSON.parse(raw)||{};
+        for(let i=0;i<store.length;i++){
+          const key=store.key(i)||'';
+          if(!key.startsWith('prep_meta_') || refKeyV61(key.slice(10))!==tech) continue;
+          const val=store.getItem(key); if(val) return JSON.parse(val)||{};
+        }
+      }catch(_){ }
+    }
+    return null;
+  }
+  function refHasLeftPreparationV66(ref){
+    const meta=prepMetaByRefV66(ref);
+    if(meta){
+      if(meta.closed_from_preparation===true || meta.stock_consumed_on_close===true ||
+         meta.stock_consumed_on_close_v114===true || meta.en_fabricacion===true ||
+         meta.en_pintura===true || meta.en_almacen===true || meta.entregado===true) return true;
+      const st=operationalNorm(meta.workflow_stage || meta.fase || meta.phase || meta.estado || '');
+      if(['fabricacion','pintura','almacen','entregado','terminado','archivado'].some(x=>st.includes(x))) return true;
+    }
+    try{
+      const map=window.__LDH_INFO_FAB_FLOW_BY_REF_V65;
+      const f=map && typeof map.get==='function' ? map.get(refKeyV61(ref)) : null;
+      if(f && (n(f.fabricacion)+n(f.pintura)+n(f.almacen)+n(f.entregado)>0)) return true;
+    }catch(_){ }
+    return false;
+  }
+  function activeOperationalV66(row,materialId){
+    if(!activeOperational(row)) return false;
+    if(!isProfileBarMaterialV66(materialId)) return true;
+    const phase=operationalNorm(row && (row.phase ?? row.fase ?? 'preparacion'));
+    if(phase && phase!=='preparacion') return false;
+    const ref=row && (row.consumerRef || row.jobRef || row.ref || row.reference || row.referencia || '');
+    return !ref || !refHasLeftPreparationV66(ref);
+  }
+
   /* V61 · Stock principal no obtiene todo el "Reservado" solo de assignments.
    * Para material ya recibido en Preparación usa además prep_recepcion_* como
    * respaldo y toma el MÁXIMO entre ambos orígenes. La Informativa debe hacer
@@ -1328,7 +1392,7 @@ function normalizePackage(db0){
 
   function refKeyV61(value){
     const raw = String(value||'').trim();
-    const match = raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]))?\b/);
+    const match = raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);
     if(match) return 'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:'');
     return prepNormV61(raw);
   }
@@ -1525,6 +1589,8 @@ function normalizePackage(db0){
         const refCompany=prepRefCompanyV61(ref);
         if(!refCompany || !companyMatchesPrepV61(refCompany,companyId)) continue;
         if(!prepRefAliveV61(ref)) continue;
+        // V66: para barras de perfileria, una OT que ya entro en Fabricacion no reserva.
+        if(isProfileBarMaterialV66(materialId) && refHasLeftPreparationV66(ref)) continue;
         if(activeBorrowForRefMaterialV61(companyId,materialId,ref)) continue;
         let lines=[];
         try{
@@ -1603,12 +1669,12 @@ function normalizePackage(db0){
 
     const reserved = reservationArr
       .filter(sameMaterial)
-      .filter(activeOperational)
+      .filter(row => activeOperationalV66(row,materialId))
       .filter(row => !isAutoReceivedPrepReservation(row))
       .reduce((sum,row)=>sum+operationalQty(row),0);
     const assignedDb = assignmentArr
       .filter(sameMaterial)
-      .filter(activeOperational)
+      .filter(row => activeOperationalV66(row,materialId))
       .filter(row => !isLoanOperational(row))
       .reduce((sum,row)=>sum+operationalQty(row),0);
 
@@ -1692,8 +1758,33 @@ function normalizePackage(db0){
     });
   });
 
+  /* V66 · Consolidar fichas homonimas de PERFILERIA que quedaron con IDs historicos
+   * diferentes. Solo afecta a la vista informativa: no suma fisicos ni toca la nube.
+   * Se conserva la ficha con mayor fisico maestro y una unica reserva valida. */
+  const deduped=[];
+  const byExact=new Map();
+  for(const row of out){
+    const isBar=row.type==='hierro' && !row.pletinaMm && operationalNorm(row.unit).includes('barra');
+    if(!isBar){ deduped.push(row); continue; }
+    const key=[row.companyId,row.type,operationalNorm(row.family),operationalNorm(row.name),operationalNorm(row.unit)].join('|');
+    if(!byExact.has(key)){
+      const copy=Object.assign({},row);
+      copy.physical=Math.max(0,n(copy.physical??copy.qty)); copy.qty=copy.physical;
+      copy.reserved=Math.min(copy.physical,Math.max(0,n(copy.reserved)));
+      copy.assigned=Math.min(Math.max(0,copy.physical-copy.reserved),Math.max(0,n(copy.assigned)));
+      copy.free=Math.max(0,copy.physical-copy.reserved-copy.assigned);
+      byExact.set(key,copy); deduped.push(copy); continue;
+    }
+    const keep=byExact.get(key);
+    const physical=Math.max(keep.physical,Math.max(0,n(row.physical??row.qty)));
+    const reserved=Math.min(physical,Math.max(n(keep.reserved),n(row.reserved)));
+    const assigned=Math.min(Math.max(0,physical-reserved),Math.max(n(keep.assigned),n(row.assigned)));
+    keep.physical=physical; keep.qty=physical; keep.reserved=reserved; keep.assigned=assigned;
+    keep.free=Math.max(0,physical-reserved-assigned);
+  }
+
   companies = Array.from(compMap.values()).sort((a,b)=>a.order-b.order || a.name.localeCompare(b.name,'es'));
-  return out;
+  return deduped;
 }
 
 function normalizeMaterialCollection(docs){
@@ -1966,10 +2057,13 @@ function familyHTML(f){
 }
 
 function cardHTML(m){
-  const physical = n(m.physical ?? m.qty);
-  const reserved = Math.max(0,n(m.reserved));
-  const assigned = Math.max(0,n(m.assigned));
-  const free = n(m.free ?? (physical-reserved-assigned));
+  const physical = Math.max(0,n(m.physical ?? m.qty));
+  const isBar = String(m.type||'').toLowerCase()==='hierro' && !m.pletinaMm && low(m.unit||'').includes('barra');
+  const reservedRaw = Math.max(0,n(m.reserved));
+  const assignedRaw = Math.max(0,n(m.assigned));
+  const reserved = isBar ? Math.min(physical,reservedRaw) : reservedRaw;
+  const assigned = isBar ? Math.min(Math.max(0,physical-reserved),assignedRaw) : assignedRaw;
+  const free = isBar ? Math.max(0,physical-reserved-assigned) : n(m.free ?? (physical-reserved-assigned));
   const zero = free<=0;
   const lowc = free>0 && n(m.min)>0 && free<=n(m.min);
   return `<article class="matCard ${zero?'zero':lowc?'low':''}">
@@ -5543,7 +5637,7 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
     return out;
   };
   try{window.normalizePackage=normalizePackage;}catch(_){ }
-  window.LDH_INFO_V65='RESERVAS-FISICAS-CIERRE-OT-20260910';
+  window.LDH_INFO_V65='RESERVAS-FISICAS-CIERRE-OT-20260910'; window.LDH_INFO_V66='RESERVA-SOLO-PREPARACION-SIN-DUPLICADOS-20260910';
   const refresh=()=>{try{if(typeof scheduleLoadAll==='function')scheduleLoadAll();}catch(_){ }};
   window.addEventListener('ldh:info-fab-flow-v65',refresh);
   setTimeout(refresh,50);setTimeout(refresh,1200);

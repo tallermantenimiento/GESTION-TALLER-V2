@@ -2014,7 +2014,7 @@ function _activeBorrowDebtForRefMaterial(companyId, materialId, ref){
  */
 function _stockAssignedRefKeyV68(value){
   const raw=String(value||'').trim();
-  const match=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]))?\b/);
+  const match=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);
   if(match) return 'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:'');
   return _prepNormText(raw);
 }
@@ -3505,7 +3505,7 @@ function _shortRef(txt){
  * Solo lectura: no modifica reservas, asignaciones ni stock. */
 function LDH_stockTechRefV116(value){
   const raw=String(value||'').trim();
-  const m=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?/);
+  const m=raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);
   return m ? 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'') : raw;
 }
 function LDH_stockWorkIdentificationV116(ref){
@@ -9744,6 +9744,121 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 })();
 </script>
 
+
+
+<!-- === LDH STOCK V127 · reservado SOLO mientras la OT esta en Preparacion === -->
+<script id="LDH_STOCK_V127_RESERVA_SOLO_PREPARACION_20260910">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V127_RESERVA_SOLO_PREPARACION__) return;
+  window.__LDH_STOCK_V127_RESERVA_SOLO_PREPARACION__=true;
+  const BUILD='STOCK-V127-RESERVA-SOLO-PREPARACION-20260910';
+  let busy=false;
+  const txt=v=>String(v??'').trim();
+  const num=v=>{const x=Number.parseFloat(String(v??0).replace(',','.'));return Number.isFinite(x)?Math.max(0,x):0;};
+  const norm=v=>txt(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[x×*]/g,'x').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  function refKey(v){const raw=txt(v).toUpperCase();const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):norm(raw);}
+  function rowRef(r){return txt(r&&(r.consumerRef||r.jobRef||r.ref||r.reference||r.referencia||r.workRef||r.trabajoRef));}
+  function active(r){const st=norm(r&&(r.status||r.estado||'activa'));return ['activa','activo','active','abierta','open',''].includes(st);}
+  function ownAllocation(r){
+    const t=norm([r&&r.assignmentType,r&&r.reason,r&&r.source,r&&r.createdFrom,r&&r.tipo].filter(Boolean).join(' '));
+    if(!r || r.sharedStock===true || r.sharedPool===true || r.toCompanyId || r.toEmpresa || r.fromCompanyId || r.fromEmpresa || r.fromAssignmentId || r.originalAssignmentId) return false;
+    if(t.includes('otra empresa')||t.includes('prestamo')||t.includes('donacion')||t.includes('stock comun')) return false;
+    return true;
+  }
+  function matOf(r){
+    const mid=txt(r&&(r.materialId||r.matId||r.material_id));
+    let m=null;
+    try{if(mid&&typeof materialById==='function')m=materialById(mid)||null;}catch(_){ }
+    if(!m && typeof db!=='undefined' && db){
+      const name=norm(r&&(r.materialName||r.material||r.mat||r.name));
+      m=(Array.isArray(db.materials)?db.materials:[]).find(x=>txt(x&&(x.id||x.materialId||x.matId||x.material_id))===mid)
+        || (name ? (Array.isArray(db.materials)?db.materials:[]).find(x=>norm(x&&(x.name||x.nombre||x.material))===name) : null);
+    }
+    return m||{};
+  }
+  function profileBar(r){
+    const m=matOf(r);
+    const type=norm(m.type||m.tipo||m.stockType||'');
+    const unit=norm(m.unit||m.unidad||r&&r.unit||r&&r.unidad||'');
+    const fam=norm(m.family||m.familia||r&&r.family||r&&r.familia||'');
+    const name=norm(m.name||m.nombre||r&&r.materialName||r&&r.material||'');
+    if(fam.includes('pletina')||name.includes('pletina')||unit==='mm') return false;
+    return type==='hierro' && unit.includes('barra');
+  }
+  function refAdvanced(ref){
+    const key=refKey(ref); if(!key) return false;
+    try{
+      const map=window.__LDH_STOCK_V126_FAB_FLOW_BY_REF;
+      const f=map&&typeof map.get==='function'?map.get(key):null;
+      if(f&&(num(f.fabricacion)+num(f.pintura)+num(f.almacen)+num(f.entregado)>0)) return true;
+    }catch(_){ }
+    try{
+      for(const store of [localStorage,sessionStorage]){
+        for(let i=0;i<store.length;i++){
+          const k=store.key(i)||'';if(!k.startsWith('prep_meta_')||refKey(k.slice(10))!==key)continue;
+          const m=JSON.parse(store.getItem(k)||'{}')||{};
+          if(m.closed_from_preparation===true||m.stock_consumed_on_close===true||m.stock_consumed_on_close_v114===true||m.en_fabricacion===true||m.en_pintura===true||m.en_almacen===true||m.entregado===true)return true;
+          const st=norm(m.workflow_stage||m.fase||m.phase||m.estado||'');
+          if(['fabricacion','pintura','almacen','entregado','terminado','archivado'].some(x=>st.includes(x)))return true;
+        }
+      }
+    }catch(_){ }
+    try{
+      const raw=localStorage.getItem('ldh_db')||sessionStorage.getItem('ldh_db')||'';
+      if(raw){const x=JSON.parse(raw)||{};for(const pool of ['fabricacion','fab','pintura','almacen','entregas','deliveries','trabajos'])for(const r of (Array.isArray(x[pool])?x[pool]:[])){
+        if(!r||r.deleted===true||refKey(rowRef(r))!==key)continue;
+        const f=r.flow&&typeof r.flow==='object'?r.flow:{};
+        if(num(f.fabricacion??f.fab)+num(f.pintura??f.pint)+num(f.almacen??f.alm)+num(f.entregado??f.ent??f.delivered)>0)return true;
+        const st=norm(r.workflow_stage||r.fase||r.phase||r.estado||'');
+        if(['fabricacion','pintura','almacen','entregado','terminado','archivado'].some(v=>st.includes(v)))return true;
+      }}
+    }catch(_){ }
+    return false;
+  }
+  function shouldClose(r){
+    if(!active(r)||!ownAllocation(r)||!profileBar(r))return false;
+    const phase=norm(r&&(r.phase||r.fase||'preparacion'));
+    if(phase && phase!=='preparacion') return true;
+    const ref=rowRef(r); return !!ref && refAdvanced(ref);
+  }
+  function close(r,stamp){
+    const q=num(r.qty??r.cantidad??r.pendingQty??r.qtyPending);
+    r.status='consumida';r.estado='consumida';r.phase='fabricacion';r.fase='fabricacion';
+    r.consumedQty=Math.max(num(r.consumedQty),q);r.pendingQty=0;r.qtyPending=0;
+    r.consumedAt=r.consumedAt||stamp;r.updatedAt=stamp;r.closedFromPreparationV127=true;
+    r.closeReason='reserva_solo_preparacion_consumida_v127';
+  }
+  function repair(reason){
+    if(busy||typeof db==='undefined'||!db)return 0;busy=true;
+    try{
+      let changed=0;const stamp=new Date().toISOString();
+      for(const r of (Array.isArray(db.assignments)?db.assignments:[])){if(shouldClose(r)){close(r,stamp);changed++;}}
+      for(const r of (Array.isArray(db.reservations)?db.reservations:[])){if(shouldClose(r)){close(r,stamp);changed++;}}
+      if(changed){
+        db.stockReservationRepairV127={at:stamp,reason:txt(reason||'auto'),closedAllocations:changed};
+        if(typeof save==='function')save();
+        try{if(typeof render==='function')render();}catch(_){ }
+        try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){ }
+        try{if(window.LDH_publishStockDirectFromMemory)window.LDH_publishStockDirectFromMemory(db);}catch(_){ }
+        console.info('[Stock V127] reservas cerradas al salir de Preparacion:',changed,reason||'auto');
+      }
+      return changed;
+    }catch(e){console.warn('[Stock V127] reparacion',e);return 0;}finally{busy=false;}
+  }
+  window.LDH_repararReservasSoloPreparacionV127=()=>repair('manual');
+  window.LDH_STOCK_V127=BUILD;
+  document.documentElement.dataset.ldhStockV127='true';
+  function start(){
+    [0,250,800,1800,4000,8000,15000,25000].forEach(ms=>setTimeout(()=>repair('arranque_'+ms),ms));
+    window.addEventListener('ldh:stock-cloud-updated',()=>{setTimeout(()=>repair('evento_stock_cloud'),80);setTimeout(()=>repair('evento_stock_cloud_2'),700);});
+    window.addEventListener('storage',e=>{if(e&&(e.key==='ldh_db'||(e.key&&e.key.startsWith('prep_meta_'))))setTimeout(()=>repair('storage'),80);});
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else setTimeout(start,0);
+})();
+</script>
+<!-- /LDH STOCK V127 -->
+
 </body>
 </html>
 
@@ -9900,7 +10015,7 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
   function norm(v){return text(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[x×*]/g,'x').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();}
   function refKey(v){
     const raw=text(v).toUpperCase();
-    const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?/);
+    const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);
     return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):norm(raw);
   }
   function sameRef(a,b){const x=refKey(a),y=refKey(b);return !!x&&x===y;}
@@ -10088,7 +10203,7 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
   const norm = v => txt(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[x×*]/g,'x').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
   function refKey(v){
     const raw = txt(v).toUpperCase();
-    const m = raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?/);
+    const m = raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);
     return m ? 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'') : norm(raw);
   }
   function rowRef(r){ return txt(r && (r.consumerRef || r.jobRef || r.ref || r.reference || r.referencia || r.workRef || r.trabajoRef)); }
