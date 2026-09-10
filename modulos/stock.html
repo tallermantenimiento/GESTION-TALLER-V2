@@ -9880,3 +9880,455 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
   try{setTimeout(()=>{if(typeof render==='function') render();},0);}catch(_){ }
 })();
 </script>
+
+
+<!-- === LDH STOCK V125 · reserva fisica coherente + cierre seguro de restos de Preparacion === -->
+<script id="LDH_STOCK_V125_RESERVA_FISICA_CIERRE_OT_20260910">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V125_RESERVA_FISICA__) return;
+  window.__LDH_STOCK_V125_RESERVA_FISICA__=true;
+
+  const BUILD='STOCK-V125-RESERVA-FISICA-CIERRE-OT-20260910';
+  const EPS=0.000001;
+  const oldReserved=window.reservedStock;
+  const oldAssigned=window.assignedStock;
+  const oldOwnAssignments=window.LDH_stockOwnAssignmentsV116;
+
+  function num(v){const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;}
+  function text(v){return String(v??'').trim();}
+  function norm(v){return text(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[x×*]/g,'x').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();}
+  function refKey(v){
+    const raw=text(v).toUpperCase();
+    const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?/);
+    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):norm(raw);
+  }
+  function sameRef(a,b){const x=refKey(a),y=refKey(b);return !!x&&x===y;}
+  function rowRef(r){return text(r&&(r.consumerRef||r.jobRef||r.ref||r.reference||r.referencia||r.workRef||r.trabajoRef));}
+  function active(r){const s=norm(r&&(r.status||r.estado||'activa'));return ['activa','activo','active','abierta','open',''].includes(s);}
+  function isLoanOrShared(r){
+    const t=norm([r&&r.assignmentType,r&&r.reason,r&&r.source,r&&r.tipo].filter(Boolean).join(' '));
+    return !!(r&&(r.sharedStock===true||r.sharedPool===true||r.toCompanyId||r.toEmpresa||r.fromCompanyId||r.fromEmpresa||r.fromAssignmentId||r.originalAssignmentId)) ||
+      t.includes('otra empresa')||t.includes('prestamo')||t.includes('donacion')||t.includes('stock comun');
+  }
+  function isPrepReceipt(r){
+    const t=norm([r&&r.id,r&&r.assignmentId,r&&r.source,r&&r.reason,r&&r.createdFrom].filter(Boolean).join(' '));
+    return t.includes('prep received') || t.includes('preparacion pedidos recepcion fisica') ||
+      t.includes('recibido fisico') || t.includes('asignado desde preparacion recepcion fisica');
+  }
+  function stageText(v){
+    const t=norm(v);
+    if(t.includes('entreg')||t.includes('finaliz')||t.includes('terminad')||t.includes('archiv')) return 'entregado';
+    if(t.includes('almacen')||t.includes('almac')) return 'almacen';
+    if(t.includes('pint')) return 'pintura';
+    if(t.includes('fab')||t.includes('fabric')) return 'fabricacion';
+    return '';
+  }
+  function flowOf(r){
+    const f=r&&r.flow&&typeof r.flow==='object'?r.flow:{};
+    return {
+      fab:num(f.fabricacion??f.fab??r?.fabricacion??r?.fab),
+      pint:num(f.pintura??f.pint??r?.pintura??r?.pint),
+      alm:num(f.almacen??f.alm??r?.almacen??r?.alm),
+      ent:num(f.entregado??f.ent??f.delivered??r?.entregado??r?.delivered)
+    };
+  }
+  function totalOf(r){return Math.max(0,num(r&&(r.total??r.unidades??r.cantidad??r.uds??r.units)));}
+  function prepMeta(ref){
+    for(const store of [localStorage,sessionStorage]){
+      try{const raw=store.getItem('prep_meta_'+text(ref));if(raw){const m=JSON.parse(raw)||{};return m;}}catch(_){ }
+    }
+    return null;
+  }
+  function definitiveBeyondPreparation(ref){
+    if(!ref) return false;
+    const meta=prepMeta(ref);
+    if(meta){
+      if(meta.closed_from_preparation===true || meta.stock_consumed_on_close===true || meta.stock_consumed_on_close_v114===true) return true;
+      const st=stageText(meta.workflow_stage||meta.fase||meta.phase||meta.estado||'');
+      if((st==='almacen'||st==='entregado') && !meta.en_fabricacion) return true;
+    }
+    try{
+      const raw=localStorage.getItem('ldh_db')||sessionStorage.getItem('ldh_db')||'';
+      const ldb=JSON.parse(raw||'{}')||{};
+      const pools=['deliveries','fabricacion','fab','trabajos','pintura','almacen','entregas'];
+      for(const key of pools){
+        const rows=Array.isArray(ldb[key])?ldb[key]:[];
+        for(const r of rows){
+          if(!r||r.deleted===true||!sameRef(rowRef(r),ref)) continue;
+          const f=flowOf(r), post=f.pint+f.alm+f.ent, total=totalOf(r);
+          if(f.fab<=EPS && post>EPS && (total<=EPS || post+EPS>=total)) return true;
+          const st=stageText(r.workflow_stage||r.fase||r.phase||r.estado||r.status||'');
+          if((st==='almacen'||st==='entregado') && f.fab<=EPS) return true;
+        }
+      }
+    }catch(_){ }
+    return false;
+  }
+  function shouldClose(r){const mid=text(r&&(r.materialId||r.matId||''));return !!(r&&mid&&isProfileBar(mid)&&active(r)&&!isLoanOrShared(r)&&isPrepReceipt(r)&&definitiveBeyondPreparation(rowRef(r)));}
+
+  function isProfileBar(materialId){
+    try{
+      const m=typeof materialById==='function'?(materialById(materialId)||{}):{};
+      const type=norm(m.type||m.tipo||m.stockType||'');
+      const unit=norm(m.unit||m.unidad||'');
+      const fam=norm(m.family||m.familia||'');
+      return type==='hierro'&&unit.includes('barra')&&!fam.includes('pletina');
+    }catch(_){return false;}
+  }
+
+  // Lectura: una reserva de material fisico nunca puede superar el fisico real.
+  window.reservedStock=function(companyId,materialId){
+    const raw=Math.max(0,num(typeof oldReserved==='function'?oldReserved(companyId,materialId):0));
+    if(!isProfileBar(materialId)) return raw;
+    let physical=0;try{physical=Math.max(0,num(realStock(companyId,materialId)));}catch(_){return raw;}
+    return Math.min(raw,physical);
+  };
+  window.assignedStock=function(companyId,materialId){
+    const raw=Math.max(0,num(typeof oldAssigned==='function'?oldAssigned(companyId,materialId):0));
+    if(!isProfileBar(materialId)) return raw;
+    let physical=0,reserved=0;
+    try{physical=Math.max(0,num(realStock(companyId,materialId)));reserved=Math.max(0,num(window.reservedStock(companyId,materialId)));}catch(_){return raw;}
+    return Math.min(raw,Math.max(0,physical-reserved));
+  };
+  window.LDH_stockOwnAssignmentsV116=function(companyId,materialId){
+    const rows=(typeof oldOwnAssignments==='function'?oldOwnAssignments(companyId,materialId):[])||[];
+    return rows.filter(r=>!shouldClose(r));
+  };
+
+  function normalizeNegativeMasterRows(){
+    let changed=0;
+    try{
+      (db.stock||[]).forEach(r=>{
+        const mid=text(r.materialId||r.matId||'');
+        if(!mid||!isProfileBar(mid)) return;
+        const fields=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad','stock','real'];
+        const hasNegative=fields.some(k=>r[k]!==undefined&&r[k]!==null&&text(r[k])!==''&&num(r[k])<0);
+        if(!hasNegative) return;
+        let effective=0;
+        try{effective=Math.max(0,num(realStock(r.companyId||r.empresaId||'',mid)));}catch(_){effective=0;}
+        if(effective>EPS) return; // no regularizar automaticamente una fila que Stock considera positiva.
+        fields.forEach(k=>{if(r[k]!==undefined) r[k]=0;});
+        r.physicalQty=0;r.qtyPhysical=0;r.fisico=0;r.realQty=0;r.stockFisico=0;r.stockReal=0;r.stockActual=0;r.existencias=0;r.actualQty=0;r.qty=0;r.cantidad=0;r.stock=0;r.real=0;
+        r.physicalManualMaster=true;
+        r.physicalRepairV125At=new Date().toISOString();
+        r.physicalRepairV125Reason='normaliza_maestro_negativo_a_cero';
+        changed+=1;
+      });
+    }catch(_){ }
+    return changed;
+  }
+
+  function closeResidualPrepAllocations(){
+    let changed=0;const now=new Date().toISOString();
+    try{
+      (db.assignments||[]).forEach(a=>{
+        if(!shouldClose(a)) return;
+        const q=Math.max(0,num(a.qty??a.cantidad));
+        a.status='consumida';a.estado='consumida';a.phase='fabricacion';a.fase='fabricacion';
+        a.consumedQty=Math.max(num(a.consumedQty),q);a.pendingQty=0;a.qtyPending=0;
+        a.consumedAt=a.consumedAt||now;a.updatedAt=now;
+        a.closeReason='cierre_reserva_residual_ot_fuera_fabricacion_v125';
+        changed+=1;
+      });
+      (db.reservations||[]).forEach(r=>{
+        if(!shouldClose(r)) return;
+        const q=Math.max(0,num(r.qty??r.cantidad));
+        r.status='consumida';r.estado='consumida';r.phase='fabricacion';r.fase='fabricacion';
+        r.consumedQty=Math.max(num(r.consumedQty),q);r.pendingQty=0;r.qtyPending=0;
+        r.consumedAt=r.consumedAt||now;r.updatedAt=now;
+        r.closeReason='cierre_reserva_residual_ot_fuera_fabricacion_v125';
+        changed+=1;
+      });
+    }catch(_){ }
+    return changed;
+  }
+
+  let repairing=false;
+  function repairAndPublish(){
+    if(repairing||typeof db==='undefined'||!db) return;
+    repairing=true;
+    try{
+      const closed=closeResidualPrepAllocations();
+      const normalized=normalizeNegativeMasterRows();
+      if(closed||normalized){
+        db.stockReservationRepairV125={at:new Date().toISOString(),closedResidualAllocations:closed,normalizedNegativePhysicalRows:normalized};
+        if(typeof save==='function') save();
+        try{if(typeof render==='function') render();}catch(_){ }
+        try{if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true);}catch(_){ }
+        console.info('[Stock V125] saneado',db.stockReservationRepairV125);
+      }
+    }catch(e){console.warn('[Stock V125] saneado aplazado',e);}finally{repairing=false;}
+  }
+
+  window.LDH_STOCK_V125=BUILD;
+  document.documentElement.dataset.ldhStockV125='true';
+  const start=()=>{try{if(typeof render==='function')render();}catch(_){ } repairAndPublish(); setTimeout(repairAndPublish,800); setTimeout(repairAndPublish,2500);};
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start,{once:true}); else setTimeout(start,0);
+  window.addEventListener('storage',e=>{if(e&&e.key==='ldh_db')setTimeout(repairAndPublish,120);});
+})();
+</script>
+<!-- /LDH STOCK V125 -->
+
+<!-- === LDH STOCK V126 · cierre REAL de asignaciones de Preparacion al entrar en Fabricacion === -->
+<script id="LDH_STOCK_V126_CIERRE_REAL_RESERVAS_NUBE_FAB_20260910">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V126_CIERRE_REAL_RESERVAS__) return;
+  window.__LDH_STOCK_V126_CIERRE_REAL_RESERVAS__ = true;
+
+  const BUILD = 'STOCK-V126-CIERRE-REAL-RESERVAS-NUBE-FAB-20260910';
+  const flowByRef = new Map();
+  let flowCloudReady = false;
+  let repairBusy = false;
+  let remoteHookInstalled = false;
+
+  const num = v => { const n = Number(String(v ?? 0).replace(',', '.')); return Number.isFinite(n) ? Math.max(0,n) : 0; };
+  const txt = v => String(v ?? '').trim();
+  const norm = v => txt(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[x×*]/g,'x').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  function refKey(v){
+    const raw = txt(v).toUpperCase();
+    const m = raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?/);
+    return m ? 'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'') : norm(raw);
+  }
+  function rowRef(r){ return txt(r && (r.consumerRef || r.jobRef || r.ref || r.reference || r.referencia || r.workRef || r.trabajoRef)); }
+  function active(r){
+    const s = norm(r && (r.status || r.estado || 'activa'));
+    return ['activa','activo','active','abierta','open',''].includes(s);
+  }
+  function isLoanSharedOrManual(r){
+    const t = norm([r&&r.assignmentType,r&&r.reason,r&&r.source,r&&r.createdFrom,r&&r.tipo].filter(Boolean).join(' '));
+    return !!(r && (r.sharedStock===true || r.sharedPool===true || r.toCompanyId || r.toEmpresa || r.fromCompanyId || r.fromEmpresa || r.fromAssignmentId || r.originalAssignmentId)) ||
+      t.includes('otra empresa') || t.includes('prestamo') || t.includes('donacion') || t.includes('stock comun') ||
+      t.includes('reserva desde stock') || t.includes('entrada stock');
+  }
+  function isPrepReceipt(r){
+    const t = norm([r&&r.id,r&&r.assignmentId,r&&r.source,r&&r.reason,r&&r.createdFrom].filter(Boolean).join(' '));
+    return t.includes('prep received') ||
+      t.includes('preparacion pedidos recepcion fisica') ||
+      t.includes('recibido fisico v66') ||
+      t.includes('recibido fisico v74') ||
+      t.includes('asignado desde preparacion recepcion fisica');
+  }
+  function isProfileBar(materialId){
+    try{
+      const m = typeof materialById === 'function' ? (materialById(materialId) || {}) : {};
+      const type = norm(m.type || m.tipo || m.stockType || '');
+      const unit = norm(m.unit || m.unidad || '');
+      const fam = norm(m.family || m.familia || '');
+      return type === 'hierro' && unit.includes('barra') && !fam.includes('pletina');
+    }catch(_){ return false; }
+  }
+  function stageFromText(v){
+    const t = norm(v);
+    if(t.includes('entreg') || t.includes('archiv') || t.includes('terminad')) return 'entregado';
+    if(t.includes('almacen') || t.includes('almac')) return 'almacen';
+    if(t.includes('pint')) return 'pintura';
+    if(t.includes('fab') || t.includes('fabric')) return 'fabricacion';
+    return '';
+  }
+  function localMetaAdvanced(ref){
+    const tech = refKey(ref);
+    if(!tech) return false;
+    try{
+      for(const store of [localStorage,sessionStorage]){
+        for(let i=0;i<store.length;i++){
+          const k = store.key(i) || '';
+          if(!k.startsWith('prep_meta_')) continue;
+          if(refKey(k.slice('prep_meta_'.length)) !== tech) continue;
+          try{
+            const m = JSON.parse(store.getItem(k) || '{}') || {};
+            if(m.closed_from_preparation===true || m.stock_consumed_on_close===true || m.stock_consumed_on_close_v114===true || m.en_fabricacion===true || m.en_pintura===true || m.en_almacen===true || m.entregado===true) return true;
+            if(stageFromText(m.workflow_stage || m.fase || m.phase || m.estado || m.status || '')) return true;
+          }catch(_){ }
+        }
+      }
+    }catch(_){ }
+    return false;
+  }
+  function localLdhDbAdvanced(ref){
+    const tech = refKey(ref);
+    if(!tech) return false;
+    try{
+      const raw = localStorage.getItem('ldh_db') || sessionStorage.getItem('ldh_db') || '';
+      if(!raw) return false;
+      const ldb = JSON.parse(raw) || {};
+      for(const key of ['deliveries','fabricacion','fab','trabajos','pintura','almacen','entregas']){
+        const rows = Array.isArray(ldb[key]) ? ldb[key] : [];
+        for(const r of rows){
+          if(!r || r.deleted===true || r.archived===true || refKey(rowRef(r))!==tech) continue;
+          const f = r.flow && typeof r.flow==='object' ? r.flow : {};
+          const fab = num(f.fabricacion ?? f.fab ?? r.fabricacion ?? r.fab);
+          const pint = num(f.pintura ?? f.pint ?? r.pintura ?? r.pint);
+          const alm = num(f.almacen ?? f.alm ?? r.almacen ?? r.alm);
+          const ent = num(f.entregado ?? f.ent ?? f.delivered ?? r.entregado ?? r.delivered);
+          if(fab+pint+alm+ent > 0) return true; // En cuanto la OT entra en Fabricacion, la reserva de Preparacion ya esta consumida.
+          if(stageFromText(r.workflow_stage || r.fase || r.phase || r.estado || r.status || '')) return true;
+        }
+      }
+    }catch(_){ }
+    return false;
+  }
+  function cloudFlowAdvanced(ref){
+    const key = refKey(ref);
+    if(!key || !flowCloudReady) return false;
+    const f = flowByRef.get(key);
+    return !!(f && num(f.fabricacion)+num(f.pintura)+num(f.almacen)+num(f.entregado) > 0);
+  }
+  function workHasLeftPreparation(ref){
+    return cloudFlowAdvanced(ref) || localMetaAdvanced(ref) || localLdhDbAdvanced(ref);
+  }
+  function shouldClose(row){
+    const mid = txt(row && (row.materialId || row.matId || row.material_id || ''));
+    if(!row || !mid || !active(row) || !isProfileBar(mid) || isLoanSharedOrManual(row) || !isPrepReceipt(row)) return false;
+    const ref = rowRef(row);
+    return !!ref && workHasLeftPreparation(ref);
+  }
+  function closeRow(row, now){
+    const q = num(row.qty ?? row.cantidad ?? row.pendingQty ?? row.qtyPending);
+    row.status = 'consumida';
+    row.estado = 'consumida';
+    row.phase = 'fabricacion';
+    row.fase = 'fabricacion';
+    row.consumedQty = Math.max(num(row.consumedQty), q);
+    row.pendingQty = 0;
+    row.qtyPending = 0;
+    row.consumedAt = row.consumedAt || now;
+    row.updatedAt = now;
+    row.closedFromPreparationV126 = true;
+    row.closeReason = 'reserva_preparacion_consumida_al_entrar_fabricacion_v126';
+  }
+  function repair(reason){
+    if(repairBusy || typeof db === 'undefined' || !db) return 0;
+    repairBusy = true;
+    try{
+      const now = new Date().toISOString();
+      let changed = 0;
+      for(const row of (Array.isArray(db.assignments) ? db.assignments : [])){
+        if(shouldClose(row)){ closeRow(row,now); changed++; }
+      }
+      for(const row of (Array.isArray(db.reservations) ? db.reservations : [])){
+        if(shouldClose(row)){ closeRow(row,now); changed++; }
+      }
+      if(changed){
+        db.stockReservationRepairV126 = {
+          at: now,
+          reason: txt(reason || 'auto'),
+          closedResidualAllocations: changed,
+          flowCloudReady: !!flowCloudReady
+        };
+        if(typeof save === 'function') save();
+        try{ if(typeof render === 'function') render(); }catch(_){ }
+        try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(_){ }
+        try{ if(window.LDH_publishStockDirectFromMemory && window.__LDH_STOCK_MEMORY_DB) window.LDH_publishStockDirectFromMemory(window.__LDH_STOCK_MEMORY_DB); }catch(_){ }
+        console.info('[Stock V126] reservas de Preparacion cerradas de forma real:', changed, reason || 'auto');
+      }
+      return changed;
+    }catch(e){
+      console.warn('[Stock V126] no se pudo cerrar alguna reserva residual',e);
+      return 0;
+    }finally{ repairBusy = false; }
+  }
+  function installRemoteHook(){
+    if(remoteHookInstalled) return true;
+    const prev = window.LDH_applyRemoteStockWithoutReload;
+    if(typeof prev !== 'function') return false;
+    if(prev.__ldhV126RealReservationClose){ remoteHookInstalled=true; return true; }
+    const wrapped = function(){
+      const out = prev.apply(this,arguments);
+      setTimeout(()=>repair('stock_remoto_aplicado'),40);
+      setTimeout(()=>repair('stock_remoto_aplicado_confirmacion'),500);
+      return out;
+    };
+    Object.assign(wrapped, prev);
+    wrapped.__ldhV126RealReservationClose = true;
+    window.LDH_applyRemoteStockWithoutReload = wrapped;
+    remoteHookInstalled = true;
+    return true;
+  }
+
+  // Fuente autoritativa de fase: el mismo documento que usa Fabricacion/Informativa.
+  async function startFabricationCloudReader(){
+    try{
+      const config = {
+        apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',
+        authDomain:'gestion-taller-v2.firebaseapp.com',
+        projectId:'gestion-taller-v2',
+        storageBucket:'gestion-taller-v2.firebasestorage.app',
+        messagingSenderId:'888590823508',
+        appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'
+      };
+      const App = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
+      const FS = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+      let app = App.getApps().find(a=>a.options && a.options.projectId===config.projectId);
+      if(!app) app = App.initializeApp(config,'ldh-stock-v126-fab-reader');
+      const fdb = FS.getFirestore(app);
+      FS.onSnapshot(FS.doc(fdb,'taller_data','fabricacion'), snap=>{
+        if(!snap.exists()) return;
+        const payload = snap.data() || {};
+        const next = new Map();
+        const add = (ref,flow,priority)=>{
+          const key = refKey(ref); if(!key) return;
+          const val = {fabricacion:num(flow.fabricacion),pintura:num(flow.pintura),almacen:num(flow.almacen),entregado:num(flow.entregado),priority:num(priority)};
+          const cur = next.get(key);
+          if(!cur || val.priority>=cur.priority) next.set(key,val);
+        };
+        const parseDb = raw=>{ try{return typeof raw==='string'?JSON.parse(raw||'{}'):(raw&&typeof raw==='object'?raw:{});}catch(_){return {};} };
+        const ldb = parseDb(payload.ldh_db);
+        for(const pool of ['deliveries','fabricacion','fab','trabajos']){
+          for(const r of (Array.isArray(ldb[pool])?ldb[pool]:[])){
+            if(!r || r.deleted===true || r.archived===true) continue;
+            const ref = txt(r.ref || r.referencia || r.jobRef); if(!ref) continue;
+            const f = r.flow && typeof r.flow==='object' ? r.flow : {};
+            const flow = {
+              fabricacion:num(f.fabricacion ?? f.fab ?? r.fabricacion ?? r.fab),
+              pintura:num(f.pintura ?? f.pint ?? r.pintura ?? r.pint),
+              almacen:num(f.almacen ?? f.alm ?? r.almacen ?? r.alm),
+              entregado:num(f.entregado ?? f.ent ?? f.delivered ?? r.entregado ?? r.delivered)
+            };
+            if(flow.fabricacion+flow.pintura+flow.almacen+flow.entregado<=0){
+              const st=stageFromText(r.workflow_stage||r.fase||r.phase||r.estado||r.status||'');
+              const total=num(r.total??r.unidades??r.cantidad??r.uds);
+              if(st==='fabricacion') flow.fabricacion=total||1;
+              else if(st==='pintura') flow.pintura=total||1;
+              else if(st==='almacen') flow.almacen=total||1;
+              else if(st==='entregado') flow.entregado=total||1;
+            }
+            if(flow.fabricacion+flow.pintura+flow.almacen+flow.entregado>0) add(ref,flow,20);
+          }
+        }
+        const phaseMap = payload.phaseFlowV19 && typeof payload.phaseFlowV19==='object' ? payload.phaseFlowV19 : {};
+        for(const entry of Object.values(phaseMap)){
+          if(!entry || !entry.flow) continue;
+          const ref = txt(entry.workRef || entry.ref || entry.reference); if(!ref) continue;
+          const f = entry.flow || {};
+          const flow={fabricacion:num(f.fabricacion??f.fab),pintura:num(f.pintura??f.pint),almacen:num(f.almacen??f.alm),entregado:num(f.entregado??f.ent??f.delivered)};
+          if(flow.fabricacion+flow.pintura+flow.almacen+flow.entregado>0) add(ref,flow,100);
+        }
+        flowByRef.clear(); next.forEach((v,k)=>flowByRef.set(k,v));
+        flowCloudReady = true;
+        window.__LDH_STOCK_V126_FAB_FLOW_BY_REF = flowByRef;
+        repair('fase_fabricacion_nube');
+      }, err=>console.warn('[Stock V126] lectura fase Fabricacion no disponible',err));
+    }catch(e){ console.warn('[Stock V126] no se pudo iniciar lector directo de Fabricacion',e); }
+  }
+
+  window.LDH_repararReservasConsumidasV126 = ()=>repair('manual');
+  window.LDH_STOCK_V126 = BUILD;
+  document.documentElement.dataset.ldhStockV126 = 'true';
+
+  const start = ()=>{
+    let tries=0;
+    const hookTimer=setInterval(()=>{ tries++; if(installRemoteHook() || tries>80) clearInterval(hookTimer); },100);
+    startFabricationCloudReader();
+    [0,300,1000,2500,5000,10000,20000].forEach(ms=>setTimeout(()=>repair('arranque_'+ms),ms));
+    window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(()=>repair('evento_stock_cloud'),80));
+    window.addEventListener('storage',e=>{
+      if(!e) return;
+      if(e.key==='ldh_db' || e.key==='ldh_work_orders_v1' || (e.key&&e.key.startsWith('prep_meta_'))) setTimeout(()=>repair('storage_'+e.key),50);
+    });
+  };
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start,{once:true}); else setTimeout(start,0);
+})();
+</script>
+<!-- /LDH STOCK V126 -->

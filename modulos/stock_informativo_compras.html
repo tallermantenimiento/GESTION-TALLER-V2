@@ -4944,10 +4944,15 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
     const extracted = extractFlows(payload || {});
     byId = extracted.nextById;
     byRef = extracted.nextByRef;
+    // V65: exponer el reparto real para que Stock informativo pueda cerrar visualmente
+    // reservas antiguas de OTs que ya han salido completamente de Fabricacion.
+    try{ window.__LDH_INFO_FAB_FLOW_BY_ID_V65 = byId; window.__LDH_INFO_FAB_FLOW_BY_REF_V65 = byRef; }catch(_){ }
     const signature = mapSignature(byId, byRef);
     if(signature === lastFlowSignature) return;
     lastFlowSignature = signature;
     patchWorkOrders();
+    try{ window.dispatchEvent(new CustomEvent('ldh:info-fab-flow-v65')); }catch(_){ }
+    try{ if(typeof scheduleLoadAll==='function') scheduleLoadAll(); }catch(_){ }
   }
 
   const patchTimer = setInterval(()=>{
@@ -5457,5 +5462,94 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
   }
 }
 </style>
+
+
+<!-- === LDH INFORMATIVA V65 · reservas fisicas + descarte de asignaciones residuales === -->
+<script id="LDH_INFORMATIVA_V65_RESERVAS_FISICAS_20260910">
+(function(){
+  'use strict';
+  if(window.__LDH_INFO_V65_RESERVAS_FISICAS__) return;
+  window.__LDH_INFO_V65_RESERVAS_FISICAS__=true;
+  if(typeof normalizePackage!=='function') return;
+
+  const oldNormalize=normalizePackage;
+  const EPS=0.000001;
+  const num=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const text=v=>String(v??'').trim();
+  const norm=v=>text(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[x×*]/g,'x').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  function refKey(v){const raw=text(v).toUpperCase();const m=raw.match(/OT-\d{6}-\d{3}(?:-[A-Z]{1,3})?/i);return m?m[0].toUpperCase():norm(raw);}
+  function rowRef(r){return text(r&&(r.consumerRef||r.jobRef||r.ref||r.reference||r.referencia||r.workRef));}
+  function active(r){return ['activa','activo','active','abierta','open',''].includes(norm(r&&(r.status||r.estado||'activa')));}
+  function loanOrShared(r){const t=norm([r&&r.assignmentType,r&&r.reason,r&&r.source].filter(Boolean).join(' '));return !!(r&&(r.sharedStock===true||r.sharedPool===true||r.toCompanyId||r.toEmpresa||r.fromCompanyId||r.fromEmpresa||r.fromAssignmentId||r.originalAssignmentId))||t.includes('otra empresa')||t.includes('prestamo')||t.includes('donacion')||t.includes('stock comun');}
+  function prepReceipt(r){const t=norm([r&&r.id,r&&r.assignmentId,r&&r.source,r&&r.reason,r&&r.createdFrom].filter(Boolean).join(' '));return t.includes('prep received')||t.includes('preparacion pedidos recepcion fisica')||t.includes('recibido fisico')||t.includes('asignado desde preparacion recepcion fisica');}
+  function prepMeta(ref){
+    try{const raw=prepCloudDataV62&&prepCloudDataV62['prep_meta_'+text(ref)];if(raw)return typeof raw==='string'?(JSON.parse(raw)||{}):raw;}catch(_){ }
+    try{const raw=localStorage.getItem('prep_meta_'+text(ref));if(raw)return JSON.parse(raw)||{};}catch(_){ }
+    return null;
+  }
+  function totalForRef(ref){
+    const meta=prepMeta(ref);let total=Math.max(0,num(meta&&(meta.total??meta.unidades??meta.cantidad??meta.uds)));
+    try{const W=window.WorkOrders;if(W&&Array.isArray(W.orders)){const key=refKey(ref),o=W.orders.find(x=>refKey(x&&(x.reference||x.ref||x.referencia))===key);if(o)total=Math.max(total,num(o.quantity??o.cantidad??o.unidades??o.uds));}}catch(_){ }
+    return total;
+  }
+  function closedByMeta(ref){
+    const m=prepMeta(ref);if(!m)return false;
+    if(m.closed_from_preparation===true||m.stock_consumed_on_close===true||m.stock_consumed_on_close_v114===true)return true;
+    const s=norm(m.workflow_stage||m.fase||m.phase||m.estado||'');
+    return s==='almacen'||s==='entregado'||s==='terminado'||s==='archivado';
+  }
+  function fullyBeyondFabrication(ref){
+    if(closedByMeta(ref)) return true;
+    try{
+      const map=window.__LDH_INFO_FAB_FLOW_BY_REF_V65;
+      const f=map&&typeof map.get==='function'?map.get(refKey(ref)):null;
+      if(!f)return false;
+      const fab=Math.max(0,num(f.fabricacion)),post=Math.max(0,num(f.pintura))+Math.max(0,num(f.almacen))+Math.max(0,num(f.entregado));
+      const total=totalForRef(ref);
+      return fab<=EPS&&post>EPS&&(total<=EPS||post+EPS>=total);
+    }catch(_){return false;}
+  }
+  function profileAllocation(r,db0){
+    if(!r||!db0)return false;
+    const mid=text(r.materialId||r.matId||r.material_id||'');
+    const name=norm(r.materialName||r.material||r.mat||'');
+    const mats=Array.isArray(db0.materials)?db0.materials:[];
+    const m=mats.find(x=>text(x&&(x.id||x.materialId||x.matId||x.material_id))===mid)
+      || mats.find(x=>name&&norm(x&&(x.name||x.nombre||x.material))===name);
+    if(!m)return false;
+    const type=norm(m.type||m.tipo||m.stockType||''),unit=norm(m.unit||m.unidad||''),fam=norm(m.family||m.familia||'');
+    return type==='hierro'&&unit.includes('barra')&&!fam.includes('pletina');
+  }
+  function stale(r,db0){return !!(r&&profileAllocation(r,db0)&&active(r)&&!loanOrShared(r)&&prepReceipt(r)&&fullyBeyondFabrication(rowRef(r)));}
+
+  normalizePackage=function(db0){
+    let source=db0;
+    try{
+      if(db0&&typeof db0==='object'){
+        source=Object.assign({},db0);
+        if(Array.isArray(db0.assignments)) source.assignments=db0.assignments.map(r=>stale(r,db0)?Object.assign({},r,{status:'consumida',estado:'consumida',pendingQty:0,qtyPending:0}):r);
+        if(Array.isArray(db0.reservations)) source.reservations=db0.reservations.map(r=>stale(r,db0)?Object.assign({},r,{status:'consumida',estado:'consumida',pendingQty:0,qtyPending:0}):r);
+      }
+    }catch(_){source=db0;}
+    const out=oldNormalize(source);
+    // Segunda barrera: Reservado es material fisicamente retenido, nunca demanda sin existencias.
+    (Array.isArray(out)?out:[]).forEach(r=>{
+      if(String(r.type||'').toLowerCase()!=='hierro'||r.pletinaMm||!norm(r.unit).includes('barra')) return;
+      const physical=Math.max(0,num(r.physical??r.qty));
+      const reserved=Math.min(Math.max(0,num(r.reserved)),physical);
+      const assigned=Math.min(Math.max(0,num(r.assigned)),Math.max(0,physical-reserved));
+      r.reserved=reserved;r.assigned=assigned;r.free=Math.max(0,physical-reserved-assigned);
+    });
+    return out;
+  };
+  try{window.normalizePackage=normalizePackage;}catch(_){ }
+  window.LDH_INFO_V65='RESERVAS-FISICAS-CIERRE-OT-20260910';
+  const refresh=()=>{try{if(typeof scheduleLoadAll==='function')scheduleLoadAll();}catch(_){ }};
+  window.addEventListener('ldh:info-fab-flow-v65',refresh);
+  setTimeout(refresh,50);setTimeout(refresh,1200);
+})();
+</script>
+<!-- /LDH INFORMATIVA V65 -->
+
 </body>
 </html>
