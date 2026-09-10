@@ -31776,4 +31776,219 @@ console.info('[Preparacion V168] Menú abre lista; claves de navegación transit
 })();
 </script>
 
+
+<!-- LDH_PREP_V170_FISICO_MAESTRO_STOCK_PERFILERIA_20260910 -->
+<script id="LDH_PREP_V170_FISICO_MAESTRO_STOCK_PERFILERIA_20260910">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V170_MASTER_PHYSICAL__) return;
+  window.__LDH_PREP_V170_MASTER_PHYSICAL__ = true;
+
+  const BUILD = 'PREPARACION-V170-FISICO-MAESTRO-STOCK-PERFILERIA-20260910';
+  const n = value => {
+    const parsed = Number.parseFloat(String(value ?? '').replace(',','.'));
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const txt = value => String(value ?? '').trim();
+  const norm = value => txt(value).toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/ø/g,'o').replace(/[x×*]/g,'x')
+    .replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  const first = function(){
+    for(let i=0;i<arguments.length;i++){
+      const v=arguments[i];
+      if(v!==undefined && v!==null && txt(v)!=='') return v;
+    }
+    return '';
+  };
+
+  function cloudDB(){
+    try{ if(window.__LDH_PREP_STOCK_CLOUD_DB && typeof window.__LDH_PREP_STOCK_CLOUD_DB==='object') return window.__LDH_PREP_STOCK_CLOUD_DB; }catch(_){ }
+    try{ if(window.__LDH_STOCK_MEMORY_DB && typeof window.__LDH_STOCK_MEMORY_DB==='object') return window.__LDH_STOCK_MEMORY_DB; }catch(_){ }
+    try{
+      if(typeof window._v2LoadCompanyStockDB==='function'){
+        const p=window._v2LoadCompanyStockDB();
+        if(p && p.db) return p.db;
+      }
+    }catch(_){ }
+    return null;
+  }
+
+  function materialName(row){
+    return txt(first(row&&row.name,row&&row.nombre,row&&row.materialName,row&&row.material,row&&row.mat,row&&row.label));
+  }
+  function materialId(row){
+    return txt(first(row&&row.id,row&&row.materialId,row&&row.matId,row&&row.material_id));
+  }
+  function rowMaterialId(row){
+    return txt(first(row&&row.materialId,row&&row.matId,row&&row.material_id));
+  }
+  function rowCompanyValue(row){
+    return txt(first(row&&row.companyId,row&&row.empresaId,row&&row.company,row&&row.empresa,row&&row.companyName,row&&row.empresaNombre));
+  }
+  function companyId(row){
+    return txt(first(row&&row.id,row&&row.companyId,row&&row.empresaId));
+  }
+  function companyName(row){
+    return txt(first(row&&row.name,row&&row.nombre,row&&row.empresa,row&&row.company,row&&row.code,row&&row.codigo));
+  }
+  function lineName(line,linkedMat,info){
+    return txt(first(
+      info&&info.material,
+      line&&line.linked_matName,
+      line&&line.stockLinkLabel,
+      line&&line.mat,
+      line&&line.material,
+      line&&line.name,
+      linkedMat&&materialName(linkedMat)
+    ));
+  }
+  function isProfileBar(line,linkedMat,info){
+    const name=norm(lineName(line,linkedMat,info));
+    const unit=norm(first(line&&line.unit,line&&line.unidad,linkedMat&&linkedMat.unit,linkedMat&&linkedMat.unidad,info&&info.unit));
+    const family=norm(first(linkedMat&&linkedMat.family,linkedMat&&linkedMat.familia,line&&line.family,line&&line.familia));
+    if(name.includes('pletina') || family.includes('pletina') || unit==='mm') return false;
+    return unit.includes('barra') || family.includes('perfiler') || /^o?\s*\d+\s*x/.test(name) || /^\d+\s*x\s*\d+/.test(name);
+  }
+
+  function resolveCompany(db,info){
+    const wanted=[
+      info&&info.empresa,
+      (function(){try{return typeof window._v2GetPedidoEmpresa==='function'?window._v2GetPedidoEmpresa():'';}catch(_){return '';}})()
+    ].map(norm).filter(Boolean);
+    if(!wanted.length) return null;
+    return (Array.isArray(db&&db.companies)?db.companies:[]).find(c=>{
+      const keys=[companyId(c),companyName(c),c&&c.company,c&&c.empresa,c&&c.code,c&&c.codigo].map(norm).filter(Boolean);
+      return keys.some(k=>wanted.includes(k));
+    }) || null;
+  }
+
+  function companyMatches(row,company){
+    if(!company) return false;
+    const wanted=[companyId(company),companyName(company),company&&company.company,company&&company.empresa,company&&company.code,company&&company.codigo].map(norm).filter(Boolean);
+    const got=norm(rowCompanyValue(row));
+    return !!got && wanted.includes(got);
+  }
+
+  function directPhysical(row){
+    if(!row || typeof row!=='object') return null;
+    const fields = String(row.lengthMode||'').toLowerCase()==='mm'
+      ? ['lengthPhysicalMm','physicalMm','fisicoMm','stockMm','realMm','physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad','stock','real']
+      : ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad','stock','real'];
+    for(const key of fields){
+      if(row[key]===undefined || row[key]===null || txt(row[key])==='') continue;
+      const value=Number.parseFloat(String(row[key]).replace(',','.'));
+      if(Number.isFinite(value)) return Math.max(0,value);
+    }
+    return null;
+  }
+
+  function physicalFor(line,linkedMat,info){
+    const db=cloudDB();
+    if(!db) return null;
+    const company=resolveCompany(db,info);
+    if(!company) return null;
+
+    const targetName=norm(lineName(line,linkedMat,info));
+    const seedIds=new Set([
+      info&&info.physicalMaterialIdV68,
+      info&&info.linkedMaterialIdV68,
+      line&&line.linked_matId,
+      line&&line.stockMatId,
+      line&&line.matId,
+      line&&line.stockLinkId,
+      line&&line.stockId,
+      line&&line.materialId,
+      linkedMat&&materialId(linkedMat)
+    ].map(txt).filter(Boolean));
+
+    const mats=Array.isArray(db.materials)?db.materials:[];
+    const ids=new Set(seedIds);
+    if(targetName){
+      mats.forEach(m=>{ if(norm(materialName(m))===targetName){ const id=materialId(m); if(id) ids.add(id); } });
+    }
+
+    const candidates=[];
+    (Array.isArray(db.stock)?db.stock:[]).forEach(row=>{
+      if(!companyMatches(row,company)) return;
+      const rid=rowMaterialId(row);
+      let same=!!(rid && ids.has(rid));
+      if(!same && targetName){
+        const rowName=norm(first(row&&row.materialName,row&&row.material,row&&row.mat,row&&row.name,row&&row.nombre));
+        same=!!rowName && rowName===targetName;
+      }
+      if(!same) return;
+      const physical=directPhysical(row);
+      if(physical===null) return;
+      candidates.push({id:rid,physical,row});
+    });
+
+    if(!candidates.length) return null;
+    const preferred=txt(info&&info.physicalMaterialIdV68);
+    candidates.sort((a,b)=>{
+      if(Math.abs(b.physical-a.physical)>0.000001) return b.physical-a.physical;
+      if(preferred){ if(a.id===preferred && b.id!==preferred) return -1; if(b.id===preferred && a.id!==preferred) return 1; }
+      return 0;
+    });
+    return {real:Math.max(0,candidates[0].physical),materialId:candidates[0].id||preferred,candidates};
+  }
+
+  function safeInfo(base,line,linkedMat){
+    if(!base || base.state!=='ok' || !isProfileBar(line,linkedMat,base)) return base;
+    const p=physicalFor(line,linkedMat,base);
+    const real=p ? p.real : Math.max(0,n(base.real));
+    const reservado=Math.max(0,n(base.reservado));
+    const asignado=Math.max(0,n(base.asignado));
+    const out=Object.assign({},base,{
+      real,
+      reservado,
+      asignado,
+      libre:Math.max(0,real-reservado-asignado),
+      sourceKey:String(base.sourceKey||'')+' + fisico maestro Stock V170',
+      physicalMasterV170:true
+    });
+    if(p && p.materialId){
+      // V117 usa este campo al ejecutar "Asignar libre". Se mantiene el nombre
+      // por compatibilidad, pero ahora apunta a la ficha homonima con físico maestro.
+      out.physicalMaterialIdV68=p.materialId;
+      out.physicalMaterialIdV170=p.materialId;
+      out.physicalCandidatesV170=p.candidates.map(x=>({id:x.id,real:x.physical}));
+    }
+    return out;
+  }
+
+  function install(){
+    const current=window._v2CompanyStockInfo;
+    if(typeof current!=='function') return false;
+    if(current.__ldhV170MasterPhysical) return true;
+    const wrapped=function(line,linkedMat){
+      return safeInfo(current.apply(this,arguments),line,linkedMat);
+    };
+    wrapped.__ldhV170MasterPhysical=true;
+    wrapped.__ldhV170Base=current;
+    // Evita que el temporizador de V104 vuelva a envolver este lector por encima.
+    wrapped.__ldhV104SafeDisplay=true;
+    window._v2CompanyStockInfo=wrapped;
+    try{ _v2CompanyStockInfo=wrapped; }catch(_){ }
+    window.LDH_PREP_V170_FISICO_MAESTRO_STOCK=BUILD;
+    try{ if(typeof window.renderTabla==='function' && txt(window.refActual)) window.renderTabla(); }catch(_){ }
+    return true;
+  }
+
+  let tries=0;
+  function start(){
+    tries+=1;
+    if(install()) return;
+    if(tries<120) setTimeout(start,50);
+    else console.error('[Preparacion V170] No se pudo instalar el lector de fisico maestro.');
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start,{once:true});
+  else start();
+  try{ window.addEventListener('ldh:stock-cloud-updated',()=>{setTimeout(()=>{try{install();if(typeof window.renderTabla==='function')window.renderTabla();}catch(_){ }},80);}); }catch(_){ }
+
+  console.info('[Preparacion V170] Perfileria: fisico maestro de Stock, negativos anulados y duplicados homonimos resueltos sin sumar dos veces.');
+})();
+</script>
+<!-- /LDH_PREP_V170_FISICO_MAESTRO_STOCK_PERFILERIA_20260910 -->
+
 </body></html>

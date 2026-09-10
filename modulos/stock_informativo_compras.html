@@ -615,6 +615,10 @@ body.ldh-help-active [data-ldh-helpable="1"]{cursor:help!important}
 </style>
 
 <!-- LDH_INFORMATIVA_V60_RESERVADO_IGUAL_STOCK_20260909 -->
+<!-- LDH_INFORMATIVA_V61_RESERVADO_FALLBACK_PREPARACION_20260910 -->
+<!-- LDH_INFORMATIVA_V62_RESERVAS_PREPARACION_NUBE_20260910 -->
+<!-- LDH_INFORMATIVA_V64_RESERVAS_Y_FISICO_MAESTRO_20260910 -->
+<!-- Base V63: reservas canónicas por ID/nombre exacto. V64: hierro lee físico maestro de Stock y nunca movimientos históricos negativos. -->
 </head>
 <body>
 <header>
@@ -1010,11 +1014,60 @@ const workOrdersFirebaseConfig = {
 const workOrdersApp = getApps().find(a=>a.options?.projectId===workOrdersFirebaseConfig.projectId)
   || initializeApp(workOrdersFirebaseConfig,'ldh-compras-work-orders');
 const workOrdersAuth = getAuth(workOrdersApp);
+
+/* V62 · Fuente cloud de Preparación para RESERVADO.
+ * Stock principal reconstruye parte del reservado desde prep_recepcion_*. Esa información
+ * vive en el documento autoritativo taller_data/preparacion de gestion-taller-v2 y no
+ * puede depender del localStorage del PC donde se abre la Informativa.
+ */
+const prepFirebaseConfigV62 = {
+  apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+  authDomain: "gestion-taller-v2.firebaseapp.com",
+  projectId: "gestion-taller-v2",
+  storageBucket: "gestion-taller-v2.firebasestorage.app",
+  messagingSenderId: "888590823508",
+  appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+};
+const prepAppV62 = getApps().find(a=>a.options?.projectId===prepFirebaseConfigV62.projectId)
+  || initializeApp(prepFirebaseConfigV62,'ldh-compras-preparacion-v62');
+const prepDbV62 = getFirestore(prepAppV62);
+const PREP_DOC_V62 = ['taller_data','preparacion'];
+let prepCloudDataV62 = {};
+let prepCloudLoadedV62 = false;
+let prepCloudUpdatedAtV62 = 0;
+let unsubPrepV62 = null;
+
+function applyPrepCloudSnapshotV62(snap){
+  if(!snap || !snap.exists()) return false;
+  const payload = snap.data() || {};
+  const data = payload.data;
+  prepCloudDataV62 = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+  prepCloudLoadedV62 = true;
+  prepCloudUpdatedAtV62 = Number(payload.updatedAt || payload.rev || 0) || Date.now();
+  return true;
+}
+
+async function loadPrepCloudV62(force=false){
+  if(prepCloudLoadedV62 && !force) return true;
+  try{
+    const snap = await getDoc(doc(prepDbV62,...PREP_DOC_V62));
+    return applyPrepCloudSnapshotV62(snap);
+  }catch(error){
+    console.warn('[Informativa V62] Preparación nube no disponible; se mantiene fallback local/Stock.', error);
+    return false;
+  }
+}
+
 await Promise.allSettled([
   setPersistence(auth,browserLocalPersistence),
   setPersistence(workOrdersAuth,browserLocalPersistence)
 ]);
 window.__COMPRAS_WORK_ORDERS__ = {app:workOrdersApp,auth:workOrdersAuth};
+window.__LDH_INFORMATIVA_PREP_V62__ = {
+  get loaded(){ return prepCloudLoadedV62; },
+  get updatedAt(){ return prepCloudUpdatedAtV62; },
+  get keys(){ return Object.keys(prepCloudDataV62 || {}).length; }
+};
 console.log('✅ Compras OK: proyecto', firebaseConfig.projectId);
 
 const $ = id => document.getElementById(id);
@@ -1250,25 +1303,318 @@ function normalizePackage(db0){
     ));
   }
 
+  /* V61 · Stock principal no obtiene todo el "Reservado" solo de assignments.
+   * Para material ya recibido en Preparación usa además prep_recepcion_* como
+   * respaldo y toma el MÁXIMO entre ambos orígenes. La Informativa debe hacer
+   * exactamente lo mismo para no mostrar 66 físico / 0 reservado / 66 libre
+   * cuando Stock muestra 66 / 66 / 0. Solo lectura: no escribe ni corrige datos.
+   */
+  const prepAssignedCacheV61 = new Map();
+
+  function prepNormV61(value){
+    return String(value == null ? '' : value).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').trim();
+  }
+
+  function companyMatchesPrepV61(value, companyId){
+    const c = compMap.get(s(companyId)) || {};
+    const got = prepNormV61(value);
+    if(!got) return false;
+    const want = [companyId,c.id,c.name,String(c.id||'').replace(/^emp[_-]/i,'')]
+      .map(prepNormV61).filter(Boolean);
+    return want.some(w => w === got || w.includes(got) || got.includes(w));
+  }
+
+  function refKeyV61(value){
+    const raw = String(value||'').trim();
+    const match = raw.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_\s]*([A-Z]))?\b/);
+    if(match) return 'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:'');
+    return prepNormV61(raw);
+  }
+
+  function sameRefV61(a,b){
+    const ka=refKeyV61(a), kb=refKeyV61(b);
+    return !!ka && ka===kb;
+  }
+
+  function materialLabelV61(value){
+    const id=s(value);
+    const m=matMap.get(id) || {};
+    return s(m.name || m.nombre || m.material || id);
+  }
+
+  function sameMaterialValueV61(value, materialId){
+    if(s(value) === s(materialId)) return true;
+    const a=prepNormV61(materialLabelV61(value));
+    const b=prepNormV61(materialLabelV61(materialId));
+    if(!a || !b) return false;
+    if(a===b || a.includes(b) || b.includes(a)) return true;
+    const pa=a.match(/\d+\s*x\s*\d+(?:\s*x\s*\d+)?/);
+    const pb=b.match(/\d+\s*x\s*\d+(?:\s*x\s*\d+)?/);
+    return !!(pa && pb && (pa[0]===pb[0] || pa[0].startsWith(pb[0]) || pb[0].startsWith(pa[0])));
+  }
+
+  function prepLineMaterialMatchV61(line, materialId){
+    if(!line) return false;
+    const direct=line.materialId || line.matId || line.material_id || '';
+    if(direct && sameMaterialValueV61(direct,materialId)) return true;
+    const lineName=line.mat || line.material || line.name || line.materialName || line.nombre || '';
+    return !!lineName && sameMaterialValueV61(lineName,materialId);
+  }
+
+  function lineReceivedOwnQtyV61(line){
+    const rec=n(line && (line.qty_recibida ?? line.recibida ?? line.received ?? 0));
+    const apl=n(line && (line.aplicado_qty ?? line.stock_consumed_qty ?? 0));
+    return Math.max(0,rec,apl);
+  }
+
+  function prepRefCompanyV61(ref){
+    try{
+      const jobs=Array.isArray(db0.jobs)?db0.jobs:[];
+      const j=jobs.find(x=>sameRefV61(x && (x.ref||x.jobRef||x.referencia),ref));
+      if(j) return j.companyId || j.empresaId || j.empresa || j.company || '';
+    }catch(_){ }
+    try{
+      const cloudRaw=prepCloudDataV62 && prepCloudDataV62['prep_meta_'+ref];
+      if(cloudRaw){
+        const meta=JSON.parse(cloudRaw)||{};
+        const company=meta.companyId || meta.empresaId || meta.empresa || meta.company || meta.companyName || meta.empresaActual || '';
+        if(company) return company;
+      }
+    }catch(_){ }
+    try{
+      const raw=localStorage.getItem('prep_meta_'+ref);
+      if(raw){
+        const meta=JSON.parse(raw)||{};
+        return meta.companyId || meta.empresaId || meta.empresa || meta.company || meta.companyName || meta.empresaActual || '';
+      }
+    }catch(_){ }
+    try{
+      const raw=localStorage.getItem('ldh_db') || sessionStorage.getItem('ldh_db') || '';
+      const ldb=JSON.parse(raw||'{}')||{};
+      const pools=[]
+        .concat(Array.isArray(ldb.deliveries)?ldb.deliveries:[])
+        .concat(Array.isArray(ldb.trabajos)?ldb.trabajos:[])
+        .concat(Array.isArray(ldb.fabricacion)?ldb.fabricacion:[])
+        .concat(Array.isArray(ldb.fab)?ldb.fab:[])
+        .concat(Array.isArray(ldb.pintura)?ldb.pintura:[])
+        .concat(Array.isArray(ldb.almacen)?ldb.almacen:[])
+        .concat(Array.isArray(ldb.entregas)?ldb.entregas:[]);
+      const it=pools.find(x=>sameRefV61(x && (x.ref||x.referencia||x.jobRef),ref));
+      if(it) return it.companyId || it.empresaId || it.empresa || it.company || it.companyName || '';
+    }catch(_){ }
+    return '';
+  }
+
+  function prepRefAliveV61(ref){
+    const closed=['entregado','finalizado','cerrado','cancelado','borrado','eliminado','archivado','cancelada_prueba'];
+    try{
+      const jobs=Array.isArray(db0.jobs)?db0.jobs:[];
+      const job=jobs.find(j=>sameRefV61(j && (j.ref||j.jobRef||j.referencia),ref));
+      if(job){
+        const st=operationalNorm(job.status||job.estado||job.phase||job.fase||'');
+        if(!closed.includes(st)) return true;
+      }
+    }catch(_){ }
+    try{
+      const cloudRaw=prepCloudDataV62 && prepCloudDataV62['prep_meta_'+ref];
+      if(cloudRaw){
+        const meta=JSON.parse(cloudRaw)||{};
+        const st=operationalNorm(meta.status||meta.estado||meta.phase||meta.fase||'');
+        if(st && !closed.includes(st)) return true;
+        const ub=meta.unassignedBorrow || meta.unassigned_borrow || null;
+        const items=ub && Array.isArray(ub.items)?ub.items:[];
+        if(items.some(it=>n(it.qtyPending ?? it.pending ?? it.pendingQty ?? it.qty_pending ?? 0)>0)) return true;
+      }
+    }catch(_){ }
+    try{
+      const raw=localStorage.getItem('prep_meta_'+ref);
+      if(raw){
+        const meta=JSON.parse(raw)||{};
+        const st=operationalNorm(meta.status||meta.estado||meta.phase||meta.fase||'');
+        if(st && !closed.includes(st)) return true;
+        const ub=meta.unassignedBorrow || meta.unassigned_borrow || null;
+        const items=ub && Array.isArray(ub.items)?ub.items:[];
+        if(items.some(it=>n(it.qtyPending ?? it.pending ?? it.pendingQty ?? it.qty_pending ?? 0)>0)) return true;
+      }
+    }catch(_){ }
+    try{
+      const raw=localStorage.getItem('ldh_db') || sessionStorage.getItem('ldh_db') || '';
+      if(raw){
+        const ldb=JSON.parse(raw||'{}')||{};
+        const pools=[]
+          .concat(Array.isArray(ldb.deliveries)?ldb.deliveries:[])
+          .concat(Array.isArray(ldb.trabajos)?ldb.trabajos:[])
+          .concat(Array.isArray(ldb.fabricacion)?ldb.fabricacion:[])
+          .concat(Array.isArray(ldb.fab)?ldb.fab:[])
+          .concat(Array.isArray(ldb.pintura)?ldb.pintura:[])
+          .concat(Array.isArray(ldb.almacen)?ldb.almacen:[])
+          .concat(Array.isArray(ldb.entregas)?ldb.entregas:[]);
+        const it=pools.find(x=>sameRefV61(x && (x.ref||x.referencia||x.jobRef),ref));
+        if(it){
+          const st=operationalNorm(it.status||it.estado||it.phase||it.fase||'');
+          if(!closed.includes(st)) return true;
+        }
+      }
+    }catch(_){ }
+    return false;
+  }
+
+  function movementPhysicalOutV61(movement){
+    if(!movement || movement.nonPhysical===true || movement.reconciliationOnly===true) return false;
+    const type=prepNormV61(movement.type||movement.tipo||'').replace(/\s+/g,'_');
+    return ['salida','consumo','out','ajuste_neg','consumo_terminal'].includes(type);
+  }
+
+  function confirmedConsumptionQtyV61(companyId,materialId,ref){
+    return movArr.reduce((sum,movement)=>{
+      if(!movementPhysicalOutV61(movement)) return sum;
+      const mRef=movement.ref||movement.jobRef||movement.reference||movement.referencia||movement.consumerRef||movement.usedByRef||'';
+      if(!sameRefV61(mRef,ref)) return sum;
+      const mCompany=movement.companyId||movement.empresaId||movement.company||movement.empresa||'';
+      if(!companyMatchesPrepV61(mCompany,companyId)) return sum;
+      const mvMat=movement.materialId||movement.matId||movement.material_id||movement.physicalMaterialId||'';
+      if(!sameMaterialValueV61(mvMat,materialId)) return sum;
+      return sum+Math.max(0,n(movement.qty??movement.cantidad??movement.quantity??movement.amount??0));
+    },0);
+  }
+
+  function assignmentPendingV61(a){
+    const explicit=a && (a.pendingQty ?? a.qtyPending ?? a.pendiente);
+    if(explicit !== undefined && explicit !== null && String(explicit)!=='') return Math.max(0,n(explicit));
+    return Math.max(0,n(a&&(a.qty??a.cantidad??0))-n(a&&(a.returnedQty??a.qtyReturned??a.devuelto??0)));
+  }
+
+  function activeBorrowForRefMaterialV61(companyId,materialId,ref){
+    return assignmentArr.some(a=>{
+      if(!isLoanOperational(a)) return false;
+      const to=a.toCompanyId || a.toEmpresa || '';
+      if(!companyMatchesPrepV61(to,companyId)) return false;
+      if(!sameRefV61(a.ref||a.jobRef||a.reference||'',ref)) return false;
+      if(!sameMaterialValueV61(a.toMaterialId||a.materialId||a.matId||'',materialId)) return false;
+      return assignmentPendingV61(a)>0;
+    });
+  }
+
+  function prepAssignedStockV61(companyId,materialId){
+    const cacheKey=s(companyId)+'|'+s(materialId);
+    if(prepAssignedCacheV61.has(cacheKey)) return prepAssignedCacheV61.get(cacheKey);
+    let total=0;
+    try{
+      const keys=new Set();
+
+      // V62: primero las fichas autoritativas publicadas por Preparación en Firestore.
+      Object.keys(prepCloudDataV62 || {}).forEach(key=>{
+        if(key.startsWith('prep_recepcion_')) keys.add(key);
+      });
+
+      // Fallback local para mantener compatibilidad si la nube de Preparación no responde.
+      try{
+        for(let i=0;i<localStorage.length;i++){
+          const key=localStorage.key(i)||'';
+          if(key.startsWith('prep_recepcion_')) keys.add(key);
+        }
+      }catch(_){ }
+
+      const seen=new Set();
+      for(const key of keys){
+        const ref=key.slice('prep_recepcion_'.length).trim();
+        if(!ref || seen.has(ref)) continue;
+        seen.add(ref);
+        const refCompany=prepRefCompanyV61(ref);
+        if(!refCompany || !companyMatchesPrepV61(refCompany,companyId)) continue;
+        if(!prepRefAliveV61(ref)) continue;
+        if(activeBorrowForRefMaterialV61(companyId,materialId,ref)) continue;
+        let lines=[];
+        try{
+          const cloudRaw=prepCloudDataV62 && prepCloudDataV62[key];
+          const raw=(cloudRaw!==undefined && cloudRaw!==null) ? cloudRaw : localStorage.getItem(key);
+          const parsed=JSON.parse(raw||'[]');
+          lines=Array.isArray(parsed)?parsed:[];
+        }catch(_){ lines=[]; }
+        let assignedForRef=0;
+        lines.forEach(line=>{
+          if(prepLineMaterialMatchV61(line,materialId)) assignedForRef+=lineReceivedOwnQtyV61(line);
+        });
+        if(assignedForRef<=0) continue;
+        const consumed=confirmedConsumptionQtyV61(companyId,materialId,ref);
+        total+=Math.max(0,assignedForRef-consumed);
+      }
+    }catch(_){ total=0; }
+    total=Math.max(0,total);
+    prepAssignedCacheV61.set(cacheKey,total);
+    return total;
+  }
+
+  /* V63 · RESERVAS CANÓNICAS.
+   * Stock editable ya admite fichas históricas duplicadas del mismo material. En esas
+   * fichas una reserva/asignación puede conservar un materialId antiguo aunque la fila
+   * visible use el ID nuevo. Informativa V61/V62 miraba primero el ID y, si ese ID ya no
+   * existía en materials, perdía la reserva aunque el propio registro sí guardase
+   * materialName (p.ej. 60x40x1.5 u Ø 30x1.5).
+   *
+   * Regla V63: ID exacto manda; después nombre COMPLETO normalizado. Nunca se hace una
+   * coincidencia parcial por medida, para no mezclar perfiles con accesorios/conteras.
+   */
+  function materialNameKeyV63(value){
+    return prepNormV61(value)
+      .replace(/^tubo\s+/,'')
+      .replace(/^perfil\s+/,'')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+
+  function rowMaterialNameV63(row){
+    if(!row || typeof row !== 'object') return '';
+    return s(
+      row.materialName || row.material_name || row.nombreMaterial || row.matName ||
+      row.stockLinkLabel || row.linked_matName || row.material || row.mat || row.name || ''
+    );
+  }
+
+  function sameOperationalMaterialV63(row, materialId){
+    if(!row || typeof row !== 'object') return false;
+    const direct=s(row.materialId || row.matId || row.material_id || row.stockMatId || row.stockId || '');
+    const wantedId=s(materialId);
+    if(direct && direct===wantedId) return true;
+
+    const wantedName=materialNameKeyV63(materialLabelV61(wantedId));
+    if(!wantedName) return false;
+
+    // Si el ID histórico aún existe en el catálogo, comparar su nombre completo.
+    if(direct){
+      const directMat=matMap.get(direct);
+      if(directMat){
+        const directName=materialNameKeyV63(directMat.name || directMat.nombre || directMat.material || '');
+        if(directName && directName===wantedName) return true;
+      }
+    }
+
+    // Si el ID viejo ya fue fusionado/eliminado, el propio registro conserva el nombre.
+    const rowName=materialNameKeyV63(rowMaterialNameV63(row));
+    return !!rowName && rowName===wantedName;
+  }
+
   function operationalUse(companyId, materialId){
     const sameMaterial = row =>
-      s(row.companyId || row.empresaId || row.empresa || row.company) === s(companyId) &&
-      s(row.materialId || row.matId || row.material || row.material_id) === s(materialId);
+      companyMatchesPrepV61(row && (row.companyId || row.empresaId || row.empresa || row.company), companyId) &&
+      sameOperationalMaterialV63(row, materialId);
+
     const reserved = reservationArr
       .filter(sameMaterial)
       .filter(activeOperational)
-      /*
-       * Al recibir desde Stock, la reserva se convierte en asignación.
-       * La reserva original queda como traza y no puede sumarse otra vez.
-       */
       .filter(row => !isAutoReceivedPrepReservation(row))
       .reduce((sum,row)=>sum+operationalQty(row),0);
-    const assigned = assignmentArr
+    const assignedDb = assignmentArr
       .filter(sameMaterial)
       .filter(activeOperational)
-      // Igual que Stock principal: un préstamo entre empresas no es reservado propio.
       .filter(row => !isLoanOperational(row))
       .reduce((sum,row)=>sum+operationalQty(row),0);
+
+    // Igual que Stock principal: máximo, nunca DB + Preparación a la vez.
+    const assignedPrep = prepAssignedStockV61(companyId,materialId);
+    const assigned = Math.max(assignedDb, assignedPrep);
     return {reserved,assigned};
   }
 
@@ -1311,10 +1657,15 @@ function normalizePackage(db0){
     const hasMoves = movArr.some(m => s(m.companyId || m.empresaId) === s(cid) && s(m.materialId || m.matId) === s(materialId));
     const pletinaMm = isPletinaMmStock(mat,r);
 
-    // PLETINA/MM: el físico real se lee en mm; nunca se resta una reserva en mm de un físico en barras.
+    // V64 · MISMA FUENTE QUE STOCK PRINCIPAL.
+    // En hierro la fila de Stock es el maestro físico. El histórico de movimientos
+    // puede estar compactado o contener ajustes antiguos y no debe volver a crear
+    // físicos negativos (-6, -48, etc.). Pintura conserva movimientos por Cabina.
     const physical = pletinaMm
       ? pletinaPhysicalMm(r,mat,qtyByRow,qtyByMoves)
-      : (hasMoves ? qtyByMoves : qtyByRow);
+      : (typ === 'hierro'
+          ? Math.max(0,qtyByRow)
+          : Math.max(0,(hasMoves ? qtyByMoves : qtyByRow)));
     const usage = operationalUse(cid, materialId);
     const reserved = usage.reserved;
     const assigned = usage.assigned;
@@ -1509,6 +1860,9 @@ function mergeRowsPreferPackage(fromPackage, fromDocs){
 
 async function loadAll(){
   try{
+    // V62: cargar Preparación cloud antes de normalizar Stock para que RESERVADO
+    // sea idéntico aunque la Informativa esté abierta en otro PC/tablet.
+    await loadPrepCloudV62();
     const fromPackage = await readChunkPackage();
     let fromDocs = [];
     let fromDirect = [];
@@ -1545,7 +1899,8 @@ async function loadAll(){
       ' / movimientos: ' + (p.rawMovements ?? 0) +
       ' / chunks: ' + (p.totalChunks ?? 0) +
       ' · directo raw stock: ' + (d.rawStock ?? 0) +
-      ' · stock_materials docs: ' + (sm.docs ?? 0);
+      ' · stock_materials docs: ' + (sm.docs ?? 0) +
+      ' · prep nube: ' + (prepCloudLoadedV62 ? Object.keys(prepCloudDataV62 || {}).filter(k=>k.startsWith('prep_recepcion_')).length + ' OTs' : 'sin lectura');
   }catch(e){
     console.error(e);
     $('content').innerHTML = '<div class="empty">No se pudo leer el stock. Revisa consola, login o reglas.</div>';
@@ -1632,11 +1987,27 @@ function cardHTML(m){
 function startWatch(){
   if(unsubMeta) unsubMeta();
   if(unsubMaterials) unsubMaterials();
+  if(unsubPrepV62) unsubPrepV62();
   // El paquete taller_data/stock es la fuente autoritativa publicada por Stock.
   // Escuchar tambien stock_materials provocaba una lectura completa adicional por
   // cada cambio. La fuente de respaldo queda disponible mediante el boton Actualizar.
   unsubMeta = onSnapshot(doc(db,...STOCK_META), ()=>scheduleLoadAll(), err=>console.error('meta stock',err));
   unsubMaterials = null;
+
+  // V62: Preparación es la fuente autoritativa del material ya reservado/recibido
+  // que todavía no se ha consumido en Fabricación. Al cambiar, recalculamos Stock
+  // Informativo sin escribir nada en ninguna de las dos bases.
+  try{
+    unsubPrepV62 = onSnapshot(
+      doc(prepDbV62,...PREP_DOC_V62),
+      snap=>{
+        if(applyPrepCloudSnapshotV62(snap)) scheduleLoadAll();
+      },
+      err=>console.warn('[Informativa V62] listener Preparación no disponible',err)
+    );
+  }catch(error){
+    console.warn('[Informativa V62] no se pudo iniciar listener de Preparación',error);
+  }
 }
 
 ['search','typeFilter','stockFilter'].forEach(id=>$(id).addEventListener('input',render));
