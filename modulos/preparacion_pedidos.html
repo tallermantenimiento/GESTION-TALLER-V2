@@ -12,6 +12,8 @@
 <meta name="ldh-prep-debt-global-build" content="PREPARACION-V166-ALERTA-GLOBAL-DEUDA-HIERRO-PINTURA-20260907" />
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
+<meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
+<meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
 <title>Preparación de pedidos</title>
 <link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -3445,6 +3447,136 @@ try{
 
       const materialesConsolidados = LDH_consolidarMaterialesDuplicados(materialesImport);
       setAny(KP(ref), JSON.stringify(materialesConsolidados));
+
+      // V170 · Un pedido compuesto se protege como GRUPO durante la ventana de
+      // importación. El guard es exclusivamente local: no forma parte del documento
+      // autoritativo de Preparación y caduca solo a los 90 s. Así, un snapshot remoto
+      // anterior no puede retirar A/B/C mientras llegan secuencialmente desde Cálculo.
+      try{
+        const __groupIdV170 = String(metaParaGuardar.composite_group_id || metaParaGuardar.compositeGroupId || "").trim();
+        if(__groupIdV170){
+          const __guardKeyV170 = "prep_import_group_guard_v170";
+          const __nowV170 = Date.now();
+          const __refsV170 = new Set();
+          if(String(ref || "").trim()) __refsV170.add(String(ref).trim());
+
+          let __oldGuardV170 = {};
+          try{ __oldGuardV170 = JSON.parse(getAny(__guardKeyV170) || "{}") || {}; }catch(_){ __oldGuardV170 = {}; }
+          if(
+            String(__oldGuardV170.groupId || "").trim() === __groupIdV170 &&
+            (__nowV170 - (Number(__oldGuardV170.ts) || 0)) < 90000 &&
+            Array.isArray(__oldGuardV170.refs)
+          ){
+            __oldGuardV170.refs.forEach(r=>{ r=String(r||"").trim(); if(r) __refsV170.add(r); });
+          }
+
+          // Recupera las partidas del mismo grupo que ya estén vivas en Preparación.
+          for(const __storeV170 of [localStorage,sessionStorage]){
+            try{
+              for(let __iV170=0; __iV170<__storeV170.length; __iV170++){
+                const __keyV170=__storeV170.key(__iV170);
+                if(!__keyV170 || !__keyV170.startsWith("prep_meta_")) continue;
+                let __metaV170={};
+                try{ __metaV170=JSON.parse(__storeV170.getItem(__keyV170)||"{}")||{}; }catch(_){ continue; }
+                const __gidV170=String(__metaV170.composite_group_id||__metaV170.compositeGroupId||"").trim();
+                if(__gidV170===__groupIdV170){
+                  const __rV170=String(__keyV170.slice("prep_meta_".length)||"").trim();
+                  if(__rV170) __refsV170.add(__rV170);
+                }
+              }
+            }catch(_){ }
+          }
+
+          // Agenda conoce desde el inicio todas las referencias A/B/C; usarlas aquí
+          // permite proteger también una partida que llegue milisegundos después.
+          for(const __storeV170 of [localStorage,sessionStorage]){
+            try{
+              const __rawOrdersV170=__storeV170.getItem("ldh_work_orders_v1");
+              if(!__rawOrdersV170) continue;
+              const __parsedOrdersV170=JSON.parse(__rawOrdersV170);
+              const __ordersV170=Array.isArray(__parsedOrdersV170)
+                ? __parsedOrdersV170
+                : (__parsedOrdersV170 && Array.isArray(__parsedOrdersV170.orders) ? __parsedOrdersV170.orders : []);
+              for(const __orderV170 of __ordersV170){
+                const __compV170=__orderV170 && __orderV170.compositeV1;
+                if(!__compV170 || String(__compV170.groupId||"").trim()!==__groupIdV170 || !Array.isArray(__compV170.parts)) continue;
+                __compV170.parts.forEach(__partV170=>{
+                  const __rV170=String(__partV170 && (__partV170.reference||__partV170.partReference||__partV170.displayReference) || "").trim();
+                  if(__rV170) __refsV170.add(__rV170);
+                });
+              }
+            }catch(_){ }
+          }
+
+          const __expectedV170 = Math.max(
+            2,
+            Number(metaParaGuardar.composite_part_count || 0) || 0,
+            Number(__oldGuardV170.expected || 0) || 0,
+            __refsV170.size
+          );
+          setAny(__guardKeyV170, JSON.stringify({
+            groupId: __groupIdV170,
+            refs: Array.from(__refsV170),
+            expected: __expectedV170,
+            ts: __nowV170
+          }));
+        }
+      }catch(__guardErrorV170){
+        console.warn("[Preparacion V170] No se pudo ampliar el guard del grupo compuesto",__guardErrorV170);
+      }
+
+      // V176 · Guard UNIVERSAL de importación. Protege también pedidos individuales.
+      // Es una clave exclusivamente local: el sincronizador V6 no la incluye en Firebase.
+      try{
+        const __guardKeyV176 = "prep_import_guard_refs_v176";
+        const __nowV176 = Date.now();
+        let __guardV176 = {};
+        try{ __guardV176 = JSON.parse(getAny(__guardKeyV176) || "{}") || {}; }catch(_){ __guardV176 = {}; }
+        const __itemsV176 = (__guardV176.refs && typeof __guardV176.refs === "object" && !Array.isArray(__guardV176.refs))
+          ? {...__guardV176.refs}
+          : {};
+
+        // Podar únicamente guards caducados; no toca ninguna OT ni dato funcional.
+        Object.keys(__itemsV176).forEach(__rV176=>{
+          const __entryV176 = __itemsV176[__rV176] || {};
+          const __tsV176 = Number(__entryV176.ts || 0) || 0;
+          if(!__tsV176 || (__nowV176 - __tsV176) >= 90000) delete __itemsV176[__rV176];
+        });
+
+        const __refV176 = String(ref || "").trim();
+        if(__refV176){
+          __itemsV176[__refV176] = {
+            ts: __nowV176,
+            uid: String(metaParaGuardar.pedido_uid || metaParaGuardar.pedidoUid || metaParaGuardar.uid || "").trim(),
+            groupId: String(metaParaGuardar.composite_group_id || metaParaGuardar.compositeGroupId || "").trim()
+          };
+        }
+
+        // Para compuestos mantenemos además el grupo completo ya validado por V170.
+        const __gidV176 = String(metaParaGuardar.composite_group_id || metaParaGuardar.compositeGroupId || "").trim();
+        if(__gidV176){
+          let __groupV176 = {};
+          try{ __groupV176 = JSON.parse(getAny("prep_import_group_guard_v170") || "{}") || {}; }catch(_){ __groupV176 = {}; }
+          if(String(__groupV176.groupId || "").trim() === __gidV176 && Array.isArray(__groupV176.refs)){
+            __groupV176.refs.forEach(__groupRefV176=>{
+              const __rrV176 = String(__groupRefV176 || "").trim();
+              if(!__rrV176) return;
+              let __metaV176 = {};
+              try{ __metaV176 = JSON.parse(getAny("prep_meta_" + __rrV176) || "{}") || {}; }catch(_){ __metaV176 = {}; }
+              __itemsV176[__rrV176] = {
+                ts: __nowV176,
+                uid: String(__metaV176.pedido_uid || __metaV176.pedidoUid || __metaV176.uid || "").trim(),
+                groupId: __gidV176
+              };
+            });
+          }
+        }
+
+        setAny(__guardKeyV176, JSON.stringify({refs:__itemsV176,updatedAt:__nowV176}));
+      }catch(__guardErrorV176){
+        console.warn("[Preparacion V176] No se pudo crear el guard universal de importacion",__guardErrorV176);
+      }
+
       try{ setAny("prep_last_import_ref", ref); setAny("prep_focus_ref", ref); setAny("prep_import_guard_ts", String(Date.now())); }catch(_){ }
 removeAny("latest_materials_v1");
           removeAny("pedido_en_preparacion");
@@ -10356,6 +10488,7 @@ init();
            k === "prep_pedido_payload" ||
            k === "pedido_en_preparacion" ||
            k === "latest_materials_v1" ||
+           k === "prep_import_group_guard_v170" ||
            k === "ldh_cache_compra_conjunta_history_v1";
   }
 
@@ -16305,6 +16438,7 @@ function LDH_prepVolverMenu(){
 
   function freshImportInfo(){
     try{
+      const now = Date.now();
       const guardTs = Number(getValue("prep_import_guard_ts") || "0") || 0;
       let urlRef = "";
       try{
@@ -16315,21 +16449,56 @@ function LDH_prepVolverMenu(){
       // Mantener openRef como respaldo evita que el primer snapshot remoto viejo pise
       // la generación que acaba de entrar desde Cálculo durante esos mismos segundos.
       const guardRef = String(getValue("prep_last_import_ref") || getValue("prep_focus_ref") || urlRef || "").trim();
+
+      // V170 · Guard local del grupo compuesto completo. No se sincroniza a Firebase.
+      let groupGuard = {};
+      try{ groupGuard = JSON.parse(getValue("prep_import_group_guard_v170") || "{}") || {}; }catch(_){ groupGuard = {}; }
+      const groupTs = Number(groupGuard.ts || 0) || 0;
+      const groupId = String(groupGuard.groupId || "").trim();
+      const groupFresh = !!(groupId && groupTs && (now - groupTs) < 90000 && Array.isArray(groupGuard.refs));
+
+      // V176 · Guard persistente por REFERENCIA para cualquier importación,
+      // incluso si getFocusRef() ya consumió prep_focus_ref/prep_last_import_ref.
+      let universalGuard = {};
+      try{ universalGuard = JSON.parse(getValue("prep_import_guard_refs_v176") || "{}") || {}; }catch(_){ universalGuard = {}; }
+      const universalRefs = universalGuard.refs && typeof universalGuard.refs === "object" && !Array.isArray(universalGuard.refs)
+        ? universalGuard.refs
+        : {};
+      let universalTs = 0;
+
+      const guardRefs = new Set();
+      if(guardTs && guardRef && (now - guardTs) < 90000) guardRefs.add(guardRef);
+      if(groupFresh){
+        groupGuard.refs.forEach(r=>{ r=String(r||"").trim(); if(r) guardRefs.add(r); });
+      }
+      Object.entries(universalRefs).forEach(([r,entry])=>{
+        r=String(r||"").trim();
+        const ts=Number(entry && entry.ts || 0) || 0;
+        if(r && ts && (now-ts) < 90000){
+          guardRefs.add(r);
+          if(ts>universalTs) universalTs=ts;
+        }
+      });
+
       return {
-        guardTs,
+        guardTs: Math.max(guardTs,groupTs,universalTs),
         guardRef,
-        fresh: !!(guardTs && guardRef && (Date.now() - guardTs) < 90000)
+        guardGroupId: groupFresh ? groupId : "",
+        guardRefs: Array.from(guardRefs),
+        fresh: guardRefs.size > 0
       };
     }catch(e){
-      return {guardTs:0, guardRef:"", fresh:false};
+      return {guardTs:0, guardRef:"", guardGroupId:"", guardRefs:[], fresh:false};
     }
   }
 
   function isFreshImportKey(k, info){
-    if(!info || !info.fresh || !info.guardRef) return false;
-    return k === "prep_recepcion_" + info.guardRef ||
-           k === "prep_meta_" + info.guardRef ||
-           k === "prep_last_import_ref" ||
+    if(!info || !info.fresh) return false;
+    const refs = Array.isArray(info.guardRefs) && info.guardRefs.length
+      ? info.guardRefs
+      : (info.guardRef ? [info.guardRef] : []);
+    if(refs.some(ref => k === "prep_recepcion_" + ref || k === "prep_meta_" + ref)) return true;
+    return k === "prep_last_import_ref" ||
            k === "prep_focus_ref" ||
            k === "prep_import_guard_ts";
   }
@@ -16466,7 +16635,7 @@ function LDH_prepVolverMenu(){
     lastLocalHash = stableHash(collectData());
     if(changed) refreshViews(true);
     if(preservedFreshImport && booted){
-      setTimeout(function(){ pushNow("fresh_import_preserved_v55:" + freshInfo.guardRef); }, 80);
+      setTimeout(function(){ pushNow("fresh_import_preserved_v170:" + (freshInfo.guardRef || freshInfo.guardGroupId || "grupo")); }, 80);
     }
     if(preservedNewGenerationV161 && booted){
       // Aunque el guard temporal haya caducado, publicar la generación nueva
