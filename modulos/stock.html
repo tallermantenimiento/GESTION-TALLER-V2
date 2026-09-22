@@ -2,6 +2,10 @@
 <!-- LDH_STOCK_V49_RESERVADO_UNIFICADO · 29/07/2026 -->
 <html lang="es">
 <head>
+<meta http-equiv="Content-Security-Policy" content="connect-src 'self' data: blob:; frame-src 'self' data: blob:; form-action 'self'; worker-src 'self' blob:;">
+<script src="../test_guard.js"></script>
+<meta name="ldh-stock-test-v128" content="PINTURA-FALLBACK-SIN-HISTORICO-20260910">
+
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>LDH v2 · Stock por empresa · V49 reservado unificado</title>
@@ -1780,12 +1784,15 @@ function LDH_directPhysicalV117(companyId,materialId){
   }catch(_){ }
   return {found:false,qty:0};
 }
+/* V128 · PINTURA: si existe histórico, se mantiene como verdad. Si no existe
+   ningún movimiento para esa ficha, se recupera el físico maestro igual que Cabina. */
 function realStock(companyId,materialId){
   const direct=LDH_directPhysicalV117(companyId,materialId);
   if(direct.found) return direct.qty;
-  return (db.movements||[])
-   .filter(m=>String(m.companyId||m.empresaId||'')===String(companyId||'') && String(m.materialId||m.matId||'')===String(materialId||''))
-   .reduce((a,m)=>{
+  const movements=(db.movements||[])
+   .filter(m=>String(m.companyId||m.empresaId||'')===String(companyId||'') && String(m.materialId||m.matId||'')===String(materialId||''));
+  if(movements.length){
+    return movements.reduce((a,m)=>{
       const t=String(m.type||m.tipo||'entrada').toLowerCase();
       const q=Number(m.qty??m.cantidad??0)||0;
       if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(t)) return a;
@@ -1793,6 +1800,21 @@ function realStock(companyId,materialId){
       if(t==='salida'||t==='ajuste_neg'||t==='consumo'||t==='out') return a-q;
       return a+q;
     },0);
+  }
+  try{
+    const mat=materialById(materialId)||{};
+    if(String(mat.type||mat.tipo||mat.stockType||'').toLowerCase()==='pintura'){
+      const sr=stockRow(companyId,materialId);
+      if(sr){
+        const raw=sr.qty??sr.cantidad??sr.physicalQty??sr.fisico??sr['físico']??sr.real??sr.stock;
+        if(raw!==undefined && raw!==null && String(raw)!==''){
+          const n=Number(raw);
+          if(Number.isFinite(n)) return Math.max(0,n);
+        }
+      }
+    }
+  }catch(_){ }
+  return 0;
 }
 
 function isAutoReceivedPrepReservation(r){
@@ -3757,7 +3779,10 @@ function deleteCompany(){
   const rowBelongs = (x)=> x && (
     sameCompany(x.companyId) || sameCompany(x.empresaId) || sameCompany(x.company) || sameCompany(x.empresa) ||
     sameCompany(x.fromCompanyId) || sameCompany(x.toCompanyId) || sameCompany(x.fromEmpresaId) || sameCompany(x.toEmpresaId) ||
-    sameCompany(x.fromEmpresa) || sameCompany(x.toEmpresa) || sameCompany(x.debtorEmpresa) || sameCompany(x.creditorEmpresa)
+    sameCompany(x.fromEmpresa) || sameCompany(x.toEmpresa) || sameCompany(x.debtorEmpresa) || sameCompany(x.creditorEmpresa) ||
+    sameCompany(x.debtorCompanyId) || sameCompany(x.creditorCompanyId) || sameCompany(x.sourceCompanyId) ||
+    sameCompany(x.targetCompanyId) || sameCompany(x.destinationCompanyId) || sameCompany(x.lenderCompanyId) ||
+    sameCompany(x.borrowerCompanyId)
   );
 
   const counts = {
@@ -3765,7 +3790,7 @@ function deleteCompany(){
     movimientos:(db.movements||[]).filter(rowBelongs).length,
     reservas:(db.reservations||[]).filter(rowBelongs).length,
     trabajos:(db.jobs||[]).filter(rowBelongs).length,
-    deudas:(db.assignments||[]).filter(rowBelongs).length
+    deudas:(db.assignments||[]).filter(rowBelongs).length + (db.reservationDebts||[]).filter(rowBelongs).length
   };
 
   const msg =
@@ -3788,6 +3813,7 @@ function deleteCompany(){
   db.reservations = (db.reservations||[]).filter(x=>!rowBelongs(x));
   db.jobs = (db.jobs||[]).filter(x=>!rowBelongs(x));
   if(Array.isArray(db.assignments)) db.assignments = db.assignments.filter(x=>!rowBelongs(x));
+  if(Array.isArray(db.reservationDebts)) db.reservationDebts = db.reservationDebts.filter(x=>!rowBelongs(x));
 
   // Limpiar fichas maestras de material que ya no estén usadas por ninguna empresa.
   const stillUsed = new Set((db.stock||[]).map(x=>x.materialId).filter(Boolean));
@@ -9859,6 +9885,13 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 </script>
 <!-- /LDH STOCK V127 -->
 
+
+<!-- LDH_STOCK_V132_FIREBASE_PRODUCCION_RESTAURADO_20260922 -->
+<script>
+window.__LDH_STOCK_V132_FIREBASE_PRODUCCION_RESTAURADO_20260922__ = true;
+console.info('[Stock V132] Firebase de produccion restaurado: gestion-taller-stock + gestion-taller-v2.');
+</script>
+
 </body>
 </html>
 
@@ -10447,3 +10480,219 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 })();
 </script>
 <!-- /LDH STOCK V126 -->
+
+<!-- === LDH STOCK V128 · asignado propio excluye transferencias interempresa/donaciones === -->
+<script id="LDH_STOCK_V128_ASIGNADO_SIN_TRANSFERENCIAS_INTEREMPRESA_20260922">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V128_ASIGNADO_SIN_TRANSFERENCIAS__) return;
+  window.__LDH_STOCK_V128_ASIGNADO_SIN_TRANSFERENCIAS__=true;
+
+  const BUILD='STOCK-V128-ASIGNADO-SIN-TRANSFERENCIAS-INTEREMPRESA-20260922';
+  const oldOwnAssignments=window.LDH_stockOwnAssignmentsV116;
+  const oldAssignedStock=window.assignedStock;
+
+  function norm(v){
+    return String(v==null?'':v).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  }
+  function num(v){
+    const n=Number(String(v==null?'':v).replace(',','.'));
+    return Number.isFinite(n)?Math.max(0,n):0;
+  }
+  function isSharedStock(r){
+    const t=norm([r&&r.assignmentType,r&&r.reason,r&&r.source,r&&r.createdFrom,r&&r.tipo].filter(Boolean).join(' '));
+    return !!(r&&(r.sharedStock===true||r.sharedPool===true)) || t.includes('stock comun');
+  }
+  function isIntercompanyTransfer(r){
+    if(!r || isSharedStock(r)) return false;
+    const t=norm([r.assignmentType,r.reason,r.source,r.createdFrom,r.transferType,r.tipo].filter(Boolean).join(' '));
+    if(r.toCompanyId||r.toEmpresa||r.fromCompanyId||r.fromEmpresa) return true;
+    return t.includes('otra empresa') || t.includes('prestamo') || t.includes('donacion');
+  }
+
+  window.LDH_stockOwnAssignmentsV116=function(companyId,materialId){
+    const rows=(typeof oldOwnAssignments==='function' ? oldOwnAssignments(companyId,materialId) : []) || [];
+    return rows.filter(r=>!isIntercompanyTransfer(r));
+  };
+
+  window.assignedStock=function(companyId,materialId){
+    const previous=Math.max(0,num(typeof oldAssignedStock==='function' ? oldAssignedStock(companyId,materialId) : 0));
+    let own=0;
+    try{
+      own=(window.LDH_stockOwnAssignmentsV116(companyId,materialId)||[])
+        .reduce((sum,row)=>sum+num(row&&(row.qty??row.cantidad??0)),0);
+    }catch(_){ own=previous; }
+    let prep=0;
+    try{ if(typeof window.prepAssignedStock==='function') prep=Math.max(0,num(window.prepAssignedStock(companyId,materialId))); }catch(_){ }
+    // Conserva cualquier tope de seguridad aplicado por capas previas (V125),
+    // pero una transferencia/donación interempresa nunca puede inflar "Asignado propio".
+    return Math.min(previous,Math.max(own,prep));
+  };
+
+  window.LDH_STOCK_V128=BUILD;
+  document.documentElement.dataset.ldhStockV128='true';
+  console.info('[Stock V128] Asignado propio excluye préstamos/donaciones interempresa; Stock Común mantiene sus asignaciones propias.');
+})();
+</script>
+<!-- /LDH STOCK V128 -->
+
+
+<!-- === LDH STOCK V130 · préstamo parcial propio + deuda de reserva reversible + causa de saneado preservada === -->
+<script id="LDH_STOCK_V130_PRESTAMO_PARCIAL_DEUDA_RESERVA_20260922">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V130_PRESTAMO_PARCIAL_DEUDA_RESERVA__) return;
+  window.__LDH_STOCK_V130_PRESTAMO_PARCIAL_DEUDA_RESERVA__=true;
+
+  const BUILD='STOCK-V130-SANEADO-HUERFANO-CONSERVA-CAUSA-20260922';
+  const oldOwnAssignments=window.LDH_stockOwnAssignmentsV116;
+  const oldAssignedStock=window.assignedStock;
+  const oldDebtReturn=window.devolverDeudaDesdeDetalle;
+  const oldVisibleReservationDebts=window.visibleReservationDebts;
+
+  const txt=v=>String(v==null?'':v).trim();
+  const norm=v=>txt(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ø/g,'o').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+  const num=v=>{const n=Number(String(v==null?0:v).replace(',','.'));return Number.isFinite(n)?Math.max(0,n):0;};
+
+  function sameMaterial(a,b){
+    try{ if(typeof LDH_sameMaterialNameV117==='function') return !!LDH_sameMaterialNameV117(a,b); }catch(_){ }
+    return txt(a)===txt(b);
+  }
+  function isProfileBar(materialId){
+    try{
+      const m=typeof materialById==='function' ? (materialById(materialId)||{}) : {};
+      const type=norm(m.type||m.tipo||m.stockType||'');
+      const unit=norm(m.unit||m.unidad||'');
+      const fam=norm(m.family||m.familia||'');
+      return type==='hierro' && unit.includes('barra') && !fam.includes('pletina');
+    }catch(_){ return false; }
+  }
+  function isSharedStock(r){
+    const t=norm([r&&r.assignmentType,r&&r.reason,r&&r.source,r&&r.createdFrom,r&&r.tipo].filter(Boolean).join(' '));
+    return !!(r&&(r.sharedStock===true||r.sharedPool===true)) || t.includes('stock comun');
+  }
+  function isIntercompany(r){
+    if(!r || isSharedStock(r)) return false;
+    const t=norm([r.assignmentType,r.reason,r.source,r.createdFrom,r.transferType,r.tipo].filter(Boolean).join(' '));
+    if(r.toCompanyId||r.toEmpresa||r.fromCompanyId||r.fromEmpresa) return true;
+    return t.includes('otra empresa')||t.includes('prestamo')||t.includes('donacion');
+  }
+  function partialOwnRows(companyId,materialId){
+    try{
+      return (db.assignments||[]).filter(r=>{
+        if(!r || isIntercompany(r)) return false;
+        if(txt(r.companyId||r.empresaId)!==txt(companyId)) return false;
+        if(!sameMaterial(r.materialId||r.matId||'',materialId)) return false;
+        const st=norm(r.status||r.estado||'');
+        if(!['prestada parcial','prestada_parcial','prestada'].includes(st)) return false;
+        const ph=norm(r.phase||r.fase||'preparacion');
+        if(ph && !['preparacion','fabricacion'].includes(ph)) return false;
+        return num(r.qty??r.cantidad)>0;
+      });
+    }catch(_){ return []; }
+  }
+  function mergeRows(base,extra){
+    const out=[]; const seen=new Set();
+    [...(base||[]),...(extra||[])].forEach(r=>{
+      if(!r) return;
+      const key=txt(r.id||r.assignmentId||'') || ('obj:'+out.length+':'+txt(r.ref||r.jobRef));
+      if(seen.has(key)) return;
+      seen.add(key); out.push(r);
+    });
+    return out;
+  }
+
+  window.LDH_stockOwnAssignmentsV116=function(companyId,materialId){
+    const base=(typeof oldOwnAssignments==='function' ? oldOwnAssignments(companyId,materialId) : []) || [];
+    return mergeRows(base.filter(r=>!isIntercompany(r)), partialOwnRows(companyId,materialId));
+  };
+
+  window.assignedStock=function(companyId,materialId){
+    if(!isProfileBar(materialId)){
+      return typeof oldAssignedStock==='function' ? Math.max(0,num(oldAssignedStock(companyId,materialId))) : 0;
+    }
+    let own=0,prep=0,physical=0,reserved=0;
+    try{ own=(window.LDH_stockOwnAssignmentsV116(companyId,materialId)||[]).reduce((s,r)=>s+num(r&&(r.qty??r.cantidad)),0); }catch(_){ }
+    try{ if(typeof prepAssignedStock==='function') prep=num(prepAssignedStock(companyId,materialId)); }catch(_){ }
+    try{ physical=num(realStock(companyId,materialId)); }catch(_){ physical=Math.max(own,prep); }
+    try{ reserved=num(reservedStock(companyId,materialId)); }catch(_){ }
+    return Math.min(Math.max(0,physical-reserved),Math.max(own,prep));
+  };
+
+  function normalizeReservationDebts(){
+    let changed=false;
+    try{
+      (db.reservationDebts||[]).forEach(d=>{
+        if(!d) return;
+        const original=num(d.qty??d.cantidad);
+        const returned=num(d.returnedQty??d.qtyReturned??d.devuelto);
+        const pending=typeof debtPendingQty==='function' ? num(debtPendingQty(d)) : Math.max(0,original-returned);
+        let status=String(d.status||d.estado||'pendiente');
+        const statusNorm=norm(status);
+        const terminalCancelado =
+          statusNorm.includes('cancelada') || statusNorm.includes('cancelado') ||
+          statusNorm.includes('cerrada') || statusNorm.includes('cerrado') ||
+          statusNorm.includes('resuelta') || statusNorm.includes('resuelto') ||
+          statusNorm.includes('anulada') || statusNorm.includes('anulado');
+        /* V130: una deuda saneada por ser huérfana no es una devolución real.
+           Conservamos la causa terminal (p.ej. cancelada_prueba) y solo
+           normalizamos a devuelta/devuelta_parcial cuando existe una devolución. */
+        if(!terminalCancelado){
+          if(pending<=0 && (returned>0 || statusNorm.includes('devuelta'))) status='devuelta';
+          else if(returned>0 && pending<original) status='devuelta_parcial';
+        }
+        if(String(d.status||'')!==status || String(d.estado||'')!==status){ d.status=status; d.estado=status; changed=true; }
+
+        if(d.coveredByAssignment===true){
+          let covered=false;
+          try{ covered=typeof isReservationDebtCoveredByAssignment==='function' && isReservationDebtCoveredByAssignment(d,d.companyId,d.materialId); }catch(_){ }
+          if(!covered){
+            d.coveredByAssignment=false;
+            if(d.hiddenFromStockText===true) d.hiddenFromStockText=false;
+            d.coverageReleasedAt=new Date().toISOString();
+            changed=true;
+          }
+        }
+      });
+    }catch(_){ }
+    return changed;
+  }
+
+  if(typeof oldDebtReturn==='function'){
+    window.devolverDeudaDesdeDetalle=function(){
+      const result=oldDebtReturn.apply(this,arguments);
+      try{
+        if(normalizeReservationDebts()){
+          if(typeof save==='function') save();
+          try{ if(typeof render==='function') render(); }catch(_){ }
+        }
+      }catch(_){ }
+      return result;
+    };
+  }
+
+  window.visibleReservationDebts=function(companyId,materialId){
+    try{ normalizeReservationDebts(); }catch(_){ }
+    if(typeof oldVisibleReservationDebts==='function') return oldVisibleReservationDebts(companyId,materialId);
+    return [];
+  };
+
+  window.LDH_normalizeReservationDebtsV130=normalizeReservationDebts;
+  window.LDH_STOCK_V130=BUILD;
+  document.documentElement.dataset.ldhStockV130='true';
+  console.info('[Stock V130] Prestada parcial coherente y saneado huérfano conserva su causa real.');
+})();
+</script>
+<!-- /LDH STOCK V130 -->
+
+<!-- === LDH STOCK V131 · borrado empresa limpia reservationDebts === -->
+<script id="LDH_STOCK_V131_DELETE_COMPANY_RESERVATION_DEBTS_20260922">
+(function(){
+  'use strict';
+  window.LDH_STOCK_V131='STOCK-V131-BORRADO-EMPRESA-LIMPIA-RESERVATION-DEBTS-20260922';
+  document.documentElement.dataset.ldhStockV131='true';
+})();
+</script>
+<!-- /LDH STOCK V131 -->
