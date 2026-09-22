@@ -1,7 +1,11 @@
 <!doctype html>
 <html lang="es">
 <head>
+<meta http-equiv="Content-Security-Policy" content="connect-src 'self' data: blob:; frame-src 'self' data: blob:; form-action 'self'; worker-src 'self' blob:;">
+<script src="../test_guard.js"></script>
+
   <!-- BUILD: ALMACEN-V3-ID-VISUAL-GLOBAL-DELETE-DEDUP-OT-20260902 -->
+  <!-- TEST CANDIDATE: ALMACEN-V7-PARCIALES-FLOW-SAFE-20260910 -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Almacén · Gestión Taller</title>
@@ -397,6 +401,55 @@
     itemAlmacen(item){ const f = item.flow || {}; return n(f.almacen ?? f.alm ?? item.almacen ?? item.enAlmacen ?? 0); },
     itemEntregado(item){ const f = item.flow || {}; return n(f.entregado ?? item.delivered ?? item.entregado ?? 0); },
 
+    // V9 · Material NO asignado: deuda visible también en Almacén/Entregados y retorno a Preparación.
+    _uaItems(item){
+      if(!item) return [];
+      const ub = item.unassignedBorrow || item.unassigned_borrow || item.noAsignado || item.materialNoAsignado || null;
+      const arr = ub && Array.isArray(ub.items) ? ub.items : [];
+      return arr.map(it=>({
+        matId:String(it && (it.matId || it.stockMatId || it.stock_matId || it.id || it.matKey || it.matIdKey) || ''),
+        name:String(it && (it.name || it.matName || it.material || it.mat) || 'Material'),
+        unit:String(it && (it.unit || it.ud) || ''),
+        qtyPending:n(it && (it.qtyPending ?? it.pending ?? it.qty ?? 0))
+      })).filter(it=>it.qtyPending>0);
+    },
+
+    _uaHas(item){ return this._uaItems(item).length>0; },
+
+    _uaSummary(item){
+      const items=this._uaItems(item);
+      return {lines:items.length,totalQty:items.reduce((a,it)=>a+n(it.qtyPending),0)};
+    },
+
+    _uaKey(item){
+      return String((item && (item.ref || item.referencia || item.technical_ref || item.technicalRef || item.id || item.pedidoId || item.pedido_id)) || '').trim();
+    },
+
+    _uaEnc(v){ try{return encodeURIComponent(String(v||''));}catch(e){return String(v||'');} },
+
+    _uaPill(item){
+      if(!this._uaHas(item)) return '';
+      const s=this._uaSummary(item);
+      return `<span class="badge b-red" title="Material no asignado pendiente de devolver">⚠ Material no asignado: ${s.lines}</span>`;
+    },
+
+    _uaAction(item){
+      if(!this._uaHas(item)) return '';
+      const ref=this._uaEnc(this._uaKey(item));
+      return `<button class="btn small red" title="Abrir Preparación para devolver material no asignado" onclick="App.goPrepForUnassigned('${ref}');return false;">↩ Devolver no asignado</button>`;
+    },
+
+    goPrepForUnassigned(refEnc){
+      let ref='';
+      try{ ref=decodeURIComponent(String(refEnc||'')).trim(); }catch(e){ ref=String(refEnc||'').trim(); }
+      if(ref){
+        try{ localStorage.setItem('prep_focus_ref',ref); }catch(e){}
+        try{ sessionStorage.setItem('prep_focus_ref',ref); }catch(e){}
+      }
+      const url='preparacion_pedidos.html'+(ref?('?openRef='+encodeURIComponent(ref)):'');
+      try{ window.location.href=url; }catch(e){ try{ location.href=url; }catch(_e){} }
+    },
+
     // V3 · Una OT técnica solo puede aparecer una vez por listado.
     // No suma cantidades ni modifica datos: elige una de las copias existentes,
     // priorizando la fase más avanzada, la actualización más reciente y el registro
@@ -489,6 +542,7 @@
 
     companyHTML(company, arr){
       const units = arr.reduce((a,it)=>a+this.itemAlmacen(it),0);
+      const uaCount = arr.filter(it=>this._uaHas(it)).length;
       const rows = arr
         .sort((a,b)=>String(a.ref||a.referencia||"").localeCompare(String(b.ref||b.referencia||""),"es",{sensitivity:"base"}))
         .map(it => this.rowHTML(it))
@@ -501,6 +555,7 @@
             <span class="company-name">${esc(company)}</span>
             <span class="badge b-blue">${arr.length} pedidos</span>
             <span class="badge b-orange">${units} uds en almacén</span>
+            ${uaCount>0?`<span class="badge b-red">⚠ No asignado: ${uaCount}</span>`:''}
           </div>
           <div class="company-body" style="display:${open ? "block" : "none"}">
             <table>
@@ -524,8 +579,8 @@
           <td><div class="ref">${workRefVisualHTML(item)}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
           <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Prev.: ${esc(fmtDate(item.datePrev || item.fechaPrevista || ""))}</div></td>
           <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
-          <td><span class="badge b-green">En almacén</span><div class="muted">Total: ${esc(item.total || alm || 0)}</div></td>
-          <td><div class="actions"><button class="btn small green" onclick="App.entregar(${idx})">📦 Entregar</button><button class="btn small orange" onclick="App.devolverFabricacion(${idx})">↩ Fabricación</button><button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'almacen')">🗑 Eliminar</button></div></td>
+          <td><span class="badge b-green">En almacén</span>${this._uaHas(item)?`<div style="margin-top:7px">${this._uaPill(item)}</div>`:''}<div class="muted">Total: ${esc(item.total || alm || 0)}</div></td>
+          <td><div class="actions"><button class="btn small green" onclick="App.entregar(${idx})">📦 Entregar</button><button class="btn small orange" onclick="App.devolverFabricacion(${idx})">↩ Fabricación</button>${this._uaAction(item)}<button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'almacen')">🗑 Eliminar</button></div></td>
         </tr>`;
     },
 
@@ -563,6 +618,7 @@
         .sort((a,b)=>a[0].localeCompare(b[0],"es",{sensitivity:"base"}))
         .map(([company, arr]) => {
           const units = arr.reduce((a,it)=>a+this.itemEntregado(it),0);
+          const uaCount = arr.filter(it=>this._uaHas(it)).length;
           const rows = arr
             .sort((a,b)=>String(a.ref||a.referencia||"").localeCompare(String(b.ref||b.referencia||""),"es",{sensitivity:"base"}))
             .map(it=>this.deliveredRowHTML(it))
@@ -575,6 +631,7 @@
                 <span class="company-name">${esc(company)}</span>
                 <span class="badge b-blue">${arr.length} pedidos</span>
                 <span class="badge b-green">${units} uds entregadas</span>
+                ${uaCount>0?`<span class="badge b-red">⚠ No asignado: ${uaCount}</span>`:''}
               </div>
               <div class="company-body" style="display:${open ? "block" : "none"}">
                 <table>
@@ -601,8 +658,8 @@
           <td><div class="ref">${workRefVisualHTML(item)}</div><div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div><div class="muted">${esc(company)}</div></td>
           <td><div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div><div class="muted">Entrega: ${esc(fmtDate((lastEnt && lastEnt.date) || item.entregado_ts || item.fechaEntrega || ""))}</div></td>
           <td><div class="flow"><span class="badge b-blue">Fab: ${fab}</span><span class="badge b-orange">Pint: ${pint}</span><span class="badge b-green">Alm: ${alm}</span><span class="badge b-blue">Ent: ${ent}</span></div></td>
-          <td><span class="badge b-green">Entregado</span><div class="muted">Total: ${esc(item.total || ent || 0)}</div></td>
-          <td><div class="actions"><button class="btn small orange" onclick="App.reabrirAlmacen(${idx})">↩ Reabrir almacén</button><button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'entregados')">🗑 Eliminar</button></div></td>
+          <td><span class="badge b-green">Entregado</span>${this._uaHas(item)?`<div style="margin-top:7px">${this._uaPill(item)}</div>`:''}<div class="muted">Total: ${esc(item.total || ent || 0)}</div></td>
+          <td><div class="actions"><button class="btn small orange" onclick="App.reabrirAlmacen(${idx})">↩ Reabrir almacén</button>${this._uaAction(item)}<button class="btn small" onclick="App.ver(${idx})">Ver</button><button class="btn small red" onclick="App.eliminarPedido(${idx}, 'entregados')">🗑 Eliminar</button></div></td>
         </tr>`;
     },
 
@@ -655,12 +712,21 @@
       item.flow.almacen = max - qty;
       item.flow.entregado = this.itemEntregado(item) + qty;
       item.delivered = item.flow.entregado;
-      item.fase = item.flow.almacen > 0 ? "almacen" : "entregado";
+
+      // V7 TEST · Entrega parcial: no declarar toda la OT como entregada si
+      // todavía quedan unidades en Pintura o Fabricación. El flujo es la fuente
+      // de verdad y la fase agregada debe representar la fase activa restante.
+      const fabRest = n(item.flow.fab ?? item.flow.fabricacion ?? 0);
+      const pintRest = n(item.flow.pintura ?? 0);
+      if(item.flow.almacen > 0) item.fase = "almacen";
+      else if(pintRest > 0) item.fase = "pintura";
+      else if(fabRest > 0) item.fase = "fabricacion";
+      else item.fase = "entregado";
       item.estado = item.fase;
-      item.status = item.flow.almacen > 0 ? "pendiente" : "entregado";
+      item.status = item.fase === "entregado" ? "entregado" : "pendiente";
       item.keepInFab = false;
       item.hideFromFab = true;
-      item.archived = item.flow.almacen <= 0 && item.flow.entregado >= n(item.total || item.unidades || item.flow.entregado);
+      item.archived = item.fase === "entregado" && item.flow.entregado >= n(item.total || item.unidades || item.flow.entregado);
       item.history = Array.isArray(item.history) ? item.history : [];
       item.history.push({ id:uid("hist"), type:"entrega", qty, date:new Date().toISOString(), note:"Entregado desde Almacén" });
 
@@ -724,6 +790,7 @@
         if(Array.isArray(this.state[pool])) this.state[pool]=this.state[pool].filter(row=>!keys.has(this.deletedKey(technicalWorkRef(row))));
       });
       keys.forEach(ref=>this.markPrepDeleted(ref));
+      this.releaseResidualStockForDeletedRefs(Array.from(keys));
       try{
         let inbox=parse(getStore(INBOX_KEY),[])||[];
         if(Array.isArray(inbox)){ inbox=inbox.filter(row=>!keys.has(this.deletedKey(technicalWorkRef(row)))); setStore(INBOX_KEY,JSON.stringify(inbox)); }
@@ -733,6 +800,45 @@
       }catch(e){}
       if(persist) this.save();
       return keys.size;
+    },
+
+    releaseResidualStockForDeletedRefs(refs){
+      const STOCK_KEY = "ldh_v2_company_stock_v1";
+      const wanted = new Set((Array.isArray(refs)?refs:[refs]).map(r=>String(r||"").trim().toUpperCase()).filter(Boolean));
+      if(!wanted.size) return 0;
+      let raw = null;
+      try{ raw = localStorage.getItem(STOCK_KEY); }catch(e){}
+      if(raw === null) try{ raw = sessionStorage.getItem(STOCK_KEY); }catch(e){}
+      const stockDb = parse(raw, null);
+      if(!stockDb || typeof stockDb !== "object") return 0;
+      const closed = new Set(['cancelada','cancelado','consumida','consumido','liberada','liberado','devuelta','devuelto','cerrada','cerrado','anulada','anulado','eliminada','eliminado']);
+      const rowRef = row => String(row && (row.consumerRef||row.jobRef||row.ref||row.reference||row.referencia||row.workRef) || "").trim().toUpperCase();
+      const isOpen = row => !closed.has(String(row && (row.status||row.estado) || "activa").trim().toLowerCase());
+      let changed = 0;
+      const at = new Date().toISOString();
+      ["reservations","assignments"].forEach(kind=>{
+        const rows = Array.isArray(stockDb[kind]) ? stockDb[kind] : [];
+        rows.forEach(row=>{
+          if(!row || !wanted.has(rowRef(row)) || !isOpen(row)) return;
+          const pending = Number(row.pendingQty ?? row.qtyPending ?? row.pending ?? row.qty ?? row.cantidad ?? 0) || 0;
+          if(pending <= 0) return;
+          row.status = kind === "reservations" ? "cancelada" : "liberada";
+          row.estado = row.status;
+          row.pendingQty = 0;
+          row.qtyPending = 0;
+          row.updatedAt = at;
+          row.releasedAt = at;
+          row.releasedReason = "almacen_global_delete_v4j";
+          changed += 1;
+        });
+      });
+      if(changed){
+        stockDb.updatedAt = at;
+        const next = JSON.stringify(stockDb);
+        try{ localStorage.setItem(STOCK_KEY,next); }catch(e){}
+        try{ sessionStorage.setItem(STOCK_KEY,next); }catch(e){}
+      }
+      return changed;
     },
 
     async eliminarPedido(idx, origen){
@@ -766,6 +872,11 @@
       meta.deleted = true;
       meta.eliminado = true;
       meta.eliminado_modulos = true;
+      meta.deleted_from_preparation = true;
+      meta.preparation_deleted_at = new Date().toISOString();
+      meta.preparation_deleted_by = "almacen_global_delete_v4j";
+      meta.preparation_deleted_pedido_uid = String(meta.pedido_uid || meta.pedidoUid || meta.uid || "");
+      meta.preparation_deleted_order_id = String(meta.agenda_order_id || meta.agendaOrderId || meta.orderId || "");
       meta.fase = "eliminado";
       meta.estado = "eliminado";
       meta.lastUpdate = new Date().toISOString();
@@ -781,6 +892,16 @@
       const raw = JSON.stringify(meta);
       try{ localStorage.setItem(key, raw); }catch(e){}
       try{ sessionStorage.setItem(key, raw); }catch(e){}
+      const receptionKey = "prep_recepcion_" + ref;
+      try{ localStorage.removeItem(receptionKey); }catch(e){}
+      try{ sessionStorage.removeItem(receptionKey); }catch(e){}
+      ["prep_focus_ref","prep_focus_hash_ref","prep_auto_open_ref","prep_last_import_ref"].forEach(k=>{
+        try{
+          const v = String(localStorage.getItem(k) || sessionStorage.getItem(k) || "").trim();
+          if(!v || v.toUpperCase() === String(ref).trim().toUpperCase()){ localStorage.removeItem(k); sessionStorage.removeItem(k); }
+        }catch(e){}
+      });
+      try{ localStorage.removeItem("prep_import_guard_ts"); sessionStorage.removeItem("prep_import_guard_ts"); }catch(e){}
     },
 
     updatePrepMeta(item){
@@ -790,6 +911,9 @@
       const meta = parse(getStore(key), {}) || {};
       const alm = this.itemAlmacen(item);
       const ent = this.itemEntregado(item);
+      const f = item.flow && typeof item.flow === "object" ? item.flow : {};
+      const fab = n(f.fab ?? f.fabricacion ?? 0);
+      const pint = n(f.pintura ?? 0);
       meta.empresa = item.company || item.empresa || item.empresaReceptora || meta.empresa;
       meta.concepto = item.concept || item.concepto || meta.concepto;
       meta.technical_ref = technicalWorkRef(item) || meta.technical_ref || ref;
@@ -798,29 +922,46 @@
       const visibleV2=visibleWorkRef(item);
       if(visibleV2){ meta.display_ref=visibleV2; meta.displayReference=visibleV2; meta.visible_ref=visibleV2; meta.referencia_visible=visibleV2; }
       meta.unidades = item.total || meta.unidades || 1;
-      meta.lastUpdate = new Date().toISOString();
+      const nowISO = new Date().toISOString();
+      meta.lastUpdate = nowISO;
 
+      // V7 TEST · No convertir una entrega parcial en entrega total.
+      // Guardamos antes las marcas temporales válidas y limpiamos solo las
+      // banderas de fase para reconstruirlas desde las cantidades reales.
+      const prevFabTs = meta.fabricacion_ts;
+      const prevPintTs = meta.pintura_ts;
+      const prevAlmTs = meta.almacen_ts;
       delete meta.en_fabricacion;
       delete meta.fabricacion_ts;
       delete meta.en_pintura;
       delete meta.pintura_ts;
+      delete meta.en_almacen;
+      delete meta.almacen_ts;
+      delete meta.entregado;
+      delete meta.en_entregado;
+      delete meta.entregado_ts;
 
       if(alm > 0){
         meta.en_almacen = true;
-        meta.almacen_ts = meta.almacen_ts || new Date().toISOString();
+        meta.almacen_ts = prevAlmTs || nowISO;
         meta.fase = "almacen";
         meta.estado = "almacen";
-        delete meta.entregado;
-        delete meta.en_entregado;
-        delete meta.entregado_ts;
+      }else if(pint > 0){
+        meta.en_pintura = true;
+        meta.pintura_ts = prevPintTs || nowISO;
+        meta.fase = "pintura";
+        meta.estado = "pintura";
+      }else if(fab > 0){
+        meta.en_fabricacion = true;
+        meta.fabricacion_ts = prevFabTs || nowISO;
+        meta.fase = "fabricacion";
+        meta.estado = "fabricacion";
       }else if(ent > 0){
         meta.entregado = true;
         meta.en_entregado = true;
-        meta.entregado_ts = new Date().toISOString();
+        meta.entregado_ts = nowISO;
         meta.fase = "entregado";
         meta.estado = "entregado";
-        delete meta.en_almacen;
-        delete meta.almacen_ts;
       }
       const v = JSON.stringify(meta);
       try{ localStorage.setItem(key, v); }catch(e){}
@@ -863,12 +1004,12 @@
   if(window.LDH_almacenPublishItem) return;
 
   const firebaseConfig = {
-    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
-    authDomain: "gestion-taller-v2.firebaseapp.com",
-    projectId: "gestion-taller-v2",
-    storageBucket: "gestion-taller-v2.firebasestorage.app",
-    messagingSenderId: "888590823508",
-    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
+    apiKey: "TEST_DISABLED_API_KEY_V2",
+    authDomain: "ldh-test-v2.invalid",
+    projectId: "ldh-test-disabled-v2-20260910",
+    storageBucket: "ldh-test-v2-storage.invalid",
+    messagingSenderId: "000000000000",
+    appId: "1:000000000000:web:testisolated000000"
   };
   const DB_KEY = "ldh_db";
   const INBOX_KEY = "ldh_fabricacion_inbox_v1";
@@ -1046,9 +1187,60 @@
     const docRef = doc(db, 'taller_data', 'fabricacion');
     const deletedCol = collection(db, 'taller_data', 'fabricacion', 'deleted');
     const deletedKeys = new Set();
+    // V8: conservar metadatos temporales del tombstone. Un borrado antiguo no
+    // puede bloquear para siempre una instancia nueva de la misma OT técnica.
+    const deletedMeta = new Map();
     const deletedKey = ref => technicalRefValueModule(ref).toUpperCase();
-    window.LDH_almacenIsDeletedRef = ref => deletedKeys.has(deletedKey(ref));
     const deletedDocId = ref => encodeURIComponent(technicalRefValueModule(ref));
+    let lastPhaseMapV19 = {};
+    let phaseMapReadyV19 = false;
+
+    function deletedAtMsOf(data){
+      data=data&&typeof data==='object'?data:{};
+      const direct=n(data.deletedAtMs);
+      if(direct>0)return direct;
+      try{if(data.deletedAt&&typeof data.deletedAt.toMillis==='function')return n(data.deletedAt.toMillis());}catch(_){ }
+      const parsed=Date.parse(String(data.deletedAtISO||data.deletedAt||''));
+      return Number.isFinite(parsed)?parsed:0;
+    }
+    function candidateUpdatedMsForRef(ref){
+      const identity=phaseIdentityV19(ref);if(!identity)return 0;
+      let best=0;
+      Object.values(lastPhaseMapV19&&typeof lastPhaseMapV19==='object'?lastPhaseMapV19:{}).forEach(entry=>{
+        if(!entry||typeof entry!=='object')return;
+        const eRef=entry.workRef||entry.ref||entry.reference||'';
+        if(phaseIdentityV19(eRef)!==identity)return;
+        best=Math.max(best,n(entry.updatedAtMs));
+      });
+      return best;
+    }
+    function tombstoneBlocksRef(ref,candidateUpdatedMs=0){
+      const key=deletedKey(ref);if(!key)return false;
+      const meta=deletedMeta.get(key);if(!meta)return false;
+      const deletedMs=n(meta.deletedAtMs);
+      const candidateMs=n(candidateUpdatedMs)||candidateUpdatedMsForRef(ref);
+      // Si existe actividad autoritativa V19 claramente posterior al borrado,
+      // se trata de una instancia recreada/nueva y el tombstone antiguo no aplica.
+      if(candidateMs>0&&deletedMs>0&&candidateMs>deletedMs+1000)return false;
+      return true;
+    }
+    window.LDH_almacenIsDeletedRef = (ref,candidateUpdatedMs=0) => tombstoneBlocksRef(ref,candidateUpdatedMs);
+
+    function refreshDeletedStateV8(){
+      // Evitar la carrera de arranque: no purgar nada hasta haber recibido al
+      // menos una fotografía de phaseFlowV19 con la que fechar la actividad.
+      if(!phaseMapReadyV19)return false;
+      deletedKeys.clear();
+      deletedMeta.forEach((meta,key)=>{
+        const candidateMs=candidateUpdatedMsForRef(meta.ref||key);
+        const deletedMs=n(meta.deletedAtMs);
+        if(candidateMs>0&&deletedMs>0&&candidateMs>deletedMs+1000)return;
+        deletedKeys.add(key);
+      });
+      if(window.App&&typeof window.App.setGlobalDeletedRefs==='function')
+        window.App.setGlobalDeletedRefs(Array.from(deletedKeys));
+      return true;
+    }
 
     async function syncItems(items, source, startup=false){
       items=(Array.isArray(items)?items:[items]).map(cloneItem).filter(item=>refOf(item));
@@ -1091,14 +1283,15 @@
       if(!refs.length) return true;
       if(!authReady) throw new Error('Nube todavía sin sesión para registrar el borrado');
       for(const ref of refs){
-        await setDoc(doc(deletedCol,deletedDocId(ref)),{ref,reference:ref,deleted:true,deletedAtMs:Date.now(),deletedAt:serverTimestamp(),source:'almacen.html'}, {merge:true});
-        deletedKeys.add(deletedKey(ref));
+        const nowMs=Date.now();
+        await setDoc(doc(deletedCol,deletedDocId(ref)),{ref,reference:ref,deleted:true,deletedAtMs:nowMs,deletedAt:serverTimestamp(),source:'almacen.html'}, {merge:true});
+        const key=deletedKey(ref);
+        deletedMeta.set(key,{ref,deletedAtMs:nowMs,source:'almacen.html'});
+        deletedKeys.add(key);
       }
       if(window.App&&typeof window.App.setGlobalDeletedRefs==='function') window.App.setGlobalDeletedRefs(Array.from(deletedKeys));
       return true;
     };
-
-    let lastPhaseMapV19={};
     function applyPhaseMapToAppV19(appObj,persist=true){
       if(!appObj||!appObj.state)return false;
       const phaseMap=lastPhaseMapV19&&typeof lastPhaseMapV19==='object'?lastPhaseMapV19:{};
@@ -1108,6 +1301,9 @@
         if(!entry||!entry.flow)return;
         const ref=technicalRefValueModule(entry.workRef||entry.ref||entry.reference||'');
         if(!ref)return;
+        // Anti-resurrección con cronología: un tombstone posterior sigue
+        // bloqueando una copia V19 vieja; uno anterior no bloquea una recreación.
+        if(typeof window.LDH_almacenIsDeletedRef==='function' && window.LDH_almacenIsDeletedRef(ref,n(entry.updatedAtMs)))return;
         const identity=phaseIdentityV19(ref);
         const f=entry.flow||{};
         const cf={
@@ -1170,14 +1366,29 @@
     }
     window.LDH_almacenApplyPhaseMapV19=applyPhaseMapToAppV19;
     onSnapshot(docRef,snap=>{
-      if(!snap.exists())return;const data=snap.data()||{};lastPhaseMapV19=data.phaseFlowV19&&typeof data.phaseFlowV19==='object'?data.phaseFlowV19:{};
+      if(!snap.exists())return;
+      const data=snap.data()||{};
+      lastPhaseMapV19=data.phaseFlowV19&&typeof data.phaseFlowV19==='object'?data.phaseFlowV19:{};
+      phaseMapReadyV19=true;
+      // Primero decidir qué tombstones siguen vigentes y después aplicar V19.
+      refreshDeletedStateV8();
       if(window.App){applyPhaseMapToAppV19(window.App,true);window.App.render();window.App.renderDelivered();}
     },error=>console.warn('Almacén: no se pudo leer phaseFlowV19',error));
 
     onSnapshot(deletedCol,snap=>{
-      deletedKeys.clear();
-      snap.docs.forEach(d=>{ const data=d.data()||{}; const ref=technicalRefValueModule(data.ref||data.reference||''); if(ref)deletedKeys.add(deletedKey(ref)); });
-      if(window.App&&typeof window.App.setGlobalDeletedRefs==='function') window.App.setGlobalDeletedRefs(Array.from(deletedKeys));
+      deletedMeta.clear();
+      snap.docs.forEach(d=>{
+        const data=d.data()||{};
+        const ref=technicalRefValueModule(data.ref||data.reference||'');
+        if(!ref)return;
+        const key=deletedKey(ref),deletedAtMs=deletedAtMsOf(data);
+        const prev=deletedMeta.get(key);
+        // Puede haber varios documentos legacy (referencia larga/corta) que
+        // normalicen a la misma OT. Solo manda el borrado más reciente.
+        if(!prev||deletedAtMs>=n(prev.deletedAtMs))
+          deletedMeta.set(key,{ref,deletedAtMs,source:String(data.source||''),docId:d.id});
+      });
+      refreshDeletedStateV8();
     },error=>console.warn('Almacén: no se pudieron leer borrados globales',error));
 
     async function flushPendingItems(){
@@ -1237,7 +1448,12 @@
 
 <!-- LDH_ALMACEN_AUTH_DEFAULT_Y_COLA_PENDIENTE_V3_20260803 -->
 
+<!-- LDH_ALMACEN_V9_MATERIAL_NO_ASIGNADO_20260922 -->
+<script>window.LDH_ALMACEN_UNASSIGNED_V9='PILL-RETURN-PREP-20260922';document.documentElement.dataset.ldhAlmacenUnassigned='V9';console.info('[Almacén V9] Material no asignado: pill persistente + retorno a Preparación.');</script>
+<!-- LDH_ALMACEN_V8_TOMBSTONE_CRONOLOGICO_20260921 -->
+<script>window.LDH_ALMACEN_TOMBSTONE_V8='CHRONOLOGY-V19-20260921';document.documentElement.dataset.ldhAlmacenTombstone='V8';console.info('[Almacén V8] tombstone cronológico: una actividad V19 posterior permite una OT recreada; borrados posteriores siguen bloqueando.');</script>
 <!-- LDH_ALMACEN_V6_PHASE_MAP_ALL_DUPLICATES_20260903 -->
 <script>window.LDH_ALMACEN_SYNC_V6='PHASE-MAP-ALL-DUPLICATES-20260903';document.documentElement.dataset.ldhAlmacenSync='V6';console.info('[Almacén V6] phaseFlowV19 aplicado a todas las copias locales de cada OT; lógica funcional intacta.');</script>
+<!-- TEST_AISLADO V4J: global delete cleanup for prep/residual reservations; physical stock untouched -->
 </body>
 </html>
