@@ -553,20 +553,48 @@
     },
 
     mergeItem(old, incoming){
-      old = old && typeof old === "object" ? this.normalizeItem(old) : {};
-      incoming = incoming && typeof incoming === "object" ? this.normalizeItem(incoming) : {};
-      const oldScore = rawFlowProgress(old), incomingScore = rawFlowProgress(incoming);
-      let authoritative = incoming;
-      if(oldScore > incomingScore) authoritative = old;
-      else if(oldScore === incomingScore && itemUpdatedMs(old) > itemUpdatedMs(incoming)) authoritative = old;
+      // V21 · Fusión segura de duplicados/aliases.
+      // IMPORTANTe: no normalizar la entrada ANTES de fusionarla. normalizeItem()
+      // rellena campos ausentes (empresa="", concepto="Sin concepto", total=1, etc.)
+      // y esos valores sintéticos podían pisar datos válidos de la copia anterior.
+      const oldRaw = old && typeof old === "object" ? {...old} : {};
+      const incomingRaw = incoming && typeof incoming === "object" ? {...incoming} : {};
+      const oldNorm = this.normalizeItem(oldRaw);
+      const incomingNorm = this.normalizeItem(incomingRaw);
+      const oldScore = rawFlowProgress(oldNorm), incomingScore = rawFlowProgress(incomingNorm);
+      let authoritative = incomingNorm;
+      if(oldScore > incomingScore) authoritative = oldNorm;
+      else if(oldScore === incomingScore && itemUpdatedMs(oldNorm) > itemUpdatedMs(incomingNorm)) authoritative = oldNorm;
 
-      const out = {...old, ...incoming};
-      const prefRef = preferredWorkRef(old.ref || old.referencia, incoming.ref || incoming.referencia);
+      // La fusión de metadatos se hace con los objetos CRUDOS: si la copia
+      // entrante no trae un campo, conserva el valor existente en vez de
+      // sustituirlo por un valor por defecto creado por normalizeItem().
+      const out = {...oldRaw, ...incomingRaw};
+
+      // Sincronizar aliases semánticos solo cuando la entrada trae un valor real.
+      const firstText = (obj, keys) => {
+        for(const key of keys){
+          const value = obj && obj[key];
+          if(value !== undefined && value !== null && String(value).trim() !== "") return String(value).trim();
+        }
+        return "";
+      };
+      const incomingCompany = firstText(incomingRaw,["company","empresa","empresaReceptora"]);
+      const oldCompany = firstText(oldRaw,["company","empresa","empresaReceptora"]) || String(oldNorm.company || oldNorm.empresa || "").trim();
+      const mergedCompany = incomingCompany || oldCompany;
+      if(mergedCompany){ out.company = mergedCompany; out.empresa = mergedCompany; }
+
+      const incomingConcept = firstText(incomingRaw,["concept","concepto","nombreConcepto"]);
+      const oldConcept = firstText(oldRaw,["concept","concepto","nombreConcepto"]) || String(oldNorm.concept || oldNorm.concepto || "").trim();
+      const mergedConcept = incomingConcept || oldConcept;
+      if(mergedConcept){ out.concept = mergedConcept; out.concepto = mergedConcept; }
+
+      const prefRef = preferredWorkRef(oldNorm.ref || oldNorm.referencia, incomingNorm.ref || incomingNorm.referencia);
       out.ref = prefRef; out.referencia = prefRef;
-      const oldVisible=visibleWorkRef(old), incomingVisible=visibleWorkRef(incoming);
-      const chosenVisible=(incomingVisible && incomingVisible!==String(incoming.ref||incoming.referencia||'').trim())
+      const oldVisible=visibleWorkRef(oldNorm), incomingVisible=visibleWorkRef(incomingNorm);
+      const chosenVisible=(incomingVisible && incomingVisible!==String(incomingNorm.ref||incomingNorm.referencia||'').trim())
         ? incomingVisible
-        : ((oldVisible && oldVisible!==String(old.ref||old.referencia||'').trim()) ? oldVisible : (incomingVisible||oldVisible||prefRef));
+        : ((oldVisible && oldVisible!==String(oldNorm.ref||oldNorm.referencia||'').trim()) ? oldVisible : (incomingVisible||oldVisible||prefRef));
       out.display_ref=chosenVisible; out.displayReference=chosenVisible; out.visible_ref=chosenVisible; out.referencia_visible=chosenVisible;
       out.flow = {...(authoritative.flow || {})};
       ["fase","estado","status","keepInFab","hideFromFab","archived","delivered"].forEach(k=>{
@@ -1189,7 +1217,21 @@ let ignorePublish = false;
 let publishTimer = null;
 let lastRemoteUpdated = "";
 const deletedRefs = new Set();
-window.LDH_isFabricacionDeletedRef = ref => deletedRefs.has(String(ref || "").trim());
+// V22: un tombstone pertenece a la identidad de la OT, no a una variante visual
+// de su referencia. Una referencia larga/corta de la misma OT debe quedar
+// protegida por el mismo borrado.
+function deletedIdentityKeyV22(ref){
+  try{ return flowIdentityKeyV12(String(ref || "").trim()); }catch(_){ return String(ref || "").trim().toUpperCase(); }
+}
+function isDeletedLogicalRefV22(ref){
+  const target = deletedIdentityKeyV22(ref);
+  if(!target) return false;
+  for(const stored of deletedRefs){
+    if(deletedIdentityKeyV22(stored) === target) return true;
+  }
+  return false;
+}
+window.LDH_isFabricacionDeletedRef = ref => isDeletedLogicalRefV22(ref);
 let deleteSyncReady = false;
 let deletedListenerStarted = false;
 
@@ -1267,19 +1309,20 @@ function storageKeys(prefix){
 function refFromKey(k){ return String(k || "").replace(/^prep_(meta|recepcion)_/,""); }
 function refValue(item){ return String(item && (item.ref || item.referencia || item.jobRef) || "").trim(); }
 function localDeletedRefSet(){
-  return new Set(deletedRefs);
+  return new Set(Array.from(deletedRefs).map(deletedIdentityKeyV22).filter(Boolean));
 }
 function activeRefSetFromDB(ldh){
   const set = new Set();
   const deleted = localDeletedRefSet();
   const addRef = r => {
     r = String(r||"").trim();
-    if(!r || deleted.has(r)) return;
+    if(!r) return;
     let key = r;
     try{
       const m=r.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
       if(m) key='OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
     }catch(e){}
+    if(deleted.has(deletedIdentityKeyV22(key))) return;
     set.add(key);
   };
   ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
@@ -1629,6 +1672,32 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
     const local=parse(getStore(DB_KEY),{})||{};
     const remote=parse(pkg.ldh_db,{})||{};
     const pools=['deliveries','fabricacion','fab','trabajos'];
+
+    // V23: este fallback vive en un <script type="module"> separado del núcleo App.
+    // No puede depender de helpers privados del IIFE principal (mergeRawAliasRows,
+    // visibleWorkRef, dedupeLdhByIdentity), porque fuera de ese IIFE no existen.
+    // Reutilizamos únicamente helpers V12 de ESTE módulo y el canonicalizador
+    // exportado deliberadamente en window por el núcleo.
+    const mergeCompositeRowsV23=(oldRow,newRow)=>{
+      oldRow=oldRow&&typeof oldRow==='object'?oldRow:{};
+      newRow=newRow&&typeof newRow==='object'?newRow:{};
+      const oldScore=flowScoreV12(oldRow), newScore=flowScoreV12(newRow);
+      const oldStamp=flowStampV12(oldRow), newStamp=flowStampV12(newRow);
+      const authoritative=(oldScore>newScore || (Math.abs(oldScore-newScore)<0.000001 && oldStamp>newStamp))?oldRow:newRow;
+      const out={...oldRow,...newRow};
+      const a=String(refValue(oldRow)||'').trim(), b=String(refValue(newRow)||'').trim();
+      const sameKey=a&&b&&flowIdentityKeyV12(a)===flowIdentityKeyV12(b);
+      const pref=sameKey?(b.length>a.length?b:a):(b||a);
+      if(pref){out.ref=pref;out.referencia=pref;}
+      const af=flowV12(authoritative);
+      out.flow=canonicalFlowV12(af);
+      ['fase','estado','status','keepInFab','hideFromFab','archived','delivered'].forEach(k=>{
+        if(authoritative[k]!==undefined)out[k]=authoritative[k];
+      });
+      return out;
+    };
+    const visibleRefV23=row=>String(row&&(row.display_ref||row.displayReference||row.visible_ref||row.referencia_visible||row.ref||row.referencia)||'').trim();
+
     pools.forEach(pool=>{
       const localRows=Array.isArray(local[pool])?local[pool]:[];
       const remoteRows=Array.isArray(remote[pool])?remote[pool].slice():[];
@@ -1638,14 +1707,15 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
         const lr=String(localRow?.ref||localRow?.referencia||'').trim(); if(!lr)return;
         const idx=remoteRows.findIndex(row=>flowIdentityKeyV12(String(row?.ref||row?.referencia||''))===flowIdentityKeyV12(lr));
         if(idx<0){ remoteRows.push({...localRow}); return; }
-        const merged=mergeRawAliasRows(remoteRows[idx],localRow);
-        const vr=visibleWorkRef(localRow);
+        const merged=mergeCompositeRowsV23(remoteRows[idx],localRow);
+        const vr=visibleRefV23(localRow);
         if(vr && vr!==lr){ merged.display_ref=vr; merged.displayReference=vr; merged.visible_ref=vr; merged.referencia_visible=vr; }
         remoteRows[idx]=merged;
       });
       remote[pool]=remoteRows;
     });
-    pkg={...pkg,ldh_db:JSON.stringify(dedupeLdhByIdentity(remote))};
+    const canonical=(typeof window.LDH_fabricacionCanonicalizeLdh==='function')?window.LDH_fabricacionCanonicalizeLdh(remote):remote;
+    pkg={...pkg,ldh_db:JSON.stringify(canonical)};
 
     // La recepción local de una partida compuesta recién enviada nunca se sustituye
     // por una copia remota anterior. Para el resto, se mantiene la política existente.
@@ -1657,7 +1727,7 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
     pkg.prepMeta={...(pkg.prepMeta||{}),...localMeta};
     pkg.prepRecepcion={...(pkg.prepRecepcion||{}),...localReception};
     return pkg;
-  }catch(error){console.warn('[Fabricación V10] no se pudo fusionar partida compuesta local',error);return pkg;}
+  }catch(error){console.warn('[Fabricación V10/V23] no se pudo fusionar partida compuesta local',error);return pkg;}
 }
 function mergeLocalFlowStateIntoRemoteV15(pkg){
   try{
@@ -1759,6 +1829,26 @@ function mergeLocalFlowStateIntoRemoteV15(pkg){
       const lScore=flowScoreV12(localOv), rScore=flowScoreV12(remoteOv||{});
       const cloudDeleted=Array.from(deletedRefs).some(ref=>keyOfRef(ref)===key);
       if(localOv.deleted && !cloudDeleted) return;
+
+      // V23: si el paquete viene de Almacén y ALM/ENT han cambiado realmente,
+      // el override local no puede volver a imponer el reparto anterior. V15 ya
+      // cedía correctamente en ldh_db, pero después este bloque reinyectaba el
+      // override local cuando el paquete remoto no traía override propio.
+      let authoritativeAlmacenAdvance=false;
+      if(remoteIsAlmacen){
+        let localRowForKey=null, remoteRowForKey=null;
+        for(const pool of ['deliveries','fabricacion','fab','trabajos']){
+          if(!localRowForKey){localRowForKey=(Array.isArray(localLdh[pool])?localLdh[pool]:[]).find(row=>keyOfRow(row)===key)||null;}
+          if(!remoteRowForKey){remoteRowForKey=(Array.isArray(remoteLdh[pool])?remoteLdh[pool]:[]).find(row=>keyOfRow(row)===key)||null;}
+        }
+        if(localRowForKey&&remoteRowForKey){
+          const lf=flowV12(effectiveRowV12(localRowForKey,localOv));
+          const rf=flowV12(effectiveRowV12(remoteRowForKey,remoteOv));
+          authoritativeAlmacenAdvance=Number(rf.almacen)!==Number(lf.almacen) || Number(rf.entregado)!==Number(lf.entregado);
+        }
+      }
+      if(authoritativeAlmacenAdvance) return;
+
       const localRecent=lStamp>0 && (now-lStamp)>=0 && (now-lStamp)<RECENT_LOCAL_MS;
       const keepLocal=protectedKeys.has(key) || !remoteRef ||
         (localRecent && rStamp<=lStamp+1) ||
@@ -1951,7 +2041,7 @@ function cleanupStaleDeletedMarkers(){
 
   Object.keys(overrides).forEach(ref=>{
     const ov = overrides[ref];
-    if(ov && ov.deleted && !deletedRefs.has(String(ref || "").trim())){
+    if(ov && ov.deleted && !isDeletedLogicalRefV22(ref)){
       delete overrides[ref];
       changed = true;
     }
@@ -1961,7 +2051,7 @@ function cleanupStaleDeletedMarkers(){
   // Limpia solamente las marcas de eliminación antiguas de Preparación.
   storageKeys("prep_meta_").forEach(key=>{
     const ref = refFromKey(key);
-    if(!ref || deletedRefs.has(ref)) return;
+    if(!ref || isDeletedLogicalRefV22(ref)) return;
     const meta = parse(getStore(key), null);
     if(!meta || (!meta.deleted && !meta.eliminado && !meta.eliminado_modulos)) return;
     delete meta.deleted;
@@ -1983,10 +2073,12 @@ function syncDeletedRefs(refs,republish=false){
   const next = new Set(
     (refs || []).map(ref=>String(ref || "").trim()).filter(Boolean)
   );
-  let changed = next.size !== deletedRefs.size;
+  const prevKeys = new Set(Array.from(deletedRefs).map(deletedIdentityKeyV22).filter(Boolean));
+  const nextKeys = new Set(Array.from(next).map(deletedIdentityKeyV22).filter(Boolean));
+  let changed = nextKeys.size !== prevKeys.size;
   if(!changed){
-    for(const ref of next){
-      if(!deletedRefs.has(ref)){ changed = true; break; }
+    for(const key of nextKeys){
+      if(!prevKeys.has(key)){ changed = true; break; }
     }
   }
 
@@ -2836,6 +2928,13 @@ document.documentElement.dataset.ldhFabricacionSyncGuard='V15';
 window.LDH_FABRICACION_V20='PHASEFLOW-V19-FINAL-AUTHORITATIVE-20260904';
 document.documentElement.dataset.ldhFabricacionSyncRead='V20';
 console.info('[Fabricacion V20] phaseFlowV19 se aplica al final de la reconciliacion; un override local antiguo ya no puede ocultar movimientos de Cabina/Almacen.');
+</script>
+<!-- LDH_FAB_V22_TOMBSTONE_IDENTIDAD_OT_20260922 -->
+
+<script id="LDH_FABRICACION_V23_BUILD_20260922">
+window.LDH_FABRICACION_V23='FALLBACKS-LEGACY-SEGUROS-20260922';
+document.documentElement.dataset.ldhFabricacionFallback='V23';
+console.info('[Fabricación V23] V10 aislado del IIFE + autoridad Almacén en fallback V15.');
 </script>
 </body>
 </html>
