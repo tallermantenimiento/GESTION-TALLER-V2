@@ -5293,9 +5293,27 @@ window.LDH_borrarMovimientosTodos = function(){
     try{return Number(n||0).toLocaleString('es-ES',{maximumFractionDigits:2});}
     catch(e){return String(n||0);}
   }
+  function apK(){
+    try{return localStorage.getItem('ldh_tableros_apartado_activo_v1') === 'tableros auxiliares' ? 'tableros auxiliares' : 'tableros';}
+    catch(e){return 'tableros';}
+  }
+  function activeK(x){
+    const st=String((x&&(x.status||x.estado))||'activa').toLowerCase();
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','cancelada_prueba','recibida','recibido'].includes(st);
+  }
+  function qtyK(x){
+    const v=x&&(x.pendingQty??x.qtyPending??x.pendiente??x.qty??x.cantidad??0);
+    const n=Number(String(v??0).replace(',','.'));
+    return Number.isFinite(n)?Math.max(0,n):0;
+  }
+  function sameMatK(x,materialId){
+    if(!x)return false;
+    const ids=[x.materialId,x.matId,x.stockMaterialId,x.v2MaterialId,x.toMaterialId].map(v=>String(v||'')).filter(Boolean);
+    return ids.includes(String(materialId||''));
+  }
   function ferStockK(materialId){
     try{
-      if(typeof window.ferRealStock === 'function') return window.ferRealStock(materialId);
+      if(typeof window.ferRealStock === 'function') return Number(window.ferRealStock(materialId)||0);
       return (db.movements||[])
         .filter(m=>String(m.materialId||'')===String(materialId||''))
         .reduce((a,m)=>{
@@ -5307,41 +5325,66 @@ window.LDH_borrarMovimientosTodos = function(){
         },0);
     }catch(e){return 0;}
   }
+  function reservedK(materialId){
+    try{
+      if(typeof window.LDH_tablerosReservadoDominante === 'function') return Number(window.LDH_tablerosReservadoDominante(materialId)||0);
+      if(typeof reservedStock === 'function') return Number(reservedStock('fer_common',materialId)||0);
+    }catch(e){}
+    let total=0;
+    try{
+      (db.assignments||[]).forEach(a=>{
+        if(!sameMatK(a,materialId)||!activeK(a))return;
+        const ph=String(a.phase||a.fase||'preparacion').toLowerCase();
+        if(!['preparacion','fabricacion'].includes(ph))return;
+        const typ=String(a.assignmentType||a.reason||'').toLowerCase();
+        if(typ.includes('otra_empresa')||typ.includes('otra empresa')||a.toCompanyId)return;
+        total+=qtyK(a);
+      });
+      (db.reservations||[]).forEach(r=>{
+        if(!sameMatK(r,materialId)||!activeK(r))return;
+        const src=String(r.source||r.createdFrom||r.origin||r.reason||'').toLowerCase();
+        if(r.autoReceivedFromStock||src.includes('stock_recibido_ok')||src.includes('stock_auto_receive')||src.includes('entrada_stock_recibida')||src.includes('recibido_automaticamente'))return;
+        total+=qtyK(r);
+      });
+    }catch(e){}
+    return Math.max(0,total);
+  }
   function ferRowsK(){
+    const ap=apK();
     try{
       return (db.stock||[])
         .map(s=>({s:s,m:(typeof materialById==='function'?materialById(s.materialId):null)}))
-        .filter(x=>x.m && String(x.m.type||'')==='tableros');
+        .filter(x=>x.m && String(x.m.type||'').toLowerCase()===ap);
     }catch(e){return [];}
   }
-  function kpiBody(items, mode){
+  function kpiBody(items,mode){
     if(!items.length){
-      return mode === 'agotado'
-        ? '<div class="empty">No hay materiales agotados.</div>'
-        : '<div class="empty">No hay materiales bajo mínimo.</div>';
+      return mode==='agotado'?'<div class="empty">No hay materiales agotados.</div>':'<div class="empty">No hay materiales bajo mínimo.</div>';
     }
-    return `<div class="ldh-kpi-list">${items.map(({s,m,real,min})=>`
+    return `<div class="ldh-kpi-list">${items.map(({s,m,real,reservado,free,min})=>`
       <div class="ldh-kpi-row">
         <div><b>${escK(m.name)}</b><div class="sub">${escK(m.family||'Sin familia')} · ${escK(s.location||'Sin ubicación')}</div></div>
         <div>mín: <b>${fmtK(min)}</b></div>
         <div>físico: <b>${fmtK(real)}</b></div>
-        <div class="qty ${real<=0?'stock-bad':'stock-warn'}">libre: ${fmtK(Math.max(0,real))} ${escK(m.unit||'')}</div>
-      </div>
-    `).join('')}</div>`;
+        <div>reservado: <b>${fmtK(reservado)}</b></div>
+        <div class="qty ${free<=0?'stock-bad':'stock-warn'}">libre: ${fmtK(free)} ${escK(m.unit||'')}</div>
+      </div>`).join('')}</div>`;
   }
-
-  window.LDH_verAgotados = function(){
-    const items = ferRowsK()
-      .map(({s,m})=>({s,m,real:ferStockK(m.id),min:Number(s.min||0)}))
-      .filter(x=>x.real<=0);
-    openModal('Materiales agotados', kpiBody(items,'agotado'), '<button class="btn" onclick="closeModal()">Cerrar</button>');
+  function dataK(){
+    return ferRowsK().map(({s,m})=>{
+      const real=ferStockK(m.id);
+      const reservado=reservedK(m.id);
+      const free=Math.max(0,real-reservado);
+      return {s,m,real,reservado,free,min:Number(s.min||0)};
+    });
+  }
+  window.LDH_verAgotados=function(){
+    const items=dataK().filter(x=>x.free<=0);
+    openModal('Materiales agotados',kpiBody(items,'agotado'),'<button class="btn" onclick="closeModal()">Cerrar</button>');
   };
-
-  window.LDH_verBajoMinimos = function(){
-    const items = ferRowsK()
-      .map(({s,m})=>({s,m,real:ferStockK(m.id),min:Number(s.min||0)}))
-      .filter(x=>x.real>0 && x.real<=x.min);
-    openModal('Bajo mínimos', kpiBody(items,'bajo'), '<button class="btn" onclick="closeModal()">Cerrar</button>');
+  window.LDH_verBajoMinimos=function(){
+    const items=dataK().filter(x=>x.free>0&&x.free<=x.min);
+    openModal('Bajo mínimos',kpiBody(items,'bajo'),'<button class="btn" onclick="closeModal()">Cerrar</button>');
   };
 })();
 </script>
@@ -5349,195 +5392,59 @@ window.LDH_borrarMovimientosTodos = function(){
 
 <script id="LDH_TABLEROS_DRAG_DROP_FIX_1106">
 (function(){
-  let draggedMaterialId = null;
-  let draggedFamilyName = null;
-
-  function escD(s){
-    return String(s??'').replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+  let draggedMaterialId=null;
+  let draggedFamilyName=null;
+  const FAMILY_KEY_D='ldh_tableros_family_order_v1';
+  function normD(v){return String(v||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');}
+  function familyKeyD(name){return normD(name)||'tableros';}
+  function typeD(m){return String(m&&m.type||'tableros').toLowerCase()==='tableros auxiliares'?'tableros auxiliares':'tableros';}
+  function activeTypeD(){try{return localStorage.getItem('ldh_tableros_apartado_activo_v1')==='tableros auxiliares'?'tableros auxiliares':'tableros';}catch(e){return 'tableros';}}
+  function prefixD(t){return String(t||'tableros')+'::';}
+  function readAllOrderD(){try{const a=JSON.parse(localStorage.getItem(FAMILY_KEY_D)||'[]');return Array.isArray(a)?a:[];}catch(e){return [];}}
+  function getFamilyOrderD(t){
+    const all=readAllOrderD(),pref=prefixD(t),hasPref=all.some(x=>String(x).includes('::'));
+    if(hasPref)return all.filter(x=>String(x).startsWith(pref)).map(x=>String(x).slice(pref.length));
+    return t==='tableros'?all.map(String):[];
   }
-  function fmtD(n){
-    try{return Number(n||0).toLocaleString('es-ES',{maximumFractionDigits:2});}
-    catch(e){return String(n||0);}
+  function saveFamilyOrderD(t,keys){
+    let all=readAllOrderD(),pref=prefixD(t);
+    all=all.filter(x=>!String(x).startsWith(pref));
+    if(t==='tableros')all=all.filter(x=>String(x).includes('::'));
+    all.push(...(keys||[]).map(k=>pref+String(k)));
+    try{localStorage.setItem(FAMILY_KEY_D,JSON.stringify(all));}catch(e){}
   }
-  function sid(v){ return String(v||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-  function familyKeyD(name){
-    return String(name||'Tableros').trim().toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/[^a-z0-9]+/g,'_')
-      .replace(/^_+|_+$/g,'') || 'tableros';
+  function orderedFamiliesD(names,t){
+    const order=getFamilyOrderD(t),pos=new Map(order.map((k,i)=>[k,i]));
+    return names.slice().sort((a,b)=>{const ak=familyKeyD(a),bk=familyKeyD(b),ai=pos.has(ak)?pos.get(ak):999999,bi=pos.has(bk)?pos.get(bk):999999;return ai!==bi?ai-bi:String(a).localeCompare(String(b),'es',{sensitivity:'base'});});
   }
-  function getFamilyOrderD(){
-    try{
-      const arr = JSON.parse(localStorage.getItem('ldh_tableros_family_order_v1')||'[]');
-      return Array.isArray(arr) ? arr : [];
-    }catch(e){return [];}
+  function reorderStockByMaterial(sourceMatId,targetMatId){
+    if(!sourceMatId||!targetMatId||sourceMatId===targetMatId)return;
+    const arr=db.stock||[],from=arr.findIndex(s=>String(s.materialId)===String(sourceMatId)),to=arr.findIndex(s=>String(s.materialId)===String(targetMatId));
+    if(from<0||to<0)return;
+    const [item]=arr.splice(from,1),newTo=arr.findIndex(s=>String(s.materialId)===String(targetMatId));
+    arr.splice(newTo<0?to:newTo,0,item);try{save();}catch(e){}try{window.render();}catch(e){}
   }
-  function saveFamilyOrderD(arr){
-    try{ localStorage.setItem('ldh_tableros_family_order_v1', JSON.stringify(arr||[])); }catch(e){}
-  }
-  function orderedFamiliesD(names){
-    const order = getFamilyOrderD();
-    const pos = new Map(order.map((x,i)=>[x,i]));
-    return names.sort((a,b)=>{
-      const ak=familyKeyD(a), bk=familyKeyD(b);
-      const ap=pos.has(ak)?pos.get(ak):999999;
-      const bp=pos.has(bk)?pos.get(bk):999999;
-      if(ap!==bp) return ap-bp;
-      return String(a).localeCompare(String(b),'es',{sensitivity:'base'});
-    });
-  }
-  function reorderStockByMaterial(sourceMatId, targetMatId){
-    if(!sourceMatId || !targetMatId || sourceMatId===targetMatId) return;
-    const arr = db.stock || [];
-    const from = arr.findIndex(s=>String(s.materialId)===String(sourceMatId));
-    const to = arr.findIndex(s=>String(s.materialId)===String(targetMatId));
-    if(from<0 || to<0) return;
-    const [item] = arr.splice(from,1);
-    const newTo = arr.findIndex(s=>String(s.materialId)===String(targetMatId));
-    arr.splice(newTo<0 ? to : newTo,0,item);
-    try{ save(); }catch(e){}
-    window.render();
-  }
-
-  window.ferMatDragStart = function(ev, materialId){
-    draggedMaterialId = materialId;
-    try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', materialId); }catch(e){}
-    const tr = ev.currentTarget.closest('tr');
-    if(tr) tr.classList.add('dragging');
+  window.ferMatDragStart=function(ev,materialId){draggedMaterialId=materialId;try{ev.dataTransfer.effectAllowed='move';ev.dataTransfer.setData('text/plain',materialId);}catch(e){}const tr=ev.currentTarget.closest('tr');if(tr)tr.classList.add('dragging');};
+  window.ferMatDragOver=function(ev,materialId){ev.preventDefault();const tr=ev.currentTarget.closest('tr');if(tr&&draggedMaterialId&&draggedMaterialId!==materialId)tr.classList.add('drag-over');};
+  window.ferMatDragLeave=function(ev){const tr=ev.currentTarget.closest('tr');if(tr)tr.classList.remove('drag-over');};
+  window.ferMatDrop=function(ev,materialId){ev.preventDefault();const src=draggedMaterialId||(ev.dataTransfer&&ev.dataTransfer.getData('text/plain'));try{document.querySelectorAll('tr.drag-over,tr.dragging').forEach(x=>x.classList.remove('drag-over','dragging'));}catch(e){}draggedMaterialId=null;reorderStockByMaterial(src,materialId);};
+  window.ferMatDragEnd=function(){try{document.querySelectorAll('tr.drag-over,tr.dragging').forEach(x=>x.classList.remove('drag-over','dragging'));}catch(e){}draggedMaterialId=null;};
+  window.ferFamilyDragStart=function(ev,fam){draggedFamilyName=fam;try{ev.dataTransfer.effectAllowed='move';ev.dataTransfer.setData('text/plain',fam);}catch(e){}const row=ev.currentTarget.closest('.family-row');if(row)row.classList.add('family-dragging');};
+  window.ferFamilyDragOver=function(ev,fam){ev.preventDefault();const row=ev.currentTarget.closest('.family-row');if(row&&draggedFamilyName&&draggedFamilyName!==fam)row.classList.add('family-drag-over');};
+  window.ferFamilyDragLeave=function(ev){const row=ev.currentTarget.closest('.family-row');if(row)row.classList.remove('family-drag-over');};
+  window.ferFamilyDrop=function(ev,fam){
+    ev.preventDefault();const src=draggedFamilyName||(ev.dataTransfer&&ev.dataTransfer.getData('text/plain'));
+    try{document.querySelectorAll('.family-row.family-dragging,.family-row.family-drag-over').forEach(x=>x.classList.remove('family-dragging','family-drag-over'));}catch(e){}
+    draggedFamilyName=null;if(!src||src===fam)return;
+    const mats=(db.materials||[]),active=activeTypeD();
+    const srcMat=mats.find(m=>typeD(m)===active&&familyKeyD(m.family)===familyKeyD(src))||mats.find(m=>familyKeyD(m.family)===familyKeyD(src));
+    const targetMat=mats.find(m=>typeD(m)===active&&familyKeyD(m.family)===familyKeyD(fam))||mats.find(m=>familyKeyD(m.family)===familyKeyD(fam));
+    const dragType=srcMat?typeD(srcMat):(targetMat?typeD(targetMat):active);
+    const names=Array.from(new Set((db.stock||[]).map(s=>materialById(s.materialId)).filter(m=>m&&typeD(m)===dragType).map(m=>String(m.family||'Tableros').trim()||'Tableros')));
+    const keys=orderedFamiliesD(names,dragType).map(familyKeyD),srcKey=familyKeyD(src),targetKey=familyKeyD(fam),without=keys.filter(k=>k!==srcKey),idx=without.indexOf(targetKey);
+    if(idx<0)return;without.splice(idx,0,srcKey);saveFamilyOrderD(dragType,without);try{window.render();}catch(e){}
   };
-  window.ferMatDragOver = function(ev, materialId){
-    ev.preventDefault();
-    const tr = ev.currentTarget.closest('tr');
-    if(tr && draggedMaterialId && draggedMaterialId!==materialId) tr.classList.add('drag-over');
-  };
-  window.ferMatDragLeave = function(ev){
-    const tr = ev.currentTarget.closest('tr');
-    if(tr) tr.classList.remove('drag-over');
-  };
-  window.ferMatDrop = function(ev, materialId){
-    ev.preventDefault();
-    const src = draggedMaterialId || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
-    document.querySelectorAll('tr.drag-over,tr.dragging').forEach(x=>x.classList.remove('drag-over','dragging'));
-    draggedMaterialId = null;
-    reorderStockByMaterial(src, materialId);
-  };
-  window.ferMatDragEnd = function(){
-    document.querySelectorAll('tr.drag-over,tr.dragging').forEach(x=>x.classList.remove('drag-over','dragging'));
-    draggedMaterialId = null;
-  };
-
-  window.ferFamilyDragStart = function(ev, fam){
-    draggedFamilyName = fam;
-    try{ ev.dataTransfer.effectAllowed='move'; ev.dataTransfer.setData('text/plain', fam); }catch(e){}
-    const row = ev.currentTarget.closest('.family-row');
-    if(row) row.classList.add('family-dragging');
-  };
-  window.ferFamilyDragOver = function(ev, fam){
-    ev.preventDefault();
-    const row = ev.currentTarget.closest('.family-row');
-    if(row && draggedFamilyName && draggedFamilyName!==fam) row.classList.add('family-drag-over');
-  };
-  window.ferFamilyDragLeave = function(ev){
-    const row = ev.currentTarget.closest('.family-row');
-    if(row) row.classList.remove('family-drag-over');
-  };
-  window.ferFamilyDrop = function(ev, fam){
-    ev.preventDefault();
-    const src = draggedFamilyName || (ev.dataTransfer && ev.dataTransfer.getData('text/plain'));
-    document.querySelectorAll('.family-row.family-dragging,.family-row.family-drag-over').forEach(x=>x.classList.remove('family-dragging','family-drag-over'));
-    draggedFamilyName = null;
-    if(!src || src===fam) return;
-    const names = Array.from(new Set((db.stock||[])
-      .map(s=>materialById(s.materialId))
-      .filter(m=>m && String(m.type||'')==='tableros')
-      .map(m=>String(m.family||'Tableros').trim()||'Tableros')));
-    const keys = orderedFamiliesD(names).map(familyKeyD);
-    const srcKey = familyKeyD(src), targetKey = familyKeyD(fam);
-    const without = keys.filter(k=>k!==srcKey);
-    const idx = without.indexOf(targetKey);
-    if(idx<0) return;
-    without.splice(idx,0,srcKey);
-    saveFamilyOrderD(without);
-    window.render();
-  };
-  window.ferFamilyDragEnd = function(){
-    document.querySelectorAll('.family-row.family-dragging,.family-row.family-drag-over').forEach(x=>x.classList.remove('family-dragging','family-drag-over'));
-    draggedFamilyName = null;
-  };
-
-  window.render = function(){
-    try{ refreshSelectors(); }catch(e){}
-    const wrap=$('stockTableWrap');
-    if(!wrap) return;
-
-    const q=($('search')?.value||'').trim().toLowerCase();
-    const rows=(db.stock||[])
-      .map(s=>({s,m:materialById(s.materialId)}))
-      .filter(x=>x.m && String(x.m.type||'')==='tableros')
-      .filter(x=>!q || [x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q));
-
-    let total=0, low=0, zero=0;
-    rows.forEach(({s,m})=>{
-      const r=window.ferRealStock ? window.ferRealStock(m.id) : 0;
-      total+=r;
-      if(r<=0) zero++;
-      else if(r<=Number(s.min||0)) low++;
-    });
-    if($('kpiReal')) $('kpiReal').textContent=fmtD(total);
-    if($('kpiReserved')) $('kpiReserved').textContent=fmtD((db.movements||[]).length);
-    if($('kpiLow')) $('kpiLow').textContent=low;
-    if($('kpiMaterials')) $('kpiMaterials').textContent=zero;
-    if($('activeTypePill')) $('activeTypePill').textContent='Tipo: Tableros DM';
-
-    if(!rows.length){
-      wrap.innerHTML='<div class="empty">No hay materiales de tableros. Usa <b>+ Material</b>.</div>';
-      return;
-    }
-
-    const groups={};
-    rows.forEach(x=>{
-      const f=String(x.m.family||'Tableros').trim()||'Tableros';
-      (groups[f]||(groups[f]=[])).push(x);
-    });
-
-    const htmlGroups=orderedFamiliesD(Object.keys(groups)).map(fam=>{
-      const trs=groups[fam].map(({s,m})=>{
-        const r=window.ferRealStock ? window.ferRealStock(m.id) : 0;
-        const cls=r<=0?'stock-bad':(r<=Number(s.min||0)?'stock-warn':'stock-ok');
-        const mid=sid(m.id);
-        return `<tr draggable="true" data-material-id="${escD(m.id)}" ondragstart="ferMatDragStart(event,'${mid}')" ondragover="ferMatDragOver(event,'${mid}')" ondragleave="ferMatDragLeave(event)" ondrop="ferMatDrop(event,'${mid}')" ondragend="ferMatDragEnd(event)">
-          <td class="drag-cell"><span class="drag-handle" title="Arrastra para ordenar">☰</span></td>
-          <td><div class="matname">${escD(m.name)}</div><div class="sub">${escD(s.location||'')}</div></td>
-          <td>${escD(m.family||'')}</td>
-          <td class="num ${cls}">${fmtD(r)} ${escD(m.unit||'')}</td>
-          <td class="num ${cls}">${fmtD(Math.max(0,r))} ${escD(m.unit||'')}</td>
-          <td class="actions-cell">
-            <button class="btn small ok" onclick="openMoveModal('entrada','${mid}')">Entrada</button>
-            <button class="btn small danger" onclick="openMoveModal('salida','${mid}')">Salida</button>
-            <button class="btn small" onclick="openMaterialDetail('${mid}')">Editar</button>
-            <button class="btn small danger" onclick="deleteFerMaterial('${mid}')">Borrar</button>
-          </td>
-        </tr>`;
-      }).join('');
-      const fs=sid(fam);
-      return `<tr class="family-row" data-family="${escD(fam)}"><td colspan="6">
-        <details class="family-details">
-          <summary draggable="true" ondragstart="ferFamilyDragStart(event,'${fs}')" ondragover="ferFamilyDragOver(event,'${fs}')" ondragleave="ferFamilyDragLeave(event)" ondrop="ferFamilyDrop(event,'${fs}')" ondragend="ferFamilyDragEnd(event)">
-            <span class="family-title"><span class="family-drag-handle" title="Arrastra para ordenar familias">☰</span><span class="family-name">${escD(fam)}</span><span class="family-count">${groups[fam].length} materiales</span></span>
-          </summary>
-          <table class="family-body"><colgroup><col style="width:48px"><col><col style="width:180px"><col style="width:110px"><col style="width:110px"><col style="width:280px"></colgroup><tbody>${trs}</tbody></table>
-        </details>
-      </td></tr>`;
-    }).join('');
-
-    wrap.innerHTML=`<table class="stock-table">
-      <colgroup><col style="width:48px"><col><col style="width:180px"><col style="width:110px"><col style="width:110px"><col style="width:280px"></colgroup>
-      <thead><tr><th>Orden</th><th>Material</th><th>Familia</th><th class="num">Físico</th><th class="num">Libre</th><th>Acciones</th></tr></thead>
-      <tbody>${htmlGroups}</tbody>
-    </table>`;
-  };
-
-  setTimeout(function(){ try{ window.render(); }catch(e){} }, 0);
+  window.ferFamilyDragEnd=function(){try{document.querySelectorAll('.family-row.family-dragging,.family-row.family-drag-over').forEach(x=>x.classList.remove('family-dragging','family-drag-over'));}catch(e){}draggedFamilyName=null;};
 })();
 </script>
 
@@ -6893,6 +6800,101 @@ window.LDH_borrarMovimientosTodos = function(){
 })();
 </script>
 
+
+
+<!-- LDH_TABLEROS_REGRESIONES_R1_FIX_20260923 -->
+<script id="LDH_TABLEROS_REGRESIONES_R1_FIX_20260923_JS">
+(function(){
+  const COMMON='fer_common';
+  const FAMILY_KEY='ldh_tableros_family_order_v1';
+  function apT(){try{return localStorage.getItem('ldh_tableros_apartado_activo_v1')==='tableros auxiliares'?'tableros auxiliares':'tableros';}catch(e){return 'tableros';}}
+  function labelT(){return apT()==='tableros auxiliares'?'Tableros AGLOMERADO':'Tableros DM';}
+  function typeOkT(m){return !!m&&String(m.type||'').toLowerCase()===apT();}
+  function matT(id){try{return materialById(id);}catch(e){return null;}}
+  function escT(s){return String(s??'').replace(/[&<>\"']/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m];});}
+  function fmtT(n){try{return Number(n||0).toLocaleString('es-ES',{maximumFractionDigits:2});}catch(e){return String(n||0);}}
+  function sidT(v){return String(v||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");}
+  function famKeyT(v){return String(v||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'')||'tableros';}
+  function readOrderT(){try{const a=JSON.parse(localStorage.getItem(FAMILY_KEY)||'[]');return Array.isArray(a)?a:[];}catch(e){return [];}}
+  function getFamilyOrderD(type){const all=readOrderT(),pref=String(type)+'::',hasPref=all.some(x=>String(x).includes('::'));if(hasPref)return all.filter(x=>String(x).startsWith(pref)).map(x=>String(x).slice(pref.length));return type==='tableros'?all.map(String):[];}
+  function orderedFamiliesD(names,type){const o=getFamilyOrderD(type),p=new Map(o.map((k,i)=>[k,i]));return names.slice().sort((a,b)=>{const ak=famKeyT(a),bk=famKeyT(b),ai=p.has(ak)?p.get(ak):999999,bi=p.has(bk)?p.get(bk):999999;return ai!==bi?ai-bi:String(a).localeCompare(String(b),'es',{sensitivity:'base'});});}
+  function realT(id){try{return Number(realStock(COMMON,id)||0);}catch(e){try{return Number(window.ferRealStock(id)||0);}catch(_){return 0;}}}
+  function reservadoT(id){try{return Number(window.LDH_tablerosReservadoDominante?window.LDH_tablerosReservadoDominante(id):reservedStock(COMMON,id))||0;}catch(e){return 0;}}
+
+  window.saveMove=function(type){
+    const mat=$('moveMat')?$('moveMat').value:'';
+    const qty=Number(($('moveQty')&&$('moveQty').value)||0);
+    if(!mat||qty<=0)return alert('Cantidad incorrecta');
+    const cid=typeof commonId==='function'?commonId():'fer_common';
+    if(type==='salida'){
+      const actual=realStock(cid,mat);
+      if(actual<qty){const ok=confirm('La salida supera el stock disponible. ¿Continuar igualmente?');if(!ok)return;}
+    }
+    if(!Array.isArray(db.movements))db.movements=[];
+    const mov={id:uid('mov'),companyId:cid,materialId:mat,type:type,qty:qty,date:new Date().toISOString(),note:($('moveNote')?$('moveNote').value.trim():''),origen:type==='salida' ? 'salida_manual' : 'entrada_manual'};
+    if(type==='salida'){mov.empresa=($('moveEmpresa')?$('moveEmpresa').value.trim():'');mov.ref=($('moveRef')?$('moveRef').value.trim():'');}
+    db.movements.push(mov);try{save();}catch(e){}try{closeModal();}catch(e){}try{window.render();}catch(e){}
+  };
+
+  window.deleteFerMaterial=function(materialId){
+    const m=materialById(materialId);if(!m)return;
+    const linked=(db.reservations||[]).filter(x=>String(x.materialId||x.toMaterialId||'')===String(materialId)).length+(db.assignments||[]).filter(x=>String(x.materialId||'')===String(materialId)||String(x.toMaterialId||'')===String(materialId)).length+(db.reservationDebts||[]).filter(x=>String(x.materialId||x.toMaterialId||'')===String(materialId)).length;
+    const movs=(db.movements||[]).filter(x=>String(x.materialId||'')===String(materialId||''));
+    const msg=(movs.length||linked)?`Este material tiene ${movs.length} movimientos y ${linked} vínculos activos/históricos. Si lo borras, también se limpiarán reservas/asignaciones/deudas relacionadas. ¿Continuar?`:`¿Borrar el material "${m.name}"?`;
+    if(!confirm(msg))return;
+    db.materials=(db.materials||[]).filter(x=>String(x.id||'')!==String(materialId));
+    db.stock=(db.stock||[]).filter(x=>String(x.materialId||'')!==String(materialId));
+    db.movements=(db.movements||[]).filter(x=>String(x.materialId||'')!==String(materialId));
+    db.reservations=(db.reservations||[]).filter(x=>String(x.materialId||x.toMaterialId||'')!==String(materialId));
+    db.assignments=(db.assignments||[]).filter(x=>String(x.materialId||'')!==String(materialId)&&String(x.toMaterialId||'')!==String(materialId));
+    db.reservationDebts=(db.reservationDebts||[]).filter(x=>String(x.materialId||x.toMaterialId||'')!==String(materialId));
+    try{save();}catch(e){}try{window.render();}catch(e){}
+  };
+
+  window.deleteFerFamily=function(familyName){
+    const fam=String(familyName||'').trim(),type=apT();if(!fam)return;
+    const mats=(db.materials||[]).filter(m=>String(m.type||'').toLowerCase()===type&&String(m.family||'').trim().toLowerCase()===fam.toLowerCase());
+    if(!mats.length)return alert('No se encontraron materiales en esa familia.');
+    const ids=new Set(mats.map(m=>String(m.id||'')));
+    const movs=(db.movements||[]).filter(x=>ids.has(String(x.materialId||''))).length;
+    const links=(db.reservations||[]).filter(x=>ids.has(String(x.materialId||x.toMaterialId||''))).length+(db.assignments||[]).filter(x=>ids.has(String(x.materialId||''))||ids.has(String(x.toMaterialId||''))).length+(db.reservationDebts||[]).filter(x=>ids.has(String(x.materialId||x.toMaterialId||''))).length;
+    if(!confirm(`Vas a borrar la familia "${fam}" de ${labelT()}.\n\nMateriales: ${mats.length}\nMovimientos: ${movs}\nReservas/asignaciones/deudas: ${links}\n\nSe limpiarán todos los vínculos de esos materiales. ¿Continuar?`))return;
+    db.materials=(db.materials||[]).filter(x=>!ids.has(String(x.id||'')));
+    db.stock=(db.stock||[]).filter(x=>!ids.has(String(x.materialId||'')));
+    db.movements=(db.movements||[]).filter(x=>!ids.has(String(x.materialId||'')));
+    db.reservations=(db.reservations||[]).filter(x=>!ids.has(String(x.materialId||x.toMaterialId||'')));
+    db.assignments=(db.assignments||[]).filter(x=>!ids.has(String(x.materialId||''))&&!ids.has(String(x.toMaterialId||'')));
+    db.reservationDebts=(db.reservationDebts||[]).filter(x=>!ids.has(String(x.materialId||x.toMaterialId||'')));
+    try{save();}catch(e){}try{closeModal();}catch(e){}try{window.render();}catch(e){}
+  };
+
+  window.render=function(){
+    try{if(typeof refreshSelectors==='function')refreshSelectors();}catch(e){}
+    const wrap=document.getElementById('stockTableWrap');if(!wrap)return;
+    const q=(document.getElementById('search')?.value||'').trim().toLowerCase();
+    const bDM=document.getElementById('btnTablerosComun'),bAG=document.getElementById('btnTableros auxiliaresComun');
+    if(bDM)bDM.classList.toggle('apartado-active',apT()==='tableros');
+    if(bAG)bAG.classList.toggle('apartado-active',apT()==='tableros auxiliares');
+    const rows=(db.stock||[]).map(s=>({s,m:matT(s.materialId)})).filter(x=>typeOkT(x.m)).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q));
+    let total=0,low=0,zero=0;rows.forEach(({s,m})=>{const real=realT(m.id),reservado=reservadoT(m.id),free=Math.max(0,real-reservado);total+=real;if(free<=0) zero++; else if(free<=Number(s.min||0)) low++;});
+    if(document.getElementById('kpiReal'))document.getElementById('kpiReal').textContent=fmtT(total);
+    if(document.getElementById('kpiReserved'))document.getElementById('kpiReserved').textContent=fmtT((db.movements||[]).filter(m=>{const mt=matT(m.materialId);return typeOkT(mt);}).length);
+    if(document.getElementById('kpiLow'))document.getElementById('kpiLow').textContent=low;
+    if(document.getElementById('kpiMaterials'))document.getElementById('kpiMaterials').textContent=zero;
+    if(document.getElementById('activeTypePill'))document.getElementById('activeTypePill').textContent='Tipo: '+labelT();
+    if(!rows.length){wrap.innerHTML='<div class="empty">No hay materiales en <b>'+escT(labelT())+'</b>. Usa <b>+ Material</b>.</div>';try{if(typeof window.LDH_renderHistoricoTablerosFinal==='function')window.LDH_renderHistoricoTablerosFinal();}catch(e){}return;}
+    const groups={};rows.forEach(x=>{const f=String(x.m.family||labelT()).trim()||labelT();(groups[f]||(groups[f]=[])).push(x);});
+    const html=orderedFamiliesD(Object.keys(groups),apT()).map(fam=>{
+      const trs=groups[fam].map(({s,m})=>{const real=realT(m.id),reservado=reservadoT(m.id),libre=Math.max(0,real-reservado),min=Number(s.min||0),clsLibre=libre<=0?'stock-bad':(libre<=min?'stock-warn':'stock-ok'),clsReal=real<=0?'stock-bad':'stock-ok',clsRes=reservado>0?'stock-warn':'stock-ok',mid=sidT(m.id),btnRes=reservado>0?`<button class="btn small warn" onclick="LDH_verReservasTableros('${mid}')">Ver reservas</button>`:'';return `<tr draggable="true" data-material-id="${escT(m.id)}" ondragstart="ferMatDragStart(event,'${mid}')" ondragover="ferMatDragOver(event,'${mid}')" ondragleave="ferMatDragLeave(event)" ondrop="ferMatDrop(event,'${mid}')" ondragend="ferMatDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra para ordenar">☰</span></td><td><div class="matname">${escT(m.name)}</div><div class="sub">${escT(s.location||'')}</div></td><td>${escT(m.family||'')}</td><td class="num ${clsReal}">${fmtT(real)} ${escT(m.unit||'')}</td><td class="num ${clsRes}">${fmtT(reservado)} ${escT(m.unit||'')}</td><td class="num ${clsLibre}">${fmtT(libre)} ${escT(m.unit||'')}</td><td class="actions-cell"><button class="btn small ok" onclick="openMoveModal('entrada','${mid}')">Entrada</button><button class="btn small danger" onclick="openMoveModal('salida','${mid}')">Salida</button>${btnRes}<button class="btn small" onclick="openMaterialDetail('${mid}')">Editar</button><button class="btn small danger" onclick="deleteFerMaterial('${mid}')">Borrar</button></td></tr>`;}).join('');
+      const fs=sidT(fam);return `<tr class="family-row"><td colspan="7"><details class="family-details"><summary draggable="true" ondragstart="ferFamilyDragStart(event,'${fs}')" ondragover="ferFamilyDragOver(event,'${fs}')" ondragleave="ferFamilyDragLeave(event)" ondrop="ferFamilyDrop(event,'${fs}')" ondragend="ferFamilyDragEnd(event)"><span class="family-title"><span class="family-drag-handle" title="Arrastra para ordenar familias">☰</span><span class="family-name">${escT(fam)}</span><span class="family-count">${groups[fam].length} materiales</span></span></summary><table class="family-body"><colgroup><col style="width:48px"><col><col style="width:180px"><col style="width:100px"><col style="width:105px"><col style="width:100px"><col style="width:310px"></colgroup><tbody>${trs}</tbody></table></details></td></tr>`;
+    }).join('');
+    wrap.innerHTML=`<table class="stock-table"><colgroup><col style="width:48px"><col><col style="width:180px"><col style="width:100px"><col style="width:105px"><col style="width:100px"><col style="width:310px"></colgroup><thead><tr><th>Orden</th><th>Material</th><th>Familia</th><th class="num">Físico</th><th class="num">Reservado</th><th class="num">Libre</th><th>Acciones</th></tr></thead><tbody>${html}</tbody></table>`;
+    try{if(typeof window.LDH_renderHistoricoTablerosFinal==='function')window.LDH_renderHistoricoTablerosFinal();}catch(e){}
+  };
+
+  setTimeout(function(){try{window.render();}catch(e){}},0);
+})();
+</script>
 
 </body>
 </html>
