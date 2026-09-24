@@ -1530,10 +1530,26 @@ function LDH_compactMovementsForQuota(forceFull=false){
     if(!Array.isArray(db.movements)) db.movements = [];
 
     const skipTypes = new Set(["recepcion_preparacion","stock_recibido_ok","prep_ok","traza_recepcion"]);
+
+    /* V138: los movimientos recientes que se conservan con detalle NO pueden
+       entrar tambien en el saldo compactado. La version anterior compactaba
+       todo y luego anadia otra vez los 80 recientes, duplicando su efecto. */
+    let recent = [];
+    if(!forceFull && originalMovements > 120){
+      recent = db.movements
+        .filter(m => {
+          if(!m || m.compacted) return false;
+          const type = String(m.type || m.tipo || "entrada").toLowerCase();
+          return !skipTypes.has(type);
+        })
+        .sort((a,b)=> new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0))
+        .slice(0, 80);
+    }
+    const recentSet = new Set(recent);
     const acc = new Map();
 
     db.movements.forEach(m=>{
-      if(!m) return;
+      if(!m || recentSet.has(m)) return;
       const type = String(m.type || m.tipo || "entrada").toLowerCase();
       if(skipTypes.has(type)) return;
 
@@ -1561,18 +1577,10 @@ function LDH_compactMovementsForQuota(forceFull=false){
         type: net >= 0 ? "entrada" : "salida",
         qty: Math.abs(net),
         date: "2000-01-01T00:00:00.000Z",
-        note: "Histórico compactado automáticamente para liberar almacenamiento",
+        note: "Historico compactado automaticamente para liberar almacenamiento",
         compacted: true
       });
     });
-
-    let recent = [];
-    if(!forceFull && originalMovements > 120){
-      recent = db.movements
-        .filter(m => m && !m.compacted)
-        .sort((a,b)=> new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0))
-        .slice(0, 80);
-    }
 
     db.movements = compacted.concat(recent);
 
@@ -1603,6 +1611,7 @@ function LDH_compactMovementsForQuota(forceFull=false){
     db._quotaCurrentReservations = Array.isArray(db.reservations) ? db.reservations.length : 0;
     db._quotaOriginalAssignments = originalAssignments;
     db._quotaCurrentAssignments = Array.isArray(db.assignments) ? db.assignments.length : 0;
+    db._quotaCompactionV138 = true;
     return true;
   }catch(e){
     console.warn("No se pudo compactar Stock", e);
@@ -9973,6 +9982,9 @@ document.documentElement.dataset.ldhStockV137='true';
 console.info('[Stock V137] Firebase producción: sin test_guard/CSP local y app seleccionada por projectId.');
 </script>
 <!-- /LDH STOCK V137 -->
+
+
+
 </body>
 </html>
 
@@ -10867,3 +10879,69 @@ document.documentElement.dataset.ldhStockV135='true';
 console.info('[Stock V135] Guardado local autoritativo hasta confirmacion Firebase; cambios pendientes no se restauran desde nube.');
 </script>
 <!-- /LDH STOCK V135 -->
+
+<!-- === LDH STOCK V138 - compactacion sin doble conteo + limpieza de duplicados exactos === -->
+<script id="LDH_STOCK_V138_COMPACTACION_SIN_DUPLICADOS_20260924">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V138_COMPACTACION_SIN_DUPLICADOS__) return;
+  window.__LDH_STOCK_V138_COMPACTACION_SIN_DUPLICADOS__=true;
+  const BUILD='STOCK-V138-COMPACTACION-SIN-DUPLICADOS-20260924';
+
+  function isCompactedMovement(m){
+    if(!m || typeof m!=='object') return false;
+    if(m.compacted===true) return true;
+    const note=String(m.note||m.nota||'').toLowerCase();
+    return note.includes('compactado') && note.includes('almacenamiento');
+  }
+
+  function exactKey(m){
+    return [
+      String(m.companyId||m.empresaId||''),
+      String(m.materialId||m.matId||''),
+      String(m.type||m.tipo||''),
+      String(Number(m.qty??m.cantidad??m.quantity??0)||0),
+      String(m.date||m.fecha||m.createdAt||''),
+      String(m.note||m.nota||'')
+    ].join('|');
+  }
+
+  function dedupeExactCompactedMovements(){
+    try{
+      if(typeof db==='undefined' || !db || !Array.isArray(db.movements)) return 0;
+      const seen=new Set();
+      const kept=[];
+      const removed=[];
+      db.movements.forEach(m=>{
+        if(!isCompactedMovement(m)){ kept.push(m); return; }
+        const key=exactKey(m);
+        if(!seen.has(key)){ seen.add(key); kept.push(m); return; }
+        removed.push(m);
+      });
+      if(!removed.length) return 0;
+      db.movements=kept;
+      db._v138CompactedDuplicateRepair={
+        at:new Date().toISOString(),
+        build:BUILD,
+        removed:removed.length,
+        removedIds:removed.map(m=>String(m&&m.id||'')).filter(Boolean)
+      };
+      try{ if(typeof save==='function') save(); }catch(_){ }
+      try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(_){ }
+      console.info('[Stock V138] Movimientos compactados duplicados exactos retirados:',removed.length);
+      return removed.length;
+    }catch(e){
+      console.warn('[Stock V138] No se pudo sanear duplicados compactados',e);
+      return 0;
+    }
+  }
+
+  window.LDH_dedupeExactCompactedMovementsV138=dedupeExactCompactedMovements;
+  window.LDH_STOCK_V138=BUILD;
+  document.documentElement.dataset.ldhStockV138='true';
+  const run=()=>dedupeExactCompactedMovements();
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',run,{once:true});
+  else setTimeout(run,0);
+})();
+</script>
+<!-- /LDH STOCK V138 -->

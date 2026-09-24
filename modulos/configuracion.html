@@ -7669,6 +7669,30 @@ window.ejecutarDevolucion = function(matId, maxQty){
   let lastUserActivity = 0;
   let localDirty = false;
   let lastLocalDirtyAt = 0;
+  let lastUploadAt = 0;
+  let lastFlushAt = 0;
+  const SAVE_DEBOUNCE_MS = 2200;
+  const MIN_UPLOAD_GAP_MS = 5000;
+  const UPLOAD_LOCK_KEY = "__LDH_LIVE_UPLOAD_LOCK_V5";
+  const SHARED_HASH_KEY = "__LDH_LIVE_LAST_HASH_V5";
+
+  function acquireUploadLock(){
+    try{
+      const now = Date.now();
+      const raw = localStorage.getItem(UPLOAD_LOCK_KEY);
+      const cur = raw ? JSON.parse(raw) : null;
+      if(cur && cur.clientId && cur.clientId !== CLIENT_ID && Number(cur.expiresAt||0) > now) return false;
+      localStorage.setItem(UPLOAD_LOCK_KEY, JSON.stringify({clientId:CLIENT_ID, expiresAt:now+15000}));
+      const verify = JSON.parse(localStorage.getItem(UPLOAD_LOCK_KEY)||"{}");
+      return verify.clientId === CLIENT_ID;
+    }catch(e){ return true; }
+  }
+  function releaseUploadLock(){
+    try{
+      const cur = JSON.parse(localStorage.getItem(UPLOAD_LOCK_KEY)||"{}");
+      if(cur.clientId === CLIENT_ID) localStorage.removeItem(UPLOAD_LOCK_KEY);
+    }catch(e){}
+  }
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -7908,7 +7932,17 @@ window.ejecutarDevolucion = function(matId, maxQty){
     }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar con remoto antes de subir", e); }
     const json = JSON.stringify(all);
     const hash = fastHash(json);
-    if(!force && hash === lastHash && !localDirty) return { skipped:true, reason:"no_changes" };
+    let sharedHash = "";
+    try{ sharedHash = localStorage.getItem(SHARED_HASH_KEY) || ""; }catch(e){}
+    if(!force && (hash === lastHash || hash === sharedHash)){
+      lastHash = hash;
+      localDirty = false;
+      return { skipped:true, reason:"no_changes" };
+    }
+    if(!force && lastUploadAt && Date.now() - lastUploadAt < MIN_UPLOAD_GAP_MS){
+      return { skipped:true, reason:"throttled" };
+    }
+    if(!acquireUploadLock()) return { skipped:true, reason:"other_tab_uploading" };
 
     saving = true;
     try{
@@ -7929,6 +7963,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
         mode: "GESTION_TALLER_V2_LIVE_SYNC_V4_MERGE_STOCK"
       }, { merge:false });
       lastHash = hash;
+      try{ localStorage.setItem(SHARED_HASH_KEY, hash); }catch(e){}
+      lastUploadAt = Date.now();
       localDirty = false;
       pendingRemoteRev = "";
       try{ sessionStorage.setItem(LAST_REV_KEY, revision); }catch(e){}
@@ -7936,6 +7972,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return { docId, totalChunks:total, totalBytes:json.length, totalKeys:Object.keys(all).length, revision };
     }finally{
       saving = false;
+      releaseUploadLock();
     }
   }
 
@@ -7981,7 +8018,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       pendingRemoteTimer = null;
     }
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 650);
+    saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID, false).catch(e=>console.warn("LiveSync backup ERROR", e)), SAVE_DEBOUNCE_MS);
   }
 
   if(!window.__LDH_LIVE_STORAGE_PATCHED){
@@ -7998,10 +8035,14 @@ window.ejecutarDevolucion = function(matId, maxQty){
   async function flushLiveBackupBeforeLeave(){
     try{
       clearTimeout(saveTimer);
+      if(!localDirty) return;
+      const now = Date.now();
+      if(now - lastFlushAt < 1500) return;
+      lastFlushAt = now;
       if(started && auth.currentUser && !restoring){
         await liveBackupToFirestore(DOC_ID, true);
       }
-    }catch(e){ console.warn("⚠️ LiveSync: flush al salir no completado", e); }
+    }catch(e){ console.warn("LiveSync: flush al salir no completado", e); }
   }
   try{
     window.addEventListener("pagehide", ()=>{ flushLiveBackupBeforeLeave(); });
@@ -8043,7 +8084,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     if(!rev || restoring || saving) return;
     if(localDirty){
       console.log("⏸️ LiveSync: no aplico remoto porque hay cambio local pendiente; subo local primero", rev);
-      await liveBackupToFirestore(DOC_ID, true);
+      await liveBackupToFirestore(DOC_ID, false);
       return;
     }
     if(isUserEditing()){
@@ -8077,8 +8118,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
         return;
       }catch(e){ console.warn("⚠️ LiveSync: no se pudo auto-restaurar", e); }
     }else{
-      try{ await liveBackupToFirestore(DOC_ID, true); }
-      catch(e){ console.warn("⚠️ LiveSync: no se pudo subir estado local inicial", e); }
+      try{ await liveBackupToFirestore(DOC_ID, false); }
+      catch(e){ console.warn("LiveSync: no se pudo subir estado local inicial", e); }
     }
 
     if(unsubscribe) unsubscribe();
@@ -8094,7 +8135,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     });
 
     try{
-      setInterval(()=>{ if(started && localDirty) liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync periodic ERROR", e)); }, 3000);
+      setInterval(()=>{ if(started && localDirty) liveBackupToFirestore(DOC_ID, false).catch(e=>console.warn("LiveSync periodic ERROR", e)); }, 15000);
     }catch(e){}
 
     console.log("🔁 LiveSync v4 merge stock: activo", firebaseConfig.projectId);
@@ -8968,5 +9009,12 @@ function LDH_cfgStockDiagnostico(){
 })();
 </script>
 
+
+
+<script id="LDH_CONFIG_LIVESYNC_V5_COLA_SEGURA_20260924">
+window.LDH_CONFIG_LIVESYNC_V5='CONFIG-LIVESYNC-V5-COLA-SEGURA-20260924';
+document.documentElement.dataset.ldhConfigLivesyncV5='true';
+console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce, limite temporal y bloqueo entre pestanas.');
+</script>
 </body></html>
 
