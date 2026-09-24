@@ -1680,6 +1680,17 @@ function save(){
     }
   }
 
+  /* V135 · persistencia local autoritativa mientras la nube esta pendiente.
+     Se guarda tambien en sessionStorage y se marca una revision local sucia.
+     Firebase no puede reemplazar esta revision hasta que se publique con exito. */
+  try{
+    const _rawV135 = JSON.stringify(window.__LDH_STOCK_MEMORY_DB || db);
+    try{ sessionStorage.setItem(KEY, _rawV135); }catch(_){}
+    window.__LDH_STOCK_LOCAL_DIRTY_V135 = true;
+    try{ localStorage.setItem('ldh_stock_local_dirty_v135', String(db.updatedAt || now())); }catch(_){}
+    try{ sessionStorage.setItem('ldh_stock_local_dirty_v135', String(db.updatedAt || now())); }catch(_){}
+  }catch(_){}
+
   try{ LDH_publishCompanyMaster(); }catch(e){}
   try{
     if(window.__LDH_STOCK_FORCE_MEMORY_PUBLISH){
@@ -1713,17 +1724,8 @@ function LDH_publishCompanyMaster(){
 }
 
 function normalizeBlackIron(){
-  try{
-    (db.materials||[]).forEach(m=>{
-      if(!m || String(m.type||'').toLowerCase() !== 'hierro') return;
-      m.name = String(m.name||'').replace(/galvanizado/gi,'negro');
-      m.family = String(m.family||'').replace(/Perfilería galvanizada/gi,'Perfilería hierro negro').replace(/galvanizada/gi,'hierro negro').replace(/galvanizado/gi,'negro');
-    });
-    (db.stock||[]).forEach(s=>{
-      if(!s) return;
-      if(s.family) s.family = String(s.family).replace(/galvanizada/gi,'hierro negro').replace(/galvanizado/gi,'negro');
-    });
-  }catch(e){}
+  // V134: negro y galvanizado son stocks distintos. No se renombran automaticamente.
+  return false;
 }
 
 function load(){
@@ -1750,7 +1752,7 @@ function load(){
   db.reservations = Array.isArray(db.reservations) ? db.reservations : [];
   db.assignments = Array.isArray(db.assignments) ? db.assignments : [];
   db.reservationDebts = Array.isArray(db.reservationDebts) ? db.reservationDebts : [];
-  if(!db.companies?.length) loadSample(false);
+  // V134: en produccion no se inyecta el catalogo de muestra si la base esta vacia.
   activeCompany=activeCompany||db.companies[0]?.id||'';
 normalizeBlackIron();
 try{ sanearDeudasAntiguasPreparacion(); }catch(e){}
@@ -4669,10 +4671,8 @@ function saveEditMaterial(materialId){
     m.labelColorUpdatedAt=new Date().toISOString();
   }
 
-  if(m.type === 'hierro'){
-    m.name = String(m.name||'').replace(/galvanizado/gi,'negro');
-    m.family = String(m.family||'').replace(/galvanizada/gi,'hierro negro').replace(/galvanizado/gi,'negro');
-  }
+  /* V136: negro y galvanizado son catálogos independientes.
+     Editar una ficha de hierro no debe renombrar ni convertir su acabado. */
 
   save();
   closeModal();
@@ -6803,6 +6803,21 @@ function writeStockEverywhere(raw){
   try{ window.__LDH_STOCK_MEMORY_DB = safeParse(raw); }catch(e){}
 }
 
+const LOCAL_DIRTY_KEY_V135 = 'ldh_stock_local_dirty_v135';
+function hasLocalDirtyV135(){
+  if(window.__LDH_STOCK_LOCAL_DIRTY_V135) return true;
+  try{ if(localStorage.getItem(LOCAL_DIRTY_KEY_V135)) return true; }catch(e){}
+  try{ if(sessionStorage.getItem(LOCAL_DIRTY_KEY_V135)) return true; }catch(e){}
+  return false;
+}
+function clearLocalDirtyV135(){
+  window.__LDH_STOCK_LOCAL_DIRTY_V135 = false;
+  try{ localStorage.removeItem(LOCAL_DIRTY_KEY_V135); }catch(e){}
+  try{ sessionStorage.removeItem(LOCAL_DIRTY_KEY_V135); }catch(e){}
+}
+window.LDH_stockHasLocalDirtyV135 = hasLocalDirtyV135;
+window.LDH_stockClearLocalDirtyV135 = clearLocalDirtyV135;
+
 async function restoreRemoteIfLocalMissing(){
   const local = localStockCount();
   if(local.materials > 0 && local.stock > 0) return false;
@@ -6863,6 +6878,18 @@ async function cloudPublishSafetyCheck(force){
         'Stock nube aplicando borrado...',
         'warn',
         'Borrado local autoritativo pendiente: se publicará primero y no se restaurará una copia remota anterior.'
+      );
+      return true;
+    }
+
+    /* V135: una edicion local confirmada por save() es autoritativa hasta que
+       Firebase confirme la publicacion. Nunca se sustituye por una copia remota
+       solo porque tenga mas materiales o un reloj/timestamp posterior. */
+    if(hasLocalDirtyV135()){
+      setCloudStatus(
+        'Stock guardado local · pendiente nube',
+        'warn',
+        'Hay cambios locales sin confirmar en Firebase. Se publican primero y no se restaura una copia remota anterior.'
       );
       return true;
     }
@@ -7041,6 +7068,14 @@ async function publishFullStock(force=false){
     const mirrorCount = await publishStockMaterialsMirror(data);
     lastRawPublished = raw;
 
+    /* V135: solo se limpia el marcador pendiente si lo publicado sigue siendo
+       exactamente la revision local actual. Si hubo otro cambio durante la subida,
+       ese cambio permanece pendiente para la siguiente publicacion. */
+    try{
+      const currentV135 = completePayloadFromLocalStorage();
+      if(currentV135.raw === raw) clearLocalDirtyV135();
+    }catch(e){}
+
     // Borrado confirmado en la nube: reactivar la proteccion habitual.
     if(window.__LDH_STOCK_AUTHORITATIVE_DELETE_ONCE){
       window.__LDH_STOCK_AUTHORITATIVE_DELETE_ONCE = false;
@@ -7060,7 +7095,14 @@ async function publishFullStock(force=false){
 
 window.LDH_scheduleStockCloudPublish = function(force=false){
   clearTimeout(publishTimer);
-  publishTimer = setTimeout(()=>publishFullStock(!!force), force ? 100 : 900);
+  if(hasLocalDirtyV135() && !authReady){
+    setCloudStatus(
+      'Stock guardado local · pendiente nube',
+      'warn',
+      'El cambio ya esta persistido en este equipo. Se subira automaticamente cuando Firebase termine de autenticar.'
+    );
+  }
+  publishTimer = setTimeout(()=>publishFullStock(!!force), force ? 100 : 350);
 };
 window.LDH_publishFullStockNow = function(){ publishFullStock(true); };
 window.LDH_publishStockDirectFromMemory = async function(memoryDb){
@@ -7089,6 +7131,14 @@ onAuthStateChanged(fbAuth, async user=>{
       }
     }
     authReady = true;
+    /* V135: si existe una edicion local pendiente, se publica antes de considerar
+       cualquier restauracion remota. Esto evita que un alta local desaparezca al
+       reconectar o al volver a entrar en Stock. */
+    if(hasLocalDirtyV135()){
+      setCloudStatus('Stock local pendiente · subiendo...','warn','Publicando primero la revision local pendiente.');
+      await publishFullStock(true);
+      return;
+    }
     setCloudStatus('Stock nube conectado','warn','Autenticado. Comprobando copia remota...');
     const restored = await restoreRemoteIfLocalMissing();
     if(!restored) window.LDH_scheduleStockCloudPublish(true);
@@ -7099,6 +7149,19 @@ onAuthStateChanged(fbAuth, async user=>{
 });
 
 window.addEventListener('online', ()=>window.LDH_scheduleStockCloudPublish(true));
+
+/* V135: al abandonar la pagina se reafirma la ultima copia local. No depende de
+   que una operacion asincrona de Firebase llegue a terminar durante el cierre. */
+window.addEventListener('pagehide', ()=>{
+  try{
+    const p = completePayloadFromLocalStorage();
+    if(p && p.raw){
+      try{ localStorage.setItem(STOCK_KEY, p.raw); }catch(e){}
+      try{ sessionStorage.setItem(STOCK_KEY, p.raw); }catch(e){}
+    }
+  }catch(e){}
+});
+
 setTimeout(()=>{
   // Respaldo de arranque: no vuelve a publicar si la autenticación ya lo hizo.
   if(authReady && !lastRawPublished) window.LDH_scheduleStockCloudPublish(true);
@@ -9892,6 +9955,15 @@ window.__LDH_STOCK_V132_FIREBASE_PRODUCCION_RESTAURADO_20260922__ = true;
 console.info('[Stock V132] Firebase de produccion restaurado: gestion-taller-stock + gestion-taller-v2.');
 </script>
 
+
+<!-- LDH STOCK V136 · negro y galvanizado separados también al editar -->
+<script id="LDH_STOCK_V136_SEPARA_NEGRO_GALV_20260924">
+window.LDH_STOCK_V136='STOCK-V136-SEPARA-NEGRO-GALV-20260924';
+document.documentElement.dataset.ldhStockV136='true';
+console.info('[Stock V136] Negro y galvanizado permanecen separados también al editar materiales.');
+</script>
+<!-- /LDH STOCK V136 -->
+
 </body>
 </html>
 
@@ -10696,3 +10768,93 @@ console.info('[Stock V132] Firebase de produccion restaurado: gestion-taller-sto
 })();
 </script>
 <!-- /LDH STOCK V131 -->
+
+
+<!-- === LDH STOCK V134 · retirar filas legacy confirmadas de Perfileria hierro negro === -->
+<script id="LDH_STOCK_V134_RETIRA_PERFILERIA_NEGRA_LEGACY_20260924">
+(function(){
+  'use strict';
+  if(window.__LDH_STOCK_V134_RETIRA_PERFILERIA_NEGRA_LEGACY__) return;
+  window.__LDH_STOCK_V134_RETIRA_PERFILERIA_NEGRA_LEGACY__=true;
+
+  const BUILD='STOCK-V134-RETIRA-PERFILERIA-NEGRA-LEGACY-20260924';
+  const LEGACY_IDS=new Set([
+    'mat_h_80x40_galv',
+    'mat_h_40x40_galv',
+    'mat_h_plet_40x6'
+  ]);
+  const txt=v=>String(v==null?'':v).trim();
+
+  function purgeConfirmedLegacyStockRows(){
+    try{
+      if(typeof db==='undefined' || !db || typeof db!=='object') return 0;
+      const stock=Array.isArray(db.stock)?db.stock:[];
+      const removed=stock.filter(r=>LEGACY_IDS.has(txt(r && (r.materialId||r.matId||r.material_id))));
+      if(!removed.length){
+        db.legacyBlackIronCleanupV134=db.legacyBlackIronCleanupV134||{
+          at:new Date().toISOString(),build:BUILD,removedStockRows:0,materialIds:[...LEGACY_IDS]
+        };
+        return 0;
+      }
+
+      db.stock=stock.filter(r=>!LEGACY_IDS.has(txt(r && (r.materialId||r.matId||r.material_id))));
+
+      // Los maestros y movimientos se conservan para trazabilidad historica.
+      // Sin fila en db.stock dejan de ser fichas activas/vinculables.
+      (Array.isArray(db.materials)?db.materials:[]).forEach(m=>{
+        const id=txt(m && (m.id||m.materialId||m.matId));
+        if(!LEGACY_IDS.has(id)) return;
+        m.catalogActive=false;
+        m.legacyCatalogHidden=true;
+        m.legacyCatalogReason='muestra_stock_antiguo_confirmada_v134';
+        m.legacyCatalogHiddenAt=new Date().toISOString();
+      });
+
+      db.legacyBlackIronCleanupV134={
+        at:new Date().toISOString(),build:BUILD,removedStockRows:removed.length,
+        materialIds:[...LEGACY_IDS],removedRows:removed.map(r=>({...r}))
+      };
+      db.updatedAt=new Date().toISOString();
+
+      // La copia remota anterior no debe reinyectar estas filas antes de publicar.
+      window.__LDH_STOCK_AUTHORITATIVE_DELETE_ONCE=true;
+      try{
+        if(typeof save==='function') save();
+        else throw new Error('save no disponible');
+      }catch(e){
+        try{
+          const raw=JSON.stringify(db);
+          localStorage.setItem('ldh_v2_company_stock_v1',raw);
+          sessionStorage.setItem('ldh_v2_company_stock_v1',raw);
+          window.__LDH_STOCK_MEMORY_DB=db;
+          window.__LDH_STOCK_FORCE_MEMORY_PUBLISH=true;
+        }catch(_){ throw e; }
+      }
+      try{ if(typeof render==='function') render(); }catch(_){ }
+      try{ if(window.LDH_scheduleStockCloudPublish) window.LDH_scheduleStockCloudPublish(true); }catch(_){ }
+      console.info('[Stock V134] Filas legacy confirmadas retiradas del catalogo activo:',removed.length);
+      return removed.length;
+    }catch(e){
+      console.warn('[Stock V134] No se pudo retirar la perfileria negra legacy confirmada',e);
+      return 0;
+    }
+  }
+
+  window.LDH_removeLegacyBlackIronCatalogV134=purgeConfirmedLegacyStockRows;
+  window.LDH_STOCK_V134=BUILD;
+  document.documentElement.dataset.ldhStockV134='true';
+
+  const run=()=>purgeConfirmedLegacyStockRows();
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',run,{once:true});
+  else run();
+})();
+</script>
+<!-- /LDH STOCK V134 -->
+
+<!-- LDH STOCK V135 · persistencia local primero + cola segura de nube -->
+<script id="LDH_STOCK_V135_PERSISTENCIA_NUBE_SEGURA_20260924">
+window.LDH_STOCK_V135='STOCK-V135-PERSISTENCIA-NUBE-SEGURA-20260924';
+document.documentElement.dataset.ldhStockV135='true';
+console.info('[Stock V135] Guardado local autoritativo hasta confirmacion Firebase; cambios pendientes no se restauran desde nube.');
+</script>
+<!-- /LDH STOCK V135 -->
