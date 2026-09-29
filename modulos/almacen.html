@@ -1,11 +1,9 @@
 <!doctype html>
 <html lang="es">
 <head>
-<meta http-equiv="Content-Security-Policy" content="connect-src 'self' data: blob:; frame-src 'self' data: blob:; form-action 'self'; worker-src 'self' blob:;">
-<script src="../test_guard.js"></script>
-
-  <!-- BUILD: ALMACEN-V3-ID-VISUAL-GLOBAL-DELETE-DEDUP-OT-20260902 -->
-  <!-- TEST CANDIDATE: ALMACEN-V7-PARCIALES-FLOW-SAFE-20260910 -->
+  <!-- BUILD: ALMACEN-V10-PARCIALES-PERSISTENTES-PRODUCCION-20260929 -->
+  <!-- BASE: V9 material no asignado + V8 tombstone cronologico + V6 phaseMap duplicados -->
+  <!-- REGRESION: entrega parcial ALM->ENT persiste tras F5/reconciliacion -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Almacén · Gestión Taller</title>
@@ -277,13 +275,26 @@
         if(!ref || !meta) return;
         if(meta.deleted || meta.eliminado || meta.archived || meta.eliminado_modulos || this.isGloballyDeleted(ref)) return;
         const fase = norm(meta.fase || meta.estado || meta.status);
-        const isAlm = !!(meta.en_almacen || meta.almacen_ts || fase.includes("almacen"));
-        const isEnt = !!(meta.entregado || meta.en_entregado || meta.entregado_ts || fase.includes("entreg"));
+        // V10 · prep_meta conserva ahora el reparto exacto. Esto evita que una
+        // entrega parcial (por ejemplo ALM 54 / ENT 10) se reconstruya como
+        // ALM 64 / ENT 0 al recargar o reconciliar el módulo.
+        const metaFlow = meta.flow && typeof meta.flow === "object" ? meta.flow : null;
+        const mfFab = metaFlow ? n(metaFlow.fab ?? metaFlow.fabricacion ?? 0) : 0;
+        const mfPint = metaFlow ? n(metaFlow.pintura ?? 0) : 0;
+        const mfAlm = metaFlow ? n(metaFlow.almacen ?? metaFlow.alm ?? 0) : 0;
+        const mfEnt = metaFlow ? n(metaFlow.entregado ?? 0) : 0;
+        const isAlm = !!(meta.en_almacen || meta.almacen_ts || fase.includes("almacen") || mfAlm > 0);
+        const isEnt = !!(meta.entregado || meta.en_entregado || meta.entregado_ts || fase.includes("entreg") || (mfEnt > 0 && mfAlm <= 0 && mfPint <= 0 && mfFab <= 0));
         if(!isAlm && !isEnt) return;
 
         const units = n(meta.unidades || meta.uds || meta.total || meta.cantidad || 1) || 1;
         const company = String(meta.empresa || meta.company || meta.empresaReceptora || meta.empresa_receptora || "").trim();
         const concept = String(meta.concepto || meta.concept || "Sin concepto").trim();
+        const recFlow = metaFlow ? {
+          fab:mfFab, fabricacion:mfFab, pintura:mfPint, almacen:mfAlm, entregado:mfEnt
+        } : {
+          fab:0, fabricacion:0, pintura:0, almacen:isEnt ? 0 : units, entregado:isEnt ? units : 0
+        };
 
         const rec = {
           id: meta.pedido_uid || ("ALM-" + ref),
@@ -296,7 +307,7 @@
           concept, concepto: concept,
           company, empresa: company, empresaReceptora: company,
           total: units,
-          delivered: 0,
+          delivered: n(recFlow.entregado),
           status:isEnt ? "entregado" : "pendiente",
           estado:isEnt ? "entregado" : "pendiente",
           fase:isEnt ? "entregado" : "almacen",
@@ -306,7 +317,7 @@
           archived:false,
           datePed: meta.fecha_pedido || meta.datePed || meta.createdAt || todayISO(),
           datePrev: meta.fecha_entrega || meta.datePrev || todayISO(),
-          flow:{ fab:0, fabricacion:0, pintura:0, almacen:isEnt ? 0 : units, entregado:isEnt ? units : 0 },
+          flow:recFlow,
           history: Array.isArray(meta.history) ? meta.history : []
         };
         changed = this.upsertDelivery(rec) || changed;
@@ -925,6 +936,17 @@
       const nowISO = new Date().toISOString();
       meta.lastUpdate = nowISO;
 
+      // V10 · guardar las cantidades exactas por fase. prep_meta ya no es solo
+      // una etiqueta de fase: también conserva ALM/ENT para que F5 no deshaga
+      // una entrega parcial.
+      meta.flow = {
+        fab:fab,
+        fabricacion:fab,
+        pintura:pint,
+        almacen:alm,
+        entregado:ent
+      };
+
       // V7 TEST · No convertir una entrega parcial en entrega total.
       // Guardamos antes las marcas temporales válidas y limpiamos solo las
       // banderas de fase para reconstruirlas desde las cantidades reales.
@@ -1004,12 +1026,12 @@
   if(window.LDH_almacenPublishItem) return;
 
   const firebaseConfig = {
-    apiKey: "TEST_DISABLED_API_KEY_V2",
-    authDomain: "ldh-test-v2.invalid",
-    projectId: "ldh-test-disabled-v2-20260910",
-    storageBucket: "ldh-test-v2-storage.invalid",
-    messagingSenderId: "000000000000",
-    appId: "1:000000000000:web:testisolated000000"
+    apiKey: "AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg",
+    authDomain: "gestion-taller-v2.firebaseapp.com",
+    projectId: "gestion-taller-v2",
+    storageBucket: "gestion-taller-v2.firebasestorage.app",
+    messagingSenderId: "888590823508",
+    appId: "1:888590823508:web:6dfd420a3e7ac17d647dc1"
   };
   const DB_KEY = "ldh_db";
   const INBOX_KEY = "ldh_fabricacion_inbox_v1";
@@ -1455,5 +1477,7 @@
 <!-- LDH_ALMACEN_V6_PHASE_MAP_ALL_DUPLICATES_20260903 -->
 <script>window.LDH_ALMACEN_SYNC_V6='PHASE-MAP-ALL-DUPLICATES-20260903';document.documentElement.dataset.ldhAlmacenSync='V6';console.info('[Almacén V6] phaseFlowV19 aplicado a todas las copias locales de cada OT; lógica funcional intacta.');</script>
 <!-- TEST_AISLADO V4J: global delete cleanup for prep/residual reservations; physical stock untouched -->
+<!-- LDH_ALMACEN_V10_PARCIAL_PERSIST_20260929 -->
+<script>window.LDH_ALMACEN_PARTIAL_V10='PREP-META-FLOW-PERSIST-20260929';document.documentElement.dataset.ldhAlmacenPartial='V10';console.info('[Almacén V10] entrega parcial ALM→ENT persistente tras F5/reconciliación.');</script>
 </body>
 </html>
