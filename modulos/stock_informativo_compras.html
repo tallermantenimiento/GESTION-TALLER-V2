@@ -5,7 +5,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Stock informativo · Compras · V50 estado estable</title>
+<title>IA LOCAL R2 · Stock informativo · Compras · V50 estado estable</title>
 <style>
 :root{--bg:#071524;--panel:#0d2034;--panel2:#102a44;--line:rgba(148,163,184,.22);--txt:#eaf2ff;--mut:#9fb1c8;--blue:#38bdf8;--green:#22c55e;--red:#ef4444;--amber:#f59e0b;}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 30% 0,#102b46 0,#071524 45%,#04101c 100%);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;min-height:100vh}
@@ -1088,6 +1088,24 @@ let unsubMeta = null;
 let unsubMaterials = null;
 let lastSource = '';
 let sourceStats = {package:null,materials:null,direct:null};
+
+// === IA COMPRAS LOCAL R2 · puente de lectura semantica del Stock ===
+window.__LDH_IA_COMPRAS_STOCK__ = {
+  snapshot(){
+    return {
+      activeCompany,
+      source:lastSource,
+      companies:(companies||[]).map(c=>({id:c.id,name:c.name,order:c.order})),
+      rows:(rows||[]).map(r=>({
+        id:r.id, companyId:r.companyId, type:r.type, name:r.name, family:r.family,
+        unit:r.unit, location:r.location, min:r.min, qty:r.qty, physical:r.physical,
+        reserved:r.reserved, assigned:r.assigned, free:r.free, pletinaMm:!!r.pletinaMm
+      })),
+      updatedAt:Date.now()
+    };
+  },
+  refresh(){ return loadAll(); }
+};
 
 let openAccState = new Set();
 
@@ -2639,8 +2657,23 @@ ensureAutomaticAccess();
     },
 
     attachCloud(cloud){
-      this.cloud = cloud;
-      this.updateSyncStatus('Sincronización: conectada', true);
+      window.__LDH_IA_COMPRAS_REAL_WORK_CLOUD__ = cloud;
+      const isProduction = location.hostname === 'tallermantenimiento.github.io';
+      if(isProduction){
+        this.cloud = cloud;
+        this.updateSyncStatus('Sincronización: actualizada', true);
+        return;
+      }
+      const owner = this;
+      this.cloud = {
+        reserveReference: async (entryDate,fallback) => owner.previewReference(entryDate) || fallback,
+        saveOrder: async () => true,
+        saveOrders: async () => true,
+        createNotification: async () => true,
+        acknowledgeNotification: async () => true,
+        deleteOrders: async () => true
+      };
+      this.updateSyncStatus('PRUEBA LOCAL · lectura nube · escritura aislada', true);
     },
 
     getClientId(){
@@ -2820,8 +2853,10 @@ ensureAutomaticAccess();
     },
 
     sortedPending(){
+      // La cola de prioridad debe ser exactamente la misma que ve Direccion.
+      // Las OT con anulacion pendiente siguen guardadas, pero no cuentan como puestos activos.
       return this.orders
-        .filter(o=>o.status === 'pending')
+        .filter(o=>o.status === 'pending' && !o.cancellationPendingV1 && !normalizeCancellationRequest(o.cancellationRequestV1))
         .sort((a,b)=>
           (Number(a.priority)-Number(b.priority)) ||
           String(a.deliveryDate||'9999').localeCompare(String(b.deliveryDate||'9999')) ||
@@ -2845,7 +2880,9 @@ ensureAutomaticAccess();
     },
 
     normalizePendingPositions(touchUpdatedAt){
-      const rows = this.sortedPending();
+      // Una orden con solicitud de anulacion esta fuera de la cola visible.
+      // Las prioridades visibles deben quedar siempre compactas: 1, 2, 3...
+      const rows = this.sortedPending().filter(order=>!normalizeCancellationRequest(order.cancellationRequestV1));
       const changed = [];
       const now = Date.now();
       rows.forEach((order,index)=>{
@@ -2877,10 +2914,14 @@ ensureAutomaticAccess();
     },
 
     resequencePending(movingOrder,desiredPosition){
+      // Las ordenes con anulacion pendiente se conservan en datos, pero NO participan
+      // en la cola visible ni pueden provocar huecos al mover prioridades.
+      const isHiddenCancellation = order=>!!normalizeCancellationRequest(order?.cancellationRequestV1);
       const previousPositions = new Map(
-        this.orders.filter(o=>o.status === 'pending').map(o=>[o.id,Number(o.priority)])
+        this.orders.filter(o=>o.status === 'pending' && !isHiddenCancellation(o)).map(o=>[o.id,Number(o.priority)])
       );
-      const pending = this.sortedPending().filter(o=>o.id !== movingOrder.id);
+      const hiddenPending = this.orders.filter(o=>o.status === 'pending' && isHiddenCancellation(o));
+      const pending = this.sortedPending().filter(o=>!isHiddenCancellation(o) && o.id !== movingOrder.id);
       const position = Math.min(
         pending.length + 1,
         Math.max(1,Math.round(Number(desiredPosition)||pending.length + 1))
@@ -2899,6 +2940,7 @@ ensureAutomaticAccess();
       });
       this.orders = [
         ...this.orders.filter(o=>o.status !== 'pending'),
+        ...hiddenPending,
         ...pending
       ];
       return changed;
@@ -2923,7 +2965,7 @@ ensureAutomaticAccess();
             newOrderNotice ? 'wo-new-order-row' : ''
           ].filter(Boolean).join(' ');
           return `<tr${rowClasses ? ` class="${rowClasses}"` : ''}>
-            <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:allRows.length},(_,position)=>`<option value="${position+1}"${Number(o.priority)===position+1?' selected':''}>${position+1}</option>`).join('')}</select></td>
+            <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:rows.length},(_,position)=>`<option value="${position+1}"${Number(o.priority)===position+1?' selected':''}>${position+1}</option>`).join('')}</select></td>
             <td class="wo-reference">${esc(o.reference)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${o.operationalNoticeV1?`<span class="wo-operational-notice-pill">⚠ AVISO · ${esc(o.operationalNoticeV1)}</span>`:''}${phasePills(o)}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}</td>
             <td>${esc(fmtDate(o.entryDate))}</td>
             <td>${esc(fmtDate(o.deliveryDate))}</td>
@@ -3361,6 +3403,7 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
       const now=Date.now();
       const previousRequest=order.cancellationRequestV1;
       const previousPending=order.cancellationPendingV1;
+      const previousPriorities=new Map(this.orders.filter(item=>item.status==='pending').map(item=>[item.id,Number(item.priority)||1]));
       order.cancellationRequestV1={
         status:'pending',
         requestId:`cancel_${order.id}_${now}`,
@@ -3373,16 +3416,20 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
       };
       order.cancellationPendingV1=true;
       order.updatedAtMs=now;
+      // Al ocultarla, renumeramos inmediatamente la cola que Direccion ve en pantalla.
+      const compacted=this.normalizePendingPositions(true);
       writeOrders(this.orders);
       this.render();
       try{
-        if(this.cloud.saveOrder) await this.cloud.saveOrder(order);
-        else await this.cloud.saveOrders([order]);
+        const changedRows=Array.from(new Map([order,...compacted].map(item=>[item.id,item])).values());
+        if(this.cloud.saveOrders) await this.cloud.saveOrders(changedRows);
+        else if(this.cloud.saveOrder) await Promise.all(changedRows.map(item=>this.cloud.saveOrder(item)));
         this.updateSyncStatus('Solicitud de anulación enviada · pendiente de aprobación',true);
       }catch(error){
         console.error('No se pudo enviar la solicitud de anulación',error);
         order.cancellationRequestV1=previousRequest || null;
         order.cancellationPendingV1=!!previousPending;
+        this.orders.forEach(item=>{ if(previousPriorities.has(item.id)) item.priority=previousPriorities.get(item.id); });
         writeOrders(this.orders);
         this.render();
         this.updateSyncStatus('No se pudo solicitar la anulación',false);
@@ -4413,7 +4460,12 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
   function ironPendingForShare(){
     const source = window.WorkOrders?.getLocalOrders?.() || [];
     return source
-      .filter(order => order.status === 'pending')
+      // WhatsApp debe reflejar exactamente la cola visible de Direccion:
+      // una solicitud de anulacion se oculta de la Informativa y tambien de la lista compartida.
+      .filter(order => {
+        const cancelStatus = String(order?.cancellationRequestV1?.status || '').trim().toLowerCase();
+        return order.status === 'pending' && !order.cancellationPendingV1 && cancelStatus !== 'pending';
+      })
       .sort((a,b) => number(a.priority) - number(b.priority))
       .map(order => ({
         priority:number(order.priority),
@@ -4487,20 +4539,51 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
     return [...heading,...cards].join('\n');
   }
 
-  async function sharePending(){
-    const department = activeDepartment();
-    const rows = department.id === IRON_ID ? ironPendingForShare() : simplePendingForShare();
-    const message = buildPendingWhatsappList(department,rows);
+  async function openWhatsappMessage(message){
     const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
     const opened = window.open(whatsappUrl,'_blank','noopener');
     if(opened) return;
-
     try{
       await navigator.clipboard.writeText(message);
       alert('El navegador ha bloqueado la apertura de WhatsApp. La lista se ha copiado al portapapeles para que puedas pegarla en el chat.');
     }catch(error){
       throw new Error('El navegador ha bloqueado WhatsApp y no ha permitido copiar la lista.');
     }
+  }
+
+  async function sharePending(){
+    const department = activeDepartment();
+    const rows = department.id === IRON_ID ? ironPendingForShare() : simplePendingForShare();
+    const message = buildPendingWhatsappList(department,rows);
+    await openWhatsappMessage(message);
+  }
+
+  async function shareAllPending(){
+    const departments = [
+      {id:IRON_ID,name:IRON_NAME,protected:true},
+      ...sortedDepartments()
+    ];
+    const sections = [];
+    departments.forEach(department => {
+      const rows = department.id === IRON_ID
+        ? ironPendingForShare()
+        : pendingFor(department.id).map(order => ({
+            priority:number(order.priority),
+            reference:order.reference,
+            entryDate:order.entryDate,
+            deliveryDate:order.deliveryDate,
+            requester:order.requester,
+            quantity:order.quantity,
+            description:order.description
+          }));
+      sections.push(buildPendingWhatsappList(department,rows));
+    });
+    const message = [
+      '*PRIORIDADES · TODOS LOS SECTORES*',
+      '',
+      ...sections.flatMap((section,index) => index ? ['','==================================','',section] : [section])
+    ].join('\n');
+    await openWhatsappMessage(message);
   }
 
   async function mountCloud(){
@@ -4604,8 +4687,16 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
       });
 
       state.mounted = true;
-      state.cloud = cloud;
-      setCloudState('Sincronización: conectada · sin alertas en este departamento',true);
+      window.__LDH_IA_COMPRAS_REAL_DEPARTMENT_CLOUD__ = cloud;
+      const isProduction = location.hostname === 'tallermantenimiento.github.io';
+      state.cloud = isProduction ? cloud : {
+        saveDepartment: async () => true,
+        saveDepartments: async () => true,
+        saveOrders: async () => true,
+        deleteOrders: async () => true,
+        deleteDepartment: async () => true
+      };
+      setCloudState(isProduction ? 'Sincronización: actualizada' : 'PRUEBA LOCAL · lectura nube · escritura aislada',true);
 
       // Los onSnapshot siguientes entregan tambien el contenido inicial.
       // No se hacen getDocs duplicados ni se republican caches locales al arrancar.
@@ -4718,7 +4809,22 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
   window.LDHDepartments = Object.freeze({
     switchDepartment,
     sharePending,
-    getActiveDepartment:activeDepartment
+    shareAllPending,
+    changePriority,
+    getActiveDepartment:activeDepartment,
+    openOrderModal,
+    saveOrder,
+    closeModal,
+    getSnapshot(){
+      return {
+        active:{...activeDepartment()},
+        departments:[
+          {id:IRON_ID,name:IRON_NAME,protected:true},
+          ...state.departments.map(item=>({...item}))
+        ],
+        orders:state.orders.map(item=>({...item}))
+      };
+    }
   });
 
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded',init,{once:true});
@@ -5645,5 +5751,2429 @@ El trabajo se ocultará inmediatamente en la Informativa, pero no se eliminará 
 </script>
 <!-- /LDH INFORMATIVA V65 -->
 
+
+<!-- === IA COMPRAS R3 · GROQ CENTRAL + VOZ + PRODUCCION GITHUB / PRUEBA LOCAL AISLADA === -->
+<script id="LDH_IA_COMPRAS_LOCAL_R2">
+(function(){
+'use strict';
+if(window.__LDH_IA_COMPRAS_R2__) return;
+window.__LDH_IA_COMPRAS_R2__ = true;
+
+const BRIDGE = 'https://gestion-taller-ia.taller-mantenimiento.workers.dev';
+const IS_PRODUCTION = location.hostname === 'tallermantenimiento.github.io';
+const EXPECTED_BRIDGE_BUILD = 'R3_COMPRAS_SINGLE_CALL_RATE_20260928';
+const BUILD = 'R3_COMPRAS_GROQ_LIVE_REASONING_WHATSAPP_ALL_PRIORITY_VISIBLE_DATE_GUARD_20260929';
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+const text = v => String(v ?? '').trim();
+const esc = v => text(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const norm = v => text(v).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/×/g,'x').replace(/,/g,'.').replace(/\bpor\b/g,'x').replace(/\s*x\s*/g,'x').replace(/[^a-z0-9.]+/g,' ').replace(/\s+/g,' ').trim();
+const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+const fmtDate = iso => { const m=text(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/); return m?`${m[3]}/${m[2]}/${m[1]}`:text(iso); };
+const dayNames = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
+const currentDayName = () => dayNames[new Date().getDay()];
+
+const state = {
+  history: [],
+  draft: null,
+  pendingAction: null,
+  lastCreatedOrderId: sessionStorage.getItem('ldh_ia_compras_last_order_id') || '',
+  currentUserText: '',
+  busy: false,
+  recorder: null,
+  stream: null,
+  chunks: [],
+  micTimer: null,
+  speechRecognition: null,
+  speechRecognitionDisabled: false,
+  micHold: false,
+  micReleaseRequested: false,
+  localContext: {intent:'',phase:'',department:'',company:'',material:'',orderRef:''},
+  localGroupRefs: [],
+  groqCalls: 0,
+  groqCooldownUntil: 0
+};
+
+function addStyle(){
+  const style=document.createElement('style');
+  style.textContent=`
+  #ldhIaLocalBanner{position:fixed;left:12px;bottom:12px;z-index:2999995;background:#5b2106;color:#fff3c4;border:1px solid #f59e0b;border-radius:999px;padding:7px 13px;font:900 12px/1.2 Arial;box-shadow:0 8px 24px #0008}
+  #ldhIaPanel{position:fixed;top:0;right:0;width:445px;height:100vh;z-index:3000000;background:#081525;color:#eef6ff;border-left:1px solid #29415e;box-shadow:-12px 0 35px #0008;display:flex;flex-direction:column;font-family:Arial,Helvetica,sans-serif}
+  #ldhIaPanel.ldh-closed{transform:translateX(100%)}
+  #ldhIaReopen{position:fixed;right:10px;top:88px;z-index:3000002;display:none;border:1px solid #3b82f6;background:#0b1b2d;color:#fff;border-radius:12px;padding:10px 12px;font-weight:900;cursor:pointer;box-shadow:0 8px 24px #0008}
+  body.ldh-ia-panel-collapsed #ldhIaReopen{display:block}
+  #ldhIaPanel *{box-sizing:border-box}
+  .ldh-ia-head{display:flex;align-items:center;gap:10px;padding:14px 14px 12px;border-bottom:1px solid #29415e;background:#0b1b2d}
+  .ldh-ia-head-title{flex:1}.ldh-ia-head-title strong{display:block;font-size:18px}.ldh-ia-head-title span{display:block;color:#9fb3ca;font-size:11px;margin-top:2px}
+  .ldh-ia-pill{border:1px solid #3b82f6;background:#132b4c;color:#dbeafe;border-radius:999px;padding:5px 9px;font-size:10px;font-weight:900}
+  .ldh-ia-pill.ok{border-color:#22c55e;color:#bbf7d0;background:#10331f}.ldh-ia-pill.bad{border-color:#f59e0b;color:#fde68a;background:#3b2507}
+  .ldh-ia-icon{width:34px;height:34px;border-radius:50%;border:1px solid #4b6380;background:#102237;color:#fff;cursor:pointer;font-weight:900}
+  #ldhIaMessages{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+  .ldh-ia-msg{max-width:92%;padding:11px 12px;border-radius:13px;white-space:pre-wrap;line-height:1.35;font-size:13px;border:1px solid #31445d;background:#1a2a3e;align-self:flex-start}
+  .ldh-ia-msg.user{align-self:flex-end;background:#1d4ed8;border-color:#2563eb;color:#fff}
+  .ldh-ia-msg.error{background:#4a2607;border-color:#d97706;color:#fde68a}
+  .ldh-ia-msg.system{background:#102237;color:#b9cbe0;font-size:12px}
+  .ldh-ia-composer{border-top:1px solid #29415e;padding:10px;background:#0b1727}
+  #ldhIaInput{width:100%;min-height:76px;max-height:160px;resize:vertical;background:#0b1626;border:1px solid #40536c;border-radius:11px;color:#fff;padding:10px;font:13px Consolas,monospace;outline:none}
+  .ldh-ia-actions{display:flex;gap:8px;margin-top:8px;align-items:center}
+  .ldh-ia-send,.ldh-ia-mic,.ldh-ia-new{border:0;border-radius:10px;padding:9px 13px;font-weight:900;cursor:pointer;color:white}.ldh-ia-send{background:#7c3aed}.ldh-ia-mic{background:#0369a1;touch-action:none;user-select:none;-webkit-user-select:none}.ldh-ia-mic.recording{background:#b91c1c;animation:ldhPulse 1s infinite}.ldh-ia-new{background:#1f2937;border:1px solid #4b5563}
+  .ldh-ia-actions button:disabled{opacity:.5;cursor:wait}@keyframes ldhPulse{50%{opacity:.6}}
+  .ldh-ia-hint{margin-left:auto;color:#8ea4bd;font-size:10px}
+  #ldhIaSettings{position:fixed;inset:0;z-index:3100000;background:#0009;display:none;align-items:center;justify-content:center}
+  #ldhIaSettings.open{display:flex}.ldh-ia-settings-card{width:min(560px,92vw);background:#111f31;color:#fff;border:1px solid #3a506b;border-radius:16px;padding:18px;box-shadow:0 18px 60px #000b}.ldh-ia-settings-card h3{margin:0 0 12px}.ldh-ia-settings-card label{display:block;font-size:12px;font-weight:900;color:#bcd0e5;margin:12px 0 5px}.ldh-ia-settings-card input,.ldh-ia-settings-card select{width:100%;background:#081525;color:#fff;border:1px solid #425772;border-radius:9px;padding:10px}.ldh-ia-settings-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:15px}.ldh-ia-settings-actions button{border:0;border-radius:9px;padding:9px 13px;font-weight:900;cursor:pointer}.ldh-primary{background:#2563eb;color:#fff}.ldh-secondary{background:#334155;color:#fff}
+  .ldh-ia-local-warning{margin:12px 0 0;padding:10px;border:1px solid #f59e0b;border-radius:10px;background:#3a2504;color:#fde68a;font-size:12px;line-height:1.4}
+  @media (min-width:1100px){body.ldh-ia-panel-open .wo-modal.open{padding-right:465px!important}}
+  `;
+  document.head.appendChild(style);
+}
+
+function addPanel(){
+  const panel=document.createElement('aside');
+  panel.id='ldhIaPanel';
+  panel.innerHTML=`
+    <div class="ldh-ia-head">
+      <div class="ldh-ia-head-title"><strong>Asistente IA · Dirección</strong><span>${IS_PRODUCTION?'Stock informativo / Compras':'Stock informativo / Compras · PRUEBA LOCAL'}</span></div>
+      <span id="ldhIaStatus" class="ldh-ia-pill bad">GROQ…</span>
+      <button id="ldhIaSettingsBtn" class="ldh-ia-icon" title="Configuración IA">⚙</button>
+      <button id="ldhIaCloseBtn" class="ldh-ia-icon" title="Ocultar / mostrar">×</button>
+    </div>
+    <div id="ldhIaMessages"></div>
+    <div class="ldh-ia-composer">
+      <textarea id="ldhIaInput" placeholder="Habla o escribe de forma natural…"></textarea>
+      <div class="ldh-ia-actions">
+        <button id="ldhIaMic" class="ldh-ia-mic" title="Mantén pulsado para hablar y suelta para enviar">🎙 Mantén pulsado</button>
+        <button id="ldhIaSend" class="ldh-ia-send">Enviar</button>
+        <button id="ldhIaNew" class="ldh-ia-new">Nueva conversación</button>
+        <span id="ldhIaThinking" class="ldh-ia-hint"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(panel);
+
+  const reopen=document.createElement('button');
+  reopen.id='ldhIaReopen';
+  reopen.type='button';
+  reopen.textContent='IA ▶';
+  reopen.title='Volver a abrir el asistente IA';
+  document.body.appendChild(reopen);
+
+  if(!IS_PRODUCTION){
+    const banner=document.createElement('div');
+    banner.id='ldhIaLocalBanner';
+    banner.textContent='PRUEBA LOCAL · LEE NUBE · NO ESCRIBE PRODUCCIÓN';
+    document.body.appendChild(banner);
+  }
+
+  const settings=document.createElement('div');
+  settings.id='ldhIaSettings';
+  settings.innerHTML=`<div class="ldh-ia-settings-card">
+    <h3>Configuración IA · servidor central</h3>
+    <div style="color:#9fb3ca;font-size:12px">La API key se gestiona como secreto en Cloudflare. No se guarda ni se muestra en este navegador.</div>
+    <label>Servidor IA</label><div id="ldhIaCentralInfo" style="border:1px solid #314a68;background:#0b1c30;border-radius:10px;padding:11px 12px;color:#dcecff;font-size:13px;font-weight:800">Consultando servidor central…</div>
+    <label>Micrófono</label><div style="display:flex;gap:8px"><select id="ldhIaMicDevice" style="flex:1"><option value="">Micrófono predeterminado de Windows</option></select><button id="ldhIaMicRefresh" type="button" class="ldh-secondary" style="white-space:nowrap">Detectar</button></div>
+    <div id="ldhIaMicTestInfo" style="font-size:11px;color:#9fb3ca;margin-top:6px">Pulsa Detectar para ver los micrófonos disponibles.</div>
+    <div class="ldh-ia-local-warning">${IS_PRODUCTION?'Modo producción: las altas, cambios, prioridades y solicitudes de anulación confirmadas se guardan en Firebase.':'Esta prueba puede leer los datos reales publicados para razonar, pero las altas, cambios y prioridades realizados desde esta copia siguen quedando solo en localhost y no se publican a Firebase.'}</div>
+    <div class="ldh-ia-settings-actions"><button id="ldhIaTest" class="ldh-secondary">Probar conexión</button><button id="ldhIaSettingsClose" class="ldh-secondary">Cancelar</button><button id="ldhIaSettingsSave" class="ldh-primary">Guardar micrófono</button></div>
+  </div>`;
+  document.body.appendChild(settings);
+}
+
+function addMessage(role,content){
+  const box=$('ldhIaMessages'); if(!box) return;
+  const el=document.createElement('div'); el.className='ldh-ia-msg '+role; el.textContent=text(content); box.appendChild(el); box.scrollTop=box.scrollHeight;
+}
+function setBusy(v,label=''){ state.busy=!!v; $('ldhIaSend').disabled=!!v; $('ldhIaMic').disabled=!!v; $('ldhIaThinking').textContent=v?(label||'Pensando…'):''; }
+
+function groqRetryDelayMs(message){
+  const raw=String(message||'');
+  const patterns=[
+    /(?:try again in|retry(?: after| in)?|espera(?: unos)?|reintenta(?: en)?)[^0-9]{0,18}([0-9]+(?:[.,][0-9]+)?)\s*(ms|milliseconds?|s|sec|secs|seconds?|seg|segs|segundos?|m|min|mins|minutes?|minutos?)/i,
+    /([0-9]+(?:[.,][0-9]+)?)\s*(ms|milliseconds?|s|sec|secs|seconds?|seg|segs|segundos?|m|min|mins|minutes?|minutos?)[^0-9]{0,18}(?:retry|try again|reintenta|espera)/i
+  ];
+  for(const re of patterns){
+    const m=raw.match(re);
+    if(!m) continue;
+    const value=Number(String(m[1]).replace(',','.'));
+    if(!Number.isFinite(value)||value<0) continue;
+    const unit=String(m[2]||'s').toLowerCase();
+    let ms=value*1000;
+    if(unit.startsWith('ms')||unit.startsWith('mill')) ms=value;
+    else if(unit==='m'||unit.startsWith('min')) ms=value*60000;
+    return Math.max(500,Math.min(120000,Math.round(ms)));
+  }
+  // El bridge actual de pruebas oculta el Retry-After exacto de Groq.
+  // Si no viene indicado, solo bloqueamos unos pocos segundos, nunca un minuto fijo.
+  return 3500;
+}
+
+async function bridge(path,body,method='POST'){
+  const opt={method,headers:{'Content-Type':'application/json'}};
+  if(method!=='GET') opt.body=JSON.stringify(body||{});
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),65000); opt.signal=controller.signal;
+  try{
+    const res=await fetch(BRIDGE+path,opt); const raw=await res.text(); let obj={}; try{obj=JSON.parse(raw)}catch(_){obj={error:raw||('HTTP '+res.status)}}
+    if(!res.ok){ const err=new Error(obj.error||('HTTP '+res.status)); err.status=res.status; err.details=obj; throw err; } return obj;
+  } finally {clearTimeout(timer);}
+}
+
+function validIso(v){ const m=text(v).match(/^(\d{4})-(\d{2})-(\d{2})$/); if(!m)return false; const d=new Date(Number(m[1]),Number(m[2])-1,Number(m[3])); return d.getFullYear()===Number(m[1])&&d.getMonth()===Number(m[2])-1&&d.getDate()===Number(m[3]); }
+function replyKey(v){ return norm(v).replace(/[.]+/g,' ').replace(/\s+/g,' ').trim(); }
+function positiveReply(v){
+  const q=replyKey(v);
+  return /^(si|vale|ok|de acuerdo|adelante|confirmo|confirma|hazlo|creala|guardala|guardar|crear|correcto|eso es)(\s|$)/.test(q);
+}
+function negativeReply(v){
+  const q=replyKey(v);
+  return /^(no|cancela|cancelar|olvida|dejalo|para|no lo hagas)(\s|$)/.test(q);
+}
+
+function priorityFrom(value,max,utterance=''){
+  const nv=norm(value), nu=norm(utterance);
+  const context=`${nu} ${nv}`.trim();
+  // En este programa prioridad = POSICION EN LA LISTA. 1 siempre es la maxima.
+  if(/\b(prioridad )?(maxima|alta|urgente|urgencia)\b/.test(context) || /\b(primero|primera|primer)\b/.test(context)) return 1;
+  if(/\b(prioridad )?(baja|minima)\b/.test(context) || /\b(ultimo|ultima|final)\b/.test(context)) return max;
+  const ord=[['segundo','segunda',2],['tercero','tercera',3],['cuarto','cuarta',4],['quinto','quinta',5],['sexto','sexta',6],['septimo','septima',7],['octavo','octava',8],['noveno','novena',9],['decimo','decima',10]];
+  for(const row of ord){ if(context.includes(row[0])||context.includes(row[1])) return Math.max(1,Math.min(max,row[2])); }
+  const n=Number(text(value).replace(',','.'));
+  if(Number.isFinite(n) && n>=1) return Math.max(1,Math.min(max,Math.round(n)));
+  const m=nu.match(/\b(?:prioridad|posicion|puesto|orden(?:\s+de\s+ejecucion)?)(?:\s+(?:numero|n))?\s+(\d+)\b/);
+  if(m) return Math.max(1,Math.min(max,Number(m[1])));
+  return null;
+}
+function ralFromUtterance(v){
+  const raw=text(v);
+  let m=raw.match(/\bRAL\s*[-:]?\s*(\d{3,4})\b/i);
+  if(!m) m=raw.match(/\b(?:lacad[oa]|color)\s+(?:en\s+)?(?:RAL\s*)?(\d{3,4})\b/i);
+  return m ? `RAL ${m[1]}` : '';
+}
+function enrichIronArgs(input){
+  const args={...(input||{})}; const u=state.currentUserText; const nu=norm(u);
+  if(args.ral===undefined){const r=ralFromUtterance(u);if(r)args.ral=r;}
+  if(args.tipo_hierro===undefined){if(/\bgalvanizad[oa]?\b/.test(nu))args.tipo_hierro='galvanizado';else if(/\bhierro negro\b|\bnegro\b/.test(nu))args.tipo_hierro='negro';}
+  if(args.imprimacion===undefined && /\bimprimacion\b/.test(nu))args.imprimacion=true;
+  if(args.prioridad===undefined && /\b(prioridad|urgente|urgencia|primera|primer|ultima|ultimo)\b/.test(nu))args.prioridad=u;
+  return args;
+}
+function voicePrompt(){
+  const companies=(stockSnapshot().companies||[]).map(c=>c.name).filter(Boolean).join(', ');
+  const draft=state.draft?.data||{};
+  const context=[companies,'SKLUM','REYNOLDS','WOODS','CREATE','Los del Hierros','orden de trabajo','prioridad','orden de ejecucion','hierro negro','galvanizado','imprimacion','RAL 7016','RAL 9005','RAL 9010','RAL 9016','40x40x1.5','40x20x1.5','80x80x2','pletina','imprime','imprimela','imprimir orden','muestrame','guardala','WhatsApp','prioridades','prueba','probar microfono','microfono'];
+  if(draft.empresa)context.push(draft.empresa); if(draft.descripcion)context.push(draft.descripcion); if(draft.ral)context.push(draft.ral);
+  return `Transcribe literalmente en espanol de Espana. Vocabulario del taller: ${context.join(', ')}. Conserva numeros, medidas, codigos RAL, nombres de empresas y cantidades exactamente como se oyen.`.slice(0,900);
+}
+function stockSnapshot(){ try{return window.__LDH_IA_COMPRAS_STOCK__?.snapshot?.()||{companies:[],rows:[]};}catch(_){return {companies:[],rows:[]};} }
+function deptSnapshot(){ try{return window.LDHDepartments?.getSnapshot?.()||{active:{id:'iron',name:'Los del Hierros'},departments:[{id:'iron',name:'Los del Hierros'}],orders:[]};}catch(_){return {active:{id:'iron',name:'Los del Hierros'},departments:[{id:'iron',name:'Los del Hierros'}],orders:[]};} }
+function workOrders(){ return window.WorkOrders?.getLocalOrders?.() || window.WorkOrders?.orders || []; }
+function activeDepartmentInfo(){
+  const snap=deptSnapshot();
+  const active=snap?.active&&typeof snap.active==='object'?snap.active:null;
+  if(active?.id||active?.name) return {id:text(active.id||'iron'),name:text(active.name||'Los del Hierros')};
+  return {id:'iron',name:'Los del Hierros'};
+}
+function iaPhaseFlow(order){
+  const f=order&&order.phaseFlowV2&&typeof order.phaseFlowV2==='object'?order.phaseFlowV2:{};
+  const num=v=>{const x=Number(v);return Number.isFinite(x)?Math.max(0,x):0;};
+  const out={fabricacion:num(f.fabricacion??f.fab),pintura:num(f.pintura),almacen:num(f.almacen),entregado:num(f.entregado??f.delivered)};
+  let total=num(order&&(order.quantity??order.cantidad??order.unidades??order.uds));
+  const comp=order&&order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:null;
+  if(comp&&comp.enabled!==false&&Array.isArray(comp.parts)&&comp.parts.length){
+    const partsTotal=comp.parts.reduce((sum,p)=>sum+num(p&&(p.quantity??p.cantidad??p.unidades??p.uds)),0);
+    if(partsTotal>total) total=partsTotal;
+  }
+  let overflow=(out.fabricacion+out.pintura+out.almacen+out.entregado)-total;
+  if(total>0&&overflow>0){
+    for(const key of ['fabricacion','pintura','almacen','entregado']){
+      if(overflow<=0)break;
+      const cut=Math.min(out[key],overflow);out[key]-=cut;overflow-=cut;
+    }
+  }
+  return out;
+}
+function iaWorkflowState(order){
+  const o=order&&typeof order==='object'?order:{};
+  const value=text(o.workflowStateV2||o.workflowState||o.workState||o.orderState).toLocaleLowerCase('es').replace(/[\s-]+/g,'_');
+  let base='';
+  if(['preparing','preparacion','en_preparacion'].includes(value))base='preparing';
+  else if(['waiting_material','esperando_material','material_pendiente'].includes(value))base='waiting_material';
+  else if(['queued','queue','en_cola','cola'].includes(value))base='queued';
+  else if(['fabrication','fabricacion','en_fabricacion','in_progress','en_proceso','proceso'].includes(value))base='fabrication';
+  else if(['painting','pintura','en_pintura'].includes(value))base='painting';
+  else if(['installing','instalando','instalando_en_obra','en_obra','instalacion_obra'].includes(value))base='installing';
+  else if(['finished','terminado','finalizado','en_almacen','almacen'].includes(value))base='finished';
+  else if(['cancelled','canceled','anulado','cancelado'].includes(value))base='cancelled';
+  else base=o.inProgress?'fabrication':'';
+  if(base==='cancelled'||base==='installing')return base;
+  const comp=o&&o.compositeV1&&typeof o.compositeV1==='object'?o.compositeV1:null;
+  if(comp&&comp.enabled!==false&&Array.isArray(comp.parts)&&comp.parts.length){
+    const num=v=>{const x=Number(v);return Number.isFinite(x)?Math.max(0,x):0;};
+    const f=iaPhaseFlow(o),fab=num(f.fabricacion),pint=num(f.pintura),alm=num(f.almacen),ent=num(f.entregado);
+    const flow=fab+pint+alm+ent;
+    const partsTotal=comp.parts.reduce((sum,p)=>sum+num(p&&(p.quantity??p.cantidad??p.unidades??p.uds)),0);
+    const total=partsTotal>0?partsTotal:num(o.quantity??o.cantidad??o.unidades??o.uds);
+    if(fab>0)return 'fabrication';
+    if(pint>0)return 'painting';
+    if(total>0&&(alm+ent)>=total)return 'finished';
+    if(flow>0){if(['waiting_material','preparing','queued'].includes(base))return base;return 'preparing';}
+  }
+  return base;
+}
+function iaWorkflowLabel(state){
+  return ({preparing:'EN PREPARACIÓN',waiting_material:'ESPERANDO MATERIAL',queued:'EN COLA',fabrication:'EN FABRICACIÓN',painting:'EN PINTURA',installing:'INSTALANDO EN OBRA',finished:'TERMINADO',cancelled:'ANULADO'})[state]||'';
+}
+function iaPhaseKey(value){
+  const q=norm(value);
+  if(!q)return '';
+  // Acepta tanto lenguaje natural como las claves canónicas internas que devuelve Groq.
+  const canonical={
+    'pintura':'pintura','painting':'pintura','paint':'pintura','pint':'pintura',
+    'fabricacion':'fabricacion','fabrication':'fabricacion','fab':'fabricacion',
+    'almacen':'almacen','storage':'almacen','alm':'almacen',
+    'entregado':'entregado','entregados':'entregado','delivered':'entregado','ent':'entregado',
+    'preparing':'preparing','preparacion':'preparing',
+    'waiting material':'waiting_material','waiting_material':'waiting_material','esperando material':'waiting_material','material pendiente':'waiting_material',
+    'installing':'installing','instalando':'installing','instalacion':'installing','instalacion en obra':'installing',
+    'finished':'finished','terminado':'finished','terminados':'finished','finalizado':'finished','finalizados':'finished',
+    'cancelled':'cancelled','canceled':'cancelled','anulado':'cancelled','anulados':'cancelled','cancelado':'cancelled','cancelados':'cancelled'
+  };
+  if(canonical[q])return canonical[q];
+  if(/\b(pint|pintura|pintando|pintado)\b/.test(q))return 'pintura';
+  if(/\b(fab|fabricacion|fabricando)\b/.test(q))return 'fabricacion';
+  if(/\b(alm|almacen|almacenado)\b/.test(q))return 'almacen';
+  if(/\b(ent|entrega|entregado|entregados)\b/.test(q))return 'entregado';
+  if(/\b(preparacion|preparando)\b/.test(q))return 'preparing';
+  if(/\b(esperando material|material pendiente)\b/.test(q))return 'waiting_material';
+  if(/\b(instalando|instalacion|obra)\b/.test(q))return 'installing';
+  if(/\b(terminado|terminados|finalizado|finalizados)\b/.test(q))return 'finished';
+  if(/\b(anulado|anulados|cancelado|cancelados)\b/.test(q))return 'cancelled';
+  return '';
+}
+function phasePillsForIa(flow){
+  const pills=[];if(flow.fabricacion>0)pills.push(`FAB ${flow.fabricacion}`);if(flow.pintura>0)pills.push(`PINT ${flow.pintura}`);if(flow.almacen>0)pills.push(`ALM ${flow.almacen}`);if(flow.entregado>0)pills.push(`ENT ${flow.entregado}`);return pills;
+}
+
+function rememberLocalContext(patch){
+  state.localContext={...(state.localContext||{}),...(patch||{})};
+}
+function phaseHumanLabel(key){
+  return ({
+    fabricacion:'fabricación',pintura:'pintura',almacen:'almacén',entregado:'entregado',
+    preparing:'preparación',waiting_material:'esperando material',installing:'instalación en obra',
+    finished:'terminados',cancelled:'anulados'
+  })[key]||key||'';
+}
+function explicitDepartmentFromText(value){
+  const q=norm(value); if(!q)return null;
+  const snap=deptSnapshot();
+  for(const d of (snap.departments||[])){
+    const nd=norm(d.name); if(nd && q.includes(nd)) return d;
+  }
+  if(/\blos del hierro(?:s)?\b|\bhierros\b/.test(q)) return resolveDepartment('Los del Hierros');
+  return null;
+}
+function phaseQueryIntent(value,phase){
+  const q=norm(value); if(!phase)return false;
+  const action=/\b(pasa|pasar|manda|mandar|envia|enviar|mueve|mover|cambia|cambiar|pon|poner|marca|marcar)\b/.test(q);
+  if(action)return false;
+  if((state.localContext?.intent==='phase_query') && /^y\b/.test(q)) return true;
+  return /\b(cuant|cuanto|cuantos|cuantas|que|cual|cuales|hay|estan|tenemos|trabajo|trabajos|orden|ordenes|fase|fases)\b/.test(q);
+}
+function formatPhaseLocal(result,phase,userText){
+  if(!result?.ok)return null;
+  const label=phaseHumanLabel(phase);
+  const dep=result.departamento_consultado||result.departamento_activo||activeDepartmentInfo().name;
+  const rows=result.ordenes||[];
+  const countOnly=/\b(cuant|cuanto|cuantos|cuantas|numero|total)\b/.test(norm(userText));
+  if(!rows.length)return `No hay trabajos en ${label} en ${dep}.`;
+  if(countOnly){
+    const refs=rows.slice(0,5).map(r=>r.referencia).filter(Boolean);
+    return `Hay ${result.total} ${result.total===1?'trabajo':'trabajos'} en ${label} en ${dep}${refs.length?`: ${refs.join(', ')}`:''}.`;
+  }
+  const detail=rows.slice(0,8).map(r=>{
+    const pills=(r.pills||[]).join(', ');
+    const general=r.estado_general?` · ${r.estado_general}`:'';
+    return `${r.referencia}${general}${pills?` · ${pills}`:''}`;
+  }).join('\n');
+  return `${result.total} ${result.total===1?'trabajo':'trabajos'} en ${label} en ${dep}:\n${detail}`;
+}
+function findCompanyMention(value){
+  const q=norm(value); if(!q)return null;
+  const companies=(stockSnapshot().companies||[]);
+  return companies.find(c=>{const n=norm(c.name);return n&&q.includes(n);})||null;
+}
+function findMaterialMention(value){
+  const q=norm(value); if(!q)return '';
+  const rows=stockSnapshot().rows||[];
+  let best=''; let bestLen=0;
+  for(const r of rows){
+    const name=text(r.name); const nn=norm(name);
+    if(nn && nn.length>=3 && q.includes(nn) && nn.length>bestLen){best=name;bestLen=nn.length;}
+  }
+  if(best)return best;
+  const raw=text(value);
+  const dim=raw.match(/\b\d+(?:[.,]\d+)?\s*[x×]\s*\d+(?:[.,]\d+)?(?:\s*[x×]\s*\d+(?:[.,]\d+)?)?\b/i);
+  if(dim)return dim[0].replace(/\s+/g,'').replace(/×/g,'x').replace(/,/g,'.');
+  const plet=raw.match(/\bpletina\s+\d+(?:[.,]\d+)?\s*[x×]\s*\d+(?:[.,]\d+)?\b/i);
+  return plet?plet[0].replace(/\s+/g,' ').replace(/×/g,'x').replace(/,/g,'.'):'';
+}
+function stockQueryIntent(value){
+  const q=norm(value);
+  return /\b(stock|disponible|libre|queda|quedan|tiene|tenemos|hay|fisico|reservado)\b/.test(q);
+}
+function formatStockLocal(result){
+  if(!result?.ok)return null;
+  const row=result.resultados?.[0];
+  if(!row)return `No encuentro ${result.consulta} en el stock de ${result.empresa}.`;
+  const free=Number(row.libre||0), yes=free>0?'Sí':'No';
+  return `${yes}. ${result.empresa} · ${row.material}: físico ${row.fisico}, reservado ${row.reservado}, libre ${row.libre}${row.unidad?` ${row.unidad}`:''}.`;
+}
+function orderRefFromText(value){
+  const raw=text(value).toUpperCase();
+  const full=raw.match(/OT-\d{6}-\d{3}(?:-[A-Z]{1,3})?/); if(full)return full[0];
+  const short=raw.match(/\b\d{6}-\d{3}(?:-[A-Z]{1,3})?\b/); return short?`OT-${short[0]}`:'';
+}
+function localNumberWord(v){
+  const q=norm(v);
+  const map={
+    un:1,uno:1,una:1,primero:1,primera:1,
+    dos:2,segundo:2,segunda:2,
+    tres:3,tercero:3,tercera:3,
+    cuatro:4,cuarto:4,cuarta:4,
+    cinco:5,quinto:5,quinta:5,
+    seis:6,sexto:6,sexta:6,
+    siete:7,septimo:7,septima:7,
+    ocho:8,octavo:8,octava:8,
+    nueve:9,noveno:9,novena:9,
+    diez:10,decimo:10,decima:10,
+    ultimo:-1,ultima:-1
+  };
+  if(/^\d+$/.test(q))return Number(q);
+  return map[q]||0;
+}
+function prioritySelectorFromText(value){
+  const q=norm(value); if(!q)return 0;
+  let m=q.match(/\bprioridad(?:\s+(?:numero|n))?\s*(\d{1,3}|uno|una|primero|primera|dos|segundo|segunda|tres|tercero|tercera|cuatro|cuarto|cuarta|cinco|quinto|quinta|seis|sexto|sexta|siete|septimo|septima|ocho|octavo|octava|nueve|noveno|novena|diez|decimo|decima)\b/);
+  if(m)return localNumberWord(m[1]);
+  if(/\b(orden|trabajo|prioridad|elimina|eliminar|borra|borrar|anula|anular|imprime|imprimir|muestra|abre)\b/.test(q)){
+    m=q.match(/\b(?:la|el)\s+(primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo|ultima|ultimo)\b/);
+    if(m)return localNumberWord(m[1]);
+  }
+  return 0;
+}
+function localPriorityMentions(value){
+  const q=norm(value), out=[];
+  const re=/\bprioridad(?:\s+(?:numero|n))?\s*(\d{1,3}|uno|una|primero|primera|dos|segundo|segunda|tres|tercero|tercera|cuatro|cuarto|cuarta|cinco|quinto|quinta|seis|sexto|sexta|siete|septimo|septima|ocho|octavo|octava|nueve|noveno|novena|diez|decimo|decima)\b/g;
+  let m;
+  while((m=re.exec(q))){ const n=localNumberWord(m[1]); if(n)out.push({value:n,index:m.index}); }
+  return out;
+}
+function localOrdinalMentions(value){
+  const q=norm(value), out=[];
+  const re=/\b(?:la|el)\s+(primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo|ultima|ultimo)\b/g;
+  let m;
+  while((m=re.exec(q))){ const n=localNumberWord(m[1]); if(n)out.push({value:n,index:m.index}); }
+  return out;
+}
+function priorityMoveFromText(value){
+  const q=norm(value); if(!q)return null;
+  const moveIntent=/\b(pasa|pasar|pon|ponla|ponlo|cambia|cambiar|cambiala|cambialo|mueve|mover|muevela|muevelo|sube|subela|baja|bajala|coloca|colocala|deja|dejala|hazla|hazlo|sea)\b/.test(q)||/\bque sea\b/.test(q);
+  if(!moveIntent)return null;
+  const p=localPriorityMentions(q);
+  if(p.length>=2)return {from:p[0].value,to:p[p.length-1].value};
+  const ord=localOrdinalMentions(q);
+  if(ord.length>=2)return {from:ord[0].value,to:ord[ord.length-1].value};
+  const targetMatch=q.match(/(?:a\s+ser|como|que\s+sea|sea|a|en)\s+(?:la|el)?\s*(?:prioridad|posicion|puesto|orden)?\s*(\d{1,3}|uno|una|primero|primera|dos|segundo|segunda|tres|tercero|tercera|cuatro|cuarto|cuarta|cinco|quinto|quinta|seis|sexto|sexta|siete|septimo|septima|ocho|octavo|octava|nueve|noveno|novena|diez|decimo|decima|ultimo|ultima)\b/);
+  const target=targetMatch?localNumberWord(targetMatch[1]):(p.length===1?p[0].value:(ord.length===1?ord[0].value:0));
+  if(!target)return null;
+  if(p.length===1 && targetMatch && p[0].value!==target)return {from:p[0].value,to:target};
+  if(ord.length===1 && targetMatch && ord[0].value!==target)return {from:ord[0].value,to:target};
+  if(state.localContext?.orderRef)return {from:0,to:target,contextRef:state.localContext.orderRef};
+  return null;
+}
+async function changePriorityLocal(selected,targetPriority){
+  if(!selected?.ok||!selected.orden)return {ok:false,error:selected?.error||'orden_no_encontrada'};
+  const o=selected.orden;
+  const target=Math.max(1,Math.round(Number(targetPriority)||1));
+  if(o.source==='hierro'){
+    const real=(window.WorkOrders?.orders||[]).find(item=>item.id===o.id);
+    if(!real)return {ok:false,error:'orden_no_encontrada'};
+    if(real.cancellationPendingV1||real.cancellationRequestV1)return {ok:false,error:'anulacion_pendiente',referencia:real.reference};
+    const before=Number(real.priority)||0;
+    await window.WorkOrders.changePriority(real.id,{value:String(target)});
+    const updated=(window.WorkOrders?.orders||[]).find(item=>item.id===o.id);
+    return {ok:true,referencia:updated?.reference||o.referencia,antes:before,ahora:Number(updated?.priority)||target,departamento:'Los del Hierros'};
+  }
+  if(o.source==='departamento' && window.LDHDepartments?.changePriority){
+    const before=Number(o.prioridad)||0;
+    await window.LDHDepartments.changePriority(o.id,String(target));
+    const updated=(deptSnapshot().orders||[]).find(item=>item.id===o.id);
+    return {ok:true,referencia:updated?.reference||o.referencia,antes:before,ahora:Number(updated?.priority)||target,departamento:o.departamento||activeDepartmentInfo().name};
+  }
+  return {ok:false,error:'cambio_prioridad_no_disponible'};
+}
+
+function localOrderSelector(value){
+  const raw=text(value);
+  const ref=orderRefFromText(raw);
+  if(ref){
+    const found=findOrder(ref);
+    return found.ok?{ok:true,orden:found.orden,selector:'referencia'}:found;
+  }
+  const priority=prioritySelectorFromText(raw);
+  if(priority!==0){
+    const dep=explicitDepartmentFromText(raw)?.name||activeDepartmentInfo().name;
+    const listed=listOrders({departamento:dep,estado:'pendiente',limite:50});
+    if(!listed?.ok)return listed;
+    const targetPriority=priority===-1?Math.max(0,...(listed.ordenes||[]).map(o=>Number(o.prioridad)||0)):priority;
+    const matches=(listed.ordenes||[]).filter(o=>Number(o.prioridad)===targetPriority);
+    if(matches.length===1)return {ok:true,orden:matches[0],selector:'prioridad',prioridad:targetPriority,departamento:dep};
+    return {ok:false,error:matches.length?'varias_coincidencias':'no_encontrada',prioridad:targetPriority,departamento:dep,coincidencias:matches};
+  }
+  return {ok:false,error:'sin_selector'};
+}
+function iaSelectionCountToken(v){
+  const q=norm(v); if(!q)return 0;
+  if(/^\d+$/.test(q))return Number(q);
+  const n=localNumberWord(q);
+  return n>0?n:0;
+}
+function localOrderGroupSelector(value){
+  const raw=text(value), q=norm(raw).replace(/\bintimas?\b/g,'ultimas').replace(/\bintimos?\b/g,'ultimos');
+  const dep=explicitDepartmentFromText(raw)?.name||activeDepartmentInfo().name;
+  const listed=listOrders({departamento:dep,estado:'pendiente',limite:50});
+  if(!listed?.ok)return listed;
+  const rows=(listed.ordenes||[]).slice().sort((a,b)=>Number(a.prioridad)-Number(b.prioridad));
+  if(!rows.length)return {ok:false,error:'no_encontrada',departamento:dep,ordenes:[]};
+
+  // Un ordinal aislado tambien identifica una posicion real en la cola.
+  // Esto permite responder simplemente "la segunda" despues de "elimina varias OT".
+  let bare=q.match(/^(?:la|el)?\s*(primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo|ultima|ultimo)(?:\s+(?:orden|trabajo|ot))?[.!?]*$/);
+  if(bare){
+    const n=iaSelectionCountToken(bare[1]);
+    const target=n===-1?Math.max(...rows.map(o=>Number(o.prioridad)||0)):n;
+    const picked=rows.filter(o=>Number(o.prioridad)===target);
+    return picked.length?{ok:true,ordenes:picked,selector:'posicion',prioridad:target,cantidad:picked.length,departamento:dep}:{ok:false,error:'no_encontrada',departamento:dep,ordenes:[]};
+  }
+
+  let m=q.match(/\b(?:las?\s+)?(\d+|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+(primeras?|primeros?|ultimas?|ultimos?)\b/);
+  if(!m)m=q.match(/\b(primeras?|primeros?|ultimas?|ultimos?)\s+(\d+|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/);
+  if(m){
+    const count=iaSelectionCountToken(/^(primer|ultim)/.test(m[1])?m[2]:m[1]);
+    const edge=/ultim/.test(m[1])||/ultim/.test(m[2])?'last':'first';
+    if(count>0){
+      const picked=edge==='last'?rows.slice(Math.max(0,rows.length-count)):rows.slice(0,count);
+      return picked.length?{ok:true,ordenes:picked,selector:edge==='last'?'ultimas':'primeras',cantidad:picked.length,departamento:dep}:{ok:false,error:'no_encontrada',departamento:dep,ordenes:[]};
+    }
+  }
+
+  m=q.match(/\b(?:de|desde)\s+(?:la|el)?\s*(\d+|primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo)\s+(?:a|hasta)\s+(?:la|el)?\s*(\d+|primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo)\b/);
+  if(m){
+    const a=iaSelectionCountToken(m[1]), b=iaSelectionCountToken(m[2]);
+    if(a>0&&b>0){
+      const lo=Math.min(a,b), hi=Math.max(a,b);
+      const picked=rows.filter(o=>Number(o.prioridad)>=lo&&Number(o.prioridad)<=hi);
+      return picked.length?{ok:true,ordenes:picked,selector:'rango',desde:lo,hasta:hi,cantidad:picked.length,departamento:dep}:{ok:false,error:'no_encontrada',departamento:dep,ordenes:[]};
+    }
+  }
+
+  m=q.match(/\bprioridades?\s+(.+)$/);
+  if(m){
+    const tail=(m[1].match(/\d{1,3}|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez/g)||[]);
+    const priorities=[];
+    for(const tok of tail){
+      const n=iaSelectionCountToken(tok);
+      if(n>0&&!priorities.includes(n))priorities.push(n);
+    }
+    if(priorities.length>1){
+      const picked=rows.filter(o=>priorities.includes(Number(o.prioridad)));
+      return picked.length?{ok:true,ordenes:picked,selector:'prioridades',prioridades:priorities,cantidad:picked.length,departamento:dep}:{ok:false,error:'no_encontrada',departamento:dep,ordenes:[]};
+    }
+  }
+
+  const single=localOrderSelector(raw);
+  if(single?.ok)return {ok:true,ordenes:[single.orden],selector:single.selector,cantidad:1,departamento:single.departamento||dep};
+  return {ok:false,error:single?.error||'sin_selector',departamento:dep,ordenes:single?.coincidencias||[]};
+}
+function localOrderGroupSummary(rows){
+  return (rows||[]).map(o=>`prioridad ${o.prioridad} · ${o.referencia}${o.empresa?` · ${o.empresa}`:''}${o.descripcion?` · ${o.descripcion}`:''}`).join('\n');
+}
+
+function iaEscapeRegExp(value){
+  return String(value??'').replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+}
+function iaOpenOrderIntent(value){
+  const q=norm(value); if(!q)return false;
+  // "abrir nueva orden" se gestiona antes por newOrderOnly. Aquí solo abrimos una OT existente.
+  return /^(?:abre|abrir|abreme|muestra|muestrame|ensena|ver)\b/.test(q)
+    && /\b(orden|trabajo|ot|prioridad|primera|segunda|tercera|cuarta|quinta|ultima|esa|anterior|mesa|mesas|sklum|proceed|reynolds|woods)\b/.test(q);
+}
+function iaOpenOrderWords(value){
+  let q=norm(value);
+  q=q.replace(/\b(?:abre|abrir|abreme|muestra|muestrame|ensena|ver)\b/g,' ')
+     .replace(/\b(?:la|el|una|un|orden|ordenes|trabajo|trabajos|de|del|que|tiene|con|para|por|favor|ot)\b/g,' ')
+     .replace(/\bprioridad\s*(?:numero|n)?\s*(?:\d{1,3}|uno|una|primero|primera|dos|segundo|segunda|tres|tercero|tercera|cuatro|cuarto|cuarta|cinco|quinto|quinta|seis|sexto|sexta|siete|septimo|septima|ocho|octavo|octava|nueve|noveno|novena|diez|decimo|decima)\b/g,' ')
+     .replace(/\b(?:primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo|ultima|ultimo)\b/g,' ')
+     .replace(/\bot\s*\d{6}\s*\d{3}(?:\s*[a-z]{1,3})?\b/g,' ')
+     .replace(/\s+/g,' ').trim();
+  const company=findCompanyMention(value);
+  if(company)q=q.replace(new RegExp(`\\b${iaEscapeRegExp(norm(company.name))}\\b`,'g'),' ').replace(/\s+/g,' ').trim();
+  const dep=explicitDepartmentFromText(value);
+  if(dep)q=q.replace(new RegExp(`\\b${iaEscapeRegExp(norm(dep.name))}\\b`,'g'),' ').replace(/\s+/g,' ').trim();
+  const phase=iaPhaseKey(value);
+  if(phase){
+    const labels={fabricacion:'fabricacion',pintura:'pintura',almacen:'almacen',entregado:'entregado'};
+    q=q.replace(new RegExp(`\\b${iaEscapeRegExp(labels[phase]||phase)}\\b`,'g'),' ').replace(/\s+/g,' ').trim();
+  }
+  return q;
+}
+function iaOrderTextScore(order,query){
+  const q=norm(query); if(!q)return 0;
+  const desc=norm(order.descripcion||'');
+  const material=norm(order.material||'');
+  const empresa=norm(order.empresa||'');
+  const ref=norm(order.referencia||'');
+  if(desc===q)return 1000;
+  if(desc.includes(q))return 900+Math.min(80,q.length);
+  if(ref.includes(q))return 880;
+  if(material&&material.includes(q))return 820;
+  const tokens=q.split(' ').filter(t=>t.length>=2);
+  if(!tokens.length)return 0;
+  let score=0,matched=0;
+  for(const t of tokens){
+    if(desc.includes(t)){score+=35;matched++;}
+    else if(material.includes(t)){score+=24;matched++;}
+    else if(empresa.includes(t)){score+=18;matched++;}
+  }
+  if(!matched)return 0;
+  score += Math.round((matched/tokens.length)*120);
+  if(matched===tokens.length)score+=100;
+  return score;
+}
+function iaRecentOrderInDepartment(depName){
+  const dep=resolveDepartment(depName||activeDepartmentInfo().name);
+  if(!dep)return null;
+  if(dep.id==='iron'){
+    const rows=(window.WorkOrders?.orders||[]).filter(o=>o.status==='pending'&&!o.cancellationPendingV1&&!o.cancellationRequestV1);
+    rows.sort((a,b)=>(Number(b.createdAtMs)||0)-(Number(a.createdAtMs)||0));
+    const o=rows[0]; if(!o)return null;
+    return listOrders({departamento:dep.name,estado:'pendiente',limite:50}).ordenes.find(x=>x.id===o.id)||null;
+  }
+  const rows=(deptSnapshot().orders||[]).filter(o=>o.departmentId===dep.id&&o.status==='pending').sort((a,b)=>(Number(b.createdAtMs)||0)-(Number(a.createdAtMs)||0));
+  const o=rows[0]; if(!o)return null;
+  return listOrders({departamento:dep.name,estado:'pendiente',limite:50}).ordenes.find(x=>x.id===o.id)||null;
+}
+function iaFindOrderToOpen(value){
+  const raw=text(value), q=norm(raw);
+  const direct=localOrderSelector(raw);
+  if(direct?.ok)return direct;
+
+  const dep=explicitDepartmentFromText(raw)?.name||activeDepartmentInfo().name;
+  const listed=listOrders({departamento:dep,estado:'pendiente',limite:50});
+  if(!listed?.ok)return listed;
+  let rows=(listed.ordenes||[]).slice();
+
+  // Referencias conversacionales frecuentes.
+  if(/\b(esa|esa misma|la anterior|la que acabamos de crear|la ultima creada|ultima creada|ultima orden)\b/.test(q)){
+    if(state.localContext?.orderRef){
+      const byContext=rows.find(o=>norm(o.referencia)===norm(state.localContext.orderRef));
+      if(byContext)return {ok:true,orden:byContext,selector:'contexto'};
+    }
+    if(state.lastCreatedOrderId){
+      const byLast=rows.find(o=>o.id===state.lastCreatedOrderId);
+      if(byLast)return {ok:true,orden:byLast,selector:'ultima_creada'};
+    }
+    const recent=iaRecentOrderInDepartment(dep);
+    if(recent)return {ok:true,orden:recent,selector:'ultima_creada'};
+  }
+
+  const company=findCompanyMention(raw);
+  if(company)rows=rows.filter(o=>norm(o.empresa)===norm(company.name)||norm(o.empresa).includes(norm(company.name)));
+  const phase=iaPhaseKey(raw);
+  if(phase){
+    rows=rows.filter(o=>Number(o.fases?.[phase]||0)>0 || (phase==='fabricacion'&&o.estado_clave==='fabrication') || (phase==='pintura'&&o.estado_clave==='painting'));
+  }
+
+  const query=iaOpenOrderWords(raw);
+  if(query){
+    const scored=rows.map(o=>({o,score:iaOrderTextScore(o,query)})).filter(x=>x.score>0).sort((a,b)=>b.score-a.score||Number(a.o.prioridad)-Number(b.o.prioridad));
+    if(scored.length){
+      const best=scored[0].score;
+      const close=scored.filter(x=>x.score>=best-12);
+      if(close.length===1)return {ok:true,orden:close[0].o,selector:'descripcion',score:best};
+      return {ok:false,error:'varias_coincidencias',coincidencias:close.slice(0,6).map(x=>x.o),selector:'descripcion'};
+    }
+  }
+
+  if(rows.length===1 && (company||phase))return {ok:true,orden:rows[0],selector:company?'empresa':'fase'};
+  if(rows.length>1 && (company||phase))return {ok:false,error:'varias_coincidencias',coincidencias:rows.slice(0,6),selector:company?'empresa':'fase'};
+  return {ok:false,error:'no_encontrada',coincidencias:[]};
+}
+function iaOpenExistingOrder(order){
+  if(!order)return {ok:false,error:'orden_no_encontrada'};
+  state.draft=null; state.pendingAction=null;
+  if(order.source==='hierro'){
+    window.LDHDepartments?.switchDepartment?.('iron');
+    window.WorkOrders?.openEdit?.(order.id);
+  }else{
+    const dep=resolveDepartment(order.departamento||'');
+    if(!dep)return {ok:false,error:'departamento_no_encontrado'};
+    window.LDHDepartments?.switchDepartment?.(dep.id);
+    window.LDHDepartments?.openOrderModal?.(order.id);
+  }
+  rememberLocalContext({intent:'order_open',orderRef:order.referencia,department:order.departamento||activeDepartmentInfo().name,company:order.empresa||'',priority:Number(order.prioridad)||0});
+  return {ok:true,orden:order};
+}
+function iaOpenAmbiguityText(matches){
+  const rows=(matches||[]).slice(0,6);
+  if(!rows.length)return 'No encuentro una orden pendiente que coincida con lo que has dicho.';
+  return `Encuentro ${rows.length} órdenes que coinciden:\n`+rows.map(o=>`• prioridad ${o.prioridad} · ${o.referencia}${o.empresa?` · ${o.empresa}`:''}${o.descripcion?` · ${o.descripcion}`:''}`).join('\n')+'\nDime la prioridad o la referencia de la que quieres abrir.';
+}
+function localOrderSummary(o){
+  if(!o)return '';
+  const parts=[o.referencia];
+  if(Number(o.prioridad)>0)parts.push(`prioridad ${o.prioridad}`);
+  if(o.empresa)parts.push(o.empresa);
+  if(o.cantidad)parts.push(`${o.cantidad} ud.`);
+  if(o.descripcion)parts.push(o.descripcion);
+  return parts.filter(Boolean).join(' · ');
+}
+function appendHistoryLocal(userText,assistantText){
+  state.history.push({role:'user',content:text(userText)},{role:'assistant',content:text(assistantText)});
+  if(state.history.length>16)state.history=state.history.slice(-16);
+}
+function iaIsoFromDate(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function iaNaturalDate(value){
+  const raw=text(value), q=norm(raw); if(!q)return '';
+  let m=raw.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/);
+  if(m){
+    const now=new Date(); let y=m[3]?Number(m[3]):now.getFullYear(); if(y<100)y+=2000;
+    const d=new Date(y,Number(m[2])-1,Number(m[1]));
+    if(d.getFullYear()===y&&d.getMonth()===Number(m[2])-1&&d.getDate()===Number(m[1]))return iaIsoFromDate(d);
+  }
+  m=raw.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/);
+  if(m){const d=new Date(Number(m[1]),Number(m[2])-1,Number(m[3]));if(!Number.isNaN(d.getTime()))return iaIsoFromDate(d);}
+  const d=new Date(); d.setHours(12,0,0,0);
+  if(/\bpasado manana\b/.test(q)){d.setDate(d.getDate()+2);return iaIsoFromDate(d);}
+  if(/\bmanana\b/.test(q)){d.setDate(d.getDate()+1);return iaIsoFromDate(d);}
+  const names={domingo:0,lunes:1,martes:2,miercoles:3,jueves:4,viernes:5,sabado:6};
+  for(const [name,target] of Object.entries(names)){
+    if(new RegExp(`\\b${name}\\b`).test(q)){
+      let delta=(target-d.getDay()+7)%7;
+      if(delta===0 || /\b(proximo|proxima|que viene|siguiente)\b/.test(q)) delta=delta||7;
+      d.setDate(d.getDate()+delta); return iaIsoFromDate(d);
+    }
+  }
+  m=q.match(/\b(?:dentro de|en)\s+(un|una|uno|\d+|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+mes(?:es)?\b/);
+  if(m){
+    const months=localNumberWord(m[1])||Number(m[1])||1;
+    const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+months);
+    const last=new Date(d.getFullYear(),d.getMonth()+1,0).getDate(); d.setDate(Math.min(day,last));
+    return iaIsoFromDate(d);
+  }
+  if(/\b(?:el\s+)?(?:proximo|siguiente)\s+mes\b|\bel\s+mes\s+que\s+viene\b/.test(q)){
+    const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+1);
+    const last=new Date(d.getFullYear(),d.getMonth()+1,0).getDate(); d.setDate(Math.min(day,last));
+    return iaIsoFromDate(d);
+  }
+  m=q.match(/\b(?:dentro de|en)\s+(un|una|uno|\d+|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+semanas?\b/);
+  if(m){const weeks=localNumberWord(m[1])||Number(m[1])||1;d.setDate(d.getDate()+weeks*7);return iaIsoFromDate(d);}
+  m=q.match(/\bdentro de (\d+) dias?\b/); if(m){d.setDate(d.getDate()+Number(m[1]));return iaIsoFromDate(d);}
+  return '';
+}
+function iaSpanishCardinal(value){
+  const q=norm(value).replace(/-/g,' ').replace(/\s+/g,' ').trim();
+  if(!q)return 0;
+  if(/^\d{1,4}$/.test(q))return Number(q);
+  const direct={
+    un:1,uno:1,una:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,
+    once:11,doce:12,trece:13,catorce:14,quince:15,dieciseis:16,diecisiete:17,dieciocho:18,diecinueve:19,
+    veinte:20,veintiuno:21,veintiuna:21,veintidos:22,veintitres:23,veinticuatro:24,veinticinco:25,veintiseis:26,veintisiete:27,veintiocho:28,veintinueve:29,
+    treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,ciento:100
+  };
+  if(direct[q]!==undefined)return direct[q];
+  const m=q.match(/^(treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa)(?:\s+y\s+|\s+)(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)$/);
+  if(m)return (direct[m[1]]||0)+(direct[m[2]]||0);
+  return 0;
+}
+function iaQuantityFromText(value){
+  const raw=text(value);
+  const word='(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieciseis|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)|treinta(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?|cuarenta(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?|cincuenta(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?|sesenta(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?|setenta(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?|ochenta(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?|noventa(?:\\s+y\\s+(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))?)';
+  const patterns=[
+    new RegExp(`\\b(?:necesito|quiero|preciso|haz|hacer|fabrica|fabricar|crea|crear|prepara|preparame|son|cantidad(?:\\s+(?:de|a\\s+fabricar))?)\\s+(?:unas?\\s+)?(\\d{1,4}|${word})\\b`,'i'),
+    new RegExp(`\\b(\\d{1,4}|${word})\\s+(?:uds?|unidades?|mesas?|piezas?|trabajos?|ordenes?)\\b`,'i'),
+    new RegExp(`\\bde\\s+(\\d{1,4}|${word})\\s+(?:mesas?|piezas?|uds?|unidades?)\\b`,'i')
+  ];
+  for(const re of patterns){
+    const m=raw.match(re);
+    if(m){const n=iaSpanishCardinal(m[1]);if(Number.isFinite(n)&&n>0)return n;}
+  }
+  return 0;
+}
+function iaPriorityExplicit(value){
+  const raw=text(value), q=norm(raw); const max=(window.WorkOrders?.sortedPending?.().length||0)+1;
+  if(!/\b(prioridad|puesto|posicion|orden de ejecucion|urgente|urgencia|maxima|alta|ultima|ultimo|primera|primero)\b/.test(q))return 0;
+  return priorityFrom(raw,max,raw)||0;
+}
+function iaCleanDescription(value,companyName,dateIso,quantity){
+  let s=text(value);
+  // Las palabras que ordenan crear/preparar una OT describen la INTENCION, nunca el trabajo.
+  s=s.replace(/^\s*(?:necesito|quiero|preciso|hazme|haz|hacer|fabrica|fabricar|crea|crear|creame|prepara|preparame|genera|generame|monta|nueva orden(?: de trabajo)?|orden de trabajo)\s+(?:una\s+)?(?:nueva\s+)?(?:orden(?:\s+de\s+trabajo)?)?(?:\s+de)?\s*/i,'');
+  s=s.replace(/^\s*(?:una\s+)?(?:nueva\s+)?orden(?:\s+de\s+trabajo)?(?:\s+de)?\s*/i,'');
+  if(quantity){
+    s=s.replace(new RegExp(`^\\s*(?:de\\s+)?(?:unas?\\s+)?${quantity}\\s*(?:uds?\\.?|unidades?)?\\s*`,'i'),'');
+    const first=text(s).match(/^\s*(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+y\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+)?)\s+/);
+    if(first && iaSpanishCardinal(first[1])===Number(quantity))s=s.slice(first[0].length);
+  }
+  if(companyName){
+    const companyEsc=companyName.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    s=s.replace(new RegExp(`\\bempresa(?:\\s+receptora)?\\s*[:=-]?\\s*${companyEsc}\\b`,'ig'),' ');
+    s=s.replace(new RegExp(`\\s+(?:para|de)\\s+${companyEsc}\\b`,'ig'),' ');
+  }
+  s=s.replace(/\s+(?:para|con entrega|entrega)\s+(?:manana|pasado manana|el\s+)?(?:lunes|martes|miercoles|jueves|viernes|sabado|domingo)(?:\s+que viene|\s+proximo|\s+proxima)?\b/ig,' ');
+  s=s.replace(/\s+(?:para|con entrega|entrega)\s+manana\b/ig,' ');
+  s=s.replace(/\bRAL\s*[-:]?\s*\d{3,4}\b/ig,' ');
+  s=s.replace(/\b(?:hierro\s+)?(?:negro|galvanizado)\b/ig,' ');
+  s=s.replace(/\bprioridad\s+(?:\d+|alta|maxima|baja|ultima)\b/ig,' ');
+  s=s.replace(/[,.]+\s*$/,'').replace(/\s+/g,' ').trim();
+  return s;
+}
+function iaActionOnlyUtterance(value){
+  const q=norm(value); if(!q)return false;
+  return /^(?:abre|abrir|abreme|muestra|muestrame|ensena|ver|elimina|eliminala|eliminalo|borrala|borralo|borra|borrar|anula|anular|anulala|anulalo|cancela|cancelar|cancelala|cancelalo|imprime|imprimir|imprimela|imprimelo|guarda|guardar|guardala|guardalo)(?:\s|$)/.test(q);
+}
+function iaIronFieldOnlyUtterance(value){
+  const raw=text(value).trim();
+  if(iaActionOnlyUtterance(raw))return true;
+  return /^(?:empresa(?:\s+receptora)?|cantidad|fecha(?:\s+de\s+entrega)?|entrega|prioridad|orden\s+de\s+ejecucion|material(?:\s+previsto)?|ral|color|tipo\s+de\s+hierro|hierro|imprimacion)\b/i.test(raw);
+}
+function iaCompanyOnlyUtterance(value,knownCompany=null){
+  const raw=text(value).trim();
+  const company=knownCompany||findCompanyMention(raw)||resolveCompany(raw.replace(/^\s*(?:empresa(?:\s+receptora)?|cliente)\s*[:=-]?\s*/i,''));
+  if(!company)return false;
+  const q=norm(raw).replace(/^(?:empresa(?: receptora)?|cliente)\s*[:=-]?\s*/,'').trim();
+  return q===norm(company.name);
+}
+function iaExplicitDescriptionInstruction(value){
+  const raw=text(value).trim();
+  if(!raw)return '';
+  const patterns=[
+    /^\s*(?:descripcion|descripci\u00f3n|concepto)\s*[:=-]?\s*(.+?)\s*[.!?]*$/i,
+    /^\s*trabajo\s*[:=-]?\s*(.+?)\s*[.!?]*$/i,
+    /^\s*el\s+trabajo\s+(?:es|sera|ser\u00e1|consiste\s+en)\s+(.+?)\s*[.!?]*$/i,
+    /^\s*(?:cambia|cambiar|modifica|modificar|pon|poner)\s+(?:el\s+)?(?:trabajo|descripcion|descripci\u00f3n|concepto)\s*(?:a|por|como)?\s*[:=-]?\s*(.+?)\s*[.!?]*$/i,
+    /(?:^|[,;]\s*|\by\s+)(?:el\s+)?trabajo\s+(?:es|sera|ser\u00e1|consiste\s+en)\s+(.+?)(?=$|[,;])/i,
+    /(?:^|[,;]\s*|\by\s+)(?:cambia|modifica|pon)\s+(?:el\s+)?trabajo\s*(?:a|por|como)?\s*[:=-]?\s*(.+?)(?=$|[,;])/i
+  ];
+  for(const re of patterns){
+    const m=raw.match(re);
+    if(m&&text(m[1]).trim())return text(m[1]).trim();
+  }
+  return '';
+}
+function iaDescriptionFromCompound(value,companyName,dateIso,quantity){
+  const raw=text(value).trim();
+  if(!raw)return '';
+  const explicit=iaExplicitDescriptionInstruction(raw);
+  if(explicit)return explicit;
+  const company=companyName?resolveCompany(companyName):findCompanyMention(raw);
+  const segments=raw.split(/[,;\n]+/).map(v=>text(v).trim()).filter(Boolean);
+  const candidates=[];
+  for(const seg of segments){
+    const q=norm(seg);
+    if(!q)continue;
+    if(iaCompanyOnlyUtterance(seg,company))continue;
+    if(/^(?:empresa(?: receptora)?|cliente|fecha(?: de entrega)?|entrega|cantidad(?: a fabricar)?|prioridad|orden de ejecucion|material(?: previsto)?|ral|color|tipo de hierro|hierro|imprimacion)\b/.test(q))continue;
+    if(iaNaturalDate(seg)||ralFromUtterance(seg)||iaPriorityExplicit(seg))continue;
+    if(/^(?:negro|galvanizado|hierro negro|hierro galvanizado)\b/.test(q))continue;
+    let cleaned=iaCleanDescription(seg,company?.name||companyName||'',dateIso,quantity);
+    cleaned=text(cleaned).replace(/^[\s,;:.]+|[\s,;:.]+$/g,'').trim();
+    if(cleaned.length>=3 && !/^(?:si|no|vale|ok|correcto|adelante)$/i.test(cleaned))candidates.push(cleaned);
+  }
+  if(candidates.length)return candidates.join(', ');
+  return '';
+}
+function iaValidVisibleCompany(row){
+  const id=text(row?.companyId), name=text(row?.companyName);
+  if(!id||!name)return null;
+  if(/selecciona\s+empresa/i.test(name))return null;
+  return resolveCompany(id)||resolveCompany(name)||null;
+}
+function iaSyncDraftVisibleCore(){
+  if(state.draft?.kind!=='iron'||!window.WorkOrders?.collectForm)return;
+  try{
+    const row=window.WorkOrders.collectForm();
+    const d=state.draft.data||(state.draft.data={});
+    // El formulario visible es la fuente de verdad para valores que el usuario ya ha dado
+    // o ha corregido manualmente. El placeholder "Selecciona empresa" NUNCA es una empresa real.
+    const visibleCompany=iaValidVisibleCompany(row);
+    if(visibleCompany){d.empresa=visibleCompany.name;d.companyId=visibleCompany.id;}
+    else if(!row.companyId && /selecciona\s+empresa/i.test(text(row.companyName))){delete d.empresa;delete d.companyId;}
+    if(text(row.description))d.descripcion=text(row.description);
+    if(text(row.material))d.material=text(row.material);
+    if(text(row.ral))d.ral=text(row.ral);
+  }catch(_){ }
+}
+function iaLocalIronArgs(value){
+  const raw=text(value), q=norm(raw); const args={};
+  const explicitCompany=raw.match(/^\s*(?:empresa(?:\s+receptora)?|cliente)\s*[:=-]?\s*(.+?)\s*[.!?]*$/i);
+  let company=findCompanyMention(raw);
+  if(!company && explicitCompany) company=resolveCompany(explicitCompany[1]);
+  if(!company) company=resolveCompany(raw.replace(/[.!?]+$/,'').trim());
+  const companyOnly=iaCompanyOnlyUtterance(raw,company);
+  if(company)args.empresa=company.name;
+  const qty=iaQuantityFromText(raw); if(qty)args.cantidad=qty;
+  const date=iaNaturalDate(raw); if(date)args.fecha_entrega=date;
+  const pri=iaPriorityExplicit(raw); if(pri)args.prioridad=pri;
+  const ral=ralFromUtterance(raw); if(ral)args.ral=ral;
+  if(/\bgalvanizad[oa]?\b/.test(q))args.tipo_hierro='galvanizado'; else if(/\b(?:hierro\s+)?negro\b/.test(q))args.tipo_hierro='negro';
+  if(/\bimprimacion\b/.test(q))args.imprimacion=!/\b(sin|no)\s+imprimacion\b/.test(q);
+  const material=findMaterialMention(raw); if(material)args.material=material;
+
+  const existingDescription=text(state.draft?.data?.descripcion||$('woDescription')?.value||'').trim();
+  const explicitDescription=iaExplicitDescriptionInstruction(raw);
+  if(explicitDescription){
+    const desc=text(explicitDescription).trim();
+    if(desc.length>=3)args.descripcion=desc;
+  }else if(!existingDescription){
+    // Mientras Descripcion esta vacia permitimos inferirla de una frase completa o de una
+    // respuesta breve libre. En cuanto tenga contenido queda protegida y solo cambia con
+    // "Trabajo..." o "Descripcion..." explicitos.
+    const compoundDesc=iaDescriptionFromCompound(raw,company?.name||'',date,qty);
+    if(compoundDesc)args.descripcion=compoundDesc;
+    else if(iaOrderSemanticSignalCount(raw)===0 && !iaIronFieldOnlyUtterance(raw) && !companyOnly){
+      const desc=iaCleanDescription(raw,company?.name||'',date,qty);
+      if(desc && desc.length>=3 && !/^(si|no|vale|ok|correcto|adelante)$/i.test(desc))args.descripcion=desc;
+    }
+  }
+  return args;
+}
+
+function iaDraftMissingIron(){
+  const d=state.draft?.kind==='iron'?(state.draft.data||{}):{}; const missing=[];
+  if(!d.empresa||!resolveCompany(d.empresa))missing.push('empresa'); if(!d.cantidad)missing.push('cantidad'); if(!d.fecha_entrega)missing.push('fecha de entrega');
+  if(!d.prioridad)missing.push('prioridad / orden de ejecución'); if(!d.descripcion)missing.push('descripción');
+  return missing;
+}
+function iaSyncDraftFromVisibleFormForCommit(){
+  if(state.draft?.kind!=='iron'||!window.WorkOrders?.collectForm)return null;
+  try{
+    const row=window.WorkOrders.collectForm(); const d=state.draft.data||(state.draft.data={});
+    const visibleCompany=iaValidVisibleCompany(row);
+    if(visibleCompany){d.empresa=visibleCompany.name;d.companyId=visibleCompany.id;}
+    else {delete d.empresa;delete d.companyId;}
+    if(row.quantity)d.cantidad=row.quantity;
+    if(row.deliveryDate)d.fecha_entrega=row.deliveryDate; if(row.priority)d.prioridad=row.priority; if(row.description)d.descripcion=row.description;
+    if(row.material)d.material=row.material; if(row.ironType)d.tipo_hierro=row.ironType; d.imprimacion=!!row.primer; if(row.ral)d.ral=row.ral;
+    return row;
+  }catch(_){return null;}
+}
+async function iaCommitDraftLocal(userText){
+  if(state.draft?.kind!=='iron')return null;
+  const q=norm(userText);
+  const wantsPrint=/\b(imprime|imprimir|imprimela|impresion)\b/.test(q);
+  const wantsSave=/\b(guarda|guardar|guardalo|guardala|graba|crear|crea|confirma|finaliza)\b/.test(q);
+  if(!wantsPrint&&!wantsSave)return null;
+  const row=iaSyncDraftFromVisibleFormForCommit();
+  if(!row)return {handled:true,text:'No puedo leer el formulario abierto de la orden.'};
+  const validation=window.WorkOrders?.validate?.(row)||'';
+  if(validation)return {handled:true,text:validation};
+  const id=row.id;
+  if(wantsPrint)await window.WorkOrders.saveAndPrint(); else await window.WorkOrders.saveWork();
+  await sleep(30);
+  const order=(window.WorkOrders.orders||[]).find(o=>o.id===id);
+  if(!order)return {handled:true,text:'He intentado guardar la orden, pero no he podido verificar el guardado local.'};
+  state.lastCreatedOrderId=order.id; sessionStorage.setItem('ldh_ia_compras_last_order_id',order.id); state.draft=null; state.pendingAction=null;
+  rememberLocalContext({intent:'order_action',orderRef:order.reference,department:activeDepartmentInfo().name,priority:Number(order.priority)||0});
+  return {handled:true,text:wantsPrint?`Orden ${order.reference} guardada correctamente y enviada a impresión.`:`Orden ${order.reference} guardada correctamente.`};
+}
+function iaLooksLikeNewOrder(value){
+  const q=norm(value); if(!q)return false;
+  return /\b(necesito|quiero|preciso|crea|crear|haz|hacer|fabrica|fabricar|nueva orden|orden de trabajo)\b/.test(q);
+}
+function iaOrderSemanticSignalCount(value){
+  const raw=text(value), q=norm(raw); let n=0;
+  if(findCompanyMention(raw)||/\bempresa(?:\s+receptora)?\b/.test(q))n++;
+  if(iaQuantityFromText(raw)||/\bcantidad(?:\s+a\s+fabricar)?\b/.test(q))n++;
+  if(iaNaturalDate(raw)||/\b(fecha de entrega|entrega)\b/.test(q))n++;
+  if(iaPriorityExplicit(raw)||/\b(prioridad|orden de ejecucion|puesto|posicion)\b/.test(q))n++;
+  if(ralFromUtterance(raw)||/\bral\b/.test(q))n++;
+  if(/\b(?:hierro\s+)?(?:negro|galvanizado)\b/.test(q))n++;
+  if(findMaterialMention(raw)||/\bmaterial(?:\s+previsto)?\b/.test(q))n++;
+  if(/\b(descripcion|concepto)\b/.test(q))n++;
+  return n;
+}
+function iaSimpleIronFollowup(value){
+  const raw=text(value).trim(), q=norm(raw); if(!q)return false;
+  const company=findCompanyMention(raw)||resolveCompany(raw.replace(/^\s*(?:empresa(?:\s+receptora)?|cliente)\s*[:=-]?\s*/i,''));
+  if(state.draft?.kind==='iron' && iaNaturalDate(raw) && q.split(/\s+/).length<=7)return true;
+  if(iaCompanyOnlyUtterance(raw,company))return true;
+  if(/^(?:empresa(?:\s+receptora)?|cliente)\b/i.test(raw) && iaOrderSemanticSignalCount(raw)<=1)return true;
+  if(/^(?:ral|color)\s*[:=-]?\s*(?:ral\s*)?\d{3,4}[.!?]*$/i.test(raw))return true;
+  if(/^(?:tipo\s+de\s+hierro\s*[:=-]?\s*)?(?:hierro\s+)?(?:negro|galvanizado)[.!?]*$/i.test(raw))return true;
+  if(/^(?:prioridad|orden\s+de\s+ejecucion|puesto|posicion)\s*[:=-]?\s*(?:\d+|[A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+y\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+)?)[.!?]*$/i.test(raw))return true;
+  if(/^(?:cantidad(?:\s+a\s+fabricar)?\s*[:=-]?\s*)?(?:\d+|[A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+y\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+)?)(?:\s+(?:uds?|unidades?|mesas?|piezas?))?[.!?]*$/i.test(raw) && iaOrderSemanticSignalCount(raw)<=1)return true;
+  if(/^(?:fecha(?:\s+de\s+entrega)?|entrega)\b/i.test(raw) && iaOrderSemanticSignalCount(raw)<=1)return true;
+  if(iaExplicitDescriptionInstruction(raw))return true;
+  // Respuesta breve libre: si falta descripcion, dos o tres palabras como "mesas taller" son descripcion.
+  const words=q.split(/\s+/).filter(Boolean);
+  if(state.draft?.kind==='iron' && iaDraftMissingIron().includes('descripción') && words.length<=4 && iaOrderSemanticSignalCount(raw)===0 && !iaActionOnlyUtterance(raw))return true;
+  return false;
+}
+function iaNeedsSemanticOrderInterpretation(value){
+  const raw=text(value), q=norm(raw); if(!q)return false;
+  if(iaActionOnlyUtterance(raw))return false;
+  if(iaSimpleIronFollowup(raw))return false;
+  const signals=iaOrderSemanticSignalCount(raw);
+  const words=q.split(/\s+/).filter(Boolean).length;
+  const createVerb=/\b(prepara|preparame|crea|creame|crear|haz|hazme|hacer|necesito|quiero|preciso|fabrica|fabricar|genera|generame|orden de trabajo|nueva orden)\b/.test(q);
+  // Una petición completa o con varios campos la interpreta Groq UNA sola vez.
+  if(createVerb && (signals>=1 || words>=6))return true;
+  if(signals>=3)return true;
+  if(state.draft?.kind==='iron' && signals>=2 && words>=5)return true;
+  return false;
+}
+function iaSanitizeSemanticDescription(value,args={}){
+  let s=text(value).trim(); if(!s)return '';
+  s=iaCleanDescription(s,args.empresa||'',args.fecha_entrega||'',Number(args.cantidad)||0);
+  // Quita restos frecuentes de campos estructurados si el modelo los dejó dentro de descripción.
+  s=s.replace(/\b(?:ordenador\s+)?(?:prioridad|orden\s+de\s+ejecucion|puesto|posicion)\s*[:=-]?\s*(?:\d+|[A-Za-zÁÉÍÓÚáéíóúÑñ]+)\b/ig,' ');
+  s=s.replace(/\b(?:pintura|lacado|color)?\s*RAL\s*[-:]?\s*\d{3,4}\b/ig,' ');
+  s=s.replace(/\bempresa(?:\s+receptora)?\s*[:=-]?\s*[A-Za-z0-9ÁÉÍÓÚáéíóúÑñ._ -]+(?=$|[,;.])/ig,' ');
+  s=s.replace(/\b(?:hierro\s+)?(?:negro|galvanizado)\b/ig,' ');
+  return s.replace(/^[\s,;:.\-]+|[\s,;:.\-]+$/g,'').replace(/\s+/g,' ').trim();
+}
+function iaOrderContentQuery(value){
+  const raw=text(value), q=norm(raw);
+  if(!q)return null;
+  const asks=/\b(?:que|cuales|cual|dime|muestra|muestrame)\b/.test(q);
+  const subject=/\b(?:trabajos|trabajo|ordenes|orden|ots?)\b/.test(q);
+  const relation=/\b(?:llevan|lleva|tienen|tiene|usan|usa|incluyen|incluye|contienen|contiene|utilizan|utiliza|necesitan|necesita|requieren|requiere|precisan|precisa|con)\b/.test(q);
+  if(!(asks&&subject&&relation))return null;
+  let m=q.match(/\b(?:llevan|lleva|tienen|tiene|usan|usa|incluyen|incluye|contienen|contiene|utilizan|utiliza|necesitan|necesita|requieren|requiere|precisan|precisa|con)\s+(.+)$/);
+  if(!m)return null;
+  let term=(m[1]||'').replace(/\b(?:el|la|los|las|un|una|unos|unas|material|materiales|de|del|tipo|algun|alguna|alguno)\b/g,' ').replace(/\s+/g,' ').trim();
+  if(!term)return null;
+  const dep=explicitDepartmentFromText(raw)?.name||activeDepartmentInfo().name;
+  const listed=listOrders({departamento:dep,estado:'pendiente',limite:50});
+  if(!listed?.ok)return {ok:false,error:listed?.error||'consulta_no_disponible',departamento:dep,term,ordenes:[]};
+  const tokens=term.split(/\s+/).filter(t=>t.length>=2);
+  const scored=(listed.ordenes||[]).map(o=>{
+    const desc=norm(o.descripcion||''), mat=norm(o.material||''), aviso=norm(o.aviso||'');
+    const hay=`${desc} ${mat} ${aviso}`.trim();
+    let score=0;
+    if(hay.includes(term))score+=200;
+    for(const t of tokens){
+      if(desc.includes(t))score+=35;
+      if(mat.includes(t))score+=55;
+      if(aviso.includes(t))score+=20;
+    }
+    return {o,score};
+  }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score||Number(a.o.prioridad)-Number(b.o.prioridad));
+  return {ok:true,departamento:dep,term,ordenes:scored.map(x=>x.o)};
+}
+function iaOrderContentAnswer(result){
+  if(!result?.ok)return null;
+  const rows=result.ordenes||[];
+  if(!rows.length)return `No encuentro trabajos pendientes de ${result.departamento} que lleven o mencionen «${result.term}».`;
+  const head=rows.length===1?`Hay 1 trabajo que lleva o menciona «${result.term}»:`:`Hay ${rows.length} trabajos que llevan o mencionan «${result.term}»:`;
+  return head+'\n'+rows.slice(0,12).map(o=>`• prioridad ${o.prioridad} · ${o.referencia}${o.empresa?` · ${o.empresa}`:''}${o.descripcion?` · ${o.descripcion}`:''}${o.material?` · material: ${o.material}`:''}`).join('\n');
+}
+
+async function tryLocalFastPath(userText){
+  const raw=text(userText), q=norm(raw).replace(/\bintimas?\b/g,'ultimas').replace(/\bintimos?\b/g,'ultimos');
+  if(!q)return {handled:false};
+
+  // CONSULTA LOCAL SOBRE EL CONTENIDO REAL DE LAS OT.
+  // Ej.: "¿Cuáles de los trabajos llevan tablero?" busca en descripción/material/aviso, no en empresas.
+  const contentQuery=iaOrderContentQuery(raw);
+  if(contentQuery){
+    const answer=iaOrderContentAnswer(contentQuery);
+    if(answer){rememberLocalContext({intent:'order_content_query',department:contentQuery.departamento,material:contentQuery.term});return {handled:true,text:answer};}
+  }
+
+  // ESCUDO DE ACCIONES: nunca permitimos que una orden de interfaz termine escrita en Descripcion.
+  // Estas formas se resuelven antes que cualquier parser de borrador y sin usar Groq.
+  const strongOpenLast=/^(?:abre|abrir|abreme|muestra|muestrame|ensena|ver)\b.*\b(?:ultima|ultimo|esa|anterior)\b.*\b(?:orden|trabajo)?\b/.test(q)
+    || /^(?:abre|abrir|abreme|muestra|muestrame|ensena|ver)\s+(?:la\s+)?(?:que\s+)?(?:acabamos|hemos)\s+de\s+(?:hacer|crear|guardar)/.test(q);
+  if(strongOpenLast){
+    let found=null;
+    if(state.localContext?.orderRef){
+      const f=findOrder(state.localContext.orderRef); if(f?.ok)found=f.orden;
+    }
+    if(!found && state.lastCreatedOrderId){
+      const real=(window.WorkOrders?.orders||[]).find(o=>o.id===state.lastCreatedOrderId);
+      if(real){
+        const f=findOrder(real.reference||real.id); if(f?.ok)found=f.orden;
+      }
+    }
+    if(!found)found=iaRecentOrderInDepartment(activeDepartmentInfo().name);
+    if(found){
+      const opened=iaOpenExistingOrder(found);
+      return opened.ok?{handled:true,text:`Abierta ${localOrderSummary(opened.orden)}.`}:{handled:true,text:'He localizado la ultima orden, pero no he podido abrir su ficha.'};
+    }
+    return {handled:true,text:'No encuentro una ultima orden guardada en el departamento activo.'};
+  }
+
+  // SELECTORES DE POSICION / GRUPO EN LA COLA DE PRIORIDAD.
+  // Ej.: "la segunda", "las tres ultimas", "las dos primeras", "de la 3 a la 6",
+  // "prioridades 2, 4 y 5". En una anulacion plural se prepara UNA confirmacion para todas.
+  const groupSelection=localOrderGroupSelector(raw);
+  const deleteVerb=/\b(elimina|eliminar|eliminalas|eliminalos|borra|borrar|borralas|borralos|anula|anular|anulalas|anulalos|cancela|cancelar|cancelalas|cancelalos)\b/.test(q);
+  const pluralDelete=deleteVerb && /\b(ordenes|trabajos|ots|varias|varios|primeras|primeros|ultimas|ultimos|prioridades)\b/.test(q);
+  const followupCancelSelection=state.localContext?.intent==='cancel_select' && !deleteVerb && groupSelection?.ok;
+  if((pluralDelete||followupCancelSelection) && groupSelection?.ok){
+    const rows=groupSelection.ordenes||[];
+    if(!rows.length)return {handled:true,text:'No encuentro órdenes pendientes en esas posiciones.'};
+    if(rows.some(o=>o.source!=='hierro'))return {handled:true,text:'La anulación múltiple automática está disponible aquí solo para órdenes de Los del Hierros.'};
+    const r=prepareCancelOrders(rows);
+    if(!r?.ok)return {handled:true,text:'No encuentro órdenes anulables en esa selección.'};
+    state.localGroupRefs=rows.map(o=>o.referencia).filter(Boolean);
+    rememberLocalContext({intent:'order_action',department:groupSelection.departamento||activeDepartmentInfo().name,orderRef:'',priority:0});
+    return {handled:true,text:`He seleccionado ${r.cantidad} órdenes:
+${localOrderGroupSummary(rows)}
+¿Confirmas que solicite la anulación de las ${r.cantidad}?`};
+  }
+  if(pluralDelete && (!groupSelection?.ok || !groupSelection?.ordenes?.length)){
+    rememberLocalContext({intent:'cancel_select',department:activeDepartmentInfo().name,orderRef:'',priority:0});
+    return {handled:true,text:'¿Cuáles quieres anular? Puedes decir, por ejemplo: «las tres últimas», «las dos primeras», «de la 3 a la 6» o «prioridades 2, 4 y 5».'};
+  }
+  // Si venimos de "elimina varias OT" y ahora solo dice "las tres ultimas", se resuelve localmente.
+  if(state.localContext?.intent==='cancel_select' && !deleteVerb && !groupSelection?.ok){
+    return {handled:true,text:'No he entendido qué posiciones quieres. Puedes decir «las tres últimas», «las dos primeras» o un rango como «de la 3 a la 6».'};
+  }
+
+  // Una selección de posiciones sin acción también se entiende localmente.
+  // Ej.: «la segunda», «las tres últimas», «¿cuáles son las dos primeras?».
+  // Guardamos el grupo para poder continuar con «elimínalas» sin volver a identificar las OT.
+  // IMPORTANTE: 'prioridad 1' dentro de los datos de una NUEVA orden no es una seleccion
+  // de una OT existente. Solo activamos el selector cuando la frase es realmente una consulta/
+  // seleccion de cola (p. ej. 'la segunda', 'dime la prioridad 1', 'prioridad 1').
+  const bareGroupSelection = groupSelection?.ok && !deleteVerb && (
+    /^(?:la|el|las|los)?\s*(?:\d+|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto|quinta|quinto|sexta|sexto|septima|septimo|octava|octavo|novena|noveno|decima|decimo|ultima|ultimo|primeras|primeros|ultimas|ultimos)(?:\s+(?:orden|ordenes|trabajo|trabajos|ot|ots))?[.!?]*$/.test(q)
+    || /^(?:cual|cuales|que|dime|muestra|muestrame)\b/.test(q)
+    || /^(?:posicion|posiciones|puesto|puestos|prioridad|prioridades|lista)\b/.test(q)
+  ) && !/\b(abre|abrir|imprime|imprimir|mueve|mover|cambia|cambiar|pon|poner|guarda|guardar)\b/.test(q);
+  if(bareGroupSelection){
+    const rows=groupSelection.ordenes||[];
+    state.localGroupRefs=rows.map(o=>o.referencia).filter(Boolean);
+    rememberLocalContext({intent:'order_selection',department:groupSelection.departamento||activeDepartmentInfo().name,orderRef:rows.length===1?(rows[0].referencia||''):'',priority:rows.length===1?(Number(rows[0].prioridad)||0):0});
+    return {handled:true,text:rows.length===1
+      ? `La ${groupSelection.selector==='posicion'?'posición':'selección'} corresponde a ${localOrderSummary(rows[0])}.`
+      : `Son estas ${rows.length} órdenes de la cola de prioridad:\n${localOrderGroupSummary(rows)}`};
+  }
+
+  // Pronombre plural sobre el último grupo seleccionado: «elimínalas», «anúlalas»...
+  const pluralPronounCancel=/^(?:eliminalas|borralas|anulalas|cancelalas)(?:\s+(?:todas|esas|estas|ordenes|ots|trabajos))?[.!?]*$/.test(q);
+  if(pluralPronounCancel && Array.isArray(state.localGroupRefs) && state.localGroupRefs.length){
+    const rows=[];
+    for(const ref of state.localGroupRefs){ const f=findOrder(ref); if(f?.ok)rows.push(f.orden); }
+    if(!rows.length)return {handled:true,text:'Ya no encuentro esas órdenes en la cola pendiente actual.'};
+    if(rows.some(o=>o.source!=='hierro'))return {handled:true,text:'La anulación múltiple automática está disponible aquí solo para órdenes de Los del Hierros.'};
+    const r=prepareCancelOrders(rows);
+    if(!r?.ok)return {handled:true,text:'No encuentro órdenes anulables en esa selección.'};
+    return {handled:true,text:`He seleccionado ${r.cantidad} órdenes:\n${localOrderGroupSummary(rows)}\n¿Confirmas que solicite la anulación de las ${r.cantidad}?`};
+  }
+
+  const pronounCancel=/^(?:elimina|eliminala|eliminalo|borra|borrala|borralo|anula|anulala|anulalo|cancela|cancelala|cancelalo)(?:\s+(?:esta|esa|la|el))?(?:\s+(?:orden|trabajo))?[.!?]*$/.test(q);
+  if(pronounCancel){
+    let selected=null;
+    if(state.localContext?.orderRef){
+      const f=findOrder(state.localContext.orderRef); if(f?.ok)selected=f.orden;
+    }
+    if(!selected && state.lastCreatedOrderId){
+      const real=(window.WorkOrders?.orders||[]).find(o=>o.id===state.lastCreatedOrderId);
+      if(real){const f=findOrder(real.reference||real.id); if(f?.ok)selected=f.orden;}
+    }
+    if(selected){
+      rememberLocalContext({intent:'order_action',orderRef:selected.referencia,department:selected.departamento||activeDepartmentInfo().name,priority:selected.prioridad||0});
+      if(selected.source!=='hierro')return {handled:true,text:`He localizado ${localOrderSummary(selected)}, pero la anulacion automatica de esta copia esta habilitada solo para ordenes de Los del Hierros.`};
+      const r=prepareCancelOrder(selected.referencia);
+      if(r?.ya_solicitada)return {handled:true,text:`La anulacion de ${selected.referencia} ya esta pendiente.`};
+      if(!r?.ok)return {handled:true,text:`He localizado ${localOrderSummary(selected)}, pero no he podido preparar su anulacion.`};
+      return {handled:true,text:`He localizado ${localOrderSummary(selected)}. Eliminarla significa solicitar su anulacion. Confirmas que la solicite?`};
+    }
+    if(state.draft){
+      cancelPending();
+      try{window.WorkOrders?.closeModal?.();}catch(_){ }
+      state.draft=null;
+      return {handled:true,text:'He cancelado el borrador abierto. No se ha guardado ninguna orden.'};
+    }
+    return {handled:true,text:'No tengo una orden concreta en contexto para eliminar. Dime su prioridad, referencia o parte de la descripcion.'};
+  }
+
+  // Abrir una NUEVA ORDEN es una accion de interfaz local, nunca requiere Groq.
+  // Solo interceptamos peticiones de apertura/navegacion sin datos tecnicos; si la frase ya
+  // contiene empresa, cantidad, fecha, RAL, etc., continua al parser local de alta completa.
+  const newOrderOnly = /^(?:abre|abrir|crea|crear|haz|hacer|quiero|vamos(?:\s+a)?|nos\s+vamos(?:\s+a)?|nueva)?\s*(?:una\s+)?(?:nueva\s+)?orden(?:\s+de\s+trabajo)?[.!?]*$/.test(q)
+    || /^(?:abre|abrir|vamos(?:\s+a)?|nos\s+vamos(?:\s+a)?)\s+(?:a\s+)?(?:la\s+)?(?:pantalla\s+de\s+)?orden(?:es)?\s+de\s+trabajo[.!?]*$/.test(q);
+  if(newOrderOnly){
+    const active=activeDepartmentInfo();
+    state.pendingAction=null;
+    if(active.id==='iron'){
+      state.draft=null;
+      ensureIronDraft();
+      rememberLocalContext({intent:'create_order',department:active.name,company:'',material:'',orderRef:''});
+      return {handled:true,text:`Nueva orden de trabajo abierta en ${active.name}. Puedes decirme todos los datos de una vez o ir indicandolos uno a uno.`};
+    }
+    const dep=resolveDepartment(active.name);
+    if(dep){
+      state.draft=null;
+      ensureSimpleDraft(dep);
+      rememberLocalContext({intent:'create_order',department:dep.name,company:'',material:'',orderRef:''});
+      return {handled:true,text:`Nueva orden de trabajo abierta en ${dep.name}. Dime los datos y los ire completando.`};
+    }
+  }
+
+  // Abrir una OT EXISTENTE es una acción local de uso frecuente: referencia, prioridad,
+  // empresa, fase, parte de la descripción, última creada o contexto ("esa orden").
+  // Se ejecuta antes de tocar un borrador para que "abre la de mesas" nunca termine en Descripción.
+  if(iaOpenOrderIntent(raw)){
+    const found=iaFindOrderToOpen(raw);
+    if(found?.ok){
+      const opened=iaOpenExistingOrder(found.orden);
+      if(opened.ok)return {handled:true,text:`Abierta ${localOrderSummary(opened.orden)}.`};
+      return {handled:true,text:'He localizado la orden, pero no he podido abrir su ficha.'};
+    }
+    if(found?.error==='varias_coincidencias')return {handled:true,text:iaOpenAmbiguityText(found.coincidencias)};
+    return {handled:true,text:'No encuentro una orden pendiente que coincida. Puedes decirme su prioridad, referencia, empresa o parte de la descripción.'};
+  }
+
+  // Borrador abierto: guardar/imprimir y completar datos inequívocos se resuelve SIEMPRE localmente.
+  // Esto evita gastar Groq para órdenes ya visibles en el formulario.
+  const committed=await iaCommitDraftLocal(raw);
+  if(committed?.handled)return committed;
+
+  // PETICION SEMANTICA COMPLETA DE ORDEN: una sola llamada a Groq para separar intención y campos.
+  // Las respuestas cortas de un único campo siguen siendo locales. Así evitamos que frases naturales
+  // como "prepara una orden de trabajo de tres mesas..." se troceen con reglas rígidas.
+  if(activeDepartmentInfo().id==='iron' && iaNeedsSemanticOrderInterpretation(raw)){
+    if(state.draft?.kind==='iron')iaSyncDraftVisibleCore();
+    return {handled:false,semanticOrder:true};
+  }
+
+  if(state.draft?.kind==='iron'){
+    // Antes de interpretar la siguiente frase, preserva lo que YA está visible en la ficha.
+    // Así un cambio de empresa nunca borra una descripción anterior como "mesas de empaquetado".
+    iaSyncDraftVisibleCore();
+    const args=iaLocalIronArgs(raw);
+    // Una respuesta corta puede completar descripción SOLO si no es claramente otro campo.
+    const missing=iaDraftMissingIron();
+    const companyOnly=iaCompanyOnlyUtterance(raw,findCompanyMention(raw)||resolveCompany(raw.replace(/[.!?]+$/,'').trim()));
+    if(!args.descripcion && missing.includes('descripción') && iaOrderSemanticSignalCount(raw)===0 && !iaIronFieldOnlyUtterance(raw) && !companyOnly && !/\b(stock|whatsapp|prioridad|imprime|guarda|anula|borra|elimina)\b/.test(q)){
+      const candidate=raw.replace(/^\s*(?:son|es|serian|seria|descripcion|descripci\u00f3n)\s*/i,'').replace(/[.!?]+$/,'').trim();
+      if(candidate.length>=3)args.descripcion=candidate;
+    }
+    if(Object.keys(args).length){
+      const r=prepareIron(args); const out=formatToolResultLocal('preparar_orden_hierro',args,r);
+      rememberLocalContext({intent:'create_order',department:activeDepartmentInfo().name});
+      return {handled:true,text:out};
+    }
+    if(/\b(orden|trabajo|borrador)\b/.test(q)){
+      const miss=iaDraftMissingIron();
+      return {handled:true,text:miss.length?`La orden sigue abierta. Falta: ${iaShortList(miss)}.`:'La orden está completa. Puedes decir “guárdala”, “imprímela” o “guarda e imprime”.'};
+    }
+  }
+
+  // Alta sencilla de Los del Hierros: extraemos localmente empresa, cantidad, fecha, RAL, etc.
+  // También aceptamos frases telegráficas inequívocas (p.ej. "20 mesas ... mañana, PROCEED, RAL 9003, hierro negro")
+  // aunque no incluyan verbos como "necesito". Groq queda para peticiones realmente ambiguas o complejas.
+  if(activeDepartmentInfo().id==='iron'){
+    const args=iaLocalIronArgs(raw);
+    const meaningful=['empresa','cantidad','fecha_entrega','descripcion','ral','tipo_hierro','prioridad','material'].filter(k=>args[k]!==undefined&&args[k]!==''&&args[k]!==0);
+    const strongOrderData=(!!args.cantidad && (!!args.empresa || !!args.fecha_entrega) && meaningful.length>=3);
+    if((iaLooksLikeNewOrder(raw)||strongOrderData) && meaningful.length>=2){
+      const r=prepareIron(args); const out=formatToolResultLocal('preparar_orden_hierro',args,r);
+      rememberLocalContext({intent:'create_order',department:activeDepartmentInfo().name});
+      return {handled:true,text:out};
+    }
+  }
+
+  // Confirmaciones y cancelaciones de una acción ya preparada: cero llamadas al modelo.
+  // La puntuación que añade voz/Whisper (por ejemplo "Sí.") nunca debe forzar una llamada a Groq.
+  if(state.pendingAction && positiveReply(raw)){
+    const type=state.pendingAction.type;
+    const r=await confirmPending();
+    if(!r?.ok)return {handled:true,text:r?.mensaje||'No he podido completar la confirmación.'};
+    if(type==='cancel_order')return {handled:true,text:`Solicitud de anulación registrada para ${r.referencia}.`};
+    if(type==='cancel_orders'){
+      const refs=Array.isArray(r.referencias)?r.referencias:[];
+      const fail=Array.isArray(r.fallidas)?r.fallidas:[];
+      if(!refs.length)return {handled:true,text:'No he podido solicitar la anulación de las órdenes seleccionadas.'};
+      return {handled:true,text:`Solicitudes de anulación registradas para ${refs.length} órdenes: ${refs.join(', ')}.${fail.length?` No se pudieron tramitar: ${fail.join(', ')}.`:''}`};
+    }
+    const ref=r.orden?.referencia||'';
+    return {handled:true,text:`Orden ${ref||''} guardada correctamente.`.replace(/\s+/g,' ').trim()};
+  }
+  if(state.pendingAction && negativeReply(raw)){
+    cancelPending();
+    return {handled:true,text:'Acción cancelada. No he guardado cambios.'};
+  }
+  // Si el usuario pregunta "¿qué?", "¿qué confirmo?" o similar durante una confirmación,
+  // explicamos la acción pendiente localmente y conservamos el contexto. Cero llamadas a Groq.
+  if(state.pendingAction && /^(que|que confirmo|que quieres decir|a que te refieres|como|cual)(\s|$)/.test(q)){
+    const p=state.pendingAction;
+    if(p.type==='cancel_order'){
+      return {handled:true,text:`Te estoy pidiendo confirmar si quieres solicitar la anulación de ${p.reference||'esa orden'}. Responde sí o no.`};
+    }
+    if(p.type==='cancel_orders'){
+      const refs=Array.isArray(p.references)?p.references:[];
+      return {handled:true,text:`Te estoy pidiendo confirmar la anulación de ${refs.length} órdenes${refs.length?`: ${refs.join(', ')}`:''}. Responde sí o no.`};
+    }
+    if(p.type==='save_iron'||p.type==='save_department'){
+      return {handled:true,text:'Te estoy pidiendo confirmar si quieres guardar la orden que acabamos de preparar. Responde sí o no.'};
+    }
+    return {handled:true,text:'Hay una acción pendiente de confirmación. Responde sí para ejecutarla o no para cancelarla.'};
+  }
+
+  // Cambios de prioridad inequívocos se resuelven LOCALMENTE, sin gastar Groq.
+  // Ej.: "la de prioridad 4 pasa a prioridad 1" o, tras enfocarla, "que sea prioridad 1".
+  const priorityMove=priorityMoveFromText(raw);
+  if(priorityMove){
+    let selected=null;
+    if(priorityMove.from) selected=localOrderSelector(raw);
+    else if(priorityMove.contextRef) selected=localOrderSelector(priorityMove.contextRef);
+    if(selected?.ok){
+      const moved=await changePriorityLocal(selected,priorityMove.to);
+      if(moved.ok){
+        rememberLocalContext({intent:'order_action',orderRef:moved.referencia,department:moved.departamento,priority:moved.ahora});
+        return {handled:true,text:`${moved.referencia} ha pasado de prioridad ${moved.antes} a prioridad ${moved.ahora}. La cola visible queda renumerada sin huecos.`};
+      }
+      if(moved.error==='anulacion_pendiente')return {handled:true,text:`${moved.referencia} tiene una anulación pendiente y ya no forma parte de la cola visible.`};
+      return {handled:true,text:'He entendido el cambio de prioridad, pero no he podido aplicarlo a esa orden.'};
+    }
+    if(selected && selected.error==='no_encontrada')return {handled:true,text:'No encuentro la orden de origen en la cola visible actual. Dime su referencia o su prioridad actual.'};
+  }
+
+  // Acciones y consultas inequívocas sobre una orden identificada por referencia o prioridad.
+  // Esto evita gastar Groq en frases como "elimina la orden de prioridad 1".
+  const naturalSelection=localOrderGroupSelector(raw);
+  const hasOrderSelector=!!orderRefFromText(raw)||prioritySelectorFromText(raw)!==0||!!naturalSelection?.ok;
+  const deleteIntent=/\b(elimina|eliminar|eliminala|eliminalo|borra|borrar|borrala|borralo|anula|anular|anulala|anulalo|cancela|cancelar|cancelala|cancelalo)\b/.test(q) && (/\b(orden|trabajo|prioridad|ot)\b/.test(q)||hasOrderSelector);
+  const printIntent=/\b(imprime|imprimir|imprimela|imprimelo)\b/.test(q) && (/\b(orden|trabajo|prioridad|ot)\b/.test(q)||hasOrderSelector);
+  const orderInfoIntent=/\b(que|cual|dime|muestra|detalle|datos)\b/.test(q) && (/\b(orden|trabajo|prioridad|ot)\b/.test(q)||hasOrderSelector);
+  if(deleteIntent||printIntent||orderInfoIntent){
+    const selected=localOrderSelector(raw);
+    if(selected.ok){
+      const o=selected.orden;
+      rememberLocalContext({intent:'order_action',orderRef:o.referencia,department:o.departamento||activeDepartmentInfo().name,priority:o.prioridad||0});
+      if(deleteIntent){
+        if(o.source!=='hierro')return {handled:true,text:`He localizado ${localOrderSummary(o)}, pero la anulación automática de esta copia está habilitada solo para órdenes de Los del Hierros.`};
+        const r=prepareCancelOrder(o.referencia);
+        if(r?.ya_solicitada)return {handled:true,text:`La anulación de ${o.referencia} ya está pendiente.`};
+        if(!r?.ok)return {handled:true,text:`He localizado ${localOrderSummary(o)}, pero no he podido preparar su anulación (${r?.error||'error desconocido'}).`};
+        return {handled:true,text:`He localizado ${localOrderSummary(o)}. En este módulo eliminarla significa solicitar su anulación. ¿Confirmas que solicite la anulación?`};
+      }
+      if(printIntent){
+        const r=printOrder(o.referencia);
+        return r?.ok?{handled:true,text:`Orden ${r.referencia} enviada a impresión.`}:{handled:true,text:'No he podido abrir la impresión de esa orden.'};
+      }
+      if(orderInfoIntent){
+        const pills=(o.pills||[]).join(', ');
+        const estado=o.estado_general?` · ${o.estado_general}`:'';
+        return {handled:true,text:`${localOrderSummary(o)}${estado}${pills?` · ${pills}`:''}.`};
+      }
+    }else if(selected.error!=='sin_selector'){
+      if(selected.error==='no_encontrada'&&selected.prioridad)return {handled:true,text:`No encuentro ninguna orden pendiente con prioridad ${selected.prioridad} en ${selected.departamento||activeDepartmentInfo().name}.`};
+      if(selected.error==='varias_coincidencias')return {handled:true,text:'He encontrado varias órdenes que encajan. Indícame la referencia concreta.'};
+    }
+  }
+
+  // Consultas de fases/pills, incluido seguimiento coloquial: "¿y en fabricación?".
+  const phase=iaPhaseKey(raw);
+  if(phase && phaseQueryIntent(raw,phase)){
+    const explicit=explicitDepartmentFromText(raw);
+    const dep=explicit?.name || ((state.localContext?.intent==='phase_query'&&/^y\b/.test(q))?state.localContext.department:'') || activeDepartmentInfo().name;
+    const status=['finished','cancelled'].includes(phase)?'todos':'pendiente';
+    const r=listOrders({departamento:dep,estado:status,fase:phase,limite:50});
+    const answer=formatPhaseLocal(r,phase,raw);
+    if(answer){rememberLocalContext({intent:'phase_query',phase,department:dep});return {handled:true,text:answer};}
+  }
+
+  // Stock de material + empresa, solo cuando ambos se reconocen con alta confianza.
+  if(stockQueryIntent(raw)){
+    const company=findCompanyMention(raw), material=findMaterialMention(raw);
+    if(company&&material){
+      const r=queryStock(company.name,material), answer=formatStockLocal(r);
+      if(answer){rememberLocalContext({intent:'stock_query',company:company.name,material});return {handled:true,text:answer};}
+    }
+    if(!company&&material&&/\b(donde|que empresa|cual empresa|quien)\b/.test(q)){
+      const r=queryStockAll(material);
+      if(r.ok){
+        const rows=(r.resultados||[]).filter(x=>Number(x.libre)>0).slice(0,8);
+        const answer=rows.length?`Stock libre de ${material}: ${rows.map(x=>`${x.empresa} ${x.libre}${x.unidad?` ${x.unidad}`:''}`).join('; ')}.`:`No encuentro stock libre de ${material} en las empresas visibles.`;
+        rememberLocalContext({intent:'stock_query',material}); return {handled:true,text:answer};
+      }
+    }
+  }
+
+  // Acciones inequívocas sobre el contexto actual.
+  if(/\b(imprime|imprimir|imprimela|imprimelo)\b/.test(q)){
+    const ref=orderRefFromText(raw);
+    if(ref||state.lastCreatedOrderId){
+      const r=printOrder(ref);
+      if(r.ok){rememberLocalContext({intent:'order_action',orderRef:r.referencia});return {handled:true,text:`Orden ${r.referencia} enviada a impresión.`};}
+    }
+  }
+  // WhatsApp es una ACCION DE INTERFAZ: la IA puede razonar el contexto, pero abrir
+  // WhatsApp Web y pegar el mensaje lo ejecuta el programa local. No se delega al modelo.
+  // Así no depende de la cuota de Groq y recupera el comportamiento que ya funcionaba.
+  if(/\b(whatsapp|wasap|guasap)\b/.test(q) && (
+      /\b(prioridad|prioridades|lista|pendiente|pendientes)\b/.test(q) ||
+      /\b(prepara|preparame|envia|manda|comparte|abre|abrir)\b/.test(q)
+    )){
+    const allDepartments=/\b(?:todos|todas)\s+(?:los\s+|las\s+)?(?:sectores|departamentos)\b/.test(q)
+      || /\ba\s+todos(?:\s+los)?\s+(?:sectores|departamentos)\b/.test(q);
+    const dep=allDepartments?'*':(explicitDepartmentFromText(raw)?.name||activeDepartmentInfo().name);
+    const r=await shareWhatsapp(dep);
+    if(r.ok){
+      rememberLocalContext({intent:'whatsapp',department:r.departamento});
+      return {handled:true,text:r.todos?`He preparado para WhatsApp las prioridades de todos los sectores (${r.cantidad_departamentos} departamentos).`:`He preparado las prioridades de ${r.departamento} para WhatsApp.`};
+    }
+  }
+  if(state.draft && /\b(muestrame|muestra|ensename|abre)\b/.test(q) && /\b(borrador|hoja|orden)\b/.test(q)){
+    const r=showCurrentDraft();
+    if(r.ok)return {handled:true,text:'He abierto el borrador actual.'};
+  }
+
+  return {handled:false};
+}
+
+function selectToolsForGroq(userText){
+  const q=norm(userText); const names=new Set();
+  const add=(...xs)=>xs.forEach(x=>names.add(x));
+  if(state.pendingAction)add('confirmar_accion_pendiente','cancelar_accion_pendiente','detalle_orden');
+  if(/\b(stock|material|disponible|libre|fisico|reservado|empresa)\b/.test(q))add('consultar_stock','buscar_material_todas_empresas','listar_empresas');
+  if(/\b(orden|ordenes|trabajo|trabajos|prioridad|fase|fabricacion|pintura|almacen|entregado|preparacion|material pendiente|terminado|anulado)\b/.test(q))add('listar_ordenes','detalle_orden');
+  if(/\b(crea|crear|nueva|nuevo|haz una orden|pedido|prepara)\b/.test(q)||state.draft)add('preparar_orden_hierro','preparar_orden_departamento','mostrar_borrador_orden','confirmar_accion_pendiente','cancelar_accion_pendiente','listar_empresas','listar_departamentos');
+  if(/\b(elimina|eliminar|borra|borrar|anula|anular|cancela|cancelar)\b/.test(q))add('preparar_anulacion_orden','detalle_orden','confirmar_accion_pendiente','cancelar_accion_pendiente');
+  if(/\b(imprime|imprimir|impresion)\b/.test(q))add('imprimir_orden','detalle_orden');
+  if(/\b(whatsapp|wasap|guasap)\b/.test(q))add('compartir_prioridades_whatsapp','listar_departamentos');
+  if(/\b(departamento|departamentos)\b/.test(q))add('listar_departamentos','abrir_departamento');
+  if(names.size<2)return TOOLS;
+  const selected=TOOLS.filter(t=>names.has(t.function?.name));
+  return selected.length?selected:TOOLS;
+}
+function groqHistory(){
+  // Dos intercambios recientes bastan: borrador, acción pendiente y foco viven en state/localContext.
+  // Esto reduce tokens sin perder el contexto operativo real.
+  return state.history.slice(-4);
+}
+
+function resolveCompany(name){
+  const list=window.WorkOrders?.companies?.length?window.WorkOrders.companies:(stockSnapshot().companies||[]);
+  const q=norm(name); if(!q)return null;
+  return list.find(c=>norm(c.name)===q)||list.find(c=>norm(c.name).includes(q)||q.includes(norm(c.name)))||null;
+}
+function resolveDepartment(name){
+  const snap=deptSnapshot(); const list=snap.departments||[]; const q=norm(name);
+  if(!q){
+    const active=activeDepartmentInfo();
+    return list.find(d=>String(d.id)===String(active.id))||list.find(d=>norm(d.name)===norm(active.name))||active;
+  }
+  if(q==='hierro'||q==='hierros'||q.includes('los del hierro')) return list.find(d=>d.id==='iron')||{id:'iron',name:'Los del Hierros'};
+  return list.find(d=>norm(d.name)===q)||list.find(d=>norm(d.name).includes(q)||q.includes(norm(d.name)))||null;
+}
+function materialScore(row,q){
+  const nq=norm(q), rn=norm(row.name), rf=norm(row.family), all=`${rn} ${rf}`;
+  if(!nq)return 0; if(rn===nq)return 100; if(all===nq)return 95; if(rn.includes(nq))return 85; if(all.includes(nq))return 75;
+  const tokens=nq.split(' ').filter(Boolean); const hits=tokens.filter(t=>all.includes(t)).length; return tokens.length?Math.round(60*hits/tokens.length):0;
+}
+function queryStock(companyName,material){
+  const snap=stockSnapshot(); const company=resolveCompany(companyName);
+  if(!company) return {ok:false,error:'empresa_no_encontrada',empresas:(snap.companies||[]).map(c=>c.name)};
+  const candidates=(snap.rows||[]).filter(r=>String(r.companyId)===String(company.id)).map(r=>({...r,score:materialScore(r,material)})).filter(r=>r.score>0).sort((a,b)=>b.score-a.score||Number(b.free||0)-Number(a.free||0)).slice(0,8);
+  return {ok:true,empresa:company.name,consulta:material,resultados:candidates.map(r=>({material:r.name,familia:r.family,tipo:r.type,unidad:r.unit,fisico:Number(r.physical??r.qty??0),reservado:Number(r.reserved||0)+Number(r.assigned||0),libre:Number(r.free||0),minimo:Number(r.min||0)}))};
+}
+function queryStockAll(material){
+  const snap=stockSnapshot(); const out=[];
+  (snap.companies||[]).forEach(c=>{const q=queryStock(c.name,material); if(q.ok&&q.resultados?.length) out.push({empresa:c.name,...q.resultados[0]});});
+  return {ok:true,consulta:material,resultados:out.sort((a,b)=>Number(b.libre)-Number(a.libre))};
+}
+
+function listOrders(args){
+  args=args||{};
+  const ds=deptSnapshot();
+  const active=activeDepartmentInfo();
+  let dep=text(args.departamento);
+  let phase=iaPhaseKey(args.fase||'');
+  const status=norm(args.estado||'pendiente');
+  const company=norm(args.empresa);
+  const query=norm(args.query||args.texto||'');
+  const limit=Math.max(1,Math.min(50,Number(args.limite)||20));
+  const allDepartments=/^(\*|todos|todas|todos los departamentos)$/i.test(dep);
+
+  // Si el modelo colocó por error una fase en el campo departamento, la recuperamos
+  // semánticamente: PINTURA/FAB/ALM/ENT son pills/fases, no departamentos.
+  if(dep&&!allDepartments){
+    const explicit=resolveDepartment(dep);
+    if(!explicit){
+      const phaseFromDep=iaPhaseKey(dep);
+      if(phaseFromDep){phase=phase||phaseFromDep;dep='';}
+    }
+  }
+
+  // Regla de Dirección: si no se especifica otro departamento, se trabaja sobre
+  // el departamento que está abierto en pantalla.
+  if(!dep&&!allDepartments)dep=active.name;
+
+  const rows=[];
+  workOrders().forEach(o=>{
+    // La IA debe ver exactamente la misma cola visible que Direccion.
+    const cancelStatus=norm(o?.cancellationRequestV1?.status||'');
+    if(o?.cancellationPendingV1 || cancelStatus==='pending') return;
+    const flow=iaPhaseFlow(o);
+    const stateKey=iaWorkflowState(o);
+    rows.push({
+      source:'hierro',departamento:'Los del Hierros',id:o.id,referencia:o.reference,estado:o.status,
+      estadoFlujo:o.workflowStateV2||o.workflowState||'',estado_general:iaWorkflowLabel(stateKey),estado_clave:stateKey,
+      fases:flow,pills:phasePillsForIa(flow),prioridad:Number(o.priority)||0,empresa:o.companyName,cantidad:o.quantity,
+      entrada:o.entryDate,entrega:o.deliveryDate,descripcion:o.description,material:o.material||'',aviso:o.operationalNoticeV1||''
+    });
+  });
+  (ds.orders||[]).forEach(o=>rows.push({
+    source:'departamento',departamento:o.departmentName||'',id:o.id,referencia:o.reference,estado:o.status,
+    estado_general:norm(o.status)==='completed'?'TERMINADO':'PENDIENTE',estado_clave:norm(o.status)==='completed'?'finished':'pending',
+    fases:{fabricacion:0,pintura:0,almacen:0,entregado:0},pills:[],prioridad:Number(o.priority)||0,empresa:o.requester||'',
+    cantidad:o.quantity,entrada:o.entryDate,entrega:o.deliveryDate,descripcion:o.description,material:o.material||'',aviso:o.operationalNoticeV1||o.notice||''
+  }));
+
+  let out=rows;
+  if(!allDepartments){
+    const d=resolveDepartment(dep);
+    if(!d)return {ok:false,error:'departamento_no_encontrado',departamento_solicitado:dep,departamento_activo:active.name,departamentos:(ds.departments||[]).map(x=>x.name)};
+    out=out.filter(r=>d.id==='iron'?r.source==='hierro':norm(r.departamento)===norm(d.name));
+  }
+  if(company)out=out.filter(r=>norm(r.empresa).includes(company)||company.includes(norm(r.empresa)));
+  if(query){
+    out=out.filter(r=>{
+      const haystack=norm([r.referencia,r.empresa,r.descripcion,r.material,r.aviso,r.estado_general,r.estado_clave,(r.pills||[]).join(' ')].join(' '));
+      // Búsqueda tolerante para lenguaje natural: ignoramos conectores y palabras genéricas.
+      // Así «pendientes de instalación en obra» encuentra un aviso «pendiente de instalación en obra».
+      const stop=new Set(['que','cual','cuales','de','del','en','la','las','el','los','un','una','unos','unas','trabajo','trabajos','orden','ordenes','ot','ots','pendiente','pendientes','esta','estan','tiene','tienen']);
+      const terms=query.split(/\s+/).filter(t=>t&&!stop.has(t));
+      return terms.length ? terms.every(t=>haystack.includes(t)) : haystack.includes(query);
+    });
+  }
+  if(status&&status!=='todo'&&status!=='todos'){
+    if(status.includes('histor')||status.includes('termin'))out=out.filter(r=>['completed','finished','archived'].includes(norm(r.estado))||r.estado_clave==='finished');
+    else if(status.includes('pend'))out=out.filter(r=>norm(r.estado)==='pending');
+  }
+  if(phase){
+    out=out.filter(r=>{
+      if(['fabricacion','pintura','almacen','entregado'].includes(phase))return Number(r.fases?.[phase]||0)>0 || (phase==='fabricacion'&&r.estado_clave==='fabrication') || (phase==='pintura'&&r.estado_clave==='painting');
+      if(phase==='installing')return r.estado_clave==='installing' || /\binstal(?:acion|ar|ando)\b/.test(norm(`${r.aviso||''} ${r.descripcion||''}`));
+      if(phase==='waiting_material')return r.estado_clave==='waiting_material' || /\besperando\s+material\b/.test(norm(`${r.aviso||''} ${r.descripcion||''}`));
+      return r.estado_clave===phase;
+    });
+  }
+  out.sort((a,b)=>(a.prioridad-b.prioridad)||text(a.entrega).localeCompare(text(b.entrega)));
+  return {
+    ok:true,
+    departamento_activo:active.name,
+    departamento_consultado:allDepartments?'TODOS':dep,
+    filtro_fase:phase||'',
+    filtro_texto:query||'',
+    lectura_pills:'estado_general + pills FAB/PINT/ALM/ENT leídas de los datos reales de cada orden',
+    total:out.length,
+    ordenes:out.slice(0,limit)
+  };
+}
+function findOrder(ref){
+  const q=norm(ref); const all=listOrders({estado:'todos',limite:50,departamento:'*'}).ordenes;
+  let matches=all.filter(o=>norm(o.referencia)===q||norm(o.id)===q);
+  if(!matches.length) matches=all.filter(o=>norm(o.referencia).includes(q)||norm(o.descripcion).includes(q));
+  return matches.length===1?{ok:true,orden:matches[0]}:{ok:false,error:matches.length?'varias_coincidencias':'no_encontrada',coincidencias:matches.slice(0,8)};
+}
+
+function ensureIronDraft(){
+  if(state.draft?.kind==='iron') return state.draft;
+  window.LDHDepartments?.switchDepartment?.('iron');
+  window.WorkOrders?.openNew?.();
+  const id='ia_local_order_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
+  if($('woEditId')) $('woEditId').value=id;
+  state.draft={kind:'iron',localId:id,data:{tipo_hierro:'negro'}}; state.pendingAction=null; if($('woIronType'))$('woIronType').value='negro'; return state.draft;
+}
+function setIf(id,value){ if(value===undefined||value===null||value==='')return; const el=$(id); if(el) el.value=String(value); }
+function prepareIron(args){
+  args=enrichIronArgs(args);
+  const d=ensureIronDraft(); const data=d.data;
+  if(!data.tipo_hierro){data.tipo_hierro=($('woIronType')?.value||'negro')==='galvanizado'?'galvanizado':'negro'; if($('woIronType'))$('woIronType').value=data.tipo_hierro;}
+  try{window.WorkOrders?.openModal?.();}catch(_){ }
+  if(args.empresa!==undefined){ const c=resolveCompany(args.empresa); if(!c)return {ok:false,error:'empresa_no_encontrada',empresas:(window.WorkOrders?.companies||[]).map(x=>x.name)}; data.empresa=c.name; data.companyId=c.id; window.WorkOrders?.renderCompanyOptions?.(c.id,c.name); if($('woCompany')) $('woCompany').value=c.id; }
+  if(args.cantidad!==undefined){const q=Number(args.cantidad); if(!Number.isFinite(q)||q<1)return {ok:false,error:'cantidad_invalida'}; data.cantidad=Math.round(q); setIf('woQuantity',data.cantidad);}
+  if(args.fecha_entrega!==undefined){ if(!validIso(args.fecha_entrega))return {ok:false,error:'fecha_invalida',formato:'YYYY-MM-DD'}; data.fecha_entrega=args.fecha_entrega; setIf('woDeliveryDate',data.fecha_entrega); }
+  if(args.prioridad!==undefined){ const max=(window.WorkOrders?.sortedPending?.().length||0)+1; const n=priorityFrom(args.prioridad,max,state.currentUserText); if(!n)return {ok:false,error:'prioridad_invalida',regla:'La prioridad es la posición en la lista: 1 es la máxima/primera; el último número es la última posición.',max}; data.prioridad=n; if($('woPriority')){$('woPriority').max=String(max);$('woPriority').value=String(n);} }
+  if(args.descripcion!==undefined){
+    const visibleDescription=text(data.descripcion||$('woDescription')?.value||'').trim();
+    const explicitDescription=iaExplicitDescriptionInstruction(state.currentUserText);
+    if(!visibleDescription || explicitDescription){
+      data.descripcion=text(explicitDescription||args.descripcion);
+      setIf('woDescription',data.descripcion);
+    }
+  }
+  if(args.material!==undefined){data.material=text(args.material); setIf('woMaterial',data.material);}
+  if(args.tipo_hierro!==undefined){ const nh=norm(args.tipo_hierro); if(nh.includes('galv'))data.tipo_hierro='galvanizado'; else if(nh.includes('negro'))data.tipo_hierro='negro'; else return {ok:false,error:'tipo_hierro_invalido',opciones:['negro','galvanizado']}; if($('woIronType'))$('woIronType').value=data.tipo_hierro; }
+  if(args.imprimacion!==undefined){data.imprimacion=!!args.imprimacion; if($('woPrimer'))$('woPrimer').checked=data.imprimacion;}
+  if(args.ral!==undefined){data.ral=text(args.ral); setIf('woRal',data.ral);}
+  const missing=[]; if(!data.empresa||!resolveCompany(data.empresa))missing.push('empresa'); if(!data.cantidad)missing.push('cantidad'); if(!data.fecha_entrega)missing.push('fecha de entrega'); if(!data.prioridad)missing.push('prioridad / orden de ejecución'); if(!data.descripcion)missing.push('descripción');
+  if(!missing.length){ state.pendingAction={type:'save_iron',localId:d.localId}; }
+  return {ok:true,borrador:{...data,referencia:$('woReference')?.value||'',entrada:$('woEntryDate')?.value||todayISO()},regla_prioridad:'1 = máxima prioridad / primera posición. No es una escala 1-10.',faltan:missing,listo:missing.length===0,requiere_confirmacion:missing.length===0};
+}
+
+function ensureSimpleDraft(department){
+  if(state.draft?.kind==='department'&&state.draft.departmentId===department.id)return state.draft;
+  window.LDHDepartments?.switchDepartment?.(department.id); window.LDHDepartments?.openOrderModal?.();
+  state.draft={kind:'department',departmentId:department.id,data:{departamento:department.name}}; state.pendingAction=null; return state.draft;
+}
+function prepareDepartment(args){
+  args=args||{};
+  const dep=resolveDepartment(args.departamento||''); if(!dep||dep.id==='iron')return {ok:false,error:'departamento_no_encontrado_o_hierro',departamento_activo:activeDepartmentInfo().name,departamentos:(deptSnapshot().departments||[]).map(d=>d.name)};
+  const d=ensureSimpleDraft(dep), data=d.data;
+  if(args.fecha_entrega!==undefined){if(!validIso(args.fecha_entrega))return {ok:false,error:'fecha_invalida',formato:'YYYY-MM-DD'};data.fecha_entrega=args.fecha_entrega;setIf('ldhSimpleDeliveryDate',data.fecha_entrega);}
+  if(args.solicitante!==undefined){data.solicitante=text(args.solicitante);setIf('ldhSimpleRequester',data.solicitante);}
+  if(args.cantidad!==undefined){const q=Number(args.cantidad);if(!Number.isFinite(q)||q<1)return {ok:false,error:'cantidad_invalida'};data.cantidad=Math.round(q);setIf('ldhSimpleQuantity',data.cantidad);}
+  if(args.prioridad!==undefined){const snap=deptSnapshot();const count=(snap.orders||[]).filter(o=>o.departmentId===dep.id&&o.status==='pending').length;const max=count+1;const n=priorityFrom(args.prioridad,max,state.currentUserText);if(!n)return {ok:false,error:'prioridad_invalida',regla:'La prioridad es la posición en la lista: 1 es la máxima/primera; el último número es la última posición.',max};data.prioridad=n;if($('ldhSimplePriority')){$('ldhSimplePriority').max=String(max);$('ldhSimplePriority').value=String(n);}}
+  if(args.descripcion!==undefined){data.descripcion=text(args.descripcion);setIf('ldhSimpleDescription',data.descripcion);}
+  const missing=[];if(!data.fecha_entrega)missing.push('fecha de entrega');if(!data.cantidad)missing.push('cantidad');if(!data.prioridad)missing.push('prioridad / orden de ejecución');if(!data.descripcion)missing.push('descripción');
+  if(!missing.length)state.pendingAction={type:'save_department',departmentId:dep.id};
+  return {ok:true,borrador:{...data,referencia:$('ldhSimpleReference')?.value||'',entrada:$('ldhSimpleEntryDate')?.value||todayISO()},faltan:missing,listo:!missing.length,requiere_confirmacion:!missing.length};
+}
+
+function showCurrentDraft(){
+  if(state.draft?.kind==='iron'){
+    try{window.LDHDepartments?.switchDepartment?.('iron');window.WorkOrders?.openModal?.();}catch(_){ }
+    return {ok:true,tipo:'hierro',borrador:{...(state.draft.data||{}),referencia:$('woReference')?.value||''}};
+  }
+  if(state.draft?.kind==='department'){
+    try{const dep=resolveDepartment(state.draft.data?.departamento||'');if(dep){window.LDHDepartments?.switchDepartment?.(dep.id);window.LDHDepartments?.openOrderModal?.();}}catch(_){ }
+    return {ok:true,tipo:'departamento',borrador:{...(state.draft.data||{})}};
+  }
+  return {ok:false,error:'sin_borrador'};
+}
+
+async function confirmPending(){
+  const p=state.pendingAction; if(!p)return {ok:false,error:'sin_accion_pendiente'};
+  if(!positiveReply(state.currentUserText))return {ok:false,error:'confirmacion_explicita_necesaria',mensaje:'Pide al usuario una confirmación clara antes de guardar.'};
+  if(p.type==='save_iron'){
+    await window.WorkOrders.saveWork(); const order=(window.WorkOrders.orders||[]).find(o=>o.id===p.localId);
+    if(!order)return {ok:false,error:'no_se_pudo_verificar_guardado_local'};
+    state.lastCreatedOrderId=order.id; sessionStorage.setItem('ldh_ia_compras_last_order_id',order.id); state.draft=null; state.pendingAction=null;
+    return {ok:true,guardado:'LOCAL',orden:{id:order.id,referencia:order.reference,empresa:order.companyName,cantidad:order.quantity,entrega:order.deliveryDate,prioridad:order.priority,descripcion:order.description}};
+  }
+  if(p.type==='save_department'){
+    const before=new Set((deptSnapshot().orders||[]).map(o=>o.id)); await window.LDHDepartments.saveOrder(); await sleep(30); const snap=deptSnapshot(); const order=(snap.orders||[]).filter(o=>!before.has(o.id)&&o.departmentId===p.departmentId).sort((a,b)=>(b.createdAtMs||0)-(a.createdAtMs||0))[0];
+    state.draft=null; state.pendingAction=null; if(order){state.lastCreatedOrderId=order.id;sessionStorage.setItem('ldh_ia_compras_last_order_id',order.id);} return {ok:true,guardado:'LOCAL',orden:order||null};
+  }
+  if(p.type==='cancel_orders'){
+    const ids=Array.isArray(p.orderIds)?p.orderIds.slice():[];
+    const okRefs=[], failed=[];
+    const oldConfirm=window.confirm;
+    try{
+      window.confirm=()=>true;
+      for(const id of ids){
+        const order=(window.WorkOrders?.orders||[]).find(o=>o.id===id);
+        if(!order){failed.push(id);continue;}
+        try{
+          await window.WorkOrders.cancelOrder(order.id);
+          const updated=(window.WorkOrders?.orders||[]).find(o=>o.id===id);
+          if(updated?.cancellationPendingV1)okRefs.push(updated.reference||order.reference);else failed.push(order.reference||id);
+        }catch(_){failed.push(order.reference||id);}
+      }
+    }finally{ window.confirm=oldConfirm; }
+    state.pendingAction=null;
+    return {ok:okRefs.length>0,anulaciones:'SOLICITADAS_LOCAL',referencias:okRefs,fallidas:failed};
+  }
+  if(p.type==='cancel_order'){
+    const order=(window.WorkOrders?.orders||[]).find(o=>o.id===p.orderId);
+    if(!order){ state.pendingAction=null; return {ok:false,error:'orden_no_encontrada'}; }
+    const oldConfirm=window.confirm;
+    try{
+      window.confirm=()=>true;
+      await window.WorkOrders.cancelOrder(order.id);
+    }finally{ window.confirm=oldConfirm; }
+    const updated=(window.WorkOrders?.orders||[]).find(o=>o.id===p.orderId);
+    const ok=!!updated?.cancellationPendingV1;
+    state.pendingAction=null;
+    return ok
+      ? {ok:true,anulacion:'SOLICITADA',referencia:updated.reference,mensaje:'Solicitud de anulación registrada; queda pendiente de aprobación según el flujo del módulo.'}
+      : {ok:false,error:'no_se_pudo_solicitar_anulacion',referencia:order.reference};
+  }
+  return {ok:false,error:'accion_desconocida'};
+}
+function cancelPending(){ state.pendingAction=null; state.draft=null; try{window.WorkOrders?.closeModal?.();}catch(_){} try{document.getElementById('ldhSimpleOrderModal')?.classList.remove('open');}catch(_){} return {ok:true,cancelado:true}; }
+function resolveIronOrderForAction(ref){
+  let order=null;
+  if(ref){
+    const found=findOrder(ref);
+    if(found.ok && found.orden?.source==='hierro') order=(window.WorkOrders?.orders||[]).find(o=>o.id===found.orden.id)||null;
+    else if(!found.ok) return {ok:false,...found};
+  }
+  if(!order && state.lastCreatedOrderId) order=(window.WorkOrders?.orders||[]).find(o=>o.id===state.lastCreatedOrderId)||null;
+  if(!order) return {ok:false,error:'orden_no_encontrada'};
+  return {ok:true,order};
+}
+function prepareCancelOrder(ref){
+  const resolved=resolveIronOrderForAction(ref);
+  if(!resolved.ok) return resolved;
+  const order=resolved.order;
+  if(order.status!=='pending') return {ok:false,error:'orden_no_pendiente',referencia:order.reference,estado:order.status};
+  if(order.cancellationPendingV1) return {ok:true,ya_solicitada:true,referencia:order.reference,mensaje:'La solicitud de anulación ya está pendiente.'};
+  state.pendingAction={type:'cancel_order',orderId:order.id,reference:order.reference};
+  return {
+    ok:true,
+    confirmacion_necesaria:true,
+    referencia:order.reference,
+    accion:'solicitar_anulacion',
+    mensaje:'En este módulo eliminar una orden existente se gestiona como solicitud de anulación. Pide confirmación antes de ejecutarla.'
+  };
+}
+function prepareCancelOrders(selectedOrders){
+  const rows=(Array.isArray(selectedOrders)?selectedOrders:[]).filter(Boolean);
+  const valid=[];
+  for(const selected of rows){
+    if(selected.source!=='hierro')continue;
+    const real=(window.WorkOrders?.orders||[]).find(o=>o.id===selected.id);
+    if(!real||real.status!=='pending'||real.cancellationPendingV1||real.cancellationRequestV1)continue;
+    valid.push(real);
+  }
+  if(!valid.length)return {ok:false,error:'sin_ordenes_anulables'};
+  state.pendingAction={type:'cancel_orders',orderIds:valid.map(o=>o.id),references:valid.map(o=>o.reference)};
+  return {ok:true,confirmacion_necesaria:true,cantidad:valid.length,referencias:valid.map(o=>o.reference)};
+}
+function printOrder(ref){
+  let order=null; if(ref){const found=findOrder(ref); if(found.ok&&found.orden.source==='hierro') order=(window.WorkOrders.orders||[]).find(o=>o.id===found.orden.id);}
+  if(!order&&state.lastCreatedOrderId)order=(window.WorkOrders.orders||[]).find(o=>o.id===state.lastCreatedOrderId);
+  if(!order){const rows=(window.WorkOrders.orders||[]).slice().sort((a,b)=>(b.createdAtMs||0)-(a.createdAtMs||0));order=rows[0];}
+  if(!order)return {ok:false,error:'orden_no_encontrada'}; window.WorkOrders.printExisting(order.id); return {ok:true,referencia:order.reference};
+}
+async function shareWhatsapp(departmentName){
+  const requested=text(departmentName||'');
+  const q=norm(requested);
+  // IMPORTANTE: norm('*') queda vacío porque '*' no es alfanumérico.
+  // Por eso comprobamos el comodín ANTES de normalizarlo; '*' significa TODOS los sectores.
+  const all=requested==='*' || /^(?:todos|todas|todos los sectores|todos los departamentos|todas las secciones|todos los sectores y departamentos)$/.test(q);
+  if(all){
+    const departments=deptSnapshot().departments||[];
+    if(!window.LDHDepartments?.shareAllPending)return {ok:false,error:'compartir_todos_no_disponible'};
+    await window.LDHDepartments.shareAllPending();
+    return {ok:true,todos:true,departamento:'todos los sectores',cantidad_departamentos:departments.length,accion:'WhatsApp preparado con todos los sectores.'};
+  }
+  const dep=resolveDepartment(requested);
+  if(!dep)return {ok:false,error:'departamento_no_encontrado',departamentos:(deptSnapshot().departments||[]).map(d=>d.name)};
+  window.LDHDepartments.switchDepartment(dep.id);
+  await sleep(50);
+  await window.LDHDepartments.sharePending();
+  return {ok:true,todos:false,departamento:dep.name,accion:'WhatsApp preparado/abierto; si el navegador bloquea la ventana, la lista queda copiada.'};
+}
+
+const TOOLS=[
+ {type:'function',function:{name:'listar_empresas',description:'Lista las empresas reales disponibles en Stock.',parameters:{type:'object',properties:{},additionalProperties:false}}},
+ {type:'function',function:{name:'consultar_stock',description:'Consulta stock real de un material en una empresa: fisico, reservado y libre. Usa siempre esta herramienta para preguntas de disponibilidad.',parameters:{type:'object',properties:{empresa:{type:'string'},material:{type:'string'}},required:['empresa','material'],additionalProperties:false}}},
+ {type:'function',function:{name:'buscar_material_todas_empresas',description:'Compara un material en todas las empresas reales.',parameters:{type:'object',properties:{material:{type:'string'}},required:['material'],additionalProperties:false}}},
+ {type:'function',function:{name:'listar_departamentos',description:'Lista departamentos reales y el departamento activo.',parameters:{type:'object',properties:{},additionalProperties:false}}},
+ {type:'function',function:{name:'listar_ordenes',description:'Lista órdenes reales/locales. Si no se indica departamento, consulta SIEMPRE el departamento activo en pantalla. Lee el estado general y las pills reales FAB/PINT/ALM/ENT. Para preguntas como "qué órdenes están en pintura/fabricación/almacén/entregadas", usa fase; NO trates esas palabras como departamentos.',parameters:{type:'object',properties:{departamento:{type:'string',description:'Departamento explícito. Omitir = departamento activo. Usa * solo si el usuario pide todos los departamentos.'},estado:{type:'string',description:'pendiente, historico o todos'},fase:{type:'string',description:'Fase/pill: pintura/PINT, fabricación/FAB, almacén/ALM, entregado/ENT, preparación, esperando material, instalando, terminado o anulado.'},empresa:{type:'string'},query:{type:'string',description:'Texto libre a buscar en referencia, empresa, descripción, material, aviso, estado y pills.'},limite:{type:'integer'}},additionalProperties:false}}},
+ {type:'function',function:{name:'detalle_orden',description:'Obtiene una orden concreta por referencia, id o texto identificativo.',parameters:{type:'object',properties:{referencia:{type:'string'}},required:['referencia'],additionalProperties:false}}},
+ {type:'function',function:{name:'abrir_departamento',description:'Cambia visualmente al departamento solicitado.',parameters:{type:'object',properties:{departamento:{type:'string'}},required:['departamento'],additionalProperties:false}}},
+ {type:'function',function:{name:'preparar_orden_hierro',description:'Prepara y rellena progresivamente una nueva orden de Los del Hierros. Los argumentos son parciales y se acumulan. No inventes campos omitidos.',parameters:{type:'object',properties:{empresa:{type:'string'},cantidad:{type:'number'},fecha_entrega:{type:'string',description:'YYYY-MM-DD'},prioridad:{type:'string',description:'Posición en la cola. 1 es SIEMPRE la máxima prioridad/primera posición. NO es una escala 1-10. Alta/máxima/urgente = 1; última/baja = última posición.'},descripcion:{type:'string'},material:{type:'string'},tipo_hierro:{type:'string',description:'Opcional. El módulo usa negro por defecto; envía galvanizado solo si el usuario lo pide explícitamente.'},imprimacion:{type:'boolean'},ral:{type:'string'}},additionalProperties:false}}},
+ {type:'function',function:{name:'preparar_orden_departamento',description:'Prepara una nueva orden para un departamento distinto de Los del Hierros. Si se omite departamento, usa el departamento ACTIVO en pantalla. Los datos se acumulan y no se inventan.',parameters:{type:'object',properties:{departamento:{type:'string',description:'Opcional. Omitir = departamento activo.'},fecha_entrega:{type:'string',description:'YYYY-MM-DD'},solicitante:{type:'string'},cantidad:{type:'number'},prioridad:{type:'string',description:'Posición en la cola. 1 es SIEMPRE la máxima prioridad/primera posición. NO es una escala 1-10. Alta/máxima/urgente = 1; última/baja = última posición.'},descripcion:{type:'string'}},additionalProperties:false}}},
+ {type:'function',function:{name:'mostrar_borrador_orden',description:'Muestra/reabre la hoja o formulario de la orden que se está preparando sin perder el chat.',parameters:{type:'object',properties:{},additionalProperties:false}}},
+ {type:'function',function:{name:'confirmar_accion_pendiente',description:'Guarda LOCALMENTE la orden preparada solo cuando el usuario acaba de confirmar expresamente que desea crearla/guardarla.',parameters:{type:'object',properties:{},additionalProperties:false}}},
+ {type:'function',function:{name:'cancelar_accion_pendiente',description:'Cancela un borrador o una acción todavía no ejecutada. NO sirve para anular una orden ya guardada.',parameters:{type:'object',properties:{},additionalProperties:false}}},
+ {type:'function',function:{name:'preparar_anulacion_orden',description:'Prepara la anulación de una orden YA GUARDADA de Los del Hierros. Úsala cuando el usuario diga eliminar, borrar, anular o cancelar una orden existente. No ejecuta hasta que el usuario confirme. Si omite referencia, usa la última orden creada cuando sea inequívoca.',parameters:{type:'object',properties:{referencia:{type:'string'}},additionalProperties:false}}},
+ {type:'function',function:{name:'imprimir_orden',description:'Abre la impresion de una orden por referencia. Si el usuario dice la que acabamos de crear, puede omitirse referencia.',parameters:{type:'object',properties:{referencia:{type:'string'}},additionalProperties:false}}},
+ {type:'function',function:{name:'compartir_prioridades_whatsapp',description:'Prepara/abre WhatsApp con la lista de prioridades pendientes. Si el usuario no indica otro departamento, usa el departamento ACTIVO. Si pide todos los sectores/departamentos, usa departamento="*".',parameters:{type:'object',properties:{departamento:{type:'string',description:'Opcional. Omitir = departamento activo. Usa * si pide todos los sectores/departamentos.'}},additionalProperties:false}}}
+];
+
+async function executeTool(name,args){
+  args=args||{};
+  switch(name){
+    case 'listar_empresas': {const s=stockSnapshot();return {ok:true,empresas:(s.companies||[]).map(c=>c.name)};}
+    case 'consultar_stock': return queryStock(args.empresa,args.material);
+    case 'buscar_material_todas_empresas': return queryStockAll(args.material);
+    case 'listar_departamentos': {const s=deptSnapshot();return {ok:true,activo:s.active,departamentos:(s.departments||[]).map(d=>d.name)};}
+    case 'listar_ordenes': return listOrders(args);
+    case 'detalle_orden': return findOrder(args.referencia);
+    case 'abrir_departamento': {const d=resolveDepartment(args.departamento);if(!d)return {ok:false,error:'departamento_no_encontrado'};window.LDHDepartments.switchDepartment(d.id);return {ok:true,departamento:d.name};}
+    case 'preparar_orden_hierro': return prepareIron(args);
+    case 'preparar_orden_departamento': return prepareDepartment(args);
+    case 'mostrar_borrador_orden': return showCurrentDraft();
+    case 'confirmar_accion_pendiente': return await confirmPending();
+    case 'cancelar_accion_pendiente': return cancelPending();
+    case 'preparar_anulacion_orden': return prepareCancelOrder(args.referencia||'');
+    case 'imprimir_orden': return printOrder(args.referencia||'');
+    case 'compartir_prioridades_whatsapp': return await shareWhatsapp(args.departamento);
+    default:return {ok:false,error:'herramienta_desconocida',name};
+  }
+}
+
+function iaShortList(values){return (values||[]).filter(Boolean).join(', ');}
+function iaDraftSummary(b){
+  b=b||{}; const out=[];
+  if(b.empresa && resolveCompany(b.empresa))out.push(`empresa ${b.empresa}`);
+  if(b.departamento)out.push(`departamento ${b.departamento}`);
+  if(b.cantidad)out.push(`${b.cantidad} ud.`);
+  if(b.descripcion)out.push(b.descripcion);
+  if(b.fecha_entrega)out.push(`entrega ${fmtDate(b.fecha_entrega)}`);
+  if(b.prioridad)out.push(`prioridad ${b.prioridad}`);
+  if(b.tipo_hierro)out.push(`hierro ${b.tipo_hierro}`);
+  if(b.ral){const rv=text(b.ral);out.push(/^RAL\b/i.test(rv)?rv:`RAL ${rv}`);}
+  if(b.material)out.push(`material ${b.material}`);
+  return out.join(' · ');
+}
+function iaToolError(name,r){
+  const e=text(r?.error||'error');
+  if(e==='empresa_no_encontrada')return `No encuentro esa empresa. Disponibles: ${iaShortList(r.empresas)}.`;
+  if(e==='departamento_no_encontrado'||e==='departamento_no_encontrado_o_hierro')return `No encuentro ese departamento. Disponibles: ${iaShortList(r.departamentos)}.`;
+  if(e==='no_encontrada')return 'No encuentro una orden que coincida con esa referencia o descripción.';
+  if(e==='varias_coincidencias')return `Hay varias coincidencias: ${iaShortList((r.coincidencias||[]).map(x=>x.referencia||x.descripcion))}. Indícame cuál.`;
+  if(e==='cantidad_invalida')return 'La cantidad no es válida. Indícame una cantidad mayor que cero.';
+  if(e==='fecha_invalida')return 'La fecha no es válida. Indícame la fecha de entrega.';
+  if(e==='prioridad_invalida')return `La prioridad es la posición de ejecución: 1 es la máxima. ${r.max?`Ahora hay hasta ${r.max} posiciones posibles.`:''}`.trim();
+  if(e==='tipo_hierro_invalido')return 'Indica si el hierro es negro o galvanizado.';
+  if(e==='sin_borrador')return 'No hay ninguna orden en preparación ahora mismo.';
+  if(e==='sin_accion_pendiente')return 'No hay ninguna acción pendiente de confirmación.';
+  return `No he podido completar la operación (${e}).`;
+}
+function formatToolResultLocal(name,args,r){
+  if(!r||r.ok===false)return iaToolError(name,r||{});
+  switch(name){
+    case 'listar_empresas': return `Empresas disponibles: ${iaShortList(r.empresas)}.`;
+    case 'listar_departamentos': return `Departamento activo: ${r.activo?.name||r.activo||activeDepartmentInfo().name}. Departamentos: ${iaShortList(r.departamentos)}.`;
+    case 'consultar_stock': {
+      const rows=r.resultados||[]; if(!rows.length)return `No encuentro ${args.material||'ese material'} en ${r.empresa||args.empresa||'esa empresa'}.`;
+      return rows.slice(0,4).map(x=>`${r.empresa}: ${x.material} · físico ${x.fisico} · reservado ${x.reservado} · libre ${x.libre} ${x.unidad||''}`.trim()).join('\n');
+    }
+    case 'buscar_material_todas_empresas': {
+      const rows=r.resultados||[]; if(!rows.length)return `No encuentro ${args.material||'ese material'} en las empresas de Stock.`;
+      return rows.map(x=>`${x.empresa}: ${x.material} · libre ${x.libre} ${x.unidad||''}`).join('\n');
+    }
+    case 'listar_ordenes': {
+      const rows=r.ordenes||[]; const dep=r.departamento_consultado||r.departamento_activo||activeDepartmentInfo().name;
+      const phase=r.filtro_fase||text(args.fase);
+      const query=r.filtro_texto||text(args.query);
+      if(!rows.length){
+        if(phase)return `No hay trabajos en ${phaseHumanLabel(iaPhaseKey(phase)||phase)} en ${dep}.`;
+        if(query)return `No hay trabajos en ${dep} que coincidan con «${query}».`;
+        return `No hay trabajos que coincidan en ${dep}.`;
+      }
+      const head=phase
+        ?`Hay ${r.total} trabajo${r.total===1?'':'s'} en ${phaseHumanLabel(iaPhaseKey(phase)||phase)} en ${dep}:`
+        :(query?`Hay ${r.total} trabajo${r.total===1?'':'s'} en ${dep} que coinciden con «${query}»:`:`Hay ${r.total} trabajo${r.total===1?'':'s'} en ${dep}:`);
+      const lines=rows.slice(0,10).map(o=>{
+        const pills=(o.pills||[]).join(', '); return `${o.referencia} · ${o.estado_general||o.estado||''}${pills?` · ${pills}`:''}`;
+      });
+      return [head,...lines].join('\n');
+    }
+    case 'detalle_orden': {
+      const o=r.orden; return `${o.referencia} · prioridad ${o.prioridad||'—'} · ${o.empresa||'—'} · ${o.cantidad||'—'} ud. · ${o.descripcion||'—'} · ${o.estado_general||o.estado||'—'}${(o.pills||[]).length?` · ${(o.pills||[]).join(', ')}`:''}.`;
+    }
+    case 'abrir_departamento': return `He abierto ${r.departamento}.`;
+    case 'preparar_orden_hierro':
+    case 'preparar_orden_departamento': {
+      const summary=iaDraftSummary(r.borrador);
+      if(r.listo)return `Orden preparada: ${summary}. ¿Confirmas que la guarde?`;
+      return `${summary?`He preparado: ${summary}. `:''}Falta: ${iaShortList(r.faltan)}.`;
+    }
+    case 'mostrar_borrador_orden': return `He abierto el borrador actual${r.borrador?`: ${iaDraftSummary(r.borrador)}`:''}.`;
+    case 'confirmar_accion_pendiente': {
+      if(r.anulacion)return `Solicitud de anulación registrada para ${r.referencia}.`;
+      const ref=r.orden?.referencia||''; return `Orden ${ref} guardada correctamente.`.replace(/\s+/g,' ').trim();
+    }
+    case 'cancelar_accion_pendiente': return 'Acción cancelada. No he guardado cambios.';
+    case 'preparar_anulacion_orden': {
+      if(r.ya_solicitada)return `La anulación de ${r.referencia} ya está pendiente.`;
+      return `He localizado ${r.referencia}. En este módulo eliminarla significa solicitar su anulación. ¿Confirmas que solicite la anulación?`;
+    }
+    case 'imprimir_orden': return `Orden ${r.referencia} enviada a impresión.`;
+    case 'compartir_prioridades_whatsapp': return `He preparado las prioridades de ${r.departamento} para WhatsApp.`;
+    default:return 'He completado la operación.';
+  }
+}
+function groqRateSummary(details,msg){
+  const rl=details?.rateLimit||{};
+  const provider=text(details?.providerMessage||msg);
+  const parts=[];
+  if(rl.remainingTokens||rl.limitTokens)parts.push(`tokens ${rl.remainingTokens||'?'} / ${rl.limitTokens||'?'}`);
+  if(rl.remainingRequests||rl.limitRequests)parts.push(`peticiones ${rl.remainingRequests||'?'} / ${rl.limitRequests||'?'}`);
+  if(rl.resetTokens)parts.push(`reinicio tokens ${rl.resetTokens}`);
+  if(rl.resetRequests)parts.push(`reinicio peticiones ${rl.resetRequests}`);
+  if(rl.retryAfter)parts.push(`Retry-After ${rl.retryAfter}s`);
+  return {provider,parts};
+}
+
+function iaGroqLiveData(userText){
+  const raw=text(userText), q=norm(raw);
+  const active=activeDepartmentInfo();
+  const all=listOrders({estado:'todos',limite:50,departamento:'*'});
+  const orders=(all?.ordenes||[]).map(o=>({
+    ref:o.referencia||'',prioridad:Number(o.prioridad)||0,departamento:o.departamento||'',empresa:o.empresa||'',
+    cantidad:Number(o.cantidad)||0,entrada:o.entrada||'',entrega:o.entrega||'',estado:o.estado_general||o.estado||'',
+    estado_clave:o.estado_clave||'',pills:o.pills||[],descripcion:o.descripcion||'',material:o.material||'',aviso:o.aviso||''
+  }));
+
+  // Para consultas de stock no volcamos todo el catálogo a Groq: enviamos candidatos reales
+  // elegidos por coincidencia de palabras con la pregunta. Groq razona sobre ellos, no inventa datos.
+  let stock=[];
+  const stockSignal=/\b(stock|material|materiales|disponible|disponibles|libre|libres|fisico|fisico|fisicos|reservado|reservados|queda|quedan|tenemos|hay)\b/.test(q);
+  if(stockSignal){
+    const stop=new Set(['que','cual','cuales','cuanto','cuantos','cuantas','hay','tenemos','queda','quedan','stock','material','materiales','disponible','disponibles','libre','libres','fisico','fisicos','reservado','reservados','en','de','del','la','las','el','los','una','uno','un','para','por','empresa','empresas','trabajo','trabajos','esperando','pendiente','pendientes']);
+    const tokens=q.split(/\s+/).filter(t=>t.length>=2&&!stop.has(t));
+    const snap=stockSnapshot();
+    stock=(snap.rows||[]).map(r=>{
+      const hay=norm(`${r.name||''} ${r.family||''}`);
+      const score=tokens.reduce((n,t)=>n+(hay.includes(t)?1:0),0);
+      const company=(snap.companies||[]).find(c=>String(c.id)===String(r.companyId));
+      return {score,empresa:company?.name||'',material:r.name||'',familia:r.family||'',unidad:r.unit||'',fisico:Number(r.physical??r.qty??0),reservado:Number(r.reserved||0)+Number(r.assigned||0),libre:Number(r.free||0),minimo:Number(r.min||0)};
+    }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score||b.libre-a.libre).slice(0,24).map(({score,...x})=>x);
+  }
+
+  return {
+    hoy:todayISO(),dia:currentDayName(),departamento_activo:active.name,
+    ordenes_reales:orders,
+    stock_candidatos_reales:stock,
+    nota:'Los datos anteriores son una instantánea REAL tomada justo antes de esta consulta. Para órdenes, razona semánticamente sobre referencia, prioridad, empresa, descripción, material, aviso, estado y pills. No inventes filas que no estén aquí.'
+  };
+}
+
+function plannerPrompt(userText){
+  const companies=(stockSnapshot().companies||[]).map(c=>c.name).join(', ')||'cargando';
+  const snap=deptSnapshot();
+  const departments=(snap.departments||[]).map(d=>d.name).join(', ')||'cargando';
+  const active=activeDepartmentInfo();
+  const draft=state.draft?JSON.stringify(state.draft.data||{}):'ninguno';
+  const focus=JSON.stringify(state.localContext||{});
+  const live=JSON.stringify(iaGroqLiveData(userText||state.currentUserText));
+  return `Eres el CEREBRO principal del módulo Stock informativo / Compras de SKLUM.
+Tu trabajo NO es encajar frases en reglas rígidas: comprende la petición completa en español coloquial, usa el contexto conversacional y RAZONA sobre los datos reales que el programa acaba de leer.
+Hoy=${todayISO()} (${currentDayName()}); departamento activo=${active.name}; empresas=${companies}; departamentos=${departments}; borrador=${draft}; foco=${focus}.
+
+DATOS_REALES_AHORA=${live}
+
+SALIDA: SOLO líneas clave=valor. Primera línea obligatoria: intent=<intención>. Sin JSON ni explicaciones fuera del protocolo.
+Intenciones: query_stock, search_stock_all, list_orders, order_detail, create_order, cancel_order, print_order, whatsapp_priorities, open_department, list_companies, list_departments, show_draft, general.
+Campos admitidos: departamento, empresa, cantidad, fecha_entrega, prioridad, descripcion, material, tipo_hierro, imprimacion, ral, solicitante, estado, fase, query, limite, referencia, reply.
+Para reply usa UNA sola línea; si necesitas separar varios resultados escribe " · " o la secuencia \\n.
+
+REGLA CENTRAL PARA CONSULTAS:
+- Si la pregunta puede responderse con DATOS_REALES_AHORA, usa intent=general y reply=<respuesta razonada>. Esa respuesta la redactas TÚ, no un formateador local.
+- Si el usuario NO nombra otro departamento, filtra las órdenes al departamento ACTIVO (${active.name}). Solo mezcla departamentos cuando el usuario lo pida.
+- Para preguntas de órdenes, busca semánticamente en TODOS los campos de cada orden: referencia, empresa, descripción, material, aviso, estado, estado_clave y pills. No dependas de una coincidencia literal del nombre de una fase.
+- Ejemplo importante: "pendiente de instalación en obra" puede ser un AVISO de una orden terminada; NO lo conviertas automáticamente en fase=installing. Si aparece en aviso/descripcion, esa orden sí coincide.
+- "esperando material" sí es un estado operativo conocido: identifica las órdenes cuyo estado/estado_clave corresponda a waiting_material, pero si la frase aparece además en aviso o descripción, tenlo en cuenta.
+- Si una orden tiene estado general EN FABRICACIÓN y PINT > 0, puedes explicar que parte ya está en pintura.
+- Si el usuario pregunta "cuáles", "qué trabajos", "cuántos", "qué queda", "qué está pendiente", "qué lleva X", "qué tiene aviso X", "qué vence", "qué es prioritario", etc., prefiere responder directamente desde DATOS_REALES_AHORA con intent=general.
+- No digas que no hay coincidencias hasta revisar aviso y descripción además del estado.
+
+REGLAS DE ACCIÓN:
+- Si el usuario no nombra otro departamento, usa el ACTIVO (${active.name}).
+- En Los del Hierros: pintura/fabricación/almacén/entregado son FASES, no departamentos.
+- Si el usuario pide preparar/mandar/compartir prioridades por WhatsApp, la intención correcta es whatsapp_priorities. NUNCA respondas que no tienes contactos o que no puedes usar WhatsApp: el programa dispone de una acción local que abre WhatsApp Web con el texto ya preparado.
+- Prioridad es POSICIÓN: 1=primera/máxima.
+- Convierte números escritos: tres=3, veinte=20, etc. Convierte fechas coloquiales a YYYY-MM-DD.
+- En create_order, tipo de hierro es negro por defecto: solo envía tipo_hierro si el usuario pide negro/galvanizado explícitamente.
+- descripcion contiene SOLO el trabajo. Nunca metas "prepara una orden", empresa, cantidad, prioridad, fecha, RAL, tipo de hierro o material. Si ya existe descripción, no la cambies salvo "Trabajo...", "Descripción...", "El trabajo es..." o "Cambia el trabajo a...".
+- No inventes campos ausentes.
+- "esa", "la anterior", "la que acabamos de crear" puede dejar referencia vacía para usar contexto local.
+- Para stock, si DATOS_REALES_AHORA contiene candidatos suficientes puedes responder con intent=general. Si necesitas una consulta exacta, usa query_stock o search_stock_all con los campos adecuados.
+- Si es conversación general no operativa: intent=general y reply=<respuesta breve>.
+- NUNCA afirmes un dato del taller que no esté en DATOS_REALES_AHORA o que vaya a ser validado por una intención/herramienta local.`;
+}
+function parsePlannerPlan(content){
+  let raw=text(content).replace(/^```(?:text|txt|ini|yaml|json)?\s*/i,'').replace(/\s*```$/,'').trim();
+  if(!raw)return null;
+
+  // Compatibilidad: si un modelo devuelve JSON pese a pedir el protocolo de líneas, lo aceptamos.
+  if(raw.startsWith('{')){
+    try{return JSON.parse(raw);}catch(_){
+      const a=raw.indexOf('{'), b=raw.lastIndexOf('}');
+      if(a>=0&&b>a){try{return JSON.parse(raw.slice(a,b+1));}catch(__){}}
+    }
+  }
+
+  const plan={intent:'',args:{}};
+  const allowed=new Set(['departamento','empresa','cantidad','fecha_entrega','prioridad','descripcion','material','tipo_hierro','imprimacion','ral','solicitante','estado','fase','query','limite','referencia','reply']);
+  for(const original of raw.split(/\r?\n/)){
+    const line=original.trim().replace(/^[-*]\s*/,'');
+    if(!line)continue;
+    const m=line.match(/^([a-zA-Z_áéíóúÁÉÍÓÚñÑ]+)\s*[=:]\s*(.*)$/);
+    if(!m)continue;
+    const key=norm(m[1]).replace(/\s+/g,'_');
+    let value=text(m[2]).replace(/^['"]|['"]$/g,'');
+    if(key==='intent'){plan.intent=value;continue;}
+    if(key==='reply'){plan.reply=value.replace(/\\n/g,'\n');continue;}
+    if(!allowed.has(key))continue;
+    if(key==='cantidad'||key==='prioridad'||key==='limite'){
+      const n=Number(String(value).replace(',','.'));
+      if(Number.isFinite(n))value=n;
+      else {
+        const words=iaSpanishCardinal(value);
+        if(words>0)value=words;
+      }
+    }else if(key==='imprimacion'){
+      value=/^(1|si|sí|true|yes)$/i.test(value);
+    }
+    plan.args[key]=value;
+  }
+  return plan.intent?plan:null;
+}
+async function executePlanner(plan){
+  plan=plan||{}; const args=plan.args&&typeof plan.args==='object'?plan.args:{};
+  const intent=norm(plan.intent||'');
+  let name='', result=null;
+  if(intent==='query stock'||intent==='query_stock'||intent==='consultar stock')name='consultar_stock';
+  else if(intent==='search stock all'||intent==='search_stock_all'||intent==='buscar stock todas')name='buscar_material_todas_empresas';
+  else if(intent==='list orders'||intent==='list_orders'||intent==='listar ordenes')name='listar_ordenes';
+  else if(intent==='order detail'||intent==='order_detail'||intent==='detalle orden')name='detalle_orden';
+  else if(intent==='cancel order'||intent==='cancel_order'||intent==='anular orden')name='preparar_anulacion_orden';
+  else if(intent==='print order'||intent==='print_order'||intent==='imprimir orden')name='imprimir_orden';
+  else if(intent==='whatsapp priorities'||intent==='whatsapp_priorities'||intent==='whatsapp')name='compartir_prioridades_whatsapp';
+  else if(intent==='open department'||intent==='open_department'||intent==='abrir departamento')name='abrir_departamento';
+  else if(intent==='list companies'||intent==='list_companies'||intent==='listar empresas')name='listar_empresas';
+  else if(intent==='list departments'||intent==='list_departments'||intent==='listar departamentos')name='listar_departamentos';
+  else if(intent==='show draft'||intent==='show_draft'||intent==='mostrar borrador')name='mostrar_borrador_orden';
+  else if(intent==='create order'||intent==='create_order'||intent==='crear orden'){
+    if(args.cantidad!==undefined && !Number.isFinite(Number(args.cantidad))){const n=iaSpanishCardinal(args.cantidad);if(n>0)args.cantidad=n;}
+    if(args.prioridad!==undefined && !Number.isFinite(Number(args.prioridad))){const n=iaSpanishCardinal(args.prioridad);if(n>0)args.prioridad=n;}
+    // Cortafuegos semántico: una fecha coloquial nunca puede convertirse en empresa.
+    const spokenDate=iaNaturalDate(state.currentUserText);
+    const explicitCompanyInText=!!findCompanyMention(state.currentUserText)||/\b(?:empresa(?:\s+receptora)?|cliente)\b/.test(norm(state.currentUserText));
+    if(spokenDate && args.fecha_entrega===undefined)args.fecha_entrega=spokenDate;
+    if(args.empresa!==undefined && !resolveCompany(args.empresa) && spokenDate && !explicitCompanyInText)delete args.empresa;
+    if(args.ral!==undefined){const m=text(args.ral).match(/\d{3,4}/);if(m)args.ral=`RAL ${m[0]}`;}
+    if(args.descripcion!==undefined){
+      const existingDescription=text(state.draft?.data?.descripcion||$('woDescription')?.value||'').trim();
+      const explicitDescription=iaExplicitDescriptionInstruction(state.currentUserText);
+      // Groq puede inferir la descripcion al crear una orden si aun esta vacia. Si ya existe,
+      // queda protegida y solo una instruccion explicita de Trabajo/Descripcion puede cambiarla.
+      if(existingDescription && !explicitDescription){
+        delete args.descripcion;
+      }else{
+        const sourceDescription=explicitDescription||args.descripcion;
+        const clean=iaSanitizeSemanticDescription(sourceDescription,args);
+        if(clean)args.descripcion=clean; else delete args.descripcion;
+      }
+    }
+    const dep=resolveDepartment(args.departamento||'')||activeDepartmentInfo();
+    name=(dep?.id==='iron'||norm(dep?.name).includes('hierro'))?'preparar_orden_hierro':'preparar_orden_departamento';
+  }
+  else if(intent==='general')return text(plan.reply)||'¿Qué necesitas hacer?';
+  else return text(plan.reply)||'No he podido interpretar esa petición con seguridad. Dímela de otra forma.';
+
+  result=await executeTool(name,args);
+  return formatToolResultLocal(name,args,result);
+}
+
+function systemPrompt(){
+  const companies=(stockSnapshot().companies||[]).map(c=>c.name).join(', ')||'cargando';
+  const snap=deptSnapshot();
+  const departments=(snap.departments||[]).map(d=>d.name).join(', ')||'cargando';
+  const active=activeDepartmentInfo();
+  return `Eres el asistente de Direccion del modulo Stock informativo / Compras de SKLUM. ENTORNO: ${IS_PRODUCTION?'PRODUCCION REAL conectada a Firebase':'COPIA LOCAL DE PRUEBAS sin escritura en Firebase'}.
+Fecha local de hoy: ${todayISO()} (${currentDayName()}).
+Empresas que el programa conoce ahora: ${companies}.
+Departamentos que el programa conoce ahora: ${departments}.
+DEPARTAMENTO ACTIVO EN PANTALLA: ${active.name}.
+CONTEXTO LOCAL: ${state.pendingAction?`acción pendiente ${state.pendingAction.type}`:'sin acción pendiente'}; ${state.draft?`borrador ${state.draft.kind} ${JSON.stringify(state.draft.data||{})}`:'sin borrador'}; último foco ${JSON.stringify(state.localContext||{})}.
+
+OBJETIVO: entender lenguaje natural y coloquial en espanol y facilitar el trabajo de Direccion. No eres un ejecutor de frases prefijadas: razona sobre la intencion completa, usa contexto conversacional y las herramientas del programa.
+
+REGLAS DE VERDAD:
+- Para cualquier dato del sistema (stock, empresas, ordenes, prioridades, departamentos) DEBES usar herramientas. No inventes ni recuerdes cantidades de turnos anteriores si pueden haber cambiado.
+- Si una herramienta contradice tu memoria, manda la herramienta.
+- No inventes nombres de empresas, materiales, referencias, fechas, prioridades ni cantidades.
+- Comprende referencias conversacionales como "esa", "la anterior", "la que acabamos de crear" usando el contexto y las herramientas.
+
+CONTEXTO DE PANTALLA Y PILLS:
+- El DEPARTAMENTO ACTIVO es el destino y contexto por defecto de TODAS las consultas y acciones sobre órdenes. Si el usuario NO nombra otro departamento de forma explícita, NO preguntes por departamento y NO cambies de departamento: trabaja con ${active.name}.
+- En Los del Hierros, "Pintura", "Fabricación", "Almacén" y "Entregado" son FASES/PILLS de las órdenes (PINT/FAB/ALM/ENT), NO departamentos. "EN PINTURA" y "EN FABRICACIÓN" son pills de estado general.
+- Para saber qué órdenes están en una fase usa listar_ordenes con el campo fase. La herramienta devuelve estado_general y las pills reales FAB/PINT/ALM/ENT con sus cantidades. DEBES leer esos datos; no deduzcas la fase solo por el nombre del departamento.
+- Si una orden tiene estado_general EN FABRICACIÓN pero también PINT > 0, explica ambas cosas cuando sea relevante: parte de la orden ya está en Pintura aunque su estado general siga siendo Fabricación.
+- Solo interpreta una palabra como nombre de departamento si coincide con un departamento real o el usuario dice explícitamente "departamento X".
+
+ORDENES NUEVAS:
+- Si el usuario no indica otro departamento, la nueva orden va al DEPARTAMENTO ACTIVO (${active.name}). No preguntes el departamento.
+- Si el departamento activo/destino es Los del Hierros usa preparar_orden_hierro. Puedes llamarla con datos parciales: el programa mantiene el borrador.
+- Si el departamento activo/destino es otro, usa preparar_orden_departamento; puedes omitir departamento para que la herramienta use el activo.
+- PRIORIDAD NO ES UNA ESCALA 1-10. Es la POSICION REAL EN LA LISTA. 1 = máxima prioridad / primera en ejecutarse. 2 = segunda. La última posición tiene el número más alto existente. Si el usuario dice prioridad alta, máxima o urgente, usa 1. Si dice baja/última, usa la última posición. Nunca digas que 10 es la máxima.
+- Si el usuario menciona un RAL o un lacado (por ejemplo RAL 7016, lacado 9005), DEBES conservarlo y enviarlo en el campo ral. Nunca lo omitas del resumen.
+- Son necesarios antes de crear: empresa, cantidad, fecha de entrega, prioridad/orden de ejecucion y descripcion. El tipo de hierro NO se pregunta: negro es el valor por defecto del módulo; solo cámbialo a galvanizado si el usuario lo pide explícitamente. Material previsto, imprimacion y RAL son opcionales.
+- Si falta algo, pregunta SOLO por lo que falta; no reinicies la orden ni vuelvas a pedir datos ya aportados.
+- Interpreta fechas coloquiales (manana, viernes que viene, dentro de tres dias) respecto a la fecha de hoy y envia fecha_entrega en YYYY-MM-DD. Si hay ambiguedad real, pregunta.
+- Para otros departamentos usa preparar_orden_departamento. Requeridos: departamento, fecha de entrega, cantidad, prioridad y descripcion; solicitante es opcional.
+- Cuando la herramienta indique listo=true, resume TODOS los datos aportados, incluido RAL/imprimación/material si existen, y pide confirmacion antes de guardar. Aunque el primer mensaje dijera "crea", en esta R1 local SIEMPRE pide confirmacion final.
+- Si el usuario confirma claramente en el turno siguiente, usa confirmar_accion_pendiente. Si cancela, usa cancelar_accion_pendiente.
+
+ACCIONES:
+- "muéstramela / enséñame la hoja / abre el borrador" -> mostrar_borrador_orden.
+- "imprime la orden que acabamos de crear" -> imprimir_orden sin referencia.
+- Si el usuario dice "elimina", "borra", "anula" o "cancela" una ORDEN YA GUARDADA, usa preparar_anulacion_orden. En este módulo no se borra físicamente una orden: se tramita como SOLICITUD DE ANULACIÓN. Explica eso brevemente y pide confirmación. Si confirma en el turno siguiente, usa confirmar_accion_pendiente. NUNCA respondas que no existe herramienta para hacerlo.
+- cancelar_accion_pendiente se usa solo para abandonar un borrador o una acción aún no ejecutada; no para una orden ya guardada.
+- "manda/envia prioridades por WhatsApp" -> compartir_prioridades_whatsapp. Si no nombra otro departamento, usa el ACTIVO; si lo nombra, usa ese. Si dice "todos los sectores/departamentos", usa departamento="*" y nunca lo reduzcas al activo.
+- ${IS_PRODUCTION?'Las escrituras confirmadas afectan al sistema real en Firebase. Nunca afirmes que se ha guardado, cambiado o anulado algo si la herramienta no lo confirma y mantén la confirmación previa en acciones de escritura.':'Las escrituras de esta copia de prueba son solo locales y no se publican en Firebase.'}
+
+RESPUESTAS: breves, claras y orientadas a la accion. Si la herramienta devuelve varias coincidencias ambiguas, pregunta cual. No afirmes que hiciste algo si la herramienta no lo confirma.`;
+}
+
+function iaSimpleDraftFieldCommand(value){
+  const q=norm(value);
+  if(!state.draft||!q)return false;
+  // Respuestas de fecha cortas ("mañana", "para mañana", "viernes que viene"...)
+  // se aplican directamente al borrador y nunca se envían a Groq como si fueran una empresa.
+  if(state.draft?.kind==='iron' && iaNaturalDate(value) && q.split(/\s+/).length<=7)return true;
+  if(findCompanyMention(value) && q.split(/\s+/).length<=4)return true;
+  return /^(?:empresa|cantidad|prioridad|orden de ejecucion|ral|material|hierro|galvanizado|negro|imprimacion|fecha de entrega|entrega|trabajo|descripcion)\b/.test(q);
+}
+function iaGroqFirst(value){
+  const raw=text(value), q=norm(raw);
+  if(!q)return false;
+  // Confirmaciones, selectores exactos y acciones mecánicas siguen locales: son más seguras y no requieren interpretar.
+  if(state.pendingAction && (positiveReply(raw)||negativeReply(raw)||/^(?:que|que confirmo|que hago|explica)\b/.test(q)))return false;
+  if(/^(?:si|no|vale|ok|confirmo|de acuerdo|adelante)[.!?]*$/.test(q))return false;
+  const group=localOrderGroupSelector(raw);
+  if(group?.ok)return false;
+  if(/^(?:abre|abrir|imprime|imprimir|guarda|guardar|elimina|eliminar|borra|borrar|anula|anular|cancela|cancelar|cierra|cerrar)\b/.test(q))return false;
+  if(/^(?:nueva|nuevo|abre una|crear una|crea una)?\s*orden(?: de trabajo)?[.!?]*$/.test(q))return false;
+  if(iaSimpleDraftFieldCommand(raw))return false;
+  // Abrir/preparar WhatsApp es una acción mecánica del navegador, no una respuesta de IA.
+  // Se ejecuta localmente para conservar el texto pre-rellenado en WhatsApp Web incluso
+  // cuando Groq esté en rate-limit. Groq sigue siendo el cerebro para las consultas naturales.
+  if(/\b(whatsapp|wasap|guasap)\b/.test(q) && (
+      /\b(prioridad|prioridades|lista|pendiente|pendientes)\b/.test(q) ||
+      /\b(prepara|preparame|envia|manda|comparte|abre|abrir)\b/.test(q)
+    ))return false;
+  // Todo lo que no sea una acción mecánica inequívoca pasa por Groq.
+  // Así Groq es el cerebro real de la conversación, no un parser de último recurso.
+  return true;
+}
+
+async function runAgent(userText){
+  state.currentUserText=text(userText);
+  if(!state.currentUserText)return;
+  // Segundo cortafuegos: si una alucinacion tipica de Whisper escapara del filtro de audio,
+  // no entra en el chat, no modifica formularios y no consume Groq.
+  if(ldhIaLooksLikeWhisperHallucination(state.currentUserText)){
+    $('ldhIaInput').value='';
+    $('ldhIaThinking').textContent='No he reconocido una frase fiable. Repite la orden.';
+    state.currentUserText='';
+    return;
+  }
+  addMessage('user',state.currentUserText);
+  setBusy(true,'Comprobando…');
+  try{
+    const groqFirst=iaGroqFirst(state.currentUserText);
+    if(!groqFirst){
+      const local=await tryLocalFastPath(state.currentUserText);
+      if(local?.handled){
+        const final=text(local.text)||'He completado la acción.';
+        addMessage('assistant',final);
+        appendHistoryLocal(state.currentUserText,final);
+        return;
+      }
+    }
+
+    if(Date.now()<Number(state.groqCooldownUntil||0)){
+      const secs=Math.max(1,Math.ceil((state.groqCooldownUntil-Date.now())/1000));
+      addMessage('system',`Groq ha limitado temporalmente esta petición. Reintenta en unos ${secs}s; las acciones directas del módulo siguen disponibles.`);
+      return;
+    }
+
+    // UNA llamada a Groq por turno natural. Groq recibe una instantánea real de las órdenes y
+    // razona/responde directamente cuando la consulta puede resolverse con esos datos. Las acciones
+    // destructivas o de interfaz siguen ejecutándose localmente y con las confirmaciones existentes.
+    setBusy(true,'Interpretando…');
+    state.groqCalls++;
+    const response=await bridge('/chat',{
+      messages:[
+        {role:'system',content:plannerPrompt(state.currentUserText)},
+        ...groqHistory(),
+        {role:'user',content:state.currentUserText}
+      ],
+      temperature:0.05,
+      reasoning_effort:'medium',
+      max_completion_tokens:520
+    });
+    state.groqCooldownUntil=0;
+    const msg=response?.choices?.[0]?.message;
+    if(!msg)throw new Error('Groq no devolvió un mensaje válido.');
+    const plan=parsePlannerPlan(msg.content||'');
+    if(!plan)throw new Error('Groq no devolvió un plan interpretable.');
+    const final=await executePlanner(plan);
+    addMessage('assistant',final);
+    state.history.push({role:'user',content:state.currentUserText},{role:'assistant',content:final});
+    if(state.history.length>10)state.history=state.history.slice(-10);
+  }catch(e){
+    const msg=String(e?.message||e||'');
+    if(e?.status===429 || /cuota|rate.?limit|too many|429|resource exhausted|tokens per/i.test(msg)){
+      const details=e?.details||{};
+      const retryRaw=text(details?.rateLimit?.retryAfter);
+      const retryNumeric=Number(retryRaw);
+      const retryMs=Number.isFinite(retryNumeric)&&retryNumeric>0 ? Math.max(500,retryNumeric*1000) : groqRetryDelayMs(`${details?.providerMessage||''} ${retryRaw} ${msg}`);
+      state.groqCooldownUntil=Date.now()+retryMs;
+      const secs=Math.max(1,Math.ceil(retryMs/1000));
+      const diag=groqRateSummary(details,msg);
+      const limits=diag.parts.length?` · ${diag.parts.join(' · ')}`:'';
+      const why=diag.provider?`\nGroq: ${diag.provider}`:'';
+      // En consultas naturales NO sustituimos Groq por reglas locales: eso degrada la lógica
+      // y puede dar respuestas engañosas. Si Groq está limitado, lo mostramos claramente.
+      addMessage('error',`Groq está temporalmente limitado. Reintenta en ~${secs}s${limits}.${why}`);
+    }else{
+      addMessage('error','Error IA: '+msg);
+    }
+  }
+  finally{setBusy(false);state.currentUserText='';}
+}
+
+async function refreshBridgeStatus(){
+  const pill=$('ldhIaStatus');
+  try{
+    const h=await bridge('/health',null,'GET');
+    const oldBridge=h.build&&h.build!==EXPECTED_BRIDGE_BUILD;
+    pill.textContent=h.hasKey?(oldBridge?'GROQ · PUENTE ANTIGUO':'GROQ · OK'):'GROQ · SIN CLAVE';
+    pill.className='ldh-ia-pill '+(h.hasKey&&!oldBridge?'ok':'bad');
+    pill.title=`Bridge: ${h.build||'sin versión'} · esperado: ${EXPECTED_BRIDGE_BUILD}`;
+    if(oldBridge && !state.bridgeWarned){state.bridgeWarned=true;addMessage('error','El navegador está conectado a un bridge antiguo. Cierra la ventana del puente y vuelve a iniciar el .bat antes de seguir probando la cuota.');}
+    return h;
+  }catch(e){pill.textContent='PUENTE OFF';pill.className='ldh-ia-pill bad';return null;}
+}
+const LDH_IA_MIC_KEY='ldh_ia_compras_mic_device_v1';
+async function refreshMicDevices(requestPermission=false){
+  const sel=$('ldhIaMicDevice'); if(!sel||!navigator.mediaDevices?.enumerateDevices)return;
+  let tmp=null;
+  try{
+    if(requestPermission){ tmp=await navigator.mediaDevices.getUserMedia({audio:true}); }
+    const devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='audioinput');
+    const saved=localStorage.getItem(LDH_IA_MIC_KEY)||'';
+    sel.innerHTML='<option value="">Micrófono predeterminado de Windows</option>'+devices.map((d,i)=>`<option value="${d.deviceId}">${escapeHtml(d.label||('Micrófono '+(i+1)))}</option>`).join('');
+    if(saved && devices.some(d=>d.deviceId===saved)) sel.value=saved; else sel.value='';
+    const info=$('ldhIaMicTestInfo'); if(info) info.textContent=devices.length?`${devices.length} entrada(s) de audio detectada(s). Selecciona una si el predeterminado no recibe tu voz.`:'No se han detectado entradas de audio.';
+  }catch(e){ const info=$('ldhIaMicTestInfo'); if(info) info.textContent='Chrome no ha podido acceder a los micrófonos. Revisa el permiso del sitio.'; }
+  finally{ try{tmp?.getTracks().forEach(t=>t.stop());}catch(_){} }
+}
+async function openSettings(){
+  const s=$('ldhIaSettings'); s.classList.add('open');
+  const info=$('ldhIaCentralInfo'); if(info)info.textContent='Consultando servidor central…';
+  try{
+    const c=await bridge('/config',null,'GET');
+    const modelNames={'openai/gpt-oss-120b':'GPT-OSS 120B','openai/gpt-oss-20b':'GPT-OSS 20B','qwen/qwen3.8-27b':'Qwen 3.8 27B'};
+    const speechNames={'whisper-large-v3':'Whisper Large V3','whisper-large-v3-turbo':'Whisper Large V3 Turbo'};
+    if(info)info.textContent=`Cloudflare · ${modelNames[c.model]||c.model||'modelo desconocido'} · Voz: ${speechNames[c.speechModel]||c.speechModel||'sin dato'} · API central: ${c.hasKey?'OK':'NO CONFIGURADA'}`;
+  }catch(e){ if(info)info.textContent='Servidor central no disponible.'; }
+  await refreshMicDevices(false);
+}
+async function saveSettings(){
+  try{
+    const mic=$('ldhIaMicDevice')?.value||'';
+    if(mic)localStorage.setItem(LDH_IA_MIC_KEY,mic);else localStorage.removeItem(LDH_IA_MIC_KEY);
+    $('ldhIaSettings').classList.remove('open');
+    addMessage('system','Micrófono guardado en este portátil. La IA y su API se gestionan de forma central en Cloudflare.');
+  }catch(e){alert(e.message||e);}
+}
+async function testSettings(){
+  try{setBusy(true,'Probando servidor central…');const r=await bridge('/test',{});alert('Servidor central responde: '+(r.text||'OK')+(r.model?' · '+r.model:''));}
+  catch(e){alert('No conecta con el servidor central: '+(e.message||e));}
+  finally{setBusy(false);}
+}
+
+async function blobToBase64(blob){ return await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]||'');r.onerror=reject;r.readAsDataURL(blob);}); }
+function ldhIaVoiceNorm(v){
+  return text(v).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9.]+/g,' ').replace(/\s+/g,' ').trim();
+}
+function ldhIaLooksLikeWhisperHallucination(v){
+  const q=ldhIaVoiceNorm(v);
+  if(!q)return true;
+  const compact=q.replace(/[^a-z0-9]/g,'');
+  if(compact.length<2)return true;
+  const exact=[
+    'suscribete','suscribanse','suscribe','subscribe','subscribe now','music','musica','aplausos','applause',
+    'subtitulo','subtitulos','amara','amara.org','gracias por ver el video','gracias por ver este video'
+  ];
+  if(exact.includes(q))return true;
+  // Palabras sueltas muy cortas producidas por silencio ("ni", "eh", etc.) se descartan,
+  // salvo respuestas/campos que si tienen sentido operativo por si solos.
+  const one=q.split(/\s+/).filter(Boolean);
+  if(one.length===1 && q.length<=3){
+    const shortOk=new Set(['si','no','uno','dos','tres']);
+    if(!shortOk.has(q))return true;
+  }
+  const patterns=[
+    /^suscribete(?: al canal)?(?: por favor)?$/,
+    /^suscribanse(?: al canal)?$/,
+    /^gracias por ver(?: este| el)? video/,
+    /^gracias por mirar/,
+    /^thanks for watching/,
+    /^thank you for watching/,
+    /^subtitulos?(?: realizados?| aportados?| creados?)? por/,
+    /^subtitulos? por la comunidad/,
+    /^subtitulos? por/,
+    /^subtitulado por/,
+    /\bsubtitulos?\b/,
+    /\bsuscrib(?:ete|irse|anse|e)\b/,
+    /\bcanal de youtube\b/,
+    /\bdale like\b/,
+    /\bno olvides suscribirte\b/,
+    /\bcomunidad de amara\b/,
+    /\bamara(?:\.org)?\b/,
+    /\bsubtitles? by\b/,
+    /\bcaptions? by\b/,
+    /\btranslation by\b/,
+    /^(?:www\.|https?:)/
+  ];
+  return patterns.some(re=>re.test(q));
+}
+async function toggleMic(){
+  // Compatibilidad interna: la interfaz principal usa mantener pulsado / soltar.
+  return toggleMicGroq();
+}
+
+async function toggleMicGroq(){
+  if(state.recorder&&state.recorder.state==='recording') return;
+  state.micReleaseRequested=false;
+  if(!navigator.mediaDevices?.getUserMedia){addMessage('error','Este navegador no permite usar el micrófono aquí.');return;}
+  try{
+    const saved=localStorage.getItem(LDH_IA_MIC_KEY)||'';
+    const audioConstraints={echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1};
+    if(saved) audioConstraints.deviceId={exact:saved};
+    let stream;
+    try{ stream=await navigator.mediaDevices.getUserMedia({audio:audioConstraints}); }
+    catch(e){
+      if(saved){ localStorage.removeItem(LDH_IA_MIC_KEY); stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}}); }
+      else throw e;
+    }
+    state.stream=stream; state.chunks=[];
+    const track=stream.getAudioTracks()[0];
+    const micName=track?.label||'micrófono predeterminado';
+    const mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';
+
+    // R2 MICRO REALTEK BAJO: amplificación DIGITAL antes de grabar.
+    // Windows recibe la voz pero muy baja; elevamos ~22 dB y limitamos picos con compresor.
+    let audioCtx=null, source=null, highPass=null, gainNode=null, compressor=null, destination=null, analyser=null, meterTimer=null;
+    let maxRms=0, voicedFrames=0, frames=0;
+    const AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC) throw new Error('Este navegador no dispone de AudioContext para amplificar el micrófono.');
+    audioCtx=new AC(); if(audioCtx.state==='suspended')await audioCtx.resume();
+    source=audioCtx.createMediaStreamSource(stream);
+    highPass=audioCtx.createBiquadFilter(); highPass.type='highpass'; highPass.frequency.value=85; highPass.Q.value=0.7;
+    gainNode=audioCtx.createGain(); gainNode.gain.value=12.5;
+    compressor=audioCtx.createDynamicsCompressor();
+    compressor.threshold.value=-20; compressor.knee.value=12; compressor.ratio.value=8; compressor.attack.value=0.003; compressor.release.value=0.25;
+    destination=audioCtx.createMediaStreamDestination();
+    analyser=audioCtx.createAnalyser(); analyser.fftSize=1024; analyser.smoothingTimeConstant=0.12;
+    source.connect(highPass); highPass.connect(gainNode); gainNode.connect(compressor); compressor.connect(destination); compressor.connect(analyser);
+
+    const rec=new MediaRecorder(destination.stream,{mimeType:mime}); state.recorder=rec;
+    let recordingStartedAt=0;
+    const data=new Float32Array(analyser.fftSize);
+    meterTimer=setInterval(()=>{
+      if(rec.state!=='recording')return;
+      analyser.getFloatTimeDomainData(data);
+      let sum=0; for(let i=0;i<data.length;i++)sum+=data[i]*data[i];
+      const rms=Math.sqrt(sum/data.length); frames++; maxRms=Math.max(maxRms,rms);
+      if(rms>=0.010)voicedFrames++;
+      const pct=Math.min(100,Math.max(0,Math.round(rms*900)));
+      $('ldhIaThinking').textContent=`Escuchando · ${micName} · nivel ${pct}% · ganancia digital x12 · suelta cuando termines`;
+    },100);
+
+    rec.ondataavailable=e=>{if(e.data&&e.data.size)state.chunks.push(e.data);};
+    rec.onstop=async()=>{
+      clearTimeout(state.micTimer); if(meterTimer)clearInterval(meterTimer);
+      $('ldhIaMic').classList.remove('recording'); $('ldhIaMic').textContent='🎙 Mantén pulsado';
+      try{source?.disconnect();highPass?.disconnect();gainNode?.disconnect();compressor?.disconnect();analyser?.disconnect();destination?.disconnect();}catch(_){}
+      stream.getTracks().forEach(t=>t.stop());
+      try{destination?.stream?.getTracks?.().forEach(t=>t.stop());}catch(_){}
+      try{await audioCtx?.close();}catch(_){}
+      const blob=new Blob(state.chunks,{type:mime}); if(!blob.size)return;
+      const heldMs=recordingStartedAt ? Math.max(0,performance.now()-recordingStartedAt) : 0;
+      const voiceRatio=frames?voicedFrames/frames:0;
+      // Un toque accidental o un clip sin voz NO debe llegar a Whisper: en silencio puede inventar frases.
+      if(heldMs<700){
+        $('ldhIaInput').value='';
+        $('ldhIaThinking').textContent='Pulsación demasiado corta. Mantén pulsado mientras hablas y suelta al terminar.';
+        return;
+      }
+      // Tras la ganancia x12, el ruido ambiente puede parecer señal. Exigimos un mínimo
+      // de energía + varios fotogramas realmente hablados antes de gastar una transcripción.
+      if(maxRms<0.006 || (frames>=3 && voicedFrames<3) || (frames>=6 && voiceRatio<0.12)){
+        $('ldhIaInput').value='';
+        $('ldhIaThinking').textContent=`No he detectado voz suficiente en «${micName}». No se ha enviado nada.`;
+        return;
+      }
+      try{
+        setBusy(true,'Transcribiendo voz amplificada…');
+        const b64=await blobToBase64(blob);
+        const tr=await bridge('/transcribe',{audioBase64:b64,mimeType:mime,prompt:voicePrompt(),temperature:0});
+        const spoken=text(tr.text);
+        setBusy(false);
+        if(!spoken || ldhIaLooksLikeWhisperHallucination(spoken) || /^(https?:\/\/|www\.)/i.test(spoken.trim())){
+          $('ldhIaInput').value='';
+          $('ldhIaThinking').textContent='No he reconocido una frase fiable. Vuelve a pulsar Hablar y repítela.';
+          return;
+        }
+        // MODO WALKIE-TALKIE: una transcripción fiable se envía automáticamente al soltar.
+        $('ldhIaInput').value=spoken;
+        $('ldhIaThinking').textContent=`Entendido: «${spoken}» · enviando…`;
+        await sleep(120);
+        $('ldhIaInput').value='';
+        $('ldhIaThinking').textContent='';
+        await runAgent(spoken);
+      }catch(e){setBusy(false);addMessage('error','Error de voz: '+(e?.message||e));}
+    };
+    recordingStartedAt=performance.now();
+    rec.start(); $('ldhIaMic').classList.add('recording'); $('ldhIaMic').textContent='🎙 Suelta para enviar';
+    $('ldhIaThinking').textContent=`Escuchando · ${micName} · ganancia digital x12 · suelta cuando termines`;
+    // Si el usuario soltó antes de que terminara de abrirse el micrófono, paramos en cuanto arranca.
+    if(state.micReleaseRequested || !state.micHold){
+      setTimeout(()=>{try{if(rec.state==='recording')rec.stop();}catch(_){}},0);
+    }
+    // Sin corte automático: mientras mantengas pulsado, continúa grabando.
+    // Solo se detiene al soltar el botón (o si la página pierde el foco por seguridad).
+    clearTimeout(state.micTimer); state.micTimer=null;
+  }catch(e){
+    try{state.stream?.getTracks?.().forEach(t=>t.stop());}catch(_){}
+    addMessage('error','No puedo capturar el micrófono: '+(e?.message||e));
+  }
+}
+
+function bind(){
+  $('ldhIaSend').onclick=()=>{const v=$('ldhIaInput').value;$('ldhIaInput').value='';$('ldhIaThinking').textContent='';runAgent(v);};
+  $('ldhIaInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('ldhIaSend').click();}});
+  const mic=$('ldhIaMic');
+  const beginHoldToTalk=(e)=>{
+    if(state.busy || state.micHold) return;
+    e?.preventDefault?.();
+    state.micHold=true;
+    state.micReleaseRequested=false;
+    try{ if(e?.pointerId!=null) mic.setPointerCapture(e.pointerId); }catch(_){}
+    toggleMicGroq();
+  };
+  const endHoldToTalk=(e)=>{
+    if(!state.micHold && !state.recorder) return;
+    e?.preventDefault?.();
+    state.micHold=false;
+    state.micReleaseRequested=true;
+    try{ if(state.recorder?.state==='recording') state.recorder.stop(); }catch(_){}
+  };
+  mic.onclick=(e)=>e.preventDefault();
+  mic.oncontextmenu=(e)=>e.preventDefault();
+  mic.addEventListener('pointerdown',beginHoldToTalk);
+  mic.addEventListener('pointerup',endHoldToTalk);
+  // pointercancel puede dispararse por gestos/Chrome aun manteniendo el botón; no debe cortar la voz.
+  mic.addEventListener('pointercancel',e=>e?.preventDefault?.());
+  window.addEventListener('pointerup',endHoldToTalk);
+  window.addEventListener('blur',()=>{ if(state.micHold||state.recorder?.state==='recording') endHoldToTalk(); });
+  $('ldhIaNew').onclick=()=>{state.history=[];state.draft=null;state.pendingAction=null;state.localGroupRefs=[];state.localContext={intent:'',phase:'',department:'',company:'',material:'',orderRef:''};$('ldhIaMessages').innerHTML='';addMessage('system','Conversación nueva. Consultaré siempre los datos actuales del módulo.');};
+  $('ldhIaSettingsBtn').onclick=openSettings; $('ldhIaSettingsClose').onclick=()=>$('ldhIaSettings').classList.remove('open'); $('ldhIaSettingsSave').onclick=saveSettings; $('ldhIaTest').onclick=testSettings; $('ldhIaMicRefresh').onclick=()=>refreshMicDevices(true);
+  const setPanelClosed=(closed)=>{const p=$('ldhIaPanel');p.classList.toggle('ldh-closed',!!closed);document.body.classList.toggle('ldh-ia-panel-open',!closed);document.body.classList.toggle('ldh-ia-panel-collapsed',!!closed);$('ldhIaCloseBtn').textContent='×';};
+  $('ldhIaCloseBtn').onclick=()=>setPanelClosed(true);
+  $('ldhIaReopen').onclick=()=>setPanelClosed(false);
+}
+
+async function boot(){
+  addStyle();addPanel();document.body.classList.add('ldh-ia-panel-open');bind();
+  const h=await refreshBridgeStatus(); if(h&&!h.hasKey)addMessage('error','No encuentro una clave Groq reutilizable. Pulsa ⚙ y guárdala una sola vez.');
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,1200),{once:true});else setTimeout(boot,1200);
+})();
+
+</script>
+<!-- === /IA COMPRAS LOCAL R2 === -->
 </body>
 </html>
