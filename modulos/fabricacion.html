@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Fabricación · Gestión Taller</title>
+  <meta name="ldh-fabricacion-v23" content="FABRICACION-V23-CABIN-DELETE-REGRESSION-HARDEN-20260930">
+  <meta name="ldh-fabricacion-v22" content="FABRICACION-V22-CABIN-DELETE-APPROVAL-20260930">
   <style>
     :root{
       --bg:#08111f;--panel:#101b31;--panel2:#0b1324;--line:#263750;--text:#f8fafc;
@@ -56,6 +58,7 @@
     .flow{display:flex;gap:6px;flex-wrap:wrap}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
     .empty{text-align:center;color:var(--muted);padding:40px 14px;border:1px dashed rgba(148,163,184,.25);border-radius:14px;background:rgba(15,23,42,.35)}
     .toast{position:fixed;right:16px;bottom:16px;background:#042f2e;border:1px solid rgba(16,185,129,.45);color:#d1fae5;border-radius:12px;padding:12px 14px;font-weight:900;box-shadow:var(--shadow);display:none;z-index:50}
+    .cabin-delete-card{border-color:rgba(239,68,68,.55);background:linear-gradient(180deg,rgba(75,18,32,.96),rgba(39,12,23,.96))}.cabin-delete-list{display:grid;gap:10px}.cabin-delete-row{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:14px;align-items:center;border:1px solid rgba(248,113,133,.35);border-radius:12px;padding:12px;background:rgba(15,23,42,.55)}.cabin-delete-main b{display:block;font-size:14px;color:#fff}.cabin-delete-main small{display:block;color:#fecdd3;margin-top:4px;line-height:1.35}.cabin-delete-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}@media(max-width:760px){.cabin-delete-row{grid-template-columns:1fr}.cabin-delete-actions{justify-content:flex-start}}
     @media(max-width:1000px){.summary{grid-template-columns:1fr 1fr}table,thead,tbody,tr,td,th{display:block}thead{display:none}tr{border-bottom:1px solid rgba(148,163,184,.2);padding:10px}td{border:0;padding:6px 0}.actions{justify-content:flex-start}}
     @media(max-width:620px){.summary{grid-template-columns:1fr}.wrap{padding:18px 10px 40px}}
   </style>
@@ -97,6 +100,12 @@
       <div class="kpi"><span>En pintura</span><b id="kPint">0</b></div>
       <div class="kpi"><span>En almacén</span><b id="kAlm">0</b></div>
       <div class="kpi"><span>Entregado</span><b id="kEnt">0</b></div>
+    </section>
+
+    <section id="cabinDeleteRequestsCard" class="card cabin-delete-card" style="display:none">
+      <h2 class="section-title">⚠ Solicitudes de eliminación desde Cabina <span id="cabinDeleteRequestsCount" class="badge b-red">0</span></h2>
+      <div class="muted" style="margin:-4px 0 12px">La Terminal solo solicita. El pedido se elimina definitivamente únicamente al aprobarlo aquí desde el PC. Aprobar o rechazar no consume pintura ni modifica el Stock físico.</div>
+      <div id="cabinDeleteRequestsList" class="cabin-delete-list"></div>
     </section>
 
     <section class="card">
@@ -267,6 +276,8 @@
     return db;
   }
   window.LDH_fabricacionCanonicalizeLdh = dedupeLdhByIdentity;
+  window.LDH_fabricacionMergeRawAliasRows = mergeRawAliasRows;
+  window.LDH_fabricacionVisibleWorkRef = visibleWorkRef;
   function isCloudDeleted(refOrItem){
     const ref = String(refOrItem && typeof refOrItem === "object" ? (refOrItem.ref || refOrItem.referencia || "") : (refOrItem || "")).trim();
     try{ return !!(ref && window.LDH_isFabricacionDeletedRef && window.LDH_isFabricacionDeletedRef(ref)); }catch(e){ return false; }
@@ -719,6 +730,7 @@
       document.getElementById("kAlm").textContent = totals.almacen;
       document.getElementById("kEnt").textContent = totals.entregado;
       document.getElementById("status").textContent = `${items.length} trabajos visibles`;
+      this.renderCabinDeleteRequests();
 
       const list = document.getElementById("list");
       list.querySelectorAll("details.company[data-company]").forEach(detail=>{
@@ -752,6 +764,39 @@
           else this.openCompanies.delete(company);
         });
       });
+    },
+
+    cabinDeleteRequests(){
+      const map=window.LDH_fabricacionCabinDeleteRequestsV1&&typeof window.LDH_fabricacionCabinDeleteRequestsV1==='object'?window.LDH_fabricacionCabinDeleteRequestsV1:{};
+      return Object.values(map).filter(r=>r&&String(r.status||'').toLowerCase()==='pending'&&!isCloudDeleted(r.ref||r.reference));
+    },
+
+    renderCabinDeleteRequests(){
+      const card=document.getElementById('cabinDeleteRequestsCard'),list=document.getElementById('cabinDeleteRequestsList'),count=document.getElementById('cabinDeleteRequestsCount');
+      if(!card||!list||!count)return;
+      const rows=this.cabinDeleteRequests().sort((a,b)=>Number(b.requestedAtMs||0)-Number(a.requestedAtMs||0));
+      count.textContent=String(rows.length);card.style.display=rows.length?'block':'none';
+      if(!rows.length){list.innerHTML='';return;}
+      list.innerHTML=rows.map(r=>{
+        const ref=String(r.ref||r.reference||'').trim(),enc=encodeURIComponent(ref),f=r.flow&&typeof r.flow==='object'?r.flow:{};
+        let when='';try{when=r.requestedAtMs?new Date(Number(r.requestedAtMs)).toLocaleString('es-ES'):String(r.requestedAtISO||'');}catch(e){when=String(r.requestedAtISO||'');}
+        return `<div class="cabin-delete-row"><div class="cabin-delete-main"><b>🗑 ${esc(ref)}${r.identification?' · '+esc(r.identification):''}</b><small>${esc(r.company||'Sin empresa')} · ${esc(r.concept||'Sin concepto')}<br>FAB ${n(f.fab??f.fabricacion)} · PINT ${n(f.pintura)} · ALM ${n(f.almacen)} · ENT ${n(f.entregado)} · Solicitado por ${esc(r.requestedBy||'Cabina')}${when?' · '+esc(when):''}</small></div><div class="cabin-delete-actions"><button class="btn small" onclick="App.resolveCabinDeleteRequest('${enc}',false,this)">↩ Rechazar</button><button class="btn small red" onclick="App.resolveCabinDeleteRequest('${enc}',true,this)">🗑 Aprobar y eliminar</button></div></div>`;
+      }).join('');
+    },
+
+    async resolveCabinDeleteRequest(refEnc,approve,button){
+      const ref=decodeURIComponent(refEnc||'');if(!ref)return;
+      const question=approve
+        ? `¿APROBAR la eliminación solicitada desde Cabina?\n\nReferencia: ${ref}\n\nSe eliminará del flujo mediante el borrado global existente. No se generará consumo de pintura/disolvente ni se modificará el Stock físico.`
+        : `¿RECHAZAR la eliminación solicitada desde Cabina?\n\nReferencia: ${ref}\n\nEl trabajo volverá a quedar operativo en la Terminal.`;
+      if(!confirm(question))return;
+      if(typeof window.LDH_fabricacionResolveCabinDeleteRequest!=='function'){alert('La sincronización de solicitudes de Cabina todavía no está preparada.');return;}
+      const oldText=button&&button.textContent;if(button){button.disabled=true;button.textContent=approve?'Eliminando...':'Rechazando...';}
+      try{
+        await window.LDH_fabricacionResolveCabinDeleteRequest(ref,!!approve);
+        this.renderCabinDeleteRequests();this.render();
+        this.toast(approve?'Pedido eliminado tras aprobación del PC':'Solicitud rechazada · Cabina vuelve a habilitar el trabajo');
+      }catch(error){console.error('Resolver solicitud Cabina',error);alert('No se pudo resolver la solicitud. No se ha aplicado ningún cambio adicional.\n\n'+String(error&&error.message||error));if(button&&button.isConnected){button.disabled=false;button.textContent=oldText||'Reintentar';}}
     },
 
     companyHTML(company, arr){
@@ -1193,7 +1238,7 @@ const firebaseConfig = {
 };
 
 const {initializeApp,getApps} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
-const {getFirestore,collection,doc,getDoc,getDocs,setDoc,onSnapshot,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+const {getFirestore,collection,doc,getDoc,getDocs,setDoc,onSnapshot,runTransaction,serverTimestamp} = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
 
 // V4: este proyecto ya no depende de Auth anonimo. La Informativa lee este
 // mismo documento sin login; Fabricacion usa el mismo acceso directo y deja
@@ -1212,26 +1257,37 @@ const DB_KEY = "ldh_db";
 const INBOX_KEY = "ldh_fabricacion_inbox_v1";
 const OVERRIDE_KEY = "ldh_fabricacion_flow_overrides_v1";
 
+window.LDH_fabricacionCabinDeleteRequestsV1 = window.LDH_fabricacionCabinDeleteRequestsV1 || {};
+function cabinDeleteIdentityV1(value){
+  const raw=String(value||"").trim();if(!raw)return "";
+  const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+  if(m)return "OT-"+m[1]+"-"+m[2]+(m[3]?"-"+m[3]:"");
+  return "REF:"+raw.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim();
+}
+function cabinDeleteRequestKeyV1(ref){return encodeURIComponent(cabinDeleteIdentityV1(ref)).replace(/\./g,"%2E");}
+function syncCabinDeleteRequestsV1(pkg){
+  const map=pkg&&pkg.cabinDeleteRequestsV1&&typeof pkg.cabinDeleteRequestsV1==="object"?pkg.cabinDeleteRequestsV1:{};
+  window.LDH_fabricacionCabinDeleteRequestsV1={...map};
+  try{window.App&&window.App.renderCabinDeleteRequests&&window.App.renderCabinDeleteRequests();}catch(e){}
+}
+
 let authReady = false;
 let ignorePublish = false;
 let publishTimer = null;
 let lastRemoteUpdated = "";
 const deletedRefs = new Set();
-// V22: un tombstone pertenece a la identidad de la OT, no a una variante visual
-// de su referencia. Una referencia larga/corta de la misma OT debe quedar
-// protegida por el mismo borrado.
-function deletedIdentityKeyV22(ref){
-  try{ return flowIdentityKeyV12(String(ref || "").trim()); }catch(_){ return String(ref || "").trim().toUpperCase(); }
+function deletedIdentityKeyV23(ref){
+  const raw=String(ref||"").trim();if(!raw)return "";
+  const m=raw.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
+  if(m)return "OT-"+m[1]+"-"+m[2]+(m[3]?"-"+m[3]:"");
+  return "REF:"+raw.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim();
 }
-function isDeletedLogicalRefV22(ref){
-  const target = deletedIdentityKeyV22(ref);
-  if(!target) return false;
-  for(const stored of deletedRefs){
-    if(deletedIdentityKeyV22(stored) === target) return true;
-  }
+function hasDeletedRefV23(ref){
+  const key=deletedIdentityKeyV23(ref);if(!key)return false;
+  for(const saved of deletedRefs){if(deletedIdentityKeyV23(saved)===key)return true;}
   return false;
 }
-window.LDH_isFabricacionDeletedRef = ref => isDeletedLogicalRefV22(ref);
+window.LDH_isFabricacionDeletedRef = ref => hasDeletedRefV23(ref);
 let deleteSyncReady = false;
 let deletedListenerStarted = false;
 
@@ -1309,20 +1365,19 @@ function storageKeys(prefix){
 function refFromKey(k){ return String(k || "").replace(/^prep_(meta|recepcion)_/,""); }
 function refValue(item){ return String(item && (item.ref || item.referencia || item.jobRef) || "").trim(); }
 function localDeletedRefSet(){
-  return new Set(Array.from(deletedRefs).map(deletedIdentityKeyV22).filter(Boolean));
+  return new Set(deletedRefs);
 }
 function activeRefSetFromDB(ldh){
   const set = new Set();
   const deleted = localDeletedRefSet();
   const addRef = r => {
     r = String(r||"").trim();
-    if(!r) return;
+    if(!r || hasDeletedRefV23(r)) return;
     let key = r;
     try{
       const m=r.toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?(?=$|[\s:])/);
       if(m) key='OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'');
     }catch(e){}
-    if(deleted.has(deletedIdentityKeyV22(key))) return;
     set.add(key);
   };
   ["deliveries","fabricacion","fab","trabajos"].forEach(pool=>{
@@ -1433,6 +1488,8 @@ function localPackage(){
     overrides: getStore(OVERRIDE_KEY) || "{}",
     prepMeta,
     prepRecepcion,
+    cabinDeleteRequestsV1:{...(window.LDH_fabricacionCabinDeleteRequestsV1||{})},
+    cabinDeleteRequestsV1Schema:1,
     counts: {
       refs: refs.size,
       deliveries: Array.isArray(ldh.deliveries) ? ldh.deliveries.length : 0,
@@ -1672,32 +1729,6 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
     const local=parse(getStore(DB_KEY),{})||{};
     const remote=parse(pkg.ldh_db,{})||{};
     const pools=['deliveries','fabricacion','fab','trabajos'];
-
-    // V23: este fallback vive en un <script type="module"> separado del núcleo App.
-    // No puede depender de helpers privados del IIFE principal (mergeRawAliasRows,
-    // visibleWorkRef, dedupeLdhByIdentity), porque fuera de ese IIFE no existen.
-    // Reutilizamos únicamente helpers V12 de ESTE módulo y el canonicalizador
-    // exportado deliberadamente en window por el núcleo.
-    const mergeCompositeRowsV23=(oldRow,newRow)=>{
-      oldRow=oldRow&&typeof oldRow==='object'?oldRow:{};
-      newRow=newRow&&typeof newRow==='object'?newRow:{};
-      const oldScore=flowScoreV12(oldRow), newScore=flowScoreV12(newRow);
-      const oldStamp=flowStampV12(oldRow), newStamp=flowStampV12(newRow);
-      const authoritative=(oldScore>newScore || (Math.abs(oldScore-newScore)<0.000001 && oldStamp>newStamp))?oldRow:newRow;
-      const out={...oldRow,...newRow};
-      const a=String(refValue(oldRow)||'').trim(), b=String(refValue(newRow)||'').trim();
-      const sameKey=a&&b&&flowIdentityKeyV12(a)===flowIdentityKeyV12(b);
-      const pref=sameKey?(b.length>a.length?b:a):(b||a);
-      if(pref){out.ref=pref;out.referencia=pref;}
-      const af=flowV12(authoritative);
-      out.flow=canonicalFlowV12(af);
-      ['fase','estado','status','keepInFab','hideFromFab','archived','delivered'].forEach(k=>{
-        if(authoritative[k]!==undefined)out[k]=authoritative[k];
-      });
-      return out;
-    };
-    const visibleRefV23=row=>String(row&&(row.display_ref||row.displayReference||row.visible_ref||row.referencia_visible||row.ref||row.referencia)||'').trim();
-
     pools.forEach(pool=>{
       const localRows=Array.isArray(local[pool])?local[pool]:[];
       const remoteRows=Array.isArray(remote[pool])?remote[pool].slice():[];
@@ -1707,15 +1738,17 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
         const lr=String(localRow?.ref||localRow?.referencia||'').trim(); if(!lr)return;
         const idx=remoteRows.findIndex(row=>flowIdentityKeyV12(String(row?.ref||row?.referencia||''))===flowIdentityKeyV12(lr));
         if(idx<0){ remoteRows.push({...localRow}); return; }
-        const merged=mergeCompositeRowsV23(remoteRows[idx],localRow);
-        const vr=visibleRefV23(localRow);
+        const mergeAlias=window.LDH_fabricacionMergeRawAliasRows;
+        const merged=typeof mergeAlias==='function'?mergeAlias(remoteRows[idx],localRow):{...remoteRows[idx],...localRow};
+        const visibleRefFn=window.LDH_fabricacionVisibleWorkRef;
+        const vr=typeof visibleRefFn==='function'?visibleRefFn(localRow):String(localRow&&(localRow.display_ref||localRow.displayReference||localRow.visible_ref||localRow.referencia_visible||localRow.ref||localRow.referencia)||'').trim();
         if(vr && vr!==lr){ merged.display_ref=vr; merged.displayReference=vr; merged.visible_ref=vr; merged.referencia_visible=vr; }
         remoteRows[idx]=merged;
       });
       remote[pool]=remoteRows;
     });
-    const canonical=(typeof window.LDH_fabricacionCanonicalizeLdh==='function')?window.LDH_fabricacionCanonicalizeLdh(remote):remote;
-    pkg={...pkg,ldh_db:JSON.stringify(canonical)};
+    const canonicalize=window.LDH_fabricacionCanonicalizeLdh;
+    pkg={...pkg,ldh_db:JSON.stringify(typeof canonicalize==='function'?canonicalize(remote):remote)};
 
     // La recepción local de una partida compuesta recién enviada nunca se sustituye
     // por una copia remota anterior. Para el resto, se mantiene la política existente.
@@ -1727,7 +1760,7 @@ function mergeLocalCompositeIntoRemoteV10(pkg){
     pkg.prepMeta={...(pkg.prepMeta||{}),...localMeta};
     pkg.prepRecepcion={...(pkg.prepRecepcion||{}),...localReception};
     return pkg;
-  }catch(error){console.warn('[Fabricación V10/V23] no se pudo fusionar partida compuesta local',error);return pkg;}
+  }catch(error){console.warn('[Fabricación V10] no se pudo fusionar partida compuesta local',error);return pkg;}
 }
 function mergeLocalFlowStateIntoRemoteV15(pkg){
   try{
@@ -1740,6 +1773,7 @@ function mergeLocalFlowStateIntoRemoteV15(pkg){
     const localOvByKey=overridesByIdentityV12(localOverrides);
     const remoteOvByKey=overridesByIdentityV12(remoteOverrides);
     const protectedKeys=new Set();
+    const remoteAuthoritativeKeys=new Set();
     const now=Date.now();
     const EPS=0.000001;
     const RECENT_LOCAL_MS=120000;
@@ -1796,7 +1830,15 @@ function mergeLocalFlowStateIntoRemoteV15(pkg){
           return;
         }
         const remoteRow=remoteRows[idx];
-        if(!shouldKeepLocal(key,localRow,remoteRow)) return;
+        if(!shouldKeepLocal(key,localRow,remoteRow)){
+          if(remoteIsAlmacen){
+            const lOvEntry=localOvByKey.get(key),rOvEntry=remoteOvByKey.get(key);
+            const lf=flowV12(effectiveRowV12(localRow,lOvEntry&&lOvEntry.ov));
+            const rf=flowV12(effectiveRowV12(remoteRow,rOvEntry&&rOvEntry.ov));
+            if(Number(rf.almacen)!==Number(lf.almacen)||Number(rf.entregado)!==Number(lf.entregado))remoteAuthoritativeKeys.add(key);
+          }
+          return;
+        }
 
         const lOvEntry=localOvByKey.get(key);
         const localEffective=effectiveRowV12(localRow,lOvEntry&&lOvEntry.ov);
@@ -1823,32 +1865,13 @@ function mergeLocalFlowStateIntoRemoteV15(pkg){
     const mergedOverrides={...remoteOverrides};
     Object.entries(localOverrides).forEach(([localRef,localOv])=>{
       const key=keyOfRef(localRef); if(!key || !localOv || typeof localOv!=='object') return;
+      if(remoteAuthoritativeKeys.has(key)) return;
       const remoteRef=Object.keys(mergedOverrides).find(ref=>keyOfRef(ref)===key);
       const remoteOv=remoteRef ? mergedOverrides[remoteRef] : null;
       const lStamp=flowStampV12(localOv), rStamp=flowStampV12(remoteOv||{});
       const lScore=flowScoreV12(localOv), rScore=flowScoreV12(remoteOv||{});
       const cloudDeleted=Array.from(deletedRefs).some(ref=>keyOfRef(ref)===key);
       if(localOv.deleted && !cloudDeleted) return;
-
-      // V23: si el paquete viene de Almacén y ALM/ENT han cambiado realmente,
-      // el override local no puede volver a imponer el reparto anterior. V15 ya
-      // cedía correctamente en ldh_db, pero después este bloque reinyectaba el
-      // override local cuando el paquete remoto no traía override propio.
-      let authoritativeAlmacenAdvance=false;
-      if(remoteIsAlmacen){
-        let localRowForKey=null, remoteRowForKey=null;
-        for(const pool of ['deliveries','fabricacion','fab','trabajos']){
-          if(!localRowForKey){localRowForKey=(Array.isArray(localLdh[pool])?localLdh[pool]:[]).find(row=>keyOfRow(row)===key)||null;}
-          if(!remoteRowForKey){remoteRowForKey=(Array.isArray(remoteLdh[pool])?remoteLdh[pool]:[]).find(row=>keyOfRow(row)===key)||null;}
-        }
-        if(localRowForKey&&remoteRowForKey){
-          const lf=flowV12(effectiveRowV12(localRowForKey,localOv));
-          const rf=flowV12(effectiveRowV12(remoteRowForKey,remoteOv));
-          authoritativeAlmacenAdvance=Number(rf.almacen)!==Number(lf.almacen) || Number(rf.entregado)!==Number(lf.entregado);
-        }
-      }
-      if(authoritativeAlmacenAdvance) return;
-
       const localRecent=lStamp>0 && (now-lStamp)>=0 && (now-lStamp)<RECENT_LOCAL_MS;
       const keepLocal=protectedKeys.has(key) || !remoteRef ||
         (localRecent && rStamp<=lStamp+1) ||
@@ -1942,7 +1965,9 @@ async function restoreIfRemoteBetter(){
   try{
     const snap = await getDoc(DOC_REF);
     if(!snap.exists()) return false;
-    const remote = withoutDeletedRefs(snap.data() || {});
+    const rawRemote=snap.data()||{};
+    syncCabinDeleteRequestsV1(rawRemote);
+    const remote = withoutDeletedRefs(rawRemote);
     if(window.__LDH_FAB_V19_PHASE_MAP_ACTIVE){
       applyRemotePackage(remote);
       status('Nube V19 · flujo por OT', 'ok');
@@ -2041,7 +2066,7 @@ function cleanupStaleDeletedMarkers(){
 
   Object.keys(overrides).forEach(ref=>{
     const ov = overrides[ref];
-    if(ov && ov.deleted && !isDeletedLogicalRefV22(ref)){
+    if(ov && ov.deleted && !hasDeletedRefV23(ref)){
       delete overrides[ref];
       changed = true;
     }
@@ -2051,7 +2076,7 @@ function cleanupStaleDeletedMarkers(){
   // Limpia solamente las marcas de eliminación antiguas de Preparación.
   storageKeys("prep_meta_").forEach(key=>{
     const ref = refFromKey(key);
-    if(!ref || isDeletedLogicalRefV22(ref)) return;
+    if(!ref || hasDeletedRefV23(ref)) return;
     const meta = parse(getStore(key), null);
     if(!meta || (!meta.deleted && !meta.eliminado && !meta.eliminado_modulos)) return;
     delete meta.deleted;
@@ -2070,18 +2095,11 @@ function applyKnownDeletedRefs(){
   }catch(e){}
 }
 function syncDeletedRefs(refs,republish=false){
-  const next = new Set(
-    (refs || []).map(ref=>String(ref || "").trim()).filter(Boolean)
-  );
-  const prevKeys = new Set(Array.from(deletedRefs).map(deletedIdentityKeyV22).filter(Boolean));
-  const nextKeys = new Set(Array.from(next).map(deletedIdentityKeyV22).filter(Boolean));
-  let changed = nextKeys.size !== prevKeys.size;
-  if(!changed){
-    for(const key of nextKeys){
-      if(!prevKeys.has(key)){ changed = true; break; }
-    }
-  }
-
+  const next = new Set((refs || []).map(ref=>String(ref || "").trim()).filter(Boolean));
+  const currentKeys=new Set(Array.from(deletedRefs).map(deletedIdentityKeyV23).filter(Boolean));
+  const nextKeys=new Set(Array.from(next).map(deletedIdentityKeyV23).filter(Boolean));
+  let changed=currentKeys.size!==nextKeys.size;
+  if(!changed){for(const key of nextKeys){if(!currentKeys.has(key)){changed=true;break;}}}
   deletedRefs.clear();
   next.forEach(ref=>deletedRefs.add(ref));
   applyKnownDeletedRefs();
@@ -2128,6 +2146,28 @@ async function deleteRefPermanently(ref){
   publish(true);
   status("Pedido eliminado · nube actualizada","ok");
 }
+async function resolveCabinDeleteRequestV1(ref,approve){
+  ref=String(ref||"").trim();if(!ref)throw new Error("Referencia vacía");
+  if(!authReady)throw new Error("Nube no preparada");
+  const key=cabinDeleteRequestKeyV1(ref);if(!key)throw new Error("Referencia no válida");
+  if(approve)await deleteRefPermanently(ref);
+  const nowMs=Date.now(),nowISO=new Date(nowMs).toISOString();
+  const result=await runTransaction(db,async tx=>{
+    const snap=await tx.get(DOC_REF);if(!snap.exists())throw new Error("No existe taller_data/fabricacion");
+    const pkg=snap.data()||{},map=pkg.cabinDeleteRequestsV1&&typeof pkg.cabinDeleteRequestsV1==="object"?{...pkg.cabinDeleteRequestsV1}:{};
+    let current=map[key];
+    if(!current){current=Object.values(map).find(r=>r&&cabinDeleteIdentityV1(r.ref||r.reference)===cabinDeleteIdentityV1(ref));}
+    if(!current)throw new Error("La solicitud ya no existe");
+    const next={...current,status:approve?"approved":"rejected",resolvedAtMs:nowMs,resolvedAtISO:nowISO,resolvedBy:"PC Fabricación",resolutionSource:"fabricacion_v22_cabin_delete_approval"};
+    map[key]=next;
+    tx.update(DOC_REF,{["cabinDeleteRequestsV1."+key]:next,cabinDeleteRequestsV1Schema:1,cabinDeleteRequestsV1UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:nowISO,source:"fabricacion_v22_cabin_delete_approval"});
+    return {map,next};
+  });
+  window.LDH_fabricacionCabinDeleteRequestsV1={...(result.map||{})};
+  try{window.App&&window.App.renderCabinDeleteRequests&&window.App.renderCabinDeleteRequests();}catch(e){}
+  status(approve?"Solicitud Cabina aprobada · pedido eliminado":"Solicitud Cabina rechazada","ok");
+  return result.next;
+}
 function hookApp(){
   const appObj = window.App;
   if(!appObj || appObj.__LDH_CLOUD_HOOKED) return false;
@@ -2155,6 +2195,7 @@ function hookApp(){
 window.LDH_fabricacionPublishNow = () => publish(true);
 window.LDH_fabricacionRestoreCloudNow = restoreIfRemoteBetter;
 window.LDH_fabricacionDeleteRef = deleteRefPermanently;
+window.LDH_fabricacionResolveCabinDeleteRequest = resolveCabinDeleteRequestV1;
 
 async function startLegacyCloudSyncV4(){
   // Firestore se prueba directamente. No se espera ni se solicita Auth anonimo.
@@ -2175,7 +2216,9 @@ async function startLegacyCloudSyncV4(){
 
   onSnapshot(DOC_REF, snap=>{
     if(!snap.exists()) return;
-    const remote = withoutDeletedRefs(snap.data() || {});
+    const rawRemote=snap.data()||{};
+    syncCabinDeleteRequestsV1(rawRemote);
+    const remote = withoutDeletedRefs(rawRemote);
     // Aunque estemos aplicando otra actualizacion, una transaccion de Almacen
     // no puede descartarse: contiene el estado autoritativo de ALM/ENT.
     if(ignorePublish && !isAlmacenAuthoritative(remote)) return;
@@ -2929,12 +2972,7 @@ window.LDH_FABRICACION_V20='PHASEFLOW-V19-FINAL-AUTHORITATIVE-20260904';
 document.documentElement.dataset.ldhFabricacionSyncRead='V20';
 console.info('[Fabricacion V20] phaseFlowV19 se aplica al final de la reconciliacion; un override local antiguo ya no puede ocultar movimientos de Cabina/Almacen.');
 </script>
-<!-- LDH_FAB_V22_TOMBSTONE_IDENTIDAD_OT_20260922 -->
-
-<script id="LDH_FABRICACION_V23_BUILD_20260922">
-window.LDH_FABRICACION_V23='FALLBACKS-LEGACY-SEGUROS-20260922';
-document.documentElement.dataset.ldhFabricacionFallback='V23';
-console.info('[Fabricación V23] V10 aislado del IIFE + autoridad Almacén en fallback V15.');
-</script>
+<!-- LDH_FABRICACION_V22_CABIN_DELETE_APPROVAL_20260930 -->
+<!-- LDH_FABRICACION_V23_REGRESSION_HARDEN_20260930 -->
 </body>
 </html>

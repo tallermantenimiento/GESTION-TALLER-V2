@@ -9,6 +9,7 @@
 <meta name="ldh-terminal-cabina-v80" content="TERMINAL-CABINA-PINTURA-V80-PRESTAMOS-PREPARACION-FINALIZAR-CABINA-20260908">
 <meta name="ldh-terminal-cabina-v81" content="TERMINAL-CABINA-PINTURA-V81-AVISOS-SOLO-PILL-20260908">
 <meta name="ldh-terminal-cabina-v82" content="TERMINAL-CABINA-PINTURA-V82-PWA-PANTALLA-COMPLETA-20260908">
+<meta name="ldh-terminal-cabina-v86" content="TERMINAL-CABINA-PINTURA-V86-DELETE-REQUEST-PC-20260930">
 <meta name="ldh-terminal-cabina-v84" content="TERMINAL-CABINA-PINTURA-V84-SOLO-PINTURA-ESTIMACION-PRESTAMO-20260909">
 <meta name="ldh-terminal-cabina-v83" content="TERMINAL-CABINA-PINTURA-V83-PINTURA-DIRECTA-AGENDA-20260908">
 <meta name="theme-color" content="#070a12">
@@ -914,6 +915,57 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const direct=map[phaseMapKeyV19(reference)];if(direct&&direct.flow)return direct;
     const wanted=workIdentityKey(reference);if(!wanted)return null;
     return Object.values(map).find(e=>e&&e.flow&&workIdentityKey(e.workRef||e.ref||e.reference)===wanted)||null;
+  }
+
+  // V86 · Solicitud de eliminación desde Cabina. La Terminal nunca borra ni toca Stock:
+  // solo deja una solicitud en taller_data/fabricacion para que el PC la apruebe/rechace.
+  function cabinDeleteRequestV86(reference,pkg){
+    pkg=pkg&&typeof pkg==='object'?pkg:(state.flowPackage||{});
+    const map=pkg.cabinDeleteRequestsV1&&typeof pkg.cabinDeleteRequestsV1==='object'?pkg.cabinDeleteRequestsV1:{};
+    const direct=map[phaseMapKeyV19(reference)];
+    if(direct&&text(direct.status).toLowerCase()==='pending')return direct;
+    const wanted=workIdentityKey(reference);if(!wanted)return null;
+    return Object.values(map).find(r=>r&&text(r.status).toLowerCase()==='pending'&&workIdentityKey(r.ref||r.reference)===wanted)||null;
+  }
+  function cabinDeletePendingV86(reference){return !!cabinDeleteRequestV86(reference,state.flowPackage);}
+  function cabinDeleteGuardV86(reference){
+    if(!cabinDeletePendingV86(reference))return true;
+    alert('Este trabajo tiene una solicitud de eliminación pendiente de confirmar desde el PC. No se permite consumir pintura, mover fases, rectificar, prestar pintura ni finalizar Cabina hasta que se apruebe o rechace.');
+    return false;
+  }
+  async function requestCabinDeleteV86(reference,button){
+    const ref=text(reference);if(!ref)return false;
+    const work=(state.works||[]).find(w=>sameRef(w&&w.ref,ref));
+    if(!work){alert('Trabajo no encontrado. Pulsa Actualizar.');return false;}
+    const existing=cabinDeleteRequestV86(ref,state.flowPackage);
+    if(existing){toast('Solicitud de eliminación pendiente de confirmar desde el PC.');renderWorks();return true;}
+    const tech=technicalWorkRef(work)||ref;
+    const msg='¿Solicitar eliminar este pedido?\n\nReferencia: '+tech+'\n'+(workIdentification(work)?'Identificación: '+workIdentification(work)+'\n':'')+'\nLa Terminal NO lo eliminará ahora. NO consumirá pintura ni disolvente y NO modificará el Stock.\n\nEl pedido quedará bloqueado en Cabina hasta que se APRUEBE o RECHACE la eliminación desde el PC.';
+    if(!confirm(msg))return false;
+    const oldText=button&&button.textContent;
+    if(button){button.disabled=true;button.textContent='Solicitando...';}
+    try{
+      const result=await runTransaction(flowDb,async tx=>{
+        const snap=await tx.get(flowRef);if(!snap.exists())throw new Error('No existe taller_data/fabricacion.');
+        const pkg=snap.data()||{},key=phaseMapKeyV19(tech),requests=pkg.cabinDeleteRequestsV1&&typeof pkg.cabinDeleteRequestsV1==='object'?{...pkg.cabinDeleteRequestsV1}:{};
+        const prev=requests[key];
+        if(prev&&text(prev.status).toLowerCase()==='pending')return {request:prev,package:pkg,duplicate:true};
+        const nowMs=Date.now(),nowISO=new Date(nowMs).toISOString(),f=canonicalFlow(flowOf(work));
+        const request={schema:1,status:'pending',ref:tech,reference:tech,displayRef:visibleWorkRef(work)||tech,identification:workIdentification(work)||'',company:text(work.company||work.empresa),concept:text(work.concept||work.concepto),total:totalOf(work,f),flow:f,requestedAtMs:nowMs,requestedAtISO:nowISO,requestedBy:operator()||'Cabina',source:'terminal_cabina_pintura_v86_delete_request',noStockConsumption:true};
+        requests[key]=request;
+        tx.update(flowRef,{['cabinDeleteRequestsV1.'+key]:request,cabinDeleteRequestsV1Schema:1,cabinDeleteRequestsV1UpdatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedAtISO:nowISO,source:'terminal_cabina_pintura_v86_delete_request'});
+        return {request,package:{...pkg,cabinDeleteRequestsV1:requests,cabinDeleteRequestsV1Schema:1,cabinDeleteRequestsV1UpdatedAtISO:nowISO},duplicate:false};
+      });
+      if(result&&result.package)state.flowPackage=result.package;
+      renderWorks();renderControl();renderStock();
+      toast(result&&result.duplicate?'Solicitud ya pendiente de PC.':'Solicitud enviada al PC · sin consumo de Stock.');
+      return true;
+    }catch(error){
+      console.error('Solicitud eliminar desde Cabina',error);
+      alert('No se pudo enviar la solicitud de eliminación. No se ha borrado ni consumido nada.\n\n'+String(error&&error.message||error));
+      if(button&&button.isConnected){button.disabled=false;button.textContent=oldText||'🗑 Solicitar eliminar';}
+      return false;
+    }
   }
   function compactPhaseEventsV19(events){
     return (Array.isArray(events)?events:[]).filter(h=>text(h&&h.type).startsWith('terminal_pintura_')).slice(-120).map(h=>({
@@ -1908,12 +1960,15 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const open=state.openWorkJobs.has(jobKey);
     const linkKind=text(entry&&entry.info&&entry.info.kind);
     const manualLinkButton=manualPaintLinkButtonHtml(w,linkKind);
+    const deletePending=!!cabinDeleteRequestV86(w.ref,state.flowPackage);
+    const deleteBadge=deletePending?'<span class="ral-tag missing">PENDIENTE ELIMINACIÓN · PC</span>':'';
+    const deleteButton=deletePending?'<button class="btn bad" type="button" disabled>🕒 Pendiente de PC</button>':'<button class="btn bad" type="button" data-cabin-delete-request="'+encodeURIComponent(w.ref)+'">🗑 Solicitar eliminar</button>';
     let workStyle='';
     try{workStyle=workThemeStyle(ral,entry&&entry.info&&entry.info.paintName ? entry.info.paintName : (p||ral));}catch(themeError){console.warn('Tema visual trabajo',w&&w.ref,themeError);}
     return '<details class="work work-accordion" style="'+workStyle+'" data-work-job-key="'+esc(encodeURIComponent(jobKey))+'"'+(open?' open':'')+'>'+ 
       '<summary class="work-summary">'+
         '<div class="work-summary-main"><span class="accordion-arrow">&#8250;</span><div class="work-summary-title"><div class="level-label level-work">Trabajo</div><div class="ref">'+workRefVisualHTML(w)+'</div><div class="concept">'+esc(w.concept)+'</div><div class="meta">Total: '+fmt(w.total)+(p?' &middot; '+esc(p):'')+(waitingLegacy?' &middot; Pendiente de entrar en cabina':'')+'</div></div></div>'+ 
-        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span>'+(waitingLegacy?'<span class="ral-tag missing">PENDIENTE CABINA</span>':'')+'<span class="work-summary-metric units"><b>'+fmt(pendingUnits)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':((calculation&&calculation.source!=='preparacion'?(calculation.seeded?'Dato confirmado &middot; ':'C&aacute;lculo manual &middot; '):'Pintura necesaria &middot; ')+esc(fmtLiters(required))))+'</small></span>'+manualLinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Plegar trabajo</span></span></div>'+ 
+        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span>'+(waitingLegacy?'<span class="ral-tag missing">PENDIENTE CABINA</span>':'')+deleteBadge+'<span class="work-summary-metric units"><b>'+fmt(pendingUnits)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':((calculation&&calculation.source!=='preparacion'?(calculation.seeded?'Dato confirmado &middot; ':'C&aacute;lculo manual &middot; '):'Pintura necesaria &middot; ')+esc(fmtLiters(required))))+'</small></span>'+manualLinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Plegar trabajo</span></span></div>'+ 
       '</summary>'+ 
       '<div class="work-body">'+
         jobPaintStripHtml(entry)+
@@ -1925,11 +1980,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
           '<div class="phase"><b>'+fmt(w.flow.entregado)+'</b><span>ENT</span></div>'+ 
         '</div>'+ 
         '<div class="actions">'+
-          '<button class="btn good paint-one" data-paint-one="'+encodeURIComponent(w.ref)+'"'+(num(w.flow.pintura)<1?' disabled':'')+'>✅ PINTADO +1</button>'+ 
-          '<button class="btn good" data-move-store="'+encodeURIComponent(w.ref)+'"'+(num(w.flow.pintura)<1?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button>'+ 
-          '<button class="btn warn" data-fix-phase="'+encodeURIComponent(w.ref)+'">Rectificar PINTADO</button>'+ 
-          '<button class="btn loan-touch" data-paint-loan="'+encodeURIComponent(w.ref)+'">🤝 Pr&eacute;stamo pintura</button>'+ 
-          '<button class="btn ghost" data-close-cabin="'+encodeURIComponent(w.ref)+'" title="Finaliza el paso por Cabina y oculta esta OT de los trabajos activos de Cabina. No elimina la OT."'+(num(w.flow.pintura)>0?' disabled':'')+'>✓ Finalizar paso por cabina</button>'+ 
+          '<button class="btn good paint-one" data-paint-one="'+encodeURIComponent(w.ref)+'"'+((num(w.flow.pintura)<1||deletePending)?' disabled':'')+'>✅ PINTADO +1</button>'+ 
+          '<button class="btn good" data-move-store="'+encodeURIComponent(w.ref)+'"'+((num(w.flow.pintura)<1||deletePending)?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button>'+ 
+          '<button class="btn warn" data-fix-phase="'+encodeURIComponent(w.ref)+'"'+(deletePending?' disabled':'')+'>Rectificar PINTADO</button>'+ 
+          '<button class="btn loan-touch" data-paint-loan="'+encodeURIComponent(w.ref)+'"'+(deletePending?' disabled':'')+'>🤝 Pr&eacute;stamo pintura</button>'+ 
+          '<button class="btn ghost" data-close-cabin="'+encodeURIComponent(w.ref)+'" title="Finaliza el paso por Cabina y oculta esta OT de los trabajos activos de Cabina. No elimina la OT."'+((num(w.flow.pintura)>0||deletePending)?' disabled':'')+'>✓ Finalizar paso por cabina</button>'+ 
+          deleteButton+ 
         '</div>'+ 
       '</div>'+ 
     '</details>';
@@ -2109,6 +2165,9 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const ral=text(info.ral)||text(legacyPaintLinkForWork(w)&&legacyPaintLinkForWork(w).ral);
       const required=info.required===null||info.required===undefined?null:Math.max(0,num(info.required));
       const jobKey=ref;
+      const deletePending=!!cabinDeleteRequestV86(ref,state.flowPackage);
+      const deleteBadge=deletePending?'<span class="ral-tag missing">PENDIENTE ELIMINACIÓN · PC</span>':'';
+      const deleteButton=deletePending?'<button class="btn bad" type="button" disabled>🕒 Pendiente de PC</button>':'<button class="btn bad" type="button" data-cabin-delete-request="'+encodeURIComponent(ref)+'">🗑 Solicitar eliminar</button>';
       let style='';try{style=workThemeStyle(ral,info.paintName||ralLabel(ral));}catch(_){ }
       /* V64.2: incluso si la ficha entra por el render de respaldo, el cambio de
          vinculo debe seguir visible. Antes este fallback omitía el botón y por eso
@@ -2121,12 +2180,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       }
       return '<details class="work work-accordion" style="'+style+'" data-work-job-key="'+esc(encodeURIComponent(jobKey))+'"'+(state.openWorkJobs.has(jobKey)?' open':'')+'>'+ 
         '<summary class="work-summary"><div class="work-summary-main"><span class="accordion-arrow">&#8250;</span><div class="work-summary-title"><div class="level-label level-work">Trabajo</div><div class="ref">'+workRefVisualHTML(w)+'</div><div class="concept">'+esc(concept)+'</div><div class="meta">Total: '+fmt(w.total)+'</div></div></div>'+ 
-        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span><span class="work-summary-metric units"><b>'+fmt(pending)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':'Pintura necesaria &middot; '+esc(fmtLiters(required)))+'</small></span>'+relinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Plegar trabajo</span></span></div></summary>'+ 
+        '<div class="work-summary-side"><span class="ral-tag themed'+(ral?'':' missing')+'">'+esc(ralLabel(ral))+'</span>'+deleteBadge+'<span class="work-summary-metric units"><b>'+fmt(pending)+'</b><small>Unidades pendientes</small></span><span class="work-summary-metric paint"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Pintura sin dato':'Pintura necesaria &middot; '+esc(fmtLiters(required)))+'</small></span>'+relinkButton+'<span class="work-open-label"><span class="when-closed">Abrir trabajo</span><span class="when-open">Plegar trabajo</span></span></div></summary>'+ 
         '<div class="work-body">'+
           '<div class="job-paint-strip'+(required===null?' missing':'')+'"><div><div class="job-paint-title">'+esc(text(info.paintName)||ralLabel(ral)||'Pintura')+'</div><div class="job-paint-sub">Necesidad de este trabajo para sus unidades pendientes de pintar.</div></div><div class="job-paint-value"><b>'+(required===null?'&mdash;':fmtBotesEq(required))+'</b><small>'+(required===null?'Necesidad sin dato':esc(fmtLiters(required))+' necesarios')+'</small></div></div>'+ 
           loanWorkStatusHtmlV71(w)+
           '<div class="phase-grid"><div class="phase"><b>'+fmt(flow.fab)+'</b><span>FAB</span></div><div class="phase paint"><b>'+fmt(flow.pintura)+'</b><span>PINT</span></div><div class="phase store"><b>'+fmt(flow.almacen)+'</b><span>ALM</span></div><div class="phase"><b>'+fmt(flow.entregado)+'</b><span>ENT</span></div></div>'+ 
-          '<div class="actions"><button class="btn good paint-one" data-paint-one="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>✅ PINTADO +1</button><button class="btn good" data-move-store="'+encodeURIComponent(ref)+'"'+(num(flow.pintura)<1?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button><button class="btn warn" data-fix-phase="'+encodeURIComponent(ref)+'">Rectificar PINTADO</button><button class="btn loan-touch" data-paint-loan="'+encodeURIComponent(ref)+'">🤝 Pr&eacute;stamo pintura</button><button class="btn ghost" data-close-cabin="'+encodeURIComponent(ref)+'" title="Finaliza el paso por Cabina y oculta esta OT de los trabajos activos de Cabina. No elimina la OT."'+(num(flow.pintura)>0?' disabled':'')+'>✓ Finalizar paso por cabina</button></div>'+ 
+          '<div class="actions"><button class="btn good paint-one" data-paint-one="'+encodeURIComponent(ref)+'"'+((num(flow.pintura)<1||deletePending)?' disabled':'')+'>✅ PINTADO +1</button><button class="btn good" data-move-store="'+encodeURIComponent(ref)+'"'+((num(flow.pintura)<1||deletePending)?' disabled':'')+'>Mover varias &rarr; Almac&eacute;n</button><button class="btn warn" data-fix-phase="'+encodeURIComponent(ref)+'"'+(deletePending?' disabled':'')+'>Rectificar PINTADO</button><button class="btn loan-touch" data-paint-loan="'+encodeURIComponent(ref)+'"'+(deletePending?' disabled':'')+'>🤝 Pr&eacute;stamo pintura</button><button class="btn ghost" data-close-cabin="'+encodeURIComponent(ref)+'" title="Finaliza el paso por Cabina y oculta esta OT de los trabajos activos de Cabina. No elimina la OT."'+((num(flow.pintura)>0||deletePending)?' disabled':'')+'>✓ Finalizar paso por cabina</button>'+deleteButton+'</div>'+ 
         '</div></details>';
     }
   }
@@ -2221,6 +2280,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     root.querySelectorAll('[data-paint-loan]').forEach(b=>b.onclick=()=>openPaintLoanModalV70(decodeURIComponent(b.dataset.paintLoan||'')));
     root.querySelectorAll('[data-open-loans-v71]').forEach(b=>b.onclick=ev=>{ev.preventDefault();ev.stopPropagation();setTab('loans');});
     root.querySelectorAll('[data-close-cabin]').forEach(b=>b.onclick=()=>closeCabinWorkV67(decodeURIComponent(b.dataset.closeCabin||''),b));
+    root.querySelectorAll('[data-cabin-delete-request]').forEach(b=>b.onclick=ev=>{ev.preventDefault();ev.stopPropagation();requestCabinDeleteV86(decodeURIComponent(b.dataset.cabinDeleteRequest||''),b);});
     renderLoanDebtIndicatorsV71();
     setTimeout(refreshOrderMetaForWorks,0);
     schedulePendingCabinConsumptionRepair();
@@ -2380,6 +2440,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
 
   async function closeCabinWorkV67(ref,button){
+    if(!cabinDeleteGuardV86(ref))return false;
     ref=text(ref);if(!ref)return;
     const op=requireOperator();if(!op)return;
     const work=(state.works||[]).find(w=>sameRef(w&&w.ref,ref));
@@ -2594,6 +2655,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
 
   async function moveOnePaintToStore(ref,button){
+    if(!cabinDeleteGuardV86(ref))return false;
     const work=state.works.find(w=>sameRef(w.ref,ref)); if(!work) return alert('Trabajo no encontrado.');
     if(num(work.flow.pintura)<1) return alert('No queda ninguna unidad completa en Pintura.');
     const originalText='✅ PINTADO +1';
@@ -2659,6 +2721,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   }
 
   async function movePaintToStore(ref){
+    if(!cabinDeleteGuardV86(ref))return false;
     const work=state.works.find(w=>sameRef(w.ref,ref)); if(!work) return alert('Trabajo no encontrado.');
     const raw=prompt('Pintura -> Almacen\nDisponibles en Pintura: '+fmt(work.flow.pintura)+'\nCantidad a mover:',fmt(work.flow.pintura));
     if(raw===null) return; const qty=num(raw);
@@ -2892,6 +2955,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return {qty,targets:[{operationId:opId,qty}],paintEvent,correction:hist[correctionIndex]};
   }
   function openPhaseModal(ref){
+    if(!cabinDeleteGuardV86(ref))return false;
     if(!requireOperator()) return;
     const w=state.works.find(x=>sameRef(x.ref,ref)); if(!w) return;
     state.activePhaseRef=w.ref;
@@ -4479,6 +4543,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     root.querySelectorAll('[data-loan-source-company]').forEach(btn=>btn.onclick=()=>{root.querySelectorAll('.loan-candidate').forEach(x=>x.classList.remove('selected'));btn.classList.add('selected');selectedLoanSourceV70={companyId:text(btn.dataset.loanSourceCompany),materialId:text(btn.dataset.loanSourceMaterial)};const c=candidates.find(x=>x.companyId===selectedLoanSourceV70.companyId&&x.materialId===selectedLoanSourceV70.materialId);$('loanModalInfo').textContent=c?'Prestará '+c.company+'. Disponible libre: '+fmt(c.free)+' botes ('+fmt(litersFromBotes(c.free))+' L).':'Empresa seleccionada.';$('loanConfirm').disabled=false;});
   }
   function openPaintLoanModalV70(ref){
+    if(!cabinDeleteGuardV86(ref))return false;
     const work=state.works.find(x=>sameRef(x.ref,ref));if(!work)return alert('Trabajo no encontrado.');
     if(!state.stock)return alert('Stock todavía no está cargado. Pulsa Actualizar.');
     if(!operator())return alert('Selecciona primero el operario.');
@@ -4994,5 +5059,6 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 </script>
 
 <script id="LDH_TERMINAL_CABINA_V85_NOTA_ACLARATORIA_20260909">window.LDH_TERMINAL_CABINA_V85='SOLO-PINTURA-NOTA-ACLARATORIA-AGENDA-CABINA-20260909';document.documentElement.dataset.ldhCabinaDirectPaint='V85';console.info('[Cabina V85] SOLO PINTURA: nota aclaratoria de Agenda visible en tarjeta, cálculo, consumo e histórico.');</script>
+<!-- LDH_TERMINAL_CABINA_V86_DELETE_REQUEST_PC_20260930 -->
 </body>
 </html>
