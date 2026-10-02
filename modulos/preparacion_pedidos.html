@@ -32277,4 +32277,318 @@ console.info('[Preparación V177] Vinculador: barras desde Stock v2 por empresa;
 window.LDH_PREP_V178='PREPARACION-V178-ROUTER-RECIBIDO-ESTABLE-20260922';
 document.documentElement.dataset.ldhPrepV178='true';
 </script>
+
+<!-- LDH_PREP_CANCEL_FROM_AGENDA_V1_20261002 -->
+<style id="LDH_PREP_CANCEL_FROM_AGENDA_V1_STYLE">
+#ldhAgendaCancelBridgeV1{position:fixed;inset:0;z-index:2147483000;display:none;place-items:center;background:rgba(2,6,23,.88);backdrop-filter:blur(3px)}
+#ldhAgendaCancelBridgeV1.show{display:grid}
+#ldhAgendaCancelBridgeV1 .box{width:min(560px,calc(100vw - 32px));padding:22px;border:1px solid rgba(56,189,248,.42);border-radius:18px;background:linear-gradient(180deg,#0f1d34,#071225);box-shadow:0 28px 80px rgba(0,0,0,.55);color:#eaf6ff;font-family:Inter,Segoe UI,system-ui,sans-serif}
+#ldhAgendaCancelBridgeV1 b{display:block;font-size:18px;margin-bottom:8px}#ldhAgendaCancelBridgeV1 span{display:block;color:#b9c9df;font-size:13px;line-height:1.45}
+</style>
+<script id="LDH_PREP_CANCEL_FROM_AGENDA_V1_20261002">
+(function(){
+  'use strict';
+  const BUILD='PREPARACION-CANCEL-DESDE-AGENDA-V1-20261002';
+  const text=v=>String(v==null?'':v).trim();
+  const num=v=>{const n=Number.parseFloat(String(v==null?0:v).replace(',','.'));return Number.isFinite(n)?n:0;};
+  const norm=v=>text(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'');
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  function getRaw(key){
+    try{const v=localStorage.getItem(key);if(v!==null)return v;}catch(_){ }
+    try{const v=sessionStorage.getItem(key);if(v!==null)return v;}catch(_){ }
+    try{if(typeof getAny==='function'){const v=getAny(key);if(v!==null&&v!==undefined)return v;}}catch(_){ }
+    return null;
+  }
+  function parse(raw,fallback){try{return raw?JSON.parse(raw):fallback;}catch(_){return fallback;}}
+  function tech(value){
+    try{if(typeof LDH_prepTechnicalRefV159==='function')return LDH_prepTechnicalRefV159(value);}catch(_){ }
+    const raw=text(value).toUpperCase();
+    const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);
+    return m?('OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:'')):raw;
+  }
+  function allRefs(){
+    const out=new Set();
+    for(const st of [localStorage,sessionStorage]){
+      try{for(let i=0;i<st.length;i++){const k=st.key(i)||'';if(k.startsWith('prep_recepcion_'))out.add(k.slice(15));if(k.startsWith('prep_meta_'))out.add(k.slice(10));}}catch(_){ }
+    }
+    return Array.from(out).filter(Boolean);
+  }
+  function metaOf(ref){return parse(getRaw('prep_meta_'+ref),{})||{};}
+  function linesOf(ref){const v=parse(getRaw('prep_recepcion_'+ref),[]);return Array.isArray(v)?v:[];}
+  function live(ref){
+    const m=metaOf(ref);
+    if(m.deleted_from_preparation===true||m.closed_from_preparation===true)return false;
+    return linesOf(ref).length>0;
+  }
+  function metaOrderId(meta){return text(meta&&(meta.agenda_order_id||meta.agendaOrderId||meta.orderId||meta.workOrderId||meta.composite_master_order_id||meta.masterOrderId));}
+  function metaMasterRef(meta){return tech(meta&&(meta.composite_master_reference||meta.masterReference||meta.master_ref||''));}
+  function targetRefs(baseRef,orderId){
+    const base=tech(baseRef),oid=text(orderId),refs=allRefs().filter(live),out=[];
+    for(const ref of refs){
+      const m=metaOf(ref),tr=tech(ref),mid=metaOrderId(m),master=metaMasterRef(m);
+      const exact=tr===base;
+      const byOrder=!!(oid&&mid&&mid===oid);
+      const byMaster=!!(base&&master&&master===base);
+      const byPart=!!(base&&tr.startsWith(base+'-')&&/^[A-Z]{1,3}$/.test(tr.slice(base.length+1)));
+      if(exact||byOrder||byMaster||byPart) out.push(ref);
+    }
+    return Array.from(new Set(out));
+  }
+  function stageOf(ref){
+    try{if(typeof getTrabajoStage==='function')return String(getTrabajoStage(ref)||'preparacion').toLowerCase();}catch(_){ }
+    const m=metaOf(ref),s=text(m.workflow_stage||m.fase||m.estado||m.status).toLowerCase();
+    if(m.entregado||m.en_entregado||s.includes('entreg'))return 'entregado';
+    if(m.en_almacen||m.almacen_ts||s.includes('almac'))return 'almacen';
+    if(m.en_pintura||m.pintura_ts||s.includes('pint'))return 'pintura';
+    if(m.en_fabricacion||m.fabricacion_ts||s.includes('fabric'))return 'fabricacion';
+    return 'preparacion';
+  }
+  function sameRef(a,b){return norm(tech(a))===norm(tech(b));}
+  function stockDb(){
+    const raw=parse(getRaw('ldh_v2_company_stock_v1'),null);
+    if(!raw||typeof raw!=='object')return null;
+    return raw.db&&typeof raw.db==='object'?raw.db:raw;
+  }
+  function internalPending(ref){
+    const db=stockDb();if(!db)return 0;
+    const rows=Array.isArray(db.internalOtReplenishmentsV1)?db.internalOtReplenishmentsV1:[];
+    return rows.filter(r=>r&&r.kind==='internal_ot_replenishment'&&num(r.pendingQty)>0&&!['repuesto','cerrado','cancelado'].includes(text(r.status).toLowerCase())&&sameRef(r.currentDebtorRef||r.currentDebtorStorageRef,ref)).reduce((s,r)=>s+Math.max(0,num(r.pendingQty)),0);
+  }
+  function overlay(title,detail){
+    let host=document.getElementById('ldhAgendaCancelBridgeV1');
+    if(!host){host=document.createElement('div');host.id='ldhAgendaCancelBridgeV1';host.innerHTML='<div class="box"><b id="ldhAgendaCancelBridgeTitleV1"></b><span id="ldhAgendaCancelBridgeDetailV1"></span></div>';document.body.appendChild(host);}
+    const t=document.getElementById('ldhAgendaCancelBridgeTitleV1'),d=document.getElementById('ldhAgendaCancelBridgeDetailV1');
+    if(t)t.textContent=title||'Procesando anulaci\u00f3n';if(d)d.textContent=detail||'';host.classList.add('show');
+  }
+  function resultUrl(status,p,message,count){
+    const q=new URLSearchParams();
+    q.set('prepCancelResult',status);
+    q.set('cancelOrderId',text(p.get('cancelOrderId')));
+    q.set('cancelRef',text(p.get('cancelRef')));
+    q.set('cancelReason',text(p.get('cancelReason'))||'agenda-cancelled-cascade-v1');
+    if(message)q.set('cancelMessage',message);
+    if(count!=null)q.set('cancelCount',String(count));
+    return (text(p.get('cancelReturn'))||'agenda_diaria.html')+'?'+q.toString();
+  }
+  async function cloudReady(maxMs){
+    const start=Date.now();
+    while(Date.now()-start<(maxMs||6000)){
+      if(typeof window.__ldhPrepSyncNow==='function')return true;
+      await wait(100);
+    }
+    return typeof window.__ldhPrepSyncNow==='function';
+  }
+  async function deleteThroughCurrentSafety(ref){
+    const oldConfirm=window.confirm;
+    let okCall=false;
+    try{
+      try{refActual=ref;}catch(_){ }
+      window.confirm=()=>true;
+      if(typeof window.eliminarPedido==='function'){window.eliminarPedido();okCall=true;}
+      else if(typeof eliminarPedido==='function'){eliminarPedido();okCall=true;}
+    }finally{window.confirm=oldConfirm;}
+    if(!okCall)return false;
+    await wait(140);
+    const m=metaOf(ref),raw=getRaw('prep_recepcion_'+ref);
+    return m.deleted_from_preparation===true&&!raw;
+  }
+  async function process(){
+    const p=new URLSearchParams(location.search||'');
+    if(p.get('agendaCancel')!=='1')return;
+    const baseRef=text(p.get('cancelRef')),orderId=text(p.get('cancelOrderId'));
+    overlay('Anulando pedido','Comprobando Preparaci\u00f3n y reservas antes de retirar la OT de Agenda.');
+    if(!baseRef){location.replace(resultUrl('error',p,'Falta la referencia de la OT. No se ha borrado Agenda.',0));return;}
+    const refs=targetRefs(baseRef,orderId);
+    if(!refs.length){
+      location.replace(resultUrl('not_found',p,'No quedaba una ficha activa en Preparaci\u00f3n; Agenda puede cerrar la OT.',0));
+      return;
+    }
+    for(const ref of refs){
+      const stage=stageOf(ref);
+      if(stage!=='preparacion'){
+        location.replace(resultUrl('blocked',p,`La OT ${ref} ya figura en ${stage.toUpperCase()}. No se ha borrado Agenda ni se ha tocado esa fase.`,0));
+        return;
+      }
+      const pending=internalPending(ref);
+      if(pending>0){
+        location.replace(resultUrl('blocked',p,`La OT ${ref} tiene ${pending} barra(s) pendientes de reposici\u00f3n interna. Regulariza ese pendiente antes de anular. No se ha borrado Agenda.`,0));
+        return;
+      }
+    }
+    if(!await cloudReady(6500)){
+      location.replace(resultUrl('error',p,'Preparaci\u00f3n no tiene sincronizaci\u00f3n de nube disponible. No se ha iniciado la anulaci\u00f3n.',0));
+      return;
+    }
+    overlay('Anulando pedido',`Retirando ${refs.length===1?'la ficha de Preparaci\u00f3n':refs.length+' partidas de Preparaci\u00f3n'} y liberando sus reservas.`);
+    let done=0;
+    for(const ref of refs){
+      const ok=await deleteThroughCurrentSafety(ref);
+      if(!ok){
+        location.replace(resultUrl('error',p,`Preparaci\u00f3n no ha podido confirmar el borrado seguro de ${ref}. Agenda se mantiene intacta. Revisa la OT antes de reintentar.`,done));
+        return;
+      }
+      done++;
+    }
+    try{
+      await Promise.resolve(window.__ldhPrepSyncNow('agenda_cancel_cascade_v1:'+baseRef));
+      await wait(350);
+      await Promise.resolve(window.__ldhPrepSyncNow('agenda_cancel_cascade_v1_verify:'+baseRef));
+    }catch(e){
+      console.error('[Preparacion cancel cascade] sync',e);
+      location.replace(resultUrl('error',p,'La OT se ha retirado localmente de Preparaci\u00f3n, pero no se ha confirmado la nube. Agenda no se borrar\u00e1 autom\u00e1ticamente.',done));
+      return;
+    }
+    overlay('Preparaci\u00f3n anulada','Cancelaci\u00f3n confirmada. Volviendo a Agenda para cerrar tambi\u00e9n la OT.');
+    await wait(220);
+    location.replace(resultUrl('ok',p,'',done));
+  }
+  window.LDH_PREP_CANCEL_FROM_AGENDA_V1=BUILD;
+  document.documentElement.dataset.ldhPrepCancelFromAgenda='V1';
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(process,900),{once:true});
+  else setTimeout(process,900);
+})();
+</script>
+
+
+
+<!-- LDH_PREP_RETURN_COMPOSITE_V1_20261002 -->
+<style id="LDH_PREP_RETURN_COMPOSITE_V1_STYLE">
+#ldhPrepReturnCompositeV1{
+  display:none;
+  border-color:#0891b2!important;
+  background:linear-gradient(180deg,#0e7490,#155e75)!important;
+  color:#ecfeff!important;
+  font-weight:900!important;
+  box-shadow:0 0 0 1px rgba(34,211,238,.12) inset;
+}
+#ldhPrepReturnCompositeV1.show{display:inline-flex!important;align-items:center;gap:6px}
+</style>
+<script id="LDH_PREP_RETURN_COMPOSITE_V1_20261002">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_RETURN_COMPOSITE_V1__) return;
+  window.__LDH_PREP_RETURN_COMPOSITE_V1__=true;
+  const BUILD='PREPARACION-V179-VOLVER-PEDIDO-COMPUESTO-PENDIENTES-20261002';
+  const AGENDA_PAGE='agenda_diaria.html';
+  const ORDER_KEY='ldh_work_orders_v1';
+  const txt=v=>String(v==null?'':v).trim();
+  const norm=v=>txt(v).toUpperCase().replace(/[^A-Z0-9]+/g,'');
+  const parse=(raw,fallback)=>{try{const v=JSON.parse(raw||'');return v==null?fallback:v;}catch(_){return fallback;}};
+  const sameRef=(a,b)=>{const aa=norm(a),bb=norm(b);return !!aa&&!!bb&&aa===bb;};
+
+  function currentMeta(){
+    try{return (typeof metaActual!=='undefined'&&metaActual&&typeof metaActual==='object')?metaActual:{};}catch(_){return {};}
+  }
+  function currentRef(){
+    try{return txt(typeof refActual!=='undefined'?refActual:'');}catch(_){return '';}
+  }
+  function stores(){
+    const out=[];
+    try{out.push(localStorage);}catch(_){ }
+    try{out.push(sessionStorage);}catch(_){ }
+    return out;
+  }
+  function orderRows(){
+    const byId=new Map();
+    for(const store of stores()){
+      try{
+        const raw=store.getItem(ORDER_KEY);if(!raw)continue;
+        const parsed=parse(raw,[]);
+        const rows=Array.isArray(parsed)?parsed:(parsed&&Array.isArray(parsed.orders)?parsed.orders:[]);
+        rows.forEach(o=>{if(o&&typeof o==='object'){const id=txt(o.id)||txt(o.reference);if(id&&!byId.has(id))byId.set(id,o);}});
+      }catch(_){ }
+    }
+    return Array.from(byId.values());
+  }
+  function metaGroup(meta){return txt(meta&& (meta.composite_group_id||meta.compositeGroupId));}
+  function metaMasterId(meta){return txt(meta&& (meta.composite_master_order_id||meta.compositeMasterOrderId||meta.agenda_order_id||meta.agendaOrderId));}
+  function metaMasterRef(meta){return txt(meta&& (meta.composite_master_reference||meta.compositeMasterReference));}
+  function orderFor(meta){
+    const gid=metaGroup(meta),oid=metaMasterId(meta),oref=metaMasterRef(meta),rows=orderRows();
+    return rows.find(o=>oid&&txt(o.id)===oid)
+      || rows.find(o=>gid&&txt(o&&o.compositeV1&&o.compositeV1.groupId)===gid)
+      || rows.find(o=>oref&&sameRef(o.reference,oref))
+      || null;
+  }
+  function partAdvanced(part){
+    const status=txt(part&&(part.prepStatus||part.preparationStatus)).toLowerCase();
+    return status==='in_preparation'||status==='preparacion'||status==='en_preparacion'||Number(part&& (part.inPreparationAtMs||part.prepAtMs))>0;
+  }
+  function groupSeenRefs(gid){
+    const set=new Set();
+    if(!gid)return set;
+    for(const store of stores()){
+      try{
+        for(let i=0;i<store.length;i++){
+          const key=txt(store.key(i));
+          if(!key.startsWith('prep_meta_'))continue;
+          const m=parse(store.getItem(key),{});
+          if(metaGroup(m)!==gid)continue;
+          const r=txt(m.composite_part_reference||m.partReference||m.technical_ref||m.referencia||m.ref||key.slice('prep_meta_'.length));
+          if(r)set.add(norm(r));
+        }
+      }catch(_){ }
+    }
+    return set;
+  }
+  function pendingInfo(meta){
+    const gid=metaGroup(meta),masterId=metaMasterId(meta),masterRef=metaMasterRef(meta);
+    if(!gid&&!masterId&&!masterRef)return null;
+    const cur=currentRef(),order=orderFor(meta),seen=groupSeenRefs(gid);
+    if(order&&order.compositeV1&&Array.isArray(order.compositeV1.parts)&&order.compositeV1.parts.length>=2){
+      const pending=order.compositeV1.parts.filter(part=>{
+        const ref=txt(part&& (part.reference||part.partReference||part.composite_part_reference));
+        if(ref&&sameRef(ref,cur))return false;
+        if(partAdvanced(part))return false;
+        if(ref&&seen.has(norm(ref)))return false;
+        return true;
+      });
+      return {count:pending.length,orderId:txt(order.id)||masterId,masterRef:txt(order.reference)||masterRef,groupId:txt(order.compositeV1.groupId)||gid};
+    }
+    const expected=Math.max(2,Math.round(Number(meta&& (meta.composite_part_count||meta.partCount))||2));
+    const processed=Math.max(1,seen.size||1);
+    return {count:Math.max(0,expected-processed),orderId:masterId,masterRef,groupId:gid};
+  }
+  function ensureButton(){
+    const actions=document.querySelector('.ldh-prep-actions');
+    if(!actions)return null;
+    let btn=document.getElementById('ldhPrepReturnCompositeV1');
+    if(!btn){
+      btn=document.createElement('button');
+      btn.id='ldhPrepReturnCompositeV1';btn.type='button';btn.className='btn';
+      btn.addEventListener('click',()=>{
+        const meta=currentMeta(),info=pendingInfo(meta);if(!info||info.count<1)return;
+        const q=new URLSearchParams();q.set('openComposite','1');
+        if(info.orderId)q.set('compositeOrderId',info.orderId);
+        if(info.masterRef)q.set('compositeRef',info.masterRef);
+        if(info.groupId)q.set('compositeGroupId',info.groupId);
+        q.set('fromPreparation','1');
+        location.href=AGENDA_PAGE+'?'+q.toString();
+      });
+      actions.insertBefore(btn,actions.firstChild);
+    }
+    return btn;
+  }
+  function refresh(){
+    const btn=ensureButton();if(!btn)return;
+    const detail=document.getElementById('vistaDetalle');
+    const visible=detail&&!detail.classList.contains('hidden')&&!!currentRef();
+    const info=visible?pendingInfo(currentMeta()):null;
+    const show=!!(info&&info.count>0);
+    btn.classList.toggle('show',show);
+    btn.hidden=!show;
+    if(show){
+      btn.textContent=`← Volver al pedido compuesto · ${info.count} ${info.count===1?'pendiente':'pendientes'}`;
+      btn.title='Volver directamente a las PARTIDAS de esta OT en Agenda.';
+    }
+  }
+  window.LDH_PREP_RETURN_COMPOSITE_V1={refresh,pendingInfo};
+  window.LDH_PREP_V179=BUILD;
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{refresh();setTimeout(refresh,250);setTimeout(refresh,900);},{once:true});
+  else{refresh();setTimeout(refresh,250);setTimeout(refresh,900);}
+  setInterval(refresh,700);
+  console.info('[Preparacion V179] retorno directo al pedido compuesto activo solo mientras quedan partidas pendientes.');
+})();
+</script>
+
 </body></html>
