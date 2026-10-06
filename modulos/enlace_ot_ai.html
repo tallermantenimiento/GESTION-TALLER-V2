@@ -35,10 +35,26 @@ body{display:flex;flex-direction:column;background:radial-gradient(360px 220px a
 'use strict';
 const SCOPE='direccion_enlace_ot';
 const BRIDGE='https://gestion-taller-ia.taller-mantenimiento.workers.dev';
-const CHAT_KEY='ldh_ia_chat_direccion_enlace_ot_r13';
+const CHAT_KEY='ldh_ia_chat_direccion_enlace_ot_r14';
 const input=document.getElementById('input'),messages=document.getElementById('messages'),scroll=document.getElementById('scroll'),sendBtn=document.getElementById('send'),status=document.getElementById('status'),mic=document.getElementById('mic'),micNote=document.getElementById('micNote'),clearBtn=document.getElementById('clear');
 const state={busy:false,health:null,history:[],pendingAction:null,recorder:null,stream:null,chunks:[],micHold:false};
 const text=v=>String(v==null?'':v);const esc=s=>text(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function normAI(v){return text(v).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()}
+function localDateISO(offsetDays=0){const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()+Number(offsetDays||0));const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return y+'-'+m+'-'+day}
+function normalizeKnownTerms(v){
+  let s=text(v).trim();
+  s=s.replace(/\b(?:es\s*clum|esclum|esplume?|explom|skloom|sklum)\b/gi,'SKLUM');
+  s=s.replace(/\bmeses\s+de\s+empaquetado\b/gi,'mesas de empaquetado');
+  return s;
+}
+function enrichRelativeDates(v){
+  const s=normalizeKnownTerms(v);const q=normAI(s);const hints=[];
+  if(/\bpasado manana\b/.test(q)) hints.push('pasado manana='+localDateISO(2));
+  else if(/\bmanana\b/.test(q)) hints.push('manana='+localDateISO(1));
+  if(/\bhoy\b/.test(q)) hints.push('hoy='+localDateISO(0));
+  const m=q.match(/\b(?:dentro de|en)\s+(\d{1,3})\s+dias?\b/);if(m)hints.push(m[0]+'='+localDateISO(Number(m[1])));
+  return hints.length?s+'\n[FECHAS_RESUELTAS_POR_LA_APP: '+hints.join(' | ')+']':s;
+}
 function setStatus(t,k=''){status.textContent=t;status.className='status'+(k?' '+k:'')}
 function busy(v,t){state.busy=!!v;sendBtn.disabled=state.busy;document.querySelectorAll('[data-p]').forEach(b=>b.disabled=state.busy);if(mic&&!state.micHold)mic.disabled=state.busy;if(clearBtn)clearBtn.disabled=state.busy;if(t)setStatus(t,state.busy?'busy':'')}
 function msg(role,content){const r=document.createElement('div');r.className='row'+(role==='user'?' user':'');const meta=role==='user'?'Tu':(role==='error'?'Sistema':'Asistente IA');const cls=role==='error'?' error':(role==='system'?' system':'');r.innerHTML=(role==='user'?'':'<div class="avatar">+</div>')+'<div class="wrap"><div class="meta">'+meta+'</div><div class="bubble'+cls+'">'+esc(content)+'</div></div>';messages.appendChild(r);scroll.scrollTop=scroll.scrollHeight}
@@ -84,7 +100,7 @@ function parsePayload(raw){
   return null;
 }
 async function send(v){
-  v=text(v).trim();if(!v||state.busy)return;input.value='';msg('user',v);busy(true,'IA central - consultando Enlace OT...');
+  const visibleUser=normalizeKnownTerms(v);const modelUser=enrichRelativeDates(visibleUser);if(!visibleUser||state.busy)return;input.value='';msg('user',visibleUser);busy(true,'IA central - consultando Enlace OT...');
   try{
     const snap=await getSnapshot();
     const sys=[
@@ -97,6 +113,9 @@ async function send(v){
       'No cambies manualmente estados de flujo del taller como fabricacion, pintura, almacen, terminado o entregado: esos estados los gobiernan sus modulos.',
       'Acciones permitidas: open_new_order, create_order, open_edit_order, edit_order, change_priority, request_cancellation, view_order, archive_order.',
       'Si el usuario dice solo nuevo trabajo o abre un nuevo trabajo, usa open_new_order.',
+      'FECHA LOCAL ACTUAL DEL PC: '+localDateISO(0)+'.',
+      'Resuelve expresiones relativas de fecha como hoy, manana, pasado manana o dentro de N dias usando esa fecha local. No pidas la fecha exacta si la expresion relativa es inequívoca; envia deliveryDate en YYYY-MM-DD.',
+      'Empresas: usa exactamente las presentes en ENLACE_OT_DATA.empresasDisponibles. Si una transcripcion dice esplume, esplum, explom, esclum, es clum o skloom, interpretala como SKLUM cuando SKLUM exista entre las empresas disponibles.',
       'Para create_order exige company, deliveryDate en YYYY-MM-DD, quantity y description. material, ironType, primer, ral y priority son opcionales.',
       'Para edit_order, change_priority, request_cancellation, view_order y archive_order usa una referencia de OT existente y no la inventes.',
       'Si falta un dato obligatorio o la referencia es ambigua, pregunta al usuario y NO propongas una accion.',
@@ -109,11 +128,11 @@ async function send(v){
       'Si un dato no esta en ENLACE_OT_DATA, dilo y no lo inventes.',
       'ENLACE_OT_DATA='+JSON.stringify(snap)
     ].join('\n');
-    const request={scope:SCOPE,messages:[{role:'system',content:sys},...state.history.slice(-6),{role:'user',content:v}],temperature:.03,reasoning_effort:'low',max_completion_tokens:1200};
+    const request={scope:SCOPE,messages:[{role:'system',content:sys},...state.history.slice(-6),{role:'user',content:modelUser}],temperature:.03,reasoning_effort:'low',max_completion_tokens:1200};
     let response=await bridge('/chat',request);
     let reply=extractReply(response);
     if(!reply){
-      const retry={...request,reasoning_effort:'low',max_completion_tokens:1600,messages:[{role:'system',content:sys+'\nIMPORTANTE: devuelve el JSON final visible en content, sin dejarlo vacio.'},...state.history.slice(-4),{role:'user',content:v}]};
+      const retry={...request,reasoning_effort:'low',max_completion_tokens:1600,messages:[{role:'system',content:sys+'\nIMPORTANTE: devuelve el JSON final visible en content, sin dejarlo vacio.'},...state.history.slice(-4),{role:'user',content:modelUser}]};
       response=await bridge('/chat',retry);reply=extractReply(response);
     }
     if(!reply)throw new Error('La IA respondio sin texto final.');
@@ -130,12 +149,12 @@ async function send(v){
       if(!assistantText)throw new Error('La IA no ha devuelto una respuesta util.');
       msg('assistant',assistantText);
     }
-    state.history.push({role:'user',content:v},{role:'assistant',content:assistantText});state.history=state.history.slice(-6);save();
+    state.history.push({role:'user',content:modelUser},{role:'assistant',content:assistantText});state.history=state.history.slice(-6);save();
     const model=text(response?.model||state.health?.model||'openai/gpt-oss-120b').replace('openai/','');setStatus('IA central - '+model+' - solo Enlace OT - en linea','ok');
   }catch(e){state.pendingAction=null;msg('error','Error IA: '+text(e?.message||e));setStatus('IA central - error','bad')}finally{busy(false)}
 }
 async function b64(blob){return await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]||'');r.onerror=rej;r.readAsDataURL(blob)})}
-async function startMic(){if(state.busy||state.recorder?.state==='recording')return;if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){msg('error','Este navegador no permite usar el microfono aqui.');return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});state.stream=stream;state.chunks=[];const mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';const rec=new MediaRecorder(stream,{mimeType:mime});state.recorder=rec;const started=performance.now();rec.ondataavailable=e=>{if(e.data&&e.data.size)state.chunks.push(e.data)};rec.onstop=async()=>{mic.classList.remove('recording');mic.textContent='Mantener pulsado';try{stream.getTracks().forEach(t=>t.stop())}catch(_){}state.recorder=null;const blob=new Blob(state.chunks,{type:mime});if(!blob.size||performance.now()-started<650){micNote.textContent='Pulsacion demasiado corta.';return}try{busy(true,'IA central - transcribiendo...');const tr=await bridge('/transcribe',{scope:SCOPE,audioBase64:await b64(blob),mimeType:mime,prompt:'IDIOMA OBLIGATORIO: espanol de Espana. Vocabulario: Enlace OT Direccion, orden de trabajo, prioridad, esperando material, fabricacion, pintura, almacen, entregado, stock.',temperature:0});const spoken=text(tr?.text).trim();busy(false);if(!spoken){micNote.textContent='No he reconocido una frase.';return}input.value=spoken;await send(spoken);micNote.textContent='Whisper Large V3 - espanol ES'}catch(e){busy(false);msg('error','Error de voz: '+text(e?.message||e))}};rec.start();mic.classList.add('recording');mic.textContent='Soltar para enviar';micNote.textContent='Escuchando...'}catch(e){msg('error','No puedo capturar el microfono: '+text(e?.message||e))}}
+async function startMic(){if(state.busy||state.recorder?.state==='recording')return;if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){msg('error','Este navegador no permite usar el microfono aqui.');return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});state.stream=stream;state.chunks=[];const mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';const rec=new MediaRecorder(stream,{mimeType:mime});state.recorder=rec;const started=performance.now();rec.ondataavailable=e=>{if(e.data&&e.data.size)state.chunks.push(e.data)};rec.onstop=async()=>{mic.classList.remove('recording');mic.textContent='Mantener pulsado';try{stream.getTracks().forEach(t=>t.stop())}catch(_){}state.recorder=null;const blob=new Blob(state.chunks,{type:mime});if(!blob.size||performance.now()-started<650){micNote.textContent='Pulsacion demasiado corta.';return}try{busy(true,'IA central - transcribiendo...');const tr=await bridge('/transcribe',{scope:SCOPE,audioBase64:await b64(blob),mimeType:mime,prompt:'IDIOMA OBLIGATORIO: espanol de Espana. Nombres exactos de empresa: SKLUM (pronunciado es-clum; si oyes esplume, esplum, explom, esclum, es clum o skloom, escribe SKLUM), PROCEED, REYNOLDS, WOODS, STOCK COMUN. Vocabulario del taller: Enlace OT Direccion, orden de trabajo, mesas de empaquetado, mesa de empaquetado, prioridad maxima, pasado manana, RAL 7016, esperando material, fabricacion, pintura, almacen, entregado, stock.',temperature:0});const spoken=normalizeKnownTerms(text(tr?.text).trim());busy(false);if(!spoken){micNote.textContent='No he reconocido una frase.';return}input.value=spoken;await send(spoken);micNote.textContent='Whisper Large V3 - espanol ES'}catch(e){busy(false);msg('error','Error de voz: '+text(e?.message||e))}};rec.start();mic.classList.add('recording');mic.textContent='Soltar para enviar';micNote.textContent='Escuchando...'}catch(e){msg('error','No puedo capturar el microfono: '+text(e?.message||e))}}
 document.querySelectorAll('[data-p]').forEach(b=>b.addEventListener('click',()=>send(b.dataset.p||'')));sendBtn.addEventListener('click',()=>send(input.value));if(clearBtn)clearBtn.addEventListener('click',clearConversation);input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(input.value)}});mic.addEventListener('pointerdown',e=>{e.preventDefault();state.micHold=true;startMic()});const end=e=>{if(!state.micHold&&!state.recorder)return;e?.preventDefault?.();state.micHold=false;try{if(state.recorder?.state==='recording')state.recorder.stop()}catch(_){}};mic.addEventListener('pointerup',end);window.addEventListener('pointerup',end);
 load();
 bridge('/health',null,'GET').then(h=>{state.health=h;messages.innerHTML='';msg('assistant','IA de Enlace OT Direccion conectada. Puedo consultar y gestionar las ordenes de este programa, con confirmacion antes de guardar cambios.');replay();setStatus('IA central - solo Enlace OT - en linea','ok')}).catch(()=>{messages.innerHTML='';msg('error','No he podido conectar con la IA central.');setStatus('IA central - no disponible','bad')});

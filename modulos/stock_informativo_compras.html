@@ -26,6 +26,16 @@ const ai=document.getElementById('aiFrame');
 const txt=v=>String(v==null?'':v).replace(/\s+/g,' ').trim();
 const norm=v=>txt(v).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
 const hasOwn=(o,k)=>Object.prototype.hasOwnProperty.call(o||{},k);
+function localDateISO(offsetDays=0){const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()+Number(offsetDays||0));const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return y+'-'+m+'-'+day}
+function companySearchKey(value){const key=norm(value),compact=key.replace(/\s+/g,'');if(['sklum','esclum','esplum','esplume','explom','skloom'].includes(compact))return 'sklum';return key}
+function resolveDeliveryDate(value){
+  const raw=txt(value);if(!raw)return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(raw))return raw;
+  const dm=raw.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/);if(dm)return dm[3]+'-'+String(dm[2]).padStart(2,'0')+'-'+String(dm[1]).padStart(2,'0');
+  const key=norm(raw);if(key==='hoy')return localDateISO(0);if(key==='manana')return localDateISO(1);if(key==='pasado manana')return localDateISO(2);
+  const rel=key.match(/^(?:dentro de|en)\s+(\d{1,3})\s+dias?$/);if(rel)return localDateISO(Number(rel[1]));
+  return '';
+}
 function firstDoc(){try{return core.contentDocument||core.contentWindow.document}catch(_){return null}}
 function workOrders(){try{return core.contentWindow&&core.contentWindow.WorkOrders||null}catch(_){return null}}
 function pendingOrders(w){return (Array.isArray(w?.orders)?w.orders:[]).filter(o=>o&&o.status==='pending'&&!o.cancellationPendingV1&&String(o.cancellationRequestV1?.status||'')!=='pending')}
@@ -59,7 +69,7 @@ function snapshot(){
   const w=workOrders();
   const companies=(Array.isArray(w?.companies)?w.companies:[]).map(c=>({id:txt(c.id),nombre:txt(c.name)})).filter(c=>c.id||c.nombre);
   return {
-    scope:'direccion_enlace_ot',programa:'Enlace OT Direccion',timestamp:new Date().toISOString(),departamentoActivo:department,
+    scope:'direccion_enlace_ot',programa:'Enlace OT Direccion',timestamp:new Date().toISOString(),fechaLocalHoy:localDateISO(0),departamentoActivo:department,
     resumen:{pendientes:pc,historico:hc},trabajosPendientesVisibles:rows,ordenesPendientes:structuredOrders(w),empresasDisponibles:companies,
     stockVisible:stock,
     capacidadesIA:['open_new_order','create_order','open_edit_order','edit_order','change_priority','request_cancellation','view_order','archive_order'],
@@ -79,7 +89,7 @@ function findOrder(w,reference,{allowHistory=false}={}){
   return {error:'No encuentro la orden '+txt(reference)+' en Enlace OT.'};
 }
 function findCompany(w,value){
-  const key=norm(value);const rows=Array.isArray(w?.companies)?w.companies:[];
+  const key=companySearchKey(value);const rows=Array.isArray(w?.companies)?w.companies:[];
   if(!key)return {error:'Falta la empresa.'};
   const exact=rows.filter(c=>norm(c.id)===key||norm(c.name)===key);
   if(exact.length===1)return {company:exact[0]};
@@ -126,13 +136,14 @@ async function executeAction(action){
     if(name==='create_order'){
       const missing=[];if(!txt(p.deliveryDate))missing.push('fecha de entrega');if(!txt(p.company))missing.push('empresa');if(!(Number(p.quantity)>0))missing.push('cantidad');if(!txt(p.description))missing.push('descripcion');
       if(missing.length)return {ok:false,message:'Faltan datos obligatorios para crear la orden: '+missing.join(', ')+'.'};
+      const deliveryDate=resolveDeliveryDate(p.deliveryDate);if(!deliveryDate)return {ok:false,message:'No entiendo la fecha de entrega \"'+txt(p.deliveryDate)+'\". Puedes usar hoy, manana, pasado manana, dentro de N dias, DD/MM/AAAA o YYYY-MM-DD.'};
       const fc=findCompany(w,p.company);if(fc.error)return {ok:false,message:fc.error};
       const qty=Math.max(1,Math.round(Number(p.quantity)||1));const pri=cleanPriority(w,p.priority,true);
-      const summary=['Empresa: '+fc.company.name,'Entrega: '+p.deliveryDate,'Cantidad: '+qty,'Prioridad: '+pri,'Descripcion: '+txt(p.description)];
+      const summary=['Empresa: '+fc.company.name,'Entrega: '+deliveryDate,'Cantidad: '+qty,'Prioridad: '+pri,'Descripcion: '+txt(p.description)];
       if(txt(p.material))summary.push('Material: '+txt(p.material));const finish=formatFinish(p);if(finish)summary.push('Acabado: '+finish);
       if(!confirm('La IA va a crear una nueva orden de trabajo:\n\n'+summary.join('\n')+'\n\n¿Guardar esta orden?'))return {ok:false,cancelled:true,message:'Creacion cancelada. No se ha modificado ningun dato.'};
       const before=new Set((w.orders||[]).map(o=>o.id));
-      w.openNew();fillCreate(d,w,{...p,priority:pri},fc.company);
+      w.openNew();fillCreate(d,w,{...p,deliveryDate,priority:pri},fc.company);
       const probe=w.collectForm();const validation=w.validate(probe);if(validation){w.closeModal();return {ok:false,message:validation};}
       await w.saveWork();
       const created=(w.orders||[]).filter(o=>!before.has(o.id)).sort((a,b)=>(Number(b.updatedAtMs)||0)-(Number(a.updatedAtMs)||0))[0];
@@ -144,8 +155,9 @@ async function executeAction(action){
     }
     if(name==='edit_order'){
       const fo=findOrder(w,p.reference);if(fo.error)return {ok:false,message:fo.error};
-      const changes=(p.changes&&typeof p.changes==='object')?p.changes:{...p};delete changes.reference;
+      const changes=(p.changes&&typeof p.changes==='object')?{...p.changes}:{...p};delete changes.reference;
       if(!Object.keys(changes).length)return {ok:false,message:'No has indicado ningun cambio para '+fo.order.reference+'.'};
+      if(hasOwn(changes,'deliveryDate')){const resolved=resolveDeliveryDate(changes.deliveryDate);if(!resolved)return {ok:false,message:'No entiendo la fecha de entrega \"'+txt(changes.deliveryDate)+'\".'};changes.deliveryDate=resolved;}
       let company=null;if(hasOwn(changes,'company')){const fc=findCompany(w,changes.company);if(fc.error)return {ok:false,message:fc.error};company=fc.company;}
       const readable=Object.entries(changes).map(([k,v])=>k+': '+(typeof v==='boolean'?(v?'si':'no'):txt(v))).join('\n');
       if(!confirm('La IA va a editar '+fo.order.reference+':\n\n'+readable+'\n\n¿Guardar estos cambios?'))return {ok:false,cancelled:true,message:'Edicion cancelada. No se ha modificado ningun dato.'};
