@@ -10,7 +10,10 @@
 iframe{display:block;width:100%;height:100%;border:0;background:#fff}
 #coreFrame{min-width:0}
 #aiFrame{border-left:1px solid rgba(14,165,233,.28);background:#041226}
-@media(max-width:1050px){.shell{grid-template-columns:1fr}.shell #aiFrame{display:none}}
+.ldh-draft-layer{position:fixed;left:0;top:0;bottom:0;right:346px;z-index:50;display:none;place-items:center;padding:22px;background:rgba(15,23,42,.46);backdrop-filter:blur(3px)}
+.ldh-draft-layer.open{display:grid}.ldh-draft-card{width:min(650px,96%);max-height:88vh;overflow:auto;border-radius:20px;background:#fff;color:#10243d;border:1px solid #cbd5e1;box-shadow:0 28px 85px rgba(15,23,42,.34)}
+.ldh-draft-head{padding:18px 20px 13px;border-bottom:1px solid #e2e8f0}.ldh-draft-head h2{margin:0;font-size:20px}.ldh-draft-head p{margin:5px 0 0;color:#64748b;font-size:12px;line-height:1.4}.ldh-draft-body{padding:16px 20px}.ldh-draft-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px 16px}.ldh-draft-row{padding:9px 10px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;font-size:13px}.ldh-draft-row.wide{grid-column:1/-1}.ldh-draft-label{display:block;color:#64748b;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}.ldh-draft-value{font-weight:850;white-space:pre-wrap}.ldh-draft-note{margin-top:12px;padding:9px 10px;border-radius:10px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a;font-size:11px;line-height:1.45}.ldh-draft-actions{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap;padding:0 20px 18px}.ldh-draft-btn{border:0;border-radius:10px;padding:10px 14px;font-weight:900;cursor:pointer}.ldh-draft-btn.edit{background:#e2e8f0;color:#16304d}.ldh-draft-btn.create{background:#16a34a;color:#fff}.ldh-draft-btn.cancel{background:#fff;color:#b91c1c;border:1px solid #fecaca}.ldh-draft-btn:disabled{opacity:.55;cursor:not-allowed}
+@media(max-width:1050px){.shell{grid-template-columns:1fr}.shell #aiFrame{display:none}.ldh-draft-layer{right:0}.ldh-draft-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -18,11 +21,20 @@ iframe{display:block;width:100%;height:100%;border:0;background:#fff}
   <iframe id="coreFrame" src="./stock_informativo_compras_core.html" title="Enlace OT Direccion"></iframe>
   <iframe id="aiFrame" src="./enlace_ot_ai.html" title="Asistente IA Enlace OT"></iframe>
 </div>
+<div class="ldh-draft-layer" id="ldhCreateDraftLayer" aria-hidden="true">
+  <div class="ldh-draft-card" role="dialog" aria-modal="true" aria-labelledby="ldhCreateDraftTitle">
+    <div class="ldh-draft-head"><h2 id="ldhCreateDraftTitle">Nueva orden propuesta</h2><p>Revisa los datos. Puedes corregirlos hablando con la IA o abrir el formulario antes de guardar.</p></div>
+    <div class="ldh-draft-body"><div class="ldh-draft-grid" id="ldhCreateDraftSummary"></div><div class="ldh-draft-note">Todavía no se ha escrito nada en Firebase. La orden solo se crea al pulsar <b>Crear orden</b>.</div></div>
+    <div class="ldh-draft-actions"><button class="ldh-draft-btn edit" id="ldhDraftEdit" type="button">✏ Editar antes de guardar</button><button class="ldh-draft-btn create" id="ldhDraftCreate" type="button">✓ Crear orden</button><button class="ldh-draft-btn cancel" id="ldhDraftCancel" type="button">Cancelar</button></div>
+  </div>
+</div>
 <script>
 (function(){
 'use strict';
 const core=document.getElementById('coreFrame');
 const ai=document.getElementById('aiFrame');
+const draftLayer=document.getElementById('ldhCreateDraftLayer'),draftSummary=document.getElementById('ldhCreateDraftSummary'),draftEdit=document.getElementById('ldhDraftEdit'),draftCreate=document.getElementById('ldhDraftCreate'),draftCancel=document.getElementById('ldhDraftCancel');
+let pendingCreateDraft=null;
 const txt=v=>String(v==null?'':v).replace(/\s+/g,' ').trim();
 const norm=v=>txt(v).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
 const hasOwn=(o,k)=>Object.prototype.hasOwnProperty.call(o||{},k);
@@ -72,7 +84,8 @@ function snapshot(){
     scope:'direccion_enlace_ot',programa:'Enlace OT Direccion',timestamp:new Date().toISOString(),fechaLocalHoy:localDateISO(0),departamentoActivo:department,
     resumen:{pendientes:pc,historico:hc},trabajosPendientesVisibles:rows,ordenesPendientes:structuredOrders(w),empresasDisponibles:companies,
     stockVisible:stock,
-    capacidadesIA:['open_new_order','create_order','open_edit_order','edit_order','change_priority','request_cancellation','view_order','archive_order'],
+    borradorCreacionPendiente:pendingCreateDraft?{company:pendingCreateDraft.companyName,deliveryDate:pendingCreateDraft.deliveryDate,quantity:pendingCreateDraft.quantity,priority:pendingCreateDraft.priority,description:pendingCreateDraft.description,material:pendingCreateDraft.material,ironType:pendingCreateDraft.ironType,primer:pendingCreateDraft.primer,ral:pendingCreateDraft.ral}:null,
+    capacidadesIA:['open_new_order','create_order','update_create_draft','show_create_draft','cancel_create_draft','open_edit_order','edit_order','change_priority','request_cancellation','view_order','archive_order'],
     limites:'Solo datos y acciones del propio Enlace OT Direccion. Sin acceso directo a otros modulos ni cambio manual de estados de taller.'
   };
 }
@@ -102,6 +115,42 @@ function setValue(d,id,value){const el=d.getElementById(id);if(!el)return;el.val
 function setChecked(d,id,value){const el=d.getElementById(id);if(!el)return;el.checked=!!value;el.dispatchEvent(new Event('change',{bubbles:true}));}
 function formatFinish(p){const out=[];if(hasOwn(p,'ironType'))out.push(norm(p.ironType).includes('galv')?'Galvanizado':'Hierro negro');if(hasOwn(p,'primer'))out.push(p.primer?'con imprimacion':'sin imprimacion');if(hasOwn(p,'ral'))out.push(txt(p.ral)||'sin RAL');return out.join(' · ')}
 function cleanPriority(w,v,forNew){const max=Math.max(1,pendingOrders(w).length+(forNew?1:0));const n=Math.round(Number(v)||max);return Math.max(1,Math.min(max,n));}
+function draftLines(p){const out=[['Empresa',p.companyName],['Entrega',p.deliveryDate],['Cantidad',p.quantity],['Prioridad',p.priority],['Descripción',p.description]];if(txt(p.material))out.push(['Material',p.material]);const finish=formatFinish(p);if(finish)out.push(['Acabado',finish]);return out}
+function draftText(p){return draftLines(p).map(x=>x[0]+': '+txt(x[1])).join('\n')}
+function renderCreateDraft(){if(!pendingCreateDraft||!draftLayer||!draftSummary)return;draftSummary.innerHTML='';for(const [label,value] of draftLines(pendingCreateDraft)){const row=document.createElement('div');row.className='ldh-draft-row'+(label==='Descripción'||label==='Material'||label==='Acabado'?' wide':'');const l=document.createElement('span');l.className='ldh-draft-label';l.textContent=label;const v=document.createElement('span');v.className='ldh-draft-value';v.textContent=txt(value);row.append(l,v);draftSummary.appendChild(row)}draftLayer.classList.add('open');draftLayer.setAttribute('aria-hidden','false')}
+function hideCreateDraft(){draftLayer?.classList.remove('open');draftLayer?.setAttribute('aria-hidden','true')}
+function notifyAi(message,opts={}){try{ai.contentWindow.postMessage({type:'LDH_ENLACE_OT_AI_EXTERNAL_RESULT',ok:opts.ok!==false,cancelled:!!opts.cancelled,message:txt(message)},location.origin)}catch(_){}}
+function buildCreateDraft(w,p){
+  const missing=[];if(!txt(p.deliveryDate))missing.push('fecha de entrega');if(!txt(p.company))missing.push('empresa');if(!(Number(p.quantity)>0))missing.push('cantidad');if(!txt(p.description))missing.push('descripcion');
+  if(missing.length)return {error:'Faltan datos obligatorios para crear la orden: '+missing.join(', ')+'.'};
+  const deliveryDate=resolveDeliveryDate(p.deliveryDate);if(!deliveryDate)return {error:'No entiendo la fecha de entrega "'+txt(p.deliveryDate)+'". Puedes usar hoy, manana, pasado manana, dentro de N dias, DD/MM/AAAA o YYYY-MM-DD.'};
+  const fc=findCompany(w,p.company);if(fc.error)return {error:fc.error};
+  return {draft:{companyId:txt(fc.company.id),companyName:txt(fc.company.name),deliveryDate,quantity:Math.max(1,Math.round(Number(p.quantity)||1)),priority:cleanPriority(w,p.priority,true),description:txt(p.description),material:txt(p.material),ironType:norm(p.ironType).includes('galv')?'galvanizado':'negro',primer:!!p.primer,ral:txt(p.ral)}};
+}
+function updateCreateDraft(w,changes){
+  if(!pendingCreateDraft)return {error:'No hay ningún borrador de nueva orden pendiente.'};
+  const next={...pendingCreateDraft};const c=(changes&&typeof changes==='object')?changes:{};
+  if(hasOwn(c,'company')){const fc=findCompany(w,c.company);if(fc.error)return {error:fc.error};next.companyId=txt(fc.company.id);next.companyName=txt(fc.company.name)}
+  if(hasOwn(c,'deliveryDate')){const resolved=resolveDeliveryDate(c.deliveryDate);if(!resolved)return {error:'No entiendo la fecha de entrega "'+txt(c.deliveryDate)+'".'};next.deliveryDate=resolved}
+  if(hasOwn(c,'quantity')){const q=Math.round(Number(c.quantity)||0);if(q<1)return {error:'La cantidad debe ser mayor que cero.'};next.quantity=q}
+  if(hasOwn(c,'priority'))next.priority=cleanPriority(w,c.priority,true);
+  if(hasOwn(c,'description')){if(!txt(c.description))return {error:'La descripción no puede quedar vacía.'};next.description=txt(c.description)}
+  if(hasOwn(c,'material'))next.material=txt(c.material);
+  if(hasOwn(c,'ironType'))next.ironType=norm(c.ironType).includes('galv')?'galvanizado':'negro';
+  if(hasOwn(c,'primer'))next.primer=!!c.primer;
+  if(hasOwn(c,'ral'))next.ral=txt(c.ral);
+  pendingCreateDraft=next;return {draft:next};
+}
+async function commitCreateDraft(){
+  const w=workOrders(),d=firstDoc(),draft=pendingCreateDraft;if(!w||!d||!draft)return {ok:false,message:'No hay un borrador listo para crear.'};
+  const fc=findCompany(w,draft.companyId||draft.companyName);if(fc.error)return {ok:false,message:fc.error};
+  const before=new Set((w.orders||[]).map(o=>o.id));
+  w.openNew();fillCreate(d,w,draft,fc.company);const probe=w.collectForm();const validation=w.validate(probe);if(validation){w.closeModal();return {ok:false,message:validation};}
+  await w.saveWork();const created=(w.orders||[]).filter(o=>!before.has(o.id)).sort((a,b)=>(Number(b.updatedAtMs)||0)-(Number(a.updatedAtMs)||0))[0];
+  if(!created)return {ok:false,message:'No se ha creado la orden. Comprueba que la sincronizacion muestre conectada y vuelve a intentarlo.'};
+  pendingCreateDraft=null;hideCreateDraft();return {ok:true,message:'Orden creada correctamente: '+created.reference+' · '+created.companyName+' · '+created.quantity+' uds.'};
+}
+function openCreateDraftForEdit(){const w=workOrders(),d=firstDoc(),draft=pendingCreateDraft;if(!w||!d||!draft)return false;const fc=findCompany(w,draft.companyId||draft.companyName);if(fc.error)return false;hideCreateDraft();w.openNew();fillCreate(d,w,draft,fc.company);pendingCreateDraft=null;notifyAi('He abierto el formulario con el borrador ya rellenado. Puedes corregir lo necesario y guardarlo manualmente.');return true}
 function fillCreate(d,w,p,company){
   setValue(d,'woDeliveryDate',p.deliveryDate);
   setValue(d,'woCompany',company.id);
@@ -134,21 +183,18 @@ async function executeAction(action){
       return {ok:true,message:'He abierto el formulario de nueva orden de trabajo para que puedas completarlo o revisarlo.'};
     }
     if(name==='create_order'){
-      const missing=[];if(!txt(p.deliveryDate))missing.push('fecha de entrega');if(!txt(p.company))missing.push('empresa');if(!(Number(p.quantity)>0))missing.push('cantidad');if(!txt(p.description))missing.push('descripcion');
-      if(missing.length)return {ok:false,message:'Faltan datos obligatorios para crear la orden: '+missing.join(', ')+'.'};
-      const deliveryDate=resolveDeliveryDate(p.deliveryDate);if(!deliveryDate)return {ok:false,message:'No entiendo la fecha de entrega \"'+txt(p.deliveryDate)+'\". Puedes usar hoy, manana, pasado manana, dentro de N dias, DD/MM/AAAA o YYYY-MM-DD.'};
-      const fc=findCompany(w,p.company);if(fc.error)return {ok:false,message:fc.error};
-      const qty=Math.max(1,Math.round(Number(p.quantity)||1));const pri=cleanPriority(w,p.priority,true);
-      const summary=['Empresa: '+fc.company.name,'Entrega: '+deliveryDate,'Cantidad: '+qty,'Prioridad: '+pri,'Descripcion: '+txt(p.description)];
-      if(txt(p.material))summary.push('Material: '+txt(p.material));const finish=formatFinish(p);if(finish)summary.push('Acabado: '+finish);
-      if(!confirm('La IA va a crear una nueva orden de trabajo:\n\n'+summary.join('\n')+'\n\n¿Guardar esta orden?'))return {ok:false,cancelled:true,message:'Creacion cancelada. No se ha modificado ningun dato.'};
-      const before=new Set((w.orders||[]).map(o=>o.id));
-      w.openNew();fillCreate(d,w,{...p,deliveryDate,priority:pri},fc.company);
-      const probe=w.collectForm();const validation=w.validate(probe);if(validation){w.closeModal();return {ok:false,message:validation};}
-      await w.saveWork();
-      const created=(w.orders||[]).filter(o=>!before.has(o.id)).sort((a,b)=>(Number(b.updatedAtMs)||0)-(Number(a.updatedAtMs)||0))[0];
-      if(!created)return {ok:false,message:'No se ha creado la orden. Comprueba que la sincronizacion muestre conectada y vuelve a intentarlo.'};
-      return {ok:true,message:'Orden creada correctamente: '+created.reference+' · '+created.companyName+' · '+created.quantity+' uds.'};
+      const built=buildCreateDraft(w,p);if(built.error)return {ok:false,message:built.error};pendingCreateDraft=built.draft;renderCreateDraft();
+      return {ok:true,draft:true,message:'He preparado el borrador de la nueva orden. Revísalo: puedes decirme una corrección, abrir Editar antes de guardar o pulsar Crear orden. Todavía no se ha guardado nada.'};
+    }
+    if(name==='update_create_draft'){
+      const changes=(p.changes&&typeof p.changes==='object')?p.changes:p;const updated=updateCreateDraft(w,changes);if(updated.error)return {ok:false,message:updated.error};renderCreateDraft();
+      return {ok:true,draft:true,message:'Borrador actualizado:\n'+draftText(updated.draft)+'\n\nTodavía no se ha guardado. Revisa el resumen y pulsa Crear orden cuando esté correcto.'};
+    }
+    if(name==='show_create_draft'){
+      if(!pendingCreateDraft)return {ok:false,message:'No hay ningún borrador de nueva orden pendiente.'};renderCreateDraft();return {ok:true,draft:true,message:'Te muestro de nuevo el borrador. Comprueba el resumen y pulsa Crear orden para guardarlo.'};
+    }
+    if(name==='cancel_create_draft'){
+      if(!pendingCreateDraft)return {ok:false,message:'No hay ningún borrador de nueva orden pendiente.'};pendingCreateDraft=null;hideCreateDraft();return {ok:true,cancelled:true,message:'Borrador cancelado. No se ha modificado ningún dato.'};
     }
     if(name==='open_edit_order'){
       const fo=findOrder(w,p.reference);if(fo.error)return {ok:false,message:fo.error};w.openEdit(fo.order.id);return {ok:true,message:'He abierto '+fo.order.reference+' en modo edicion.'};
@@ -191,6 +237,9 @@ async function executeAction(action){
     return {ok:false,message:'Accion no permitida en Enlace OT: '+name+'.'};
   }catch(error){console.error('[Enlace OT IA action]',error);return {ok:false,message:'No se ha podido completar la accion: '+txt(error?.message||error)};}
 }
+if(draftEdit)draftEdit.addEventListener('click',()=>{if(!openCreateDraftForEdit())notifyAi('No he podido abrir el borrador en el formulario.',{ok:false})});
+if(draftCancel)draftCancel.addEventListener('click',()=>{if(!pendingCreateDraft)return;pendingCreateDraft=null;hideCreateDraft();notifyAi('Borrador cancelado. No se ha modificado ningún dato.',{cancelled:true})});
+if(draftCreate)draftCreate.addEventListener('click',async()=>{if(!pendingCreateDraft)return;draftCreate.disabled=true;const old=draftCreate.textContent;draftCreate.textContent='Creando...';try{const result=await commitCreateDraft();notifyAi(result.message,{ok:!!result.ok});if(!result.ok)renderCreateDraft()}catch(error){notifyAi('No se ha podido crear la orden: '+txt(error?.message||error),{ok:false});renderCreateDraft()}finally{draftCreate.disabled=false;draftCreate.textContent=old}});
 window.addEventListener('message',e=>{
   if(e.source!==ai.contentWindow)return;
   const m=e.data||{};
