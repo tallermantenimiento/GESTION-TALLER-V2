@@ -2,238 +2,6 @@
 <!-- BASE BUENA 23/07/2026 · Accesorios fuera del cómputo · Chapas conservadas -->
 <html lang="es">
 <head>
-<!-- LDH_LOCAL_TEST_READONLY_V4_NOLOGIN -->
-<script id="LDH_LOCAL_TEST_READONLY_V4_NOLOGIN">
-(function(){
-  'use strict';
-  if(window.__LDH_LOCAL_TEST_READONLY_V4_NOLOGIN__) return;
-  window.__LDH_LOCAL_TEST_READONLY_V4_NOLOGIN__ = true;
-
-  const host = String(location.hostname || '').toLowerCase();
-  const local = host === '127.0.0.1' || host === 'localhost';
-  window.__LDH_TEST_LOCAL_ONLY__ = true;
-  window.__LDH_ALLOW_PRODUCTION_WRITE__ = false;
-  window.__CLOUD_SYNC_DISABLE_LEGACY = true;
-  window.__LDH_TEST_BLOCKED_WRITES__ = [];
-  window.__LDH_LOCAL_TEST_NO_LOGIN__ = true;
-
-  // En la copia local no se solicita autenticacion manual. Muchos datos operativos
-  // se leen por reglas publicas/read-only; los bloques que exijan sesion quedan
-  // simplemente sin sincronizar, pero nunca deben bloquear la navegacion.
-  function installNoLoginStyle(){
-    if(document.getElementById('ldhLocalNoLoginStyle')) return;
-    const st=document.createElement('style');
-    st.id='ldhLocalNoLoginStyle';
-    st.textContent=`
-      #authOverlay,#loginOverlay,#firebaseLoginOverlay,#authModal,#loginModal,
-      .auth-overlay,.login-overlay,.firebase-auth-overlay,
-      [data-ldh-auth-overlay="1"]{display:none!important;visibility:hidden!important;pointer-events:none!important;}
-    `;
-    (document.head||document.documentElement).appendChild(st);
-  }
-  function suppressLoginUi(){
-    installNoLoginStyle();
-    const ids=['authOverlay','loginOverlay','firebaseLoginOverlay','authModal','loginModal'];
-    ids.forEach(id=>{
-      const el=document.getElementById(id);
-      if(el){
-        try{ el.style.setProperty('display','none','important'); }catch(_){ }
-        try{ el.style.setProperty('visibility','hidden','important'); }catch(_){ }
-        try{ el.setAttribute('aria-hidden','true'); }catch(_){ }
-      }
-    });
-  }
-  installNoLoginStyle();
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',suppressLoginUi,{once:true});
-  else suppressLoginUi();
-  try{
-    const mo=new MutationObserver(()=>suppressLoginUi());
-    mo.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['style','class']});
-    window.__LDH_LOCAL_TEST_NO_LOGIN_OBSERVER__=mo;
-  }catch(_){ }
-
-  function text(v){ return v == null ? '' : String(v); }
-  function methodOf(input, init){
-    return text((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-  }
-  function urlOf(input){
-    try{
-      if(typeof input === 'string') return input;
-      if(input && input.url) return input.url;
-      return String(input || '');
-    }catch(_){ return ''; }
-  }
-  function parse(url){
-    try{ return new URL(url, location.href); }
-    catch(_){ return {hostname:'', pathname:text(url), search:''}; }
-  }
-  function knownFirestoreReadPost(path){
-    return /:(runquery|batchget|partitionquery|runaggregationquery)(?:\?|$)/i.test(path) ||
-           /google\.firestore\.v1\.firestore\/listen\/channel/i.test(path);
-  }
-  function classifyWrite(url, method){
-    const u = parse(url);
-    const h = text(u.hostname).toLowerCase();
-    const p = decodeURIComponent(text(u.pathname) + text(u.search)).toLowerCase();
-    const m = text(method || 'GET').toUpperCase();
-
-    // Firestore: lectura (Listen, RunQuery, BatchGet...) permitida; escrituras bloqueadas.
-    if(h === 'firestore.googleapis.com' || h.endsWith('.firestore.googleapis.com')){
-      if(p.includes('google.firestore.v1.firestore/write/channel') || p.includes('/write/channel')) return 'Firestore Write channel';
-      if(p.includes(':commit')) return 'Firestore commit';
-      if(p.includes(':batchwrite')) return 'Firestore batchWrite';
-      if((m === 'PATCH' || m === 'PUT' || m === 'DELETE') && p.includes('/documents/')) return 'Firestore REST write';
-      if(m === 'POST' && p.includes('/documents/') && !knownFirestoreReadPost(p)) return 'Firestore REST create/write';
-    }
-
-    // Realtime Database: no permitir mutaciones desde la copia local.
-    if(h.endsWith('.firebaseio.com') || h.endsWith('.firebasedatabase.app')){
-      if(m !== 'GET' && m !== 'HEAD') return 'Realtime Database write';
-    }
-
-    // Cloud Storage: lectura permitida; uploads/borrados bloqueados.
-    if(h === 'firebasestorage.googleapis.com' || h === 'storage.googleapis.com' || h.endsWith('.storage.googleapis.com')){
-      if(m !== 'GET' && m !== 'HEAD') return 'Cloud Storage write';
-      if(p.includes('uploadtype=') || p.includes('/upload/')) return 'Cloud Storage upload';
-    }
-
-    // Cloud Functions / Run usados como backend de mutaciÃ³n: POST/PUT/PATCH/DELETE bloqueados.
-    // El Worker IA workers.dev NO entra aquÃ­ y sigue operativo.
-    if(h.endsWith('.cloudfunctions.net') || h.endsWith('.run.app')){
-      if(m !== 'GET' && m !== 'HEAD') return 'Backend Firebase/Run write';
-    }
-
-    return '';
-  }
-  function blocked(url, method, reason){
-    const row = {time:new Date().toISOString(), method, url:text(url), reason};
-    window.__LDH_TEST_BLOCKED_WRITES__.push(row);
-    if(window.__LDH_TEST_BLOCKED_WRITES__.length > 100) window.__LDH_TEST_BLOCKED_WRITES__.shift();
-    console.warn('[LDH TEST READONLY] ESCRITURA BLOQUEADA:', reason, method, url);
-    try{
-      window.dispatchEvent(new CustomEvent('ldh-test-write-blocked',{detail:row}));
-    }catch(_){ }
-  }
-
-  // fetch
-  try{
-    const nativeFetch = window.fetch && window.fetch.bind(window);
-    if(nativeFetch){
-      window.fetch = function(input, init){
-        const url = urlOf(input);
-        const method = methodOf(input, init || {});
-        const reason = classifyWrite(url, method);
-        if(reason){
-          blocked(url, method, reason);
-          return Promise.reject(new TypeError('MODO TEST LOCAL: escritura bloqueada Â· ' + reason));
-        }
-        return nativeFetch(input, init);
-      };
-    }
-  }catch(e){ console.warn('[LDH TEST READONLY] No se pudo envolver fetch', e); }
-
-  // XMLHttpRequest / Firestore WebChannel
-  try{
-    const XHR = window.XMLHttpRequest;
-    if(XHR && XHR.prototype){
-      const nativeOpen = XHR.prototype.open;
-      const nativeSend = XHR.prototype.send;
-      XHR.prototype.open = function(method, url){
-        this.__ldhTestMethod = text(method || 'GET').toUpperCase();
-        this.__ldhTestUrl = text(url);
-        return nativeOpen.apply(this, arguments);
-      };
-      XHR.prototype.send = function(){
-        const method = this.__ldhTestMethod || 'GET';
-        const url = this.__ldhTestUrl || '';
-        const reason = classifyWrite(url, method);
-        if(reason){
-          blocked(url, method, reason);
-          try{ this.abort(); }catch(_){ }
-          throw new DOMException('MODO TEST LOCAL: escritura bloqueada Â· ' + reason, 'NetworkError');
-        }
-        return nativeSend.apply(this, arguments);
-      };
-    }
-  }catch(e){ console.warn('[LDH TEST READONLY] No se pudo envolver XMLHttpRequest', e); }
-
-  // sendBeacon
-  try{
-    if(navigator.sendBeacon){
-      const nativeBeacon = navigator.sendBeacon.bind(navigator);
-      navigator.sendBeacon = function(url, data){
-        const reason = classifyWrite(url, 'POST');
-        if(reason){ blocked(url, 'POST', reason); return false; }
-        return nativeBeacon(url, data);
-      };
-    }
-  }catch(_){ }
-
-  // RTDB por WebSocket: se bloquea completo porque lectura y escritura comparten canal.
-  try{
-    const NativeWebSocket = window.WebSocket;
-    if(NativeWebSocket){
-      const SafeWebSocket = function(url, protocols){
-        const u = parse(url);
-        const h = text(u.hostname).toLowerCase();
-        if(h.endsWith('.firebaseio.com') || h.endsWith('.firebasedatabase.app')){
-          blocked(url, 'WEBSOCKET', 'Realtime Database socket bloqueado en TEST');
-          throw new DOMException('MODO TEST LOCAL: Realtime Database bloqueado', 'SecurityError');
-        }
-        return protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
-      };
-      SafeWebSocket.prototype = NativeWebSocket.prototype;
-      Object.setPrototypeOf(SafeWebSocket, NativeWebSocket);
-      window.WebSocket = SafeWebSocket;
-    }
-  }catch(_){ }
-
-  // No registrar service workers en la copia de pruebas.
-  try{
-    if(navigator.serviceWorker){
-      if(navigator.serviceWorker.getRegistrations){
-        navigator.serviceWorker.getRegistrations().then(list=>{
-          list.forEach(reg=>{ try{ reg.unregister(); }catch(_){ } });
-        }).catch(()=>{});
-      }
-      try{
-        navigator.serviceWorker.register = function(){
-          return Promise.reject(new Error('MODO TEST LOCAL: Service Worker bloqueado'));
-        };
-      }catch(_){ }
-    }
-  }catch(_){ }
-
-  function mountBanner(){
-    if(document.getElementById('ldhTestReadonlyBanner')) return;
-    const b = document.createElement('div');
-    b.id = 'ldhTestReadonlyBanner';
-    b.innerHTML = local
-      ? '<b>TEST LOCAL AISLADO</b> Â· LEE NUBE Â· NO ESCRIBE PRODUCCIÃ“N'
-      : '<b>ARCHIVO DE PRUEBAS</b> Â· EJECÃšTALO SOLO EN LOCALHOST';
-    Object.assign(b.style,{
-      position:'fixed',left:'12px',bottom:'12px',zIndex:'2147483647',
-      padding:'9px 13px',borderRadius:'999px',background:local?'#063b2a':'#4c0519',
-      border:'1px solid '+(local?'#10b981':'#fb7185'),color:'#fff',
-      font:'800 11px/1.2 system-ui,Segoe UI,sans-serif',boxShadow:'0 8px 24px rgba(0,0,0,.5)',letterSpacing:'.02em'
-    });
-    document.body.appendChild(b);
-
-    if(!local){
-      const shield=document.createElement('div');
-      shield.id='ldhTestReadonlyShield';
-      shield.innerHTML='<div style="max-width:720px;padding:28px;border-radius:18px;background:#111827;border:1px solid #fb7185;color:#fff;font:800 18px/1.45 system-ui,Segoe UI,sans-serif;text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.65)">COPIA LOCAL DE PRUEBAS<br><span style="font-size:14px;font-weight:500;color:#fecdd3">No ejecutar esta versiÃ³n desde GitHub/producciÃ³n.</span></div>';
-      Object.assign(shield.style,{position:'fixed',inset:'0',zIndex:'2147483646',display:'grid',placeItems:'center',background:'rgba(2,6,23,.96)'});
-      document.body.appendChild(shield);
-    }
-  }
-  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountBanner, {once:true});
-  else mountBanner();
-
-  console.info('[LDH TEST READONLY V4] activo Â· lectura Firebase permitida Â· escrituras de producciÃ³n bloqueadas');
-})();
-</script>
-
 <meta charset="utf-8"/>
 <script id="LDH_GLOBAL_ALARM_LOADER" src="alarma_global.js?v=20260814-1"></script>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -2968,12 +2736,12 @@ body{
       </div>
     </section>
 
-    <!-- LDH_TEST_APPS_OPERATIVAS_V1 -->
+    <!-- APPS OPERATIVAS PRODUCCION V1 -->
     <section class="group group-apps" id="ldhAppsOperativas">
       <div class="section-head"><div><h3>Apps operativas</h3><p>Accesos de trabajo para responsables y usuarios. Se abren en una ventana independiente.</p></div></div>
       <div class="grid">
-        <a class="card" href="programas_direccion/compras_mantenimiento/app_responsable.html" target="_blank" rel="noopener noreferrer" data-ldh-independent-window="1" data-ldh-operational-app="compras"><div class="top"><div class="ico icon-cyan">🛒</div><span class="badge ok">app</span></div><h4>App Compras mantenimiento</h4><p>Elige el sector y abre la app del responsable para crear y seguir pedidos.</p><div class="open">Elegir sector →</div><span class="drag-hint">↕</span></a>
-        <a class="card" href="programas_direccion/gestion_vehiculos/terminal_vehiculos.html" target="_blank" rel="noopener noreferrer" data-ldh-independent-window="1" data-ldh-operational-app="vehiculos"><div class="top"><div class="ico icon-green">🚐</div><span class="badge ok">app</span></div><h4>App Vehículos</h4><p>Elige un usuario habitual habilitado y abre su terminal de recogida y devolución.</p><div class="open">Elegir usuario →</div><span class="drag-hint">↕</span></a>
+        <a class="card" href="https://tallermantenimiento.github.io/compras-mantenimiento-app/app_responsable.html" target="_blank" rel="noopener noreferrer" data-ldh-independent-window="1" data-ldh-operational-app="compras"><div class="top"><div class="ico icon-cyan">🛒</div><span class="badge ok">app</span></div><h4>App Compras mantenimiento</h4><p>Elige el sector y abre la app del responsable para crear y seguir pedidos.</p><div class="open">Elegir sector →</div><span class="drag-hint">↕</span></a>
+        <a class="card" href="https://tallermantenimiento.github.io/control-vehiculos/terminal_vehiculos.html" target="_blank" rel="noopener noreferrer" data-ldh-independent-window="1" data-ldh-operational-app="vehiculos"><div class="top"><div class="ico icon-green">🚐</div><span class="badge ok">app</span></div><h4>App Vehículos</h4><p>Elige un usuario habitual habilitado y abre su terminal de recogida y devolución.</p><div class="open">Elegir usuario →</div><span class="drag-hint">↕</span></a>
       </div>
     </section>
 
@@ -7741,11 +7509,6 @@ function ldhStatsStoreLocal(map){
     ldhStatsStoreLocal(merged);
     window.LDH_IronStats_saveExclusionsCloud=async function(map){
       const finalMap=Object.assign({},cloudMap,ldhStatsExclusionMap(map),ldhStatsLocalExclusions());
-      if(window.__LDH_LOCAL_TEST_SAFE__){
-        ldhStatsStoreLocal(finalMap);
-        console.warn('[LDH TEST] Exclusiones guardadas solo en localhost; Firebase producción no se modifica.');
-        return true;
-      }
       await setDoc(ref,{version:1,updatedAt:serverTimestamp(),rows:Object.values(finalMap)},{merge:false});
       cloudMap=finalMap;
       ldhStatsStoreLocal(finalMap);
@@ -7851,11 +7614,6 @@ function ldhRefreshWeightUI(){
     ldhStoreWeights(merged);
     window.LDH_IronStats_saveWeightOverridesCloud=async function(map){
       const finalMap=ldhMergeWeightMaps(cloudMap,ldhLocalWeights(),map||{});
-      if(window.__LDH_LOCAL_TEST_SAFE__){
-        ldhStoreWeights(finalMap);
-        console.warn('[LDH TEST] Pesos manuales guardados solo en localhost; Firebase producción no se modifica.');
-        return true;
-      }
       await setDoc(ref,{version:1,updatedAt:serverTimestamp(),rows:Object.values(finalMap)},{merge:false});
       cloudMap=finalMap;
       ldhStoreWeights(finalMap);
@@ -8832,10 +8590,6 @@ function ldhRefreshWeightUI(){
   }
 
   async function runRestore(){
-    if(window.__LDH_LOCAL_TEST_SAFE__){
-      alert('MODO TEST LOCAL\n\nLa restauración general está bloqueada en localhost para proteger Firebase de producción.');
-      return;
-    }
     if(!validatedBackup) return;
     const stamp = validatedBackup.createdAtLocal || validatedBackup.createdAt || 'sin fecha';
     const ok = confirm(
@@ -9615,33 +9369,7 @@ console.info('[Inicio] Avisos de orden: se ignoran los generados desde este mism
   setTimeout(clear,1000);
 })();
 </script>
-
-
-<script id="LDH_LOCAL_TEST_SAFE_INDEX_UI_V1">
-(function(){
-  if(!window.__LDH_LOCAL_TEST_SAFE__) return;
-  const mount=()=>{
-    if(document.getElementById('ldhLocalSafeBanner')) return;
-    const b=document.createElement('div');
-    b.id='ldhLocalSafeBanner';
-    b.textContent='PRUEBA LOCAL · LEE NUBE · NO ESCRIBE PRODUCCIÓN';
-    Object.assign(b.style,{position:'fixed',left:'12px',bottom:'12px',zIndex:'2147483647',padding:'8px 12px',borderRadius:'999px',background:'#3b0a0a',border:'1px solid #ef4444',color:'#fff',font:'800 11px/1.2 system-ui,Segoe UI,sans-serif',boxShadow:'0 8px 24px rgba(0,0,0,.45)',letterSpacing:'.03em'});
-    document.body.appendChild(b);
-    const candidates=[...document.querySelectorAll('button')];
-    for(const el of candidates){
-      const t=String(el.textContent||'').toLowerCase();
-      if(t.includes('restaurar') || t.includes('restore')){
-        el.disabled=true;
-        el.title='Bloqueado en MODO TEST LOCAL para proteger Firebase de producción';
-      }
-    }
-  };
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',mount,{once:true}); else mount();
-})();
-</script>
-
-
-<!-- LDH_TEST_APPS_OPERATIVAS_SELECTOR_V1 · SOLO TEST_AISLADO -->
+<!-- APPS OPERATIVAS · SELECTOR PRODUCCION V1 -->
 <style>
 #ldhOperationalAppModal{position:fixed;inset:0;z-index:2147483000;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(2,6,23,.78);backdrop-filter:blur(5px)}
 #ldhOperationalAppModal.open{display:flex}
@@ -9654,17 +9382,15 @@ console.info('[Inicio] Avisos de orden: se ignoran los generados desde este mism
 #ldhOperationalAppModal .ldh-op-choice{display:flex;align-items:center;gap:10px;text-align:left;border:1px solid rgba(45,212,191,.28);background:#0b2031;color:#f8fafc;border-radius:14px;padding:13px 14px;font-weight:900;cursor:pointer;min-height:54px}
 #ldhOperationalAppModal .ldh-op-choice:hover{border-color:#2dd4bf;background:#103247;transform:translateY(-1px)}
 #ldhOperationalAppModal .ldh-op-choice small{display:block;color:#8fb3cb;font-weight:700;margin-top:3px}
-#ldhOperationalAppModal .ldh-op-empty{border:1px dashed #4b6380;border-radius:14px;padding:16px;color:#cbd5e1;line-height:1.45}
+#ldhOperationalAppModal .ldh-op-empty{border:1px dashed #4b6380;border-radius:14px;padding:16px;color:#cbd5e1;line-height:1.45;grid-column:1/-1}
 #ldhOperationalAppModal .ldh-op-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
 #ldhOperationalAppModal .ldh-op-actions button{border:1px solid #35506f;background:#13243b;color:#fff;border-radius:11px;padding:10px 13px;font-weight:900;cursor:pointer}
+.ldh-op-loader{display:inline-block;width:15px;height:15px;border:2px solid #45647e;border-top-color:#2dd4bf;border-radius:50%;animation:ldhOpSpin .8s linear infinite;margin-right:8px;vertical-align:-2px}@keyframes ldhOpSpin{to{transform:rotate(360deg)}}
 @media(max-width:620px){#ldhOperationalAppModal .ldh-op-list{grid-template-columns:1fr}}
 </style>
 <div id="ldhOperationalAppModal" aria-hidden="true">
   <div class="ldh-op-box" role="dialog" aria-modal="true" aria-labelledby="ldhOperationalAppTitle">
-    <div class="ldh-op-head">
-      <div><h3 id="ldhOperationalAppTitle">Abrir app</h3><p id="ldhOperationalAppHint"></p></div>
-      <button class="ldh-op-close" type="button" aria-label="Cerrar">×</button>
-    </div>
+    <div class="ldh-op-head"><div><h3 id="ldhOperationalAppTitle">Abrir app</h3><p id="ldhOperationalAppHint"></p></div><button class="ldh-op-close" type="button" aria-label="Cerrar">×</button></div>
     <div id="ldhOperationalAppList" class="ldh-op-list"></div>
     <div id="ldhOperationalAppActions" class="ldh-op-actions"></div>
   </div>
@@ -9672,72 +9398,22 @@ console.info('[Inicio] Avisos de orden: se ignoran los generados desde este mism
 <script>
 (function(){
   'use strict';
-  const modal=document.getElementById('ldhOperationalAppModal');
-  const title=document.getElementById('ldhOperationalAppTitle');
-  const hint=document.getElementById('ldhOperationalAppHint');
-  const list=document.getElementById('ldhOperationalAppList');
-  const actions=document.getElementById('ldhOperationalAppActions');
+  const modal=document.getElementById('ldhOperationalAppModal'),title=document.getElementById('ldhOperationalAppTitle'),hint=document.getElementById('ldhOperationalAppHint'),list=document.getElementById('ldhOperationalAppList'),actions=document.getElementById('ldhOperationalAppActions');
   if(!modal||!title||!hint||!list||!actions)return;
-
-  function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];});}
-  function readJSON(key){try{return JSON.parse(localStorage.getItem(key)||'null');}catch(_){return null;}}
+  const COMPRAS_BASE='https://tallermantenimiento.github.io/compras-mantenimiento-app/';
+  const VEHICULOS_BASE='https://tallermantenimiento.github.io/control-vehiculos/';
+  function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
   function close(){modal.classList.remove('open');modal.setAttribute('aria-hidden','true');list.innerHTML='';actions.innerHTML='';}
-  function openBase(t,h){title.textContent=t;hint.textContent=h;list.innerHTML='';actions.innerHTML='';modal.classList.add('open');modal.setAttribute('aria-hidden','false');}
-  function openTab(url){const name='LDH_TEST_APP_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);const features='popup=yes,width=520,height=860,left=80,top=60,resizable=yes,scrollbars=yes';const w=window.open(url,name,features);if(!w){alert('El navegador ha bloqueado la ventana nueva. Permite ventanas emergentes para 127.0.0.1:8788 y vuelve a intentarlo.');return;}try{w.opener=null;}catch(_){}try{w.focus();}catch(_){}close();}
-  function addPanelButton(label,url){const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=function(){openTab(url);};actions.appendChild(b);}
-  function emptyMessage(text){list.innerHTML='<div class="ldh-op-empty" style="grid-column:1/-1">'+esc(text)+'</div>';}
-
-  function showCompras(){
-    openBase('App Compras mantenimiento','Selecciona el sector que va a utilizar la app.');
-    const state=readJSON('ldh_test_compras_mantenimiento_firestore_v1')||{};
-    const sectores=state.collections&&state.collections.sectores&&typeof state.collections.sectores==='object'?state.collections.sectores:{};
-    const rows=Object.keys(sectores).map(function(id){const d=sectores[id]||{};return {id:id,nombre:d.nombre||d.slug||id};}).sort(function(a,b){return a.nombre.localeCompare(b.nombre,'es');});
-    if(!rows.length){
-      emptyMessage('No hay sectores cargados en Compras TEST. Carga primero los datos ficticios o crea un sector desde el panel de Compras.');
-      addPanelButton('Abrir panel Compras TEST','/programas_direccion/compras_mantenimiento/index.html');
-      return;
-    }
-    rows.forEach(function(row){
-      const b=document.createElement('button');b.type='button';b.className='ldh-op-choice';
-      b.innerHTML='<span>🛒</span><span>'+esc(row.nombre)+'<small>Sector de Compras TEST</small></span>';
-      b.onclick=function(){openTab('/programas_direccion/compras_mantenimiento/app_responsable.html?sector='+encodeURIComponent(row.id));};
-      list.appendChild(b);
-    });
-  }
-
-  function showVehiculos(){
-    openBase('App Vehículos','Selecciona el usuario habitual que abrirá el terminal.');
-    const state=readJSON('LDH_TEST_VEHICULOS_FIRESTORE_LOCAL_V1')||{};
-    const usuarios=state.usuarios&&typeof state.usuarios==='object'?state.usuarios:{};
-    const rows=Object.keys(usuarios).map(function(id){const d=usuarios[id]||{};return {id:id,nombre:d.nombre||id,tipo:d.tipo||'',activo:d.activo!==false,accesoApp:d.accesoApp!==false};})
-      .filter(function(u){return u.activo&&u.tipo==='habitual'&&u.accesoApp;})
-      .sort(function(a,b){return a.nombre.localeCompare(b.nombre,'es');});
-    if(!rows.length){
-      emptyMessage('No hay usuarios habituales habilitados en Vehículos TEST. Carga los datos ficticios o crea un usuario con acceso a la app.');
-      addPanelButton('Abrir Gestión de vehículos TEST','/programas_direccion/gestion_vehiculos/index.html');
-      return;
-    }
-    rows.forEach(function(row){
-      const b=document.createElement('button');b.type='button';b.className='ldh-op-choice';
-      b.innerHTML='<span>🚐</span><span>'+esc(row.nombre)+'<small>Usuario habitual · terminal TEST</small></span>';
-      b.onclick=function(){openTab('/programas_direccion/gestion_vehiculos/terminal_vehiculos.html?uid='+encodeURIComponent(row.id));};
-      list.appendChild(b);
-    });
-  }
-
-  document.querySelectorAll('[data-ldh-operational-app]').forEach(function(card){
-    card.addEventListener('click',function(ev){
-      if(ev.defaultPrevented)return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      const app=card.getAttribute('data-ldh-operational-app');
-      if(app==='compras')showCompras();
-      else if(app==='vehiculos')showVehiculos();
-    });
-  });
-  modal.querySelector('.ldh-op-close').addEventListener('click',close);
-  modal.addEventListener('click',function(ev){if(ev.target===modal)close();});
-  document.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&modal.classList.contains('open'))close();});
+  function openBase(t,h){title.textContent=t;hint.textContent=h;list.innerHTML='<div class="ldh-op-empty"><span class="ldh-op-loader"></span>Cargando datos reales…</div>';actions.innerHTML='';modal.classList.add('open');modal.setAttribute('aria-hidden','false');}
+  function openTab(url){const name='LDH_APP_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);const features='popup=yes,width=560,height=880,left=80,top=50,resizable=yes,scrollbars=yes';const w=window.open(url,name,features);if(!w){alert('El navegador ha bloqueado la ventana nueva. Permite ventanas emergentes para tallermantenimiento.github.io y vuelve a intentarlo.');return;}try{w.opener=null;}catch(_){}try{w.focus();}catch(_){}close();}
+  function addPanelButton(label,url){const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=()=>openTab(url);actions.appendChild(b);}
+  function emptyMessage(t){list.innerHTML='<div class="ldh-op-empty">'+esc(t)+'</div>';}
+  function hiddenFrame(url,reader,timeoutMs=9000){return new Promise((resolve,reject)=>{const f=document.createElement('iframe');f.setAttribute('aria-hidden','true');Object.assign(f.style,{position:'fixed',left:'-10000px',top:'-10000px',width:'1200px',height:'900px',visibility:'hidden',pointerEvents:'none'});let done=false,t0=Date.now(),timer=null;const finish=(err,rows)=>{if(done)return;done=true;clearInterval(timer);setTimeout(()=>f.remove(),0);err?reject(err):resolve(rows||[]);};const poll=()=>{try{const d=f.contentDocument;if(!d)return;const rows=reader(d,f.contentWindow)||[];if(rows.length)return finish(null,rows);}catch(e){if(Date.now()-t0>1200)return finish(e);}if(Date.now()-t0>timeoutMs)finish(new Error('Tiempo de carga agotado.'));};f.onload=()=>{poll();timer=setInterval(poll,300);};f.onerror=()=>finish(new Error('No se pudo cargar el programa.'));f.src=url+(url.includes('?')?'&':'?')+'_selector='+Date.now();document.body.appendChild(f);});}
+  function renderRows(rows,ico,small,buildUrl){list.innerHTML='';rows.forEach(row=>{const b=document.createElement('button');b.type='button';b.className='ldh-op-choice';b.innerHTML='<span>'+ico+'</span><span>'+esc(row.nombre)+'<small>'+esc(small)+'</small></span>';b.onclick=()=>openTab(buildUrl(row));list.appendChild(b);});}
+  async function showCompras(){openBase('App Compras mantenimiento','Selecciona el sector que va a utilizar la app.');addPanelButton('Abrir panel de Compras',COMPRAS_BASE);try{const rows=await hiddenFrame(COMPRAS_BASE,(d)=>{const out=[],seen=new Set();d.querySelectorAll('button[data-link*="app_responsable.html?sector="]').forEach(btn=>{try{const u=new URL(btn.dataset.link,COMPRAS_BASE),id=u.searchParams.get('sector');if(!id||seen.has(id))return;seen.add(id);const tr=btn.closest('tr');const nombre=(tr?.querySelector('td')?.textContent||id).replace(/\d+\s+pendientes?/ig,'').trim()||id;out.push({id,nombre});}catch(_){}});return out.sort((a,b)=>a.nombre.localeCompare(b.nombre,'es'));});if(!modal.classList.contains('open'))return;if(!rows.length)throw new Error('Sin sectores');renderRows(rows,'🛒','Sector de Compras',row=>COMPRAS_BASE+'app_responsable.html?sector='+encodeURIComponent(row.id));}catch(_){if(modal.classList.contains('open'))emptyMessage('No he podido cargar la lista de sectores. Puedes abrir el panel de Compras desde el botón inferior.');}}
+  async function showVehiculos(){openBase('App Vehículos','Selecciona el usuario habitual habilitado que abrirá el terminal.');addPanelButton('Abrir Gestión de vehículos',VEHICULOS_BASE);try{const rows=await hiddenFrame(VEHICULOS_BASE,(d)=>{const out=[],seen=new Set();d.querySelectorAll('button[onclick*="copyAppLink("]').forEach(btn=>{const m=String(btn.getAttribute('onclick')||'').match(/copyAppLink\(['\"]([^'\"]+)['\"]\)/);if(!m||seen.has(m[1]))return;const tr=btn.closest('tr'),td=tr?Array.from(tr.querySelectorAll('td')):[];const tipo=(td[1]?.textContent||'').trim().toLowerCase(),estado=(td[2]?.textContent||'').trim().toLowerCase(),app=(td[3]?.textContent||'').trim().toLowerCase();if(!tipo.includes('habitual')||estado.includes('desactiv')||app!=='sí')return;seen.add(m[1]);const nombre=(td[0]?.querySelector('b')?.textContent||td[0]?.textContent||m[1]).trim();out.push({id:m[1],nombre});});return out.sort((a,b)=>a.nombre.localeCompare(b.nombre,'es'));});if(!modal.classList.contains('open'))return;if(!rows.length)throw new Error('Sin usuarios');renderRows(rows,'🚐','Usuario habitual · terminal',row=>VEHICULOS_BASE+'terminal_vehiculos.html?uid='+encodeURIComponent(row.id));}catch(_){if(modal.classList.contains('open'))emptyMessage('No he podido cargar la lista de usuarios. Puedes abrir Gestión de vehículos desde el botón inferior.');}}
+  document.querySelectorAll('[data-ldh-operational-app]').forEach(card=>card.addEventListener('click',ev=>{if(ev.defaultPrevented)return;ev.preventDefault();ev.stopPropagation();const app=card.getAttribute('data-ldh-operational-app');if(app==='compras')showCompras();else if(app==='vehiculos')showVehiculos();}));
+  modal.querySelector('.ldh-op-close').addEventListener('click',close);modal.addEventListener('click',ev=>{if(ev.target===modal)close();});document.addEventListener('keydown',ev=>{if(ev.key==='Escape'&&modal.classList.contains('open'))close();});
 })();
 </script>
 
