@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ENLACE OT IA R12 AISLADO</title>
+<title>Enlace OT Dirección · Gestión Taller</title>
 <style>
 *{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#eef3f8;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .shell{height:100vh;display:grid;grid-template-columns:minmax(0,1fr) 338px;gap:8px;padding:0 8px 0 0}
@@ -24,7 +24,19 @@ iframe{display:block;width:100%;height:100%;border:0;background:#fff}
 const core=document.getElementById('coreFrame');
 const ai=document.getElementById('aiFrame');
 const txt=v=>String(v==null?'':v).replace(/\s+/g,' ').trim();
+const norm=v=>txt(v).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+const hasOwn=(o,k)=>Object.prototype.hasOwnProperty.call(o||{},k);
 function firstDoc(){try{return core.contentDocument||core.contentWindow.document}catch(_){return null}}
+function workOrders(){try{return core.contentWindow&&core.contentWindow.WorkOrders||null}catch(_){return null}}
+function pendingOrders(w){return (Array.isArray(w?.orders)?w.orders:[]).filter(o=>o&&o.status==='pending'&&!o.cancellationPendingV1&&String(o.cancellationRequestV1?.status||'')!=='pending')}
+function structuredOrders(w){
+  return pendingOrders(w).slice().sort((a,b)=>(Number(a.priority)||9999)-(Number(b.priority)||9999)).slice(0,60).map(o=>({
+    id:txt(o.id),referencia:txt(o.reference),empresa:txt(o.companyName),cantidad:Number(o.quantity)||0,prioridad:Number(o.priority)||0,
+    entrada:txt(o.entryDate),entrega:txt(o.deliveryDate),descripcion:txt(o.description),material:txt(o.material),
+    hierro:txt(o.ironType),imprimacion:!!o.primer,ral:txt(o.ral),estado:txt(o.workflowStateV2||o.workflowState||o.status),
+    aviso:txt(o.operationalNoticeV1)
+  }));
+}
 function snapshot(){
   const d=firstDoc();
   if(!d)return {scope:'direccion_enlace_ot',programa:'Enlace OT Direccion',error:'Interfaz principal aun no disponible'};
@@ -44,13 +56,140 @@ function snapshot(){
   for(const card of Array.from(d.querySelectorAll('.matCard')).slice(0,30)){
     const s=txt(card.textContent).slice(0,500); if(s)stock.push(s);
   }
-  return {scope:'direccion_enlace_ot',programa:'Enlace OT Direccion',timestamp:new Date().toISOString(),departamentoActivo:department,resumen:{pendientes:pc,historico:hc},trabajosPendientesVisibles:rows,stockVisible:stock,limites:'Datos visibles del propio Enlace OT Direccion. No acceso directo a otros modulos.'};
+  const w=workOrders();
+  const companies=(Array.isArray(w?.companies)?w.companies:[]).map(c=>({id:txt(c.id),nombre:txt(c.name)})).filter(c=>c.id||c.nombre);
+  return {
+    scope:'direccion_enlace_ot',programa:'Enlace OT Direccion',timestamp:new Date().toISOString(),departamentoActivo:department,
+    resumen:{pendientes:pc,historico:hc},trabajosPendientesVisibles:rows,ordenesPendientes:structuredOrders(w),empresasDisponibles:companies,
+    stockVisible:stock,
+    capacidadesIA:['open_new_order','create_order','open_edit_order','edit_order','change_priority','request_cancellation','view_order','archive_order'],
+    limites:'Solo datos y acciones del propio Enlace OT Direccion. Sin acceso directo a otros modulos ni cambio manual de estados de taller.'
+  };
+}
+function findOrder(w,reference,{allowHistory=false}={}){
+  const key=norm(reference);
+  if(!key)return {error:'Falta la referencia de la orden.'};
+  let rows=(Array.isArray(w?.orders)?w.orders:[]).filter(o=>o&&txt(o.reference));
+  if(!allowHistory) rows=rows.filter(o=>o.status==='pending');
+  const exact=rows.filter(o=>norm(o.reference)===key);
+  if(exact.length===1)return {order:exact[0]};
+  const partial=rows.filter(o=>norm(o.reference).includes(key)||key.includes(norm(o.reference)));
+  if(partial.length===1)return {order:partial[0]};
+  if(exact.length>1||partial.length>1)return {error:'La referencia no es univoca. Coinciden: '+(exact.length?exact:partial).slice(0,6).map(o=>o.reference).join(', ')};
+  return {error:'No encuentro la orden '+txt(reference)+' en Enlace OT.'};
+}
+function findCompany(w,value){
+  const key=norm(value);const rows=Array.isArray(w?.companies)?w.companies:[];
+  if(!key)return {error:'Falta la empresa.'};
+  const exact=rows.filter(c=>norm(c.id)===key||norm(c.name)===key);
+  if(exact.length===1)return {company:exact[0]};
+  const partial=rows.filter(c=>norm(c.name).includes(key)||key.includes(norm(c.name)));
+  if(partial.length===1)return {company:partial[0]};
+  if(exact.length>1||partial.length>1)return {error:'La empresa no es univoca.'};
+  return {error:'Empresa no encontrada. Disponibles: '+rows.map(c=>c.name).filter(Boolean).join(', ')};
+}
+function setValue(d,id,value){const el=d.getElementById(id);if(!el)return;el.value=value==null?'':String(value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));}
+function setChecked(d,id,value){const el=d.getElementById(id);if(!el)return;el.checked=!!value;el.dispatchEvent(new Event('change',{bubbles:true}));}
+function formatFinish(p){const out=[];if(hasOwn(p,'ironType'))out.push(norm(p.ironType).includes('galv')?'Galvanizado':'Hierro negro');if(hasOwn(p,'primer'))out.push(p.primer?'con imprimacion':'sin imprimacion');if(hasOwn(p,'ral'))out.push(txt(p.ral)||'sin RAL');return out.join(' · ')}
+function cleanPriority(w,v,forNew){const max=Math.max(1,pendingOrders(w).length+(forNew?1:0));const n=Math.round(Number(v)||max);return Math.max(1,Math.min(max,n));}
+function fillCreate(d,w,p,company){
+  setValue(d,'woDeliveryDate',p.deliveryDate);
+  setValue(d,'woCompany',company.id);
+  setValue(d,'woQuantity',Math.max(1,Math.round(Number(p.quantity)||1)));
+  setValue(d,'woPriority',cleanPriority(w,p.priority,true));
+  setValue(d,'woMaterial',txt(p.material));
+  setValue(d,'woDescription',txt(p.description));
+  setValue(d,'woIronType',norm(p.ironType).includes('galv')?'galvanizado':'negro');
+  setChecked(d,'woPrimer',!!p.primer);
+  setValue(d,'woRal',txt(p.ral));
+}
+function fillEdit(d,w,p){
+  if(hasOwn(p,'deliveryDate'))setValue(d,'woDeliveryDate',p.deliveryDate);
+  if(hasOwn(p,'quantity'))setValue(d,'woQuantity',Math.max(1,Math.round(Number(p.quantity)||1)));
+  if(hasOwn(p,'priority'))setValue(d,'woPriority',cleanPriority(w,p.priority,false));
+  if(hasOwn(p,'material'))setValue(d,'woMaterial',txt(p.material));
+  if(hasOwn(p,'description'))setValue(d,'woDescription',txt(p.description));
+  if(hasOwn(p,'ironType'))setValue(d,'woIronType',norm(p.ironType).includes('galv')?'galvanizado':'negro');
+  if(hasOwn(p,'primer'))setChecked(d,'woPrimer',!!p.primer);
+  if(hasOwn(p,'ral'))setValue(d,'woRal',txt(p.ral));
+}
+async function executeAction(action){
+  const w=workOrders(),d=firstDoc();
+  if(!w||!d)return {ok:false,message:'Enlace OT aun no esta preparado. Espera unos segundos y vuelve a intentarlo.'};
+  const name=txt(action?.name||action?.action).toLowerCase();
+  const p=(action&&typeof action.params==='object'&&action.params)||{};
+  try{
+    if(name==='open_new_order'){
+      w.openNew();
+      return {ok:true,message:'He abierto el formulario de nueva orden de trabajo para que puedas completarlo o revisarlo.'};
+    }
+    if(name==='create_order'){
+      const missing=[];if(!txt(p.deliveryDate))missing.push('fecha de entrega');if(!txt(p.company))missing.push('empresa');if(!(Number(p.quantity)>0))missing.push('cantidad');if(!txt(p.description))missing.push('descripcion');
+      if(missing.length)return {ok:false,message:'Faltan datos obligatorios para crear la orden: '+missing.join(', ')+'.'};
+      const fc=findCompany(w,p.company);if(fc.error)return {ok:false,message:fc.error};
+      const qty=Math.max(1,Math.round(Number(p.quantity)||1));const pri=cleanPriority(w,p.priority,true);
+      const summary=['Empresa: '+fc.company.name,'Entrega: '+p.deliveryDate,'Cantidad: '+qty,'Prioridad: '+pri,'Descripcion: '+txt(p.description)];
+      if(txt(p.material))summary.push('Material: '+txt(p.material));const finish=formatFinish(p);if(finish)summary.push('Acabado: '+finish);
+      if(!confirm('La IA va a crear una nueva orden de trabajo:\n\n'+summary.join('\n')+'\n\n¿Guardar esta orden?'))return {ok:false,cancelled:true,message:'Creacion cancelada. No se ha modificado ningun dato.'};
+      const before=new Set((w.orders||[]).map(o=>o.id));
+      w.openNew();fillCreate(d,w,{...p,priority:pri},fc.company);
+      const probe=w.collectForm();const validation=w.validate(probe);if(validation){w.closeModal();return {ok:false,message:validation};}
+      await w.saveWork();
+      const created=(w.orders||[]).filter(o=>!before.has(o.id)).sort((a,b)=>(Number(b.updatedAtMs)||0)-(Number(a.updatedAtMs)||0))[0];
+      if(!created)return {ok:false,message:'No se ha creado la orden. Comprueba que la sincronizacion muestre conectada y vuelve a intentarlo.'};
+      return {ok:true,message:'Orden creada correctamente: '+created.reference+' · '+created.companyName+' · '+created.quantity+' uds.'};
+    }
+    if(name==='open_edit_order'){
+      const fo=findOrder(w,p.reference);if(fo.error)return {ok:false,message:fo.error};w.openEdit(fo.order.id);return {ok:true,message:'He abierto '+fo.order.reference+' en modo edicion.'};
+    }
+    if(name==='edit_order'){
+      const fo=findOrder(w,p.reference);if(fo.error)return {ok:false,message:fo.error};
+      const changes=(p.changes&&typeof p.changes==='object')?p.changes:{...p};delete changes.reference;
+      if(!Object.keys(changes).length)return {ok:false,message:'No has indicado ningun cambio para '+fo.order.reference+'.'};
+      let company=null;if(hasOwn(changes,'company')){const fc=findCompany(w,changes.company);if(fc.error)return {ok:false,message:fc.error};company=fc.company;}
+      const readable=Object.entries(changes).map(([k,v])=>k+': '+(typeof v==='boolean'?(v?'si':'no'):txt(v))).join('\n');
+      if(!confirm('La IA va a editar '+fo.order.reference+':\n\n'+readable+'\n\n¿Guardar estos cambios?'))return {ok:false,cancelled:true,message:'Edicion cancelada. No se ha modificado ningun dato.'};
+      const before=Number(fo.order.updatedAtMs)||0;w.openEdit(fo.order.id);if(company)setValue(d,'woCompany',company.id);fillEdit(d,w,changes);
+      const probe=w.collectForm();const validation=w.validate(probe);if(validation){w.closeModal();return {ok:false,message:validation};}
+      await w.saveWork();const updated=(w.orders||[]).find(o=>o.id===fo.order.id);
+      if(!updated||((Number(updated.updatedAtMs)||0)<=before))return {ok:false,message:'No se han podido confirmar los cambios en '+fo.order.reference+'.'};
+      return {ok:true,message:'Cambios guardados en '+updated.reference+'.'};
+    }
+    if(name==='change_priority'){
+      const fo=findOrder(w,p.reference);if(fo.error)return {ok:false,message:fo.error};const priority=cleanPriority(w,p.priority,false);
+      if(!confirm('Cambiar '+fo.order.reference+' a la prioridad '+priority+'?'))return {ok:false,cancelled:true,message:'Cambio de prioridad cancelado.'};
+      await w.changePriority(fo.order.id,{value:String(priority)});const updated=(w.orders||[]).find(o=>o.id===fo.order.id);
+      return {ok:true,message:(updated?.reference||fo.order.reference)+' queda en prioridad '+(updated?.priority||priority)+'.'};
+    }
+    if(name==='request_cancellation'){
+      const fo=findOrder(w,p.reference);if(fo.error)return {ok:false,message:fo.error};
+      if(fo.order.cancellationPendingV1||String(fo.order.cancellationRequestV1?.status||'')==='pending')return {ok:true,message:'La anulacion de '+fo.order.reference+' ya esta pendiente de aprobacion.'};
+      await w.cancelOrder(fo.order.id);const updated=(w.orders||[]).find(o=>o.id===fo.order.id);
+      if(updated?.cancellationPendingV1||String(updated?.cancellationRequestV1?.status||'')==='pending')return {ok:true,message:'Solicitud de anulacion enviada para '+fo.order.reference+'. Queda pendiente de aprobacion desde Agenda.'};
+      return {ok:false,cancelled:true,message:'La anulacion no se ha enviado. No se ha modificado la orden.'};
+    }
+    if(name==='view_order'){
+      const fo=findOrder(w,p.reference,{allowHistory:true});if(fo.error)return {ok:false,message:fo.error};w.viewOrder(fo.order.id);return {ok:true,message:'He abierto el detalle de '+fo.order.reference+'.'};
+    }
+    if(name==='archive_order'){
+      const fo=findOrder(w,p.reference,{allowHistory:true});if(fo.error)return {ok:false,message:fo.error};const before=fo.order.status;await w.archiveOrder(fo.order.id);const updated=(w.orders||[]).find(o=>o.id===fo.order.id);
+      if(updated?.status==='completed'&&before!=='completed')return {ok:true,message:fo.order.reference+' se ha archivado.'};
+      return {ok:false,cancelled:true,message:'No se ha archivado '+fo.order.reference+'.'};
+    }
+    return {ok:false,message:'Accion no permitida en Enlace OT: '+name+'.'};
+  }catch(error){console.error('[Enlace OT IA action]',error);return {ok:false,message:'No se ha podido completar la accion: '+txt(error?.message||error)};}
 }
 window.addEventListener('message',e=>{
   if(e.source!==ai.contentWindow)return;
   const m=e.data||{};
   if(m.type==='LDH_ENLACE_OT_AI_SNAPSHOT_REQUEST'){
     ai.contentWindow.postMessage({type:'LDH_ENLACE_OT_AI_SNAPSHOT_RESPONSE',requestId:m.requestId,data:snapshot()},location.origin);
+    return;
+  }
+  if(m.type==='LDH_ENLACE_OT_AI_ACTION_REQUEST'){
+    Promise.resolve(executeAction(m.action)).then(result=>{
+      ai.contentWindow.postMessage({type:'LDH_ENLACE_OT_AI_ACTION_RESPONSE',requestId:m.requestId,result},location.origin);
+    });
   }
 });
 })();

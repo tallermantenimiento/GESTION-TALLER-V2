@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IA Enlace OT R12</title>
+<title>Asistente IA · Enlace OT Dirección</title>
 <style>
 *{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#041226;color:#eef7ff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 body{display:flex;flex-direction:column;background:radial-gradient(360px 220px at 50% -8%,rgba(14,165,233,.16),transparent 62%),linear-gradient(180deg,#061427 0%,#07182d 58%,#041226 100%)}
@@ -14,17 +14,18 @@ body{display:flex;flex-direction:column;background:radial-gradient(360px 220px a
 <body>
 <div class="head"><div class="brand"><div class="bot">AI</div><div class="title"><b>Asistente IA</b><span>En linea</span></div></div><div class="scope">SOLO<br>ENLACE OT</div></div>
 <div class="scroll" id="scroll">
-  <div class="card"><b>Asistente IA - Enlace OT Direccion</b><p>Consulta los datos visibles de este programa usando la misma IA central.</p><div class="boundary">Ambito aislado: no consulta directamente Agenda, Calculo, Preparacion, Fabricacion, Compras mantenimiento ni Vehiculos.</div></div>
+  <div class="card"><b>Asistente IA - Enlace OT Direccion</b><p>Consulta y gestiona las órdenes visibles de este programa usando la misma IA central.</p><div class="boundary">Ámbito limitado a Enlace OT: puede crear, editar, priorizar y solicitar anulaciones aquí, pero no actúa directamente sobre Agenda, Cálculo, Preparación, Fabricación, Compras mantenimiento ni Vehículos.</div></div>
   <div class="card"><b>En que puedo ayudarte?</b><div class="quick">
     <button data-p="Resume los trabajos pendientes visibles y dime cuales requieren atencion"><span>▥</span><span>Resumir pendientes</span><span>›</span></button>
     <button data-p="Revisa las prioridades visibles y dime si hay algo urgente"><span>⚑</span><span>Revisar prioridades</span><span>›</span></button>
     <button data-p="Busca trabajos visibles que esten esperando material y resumelos"><span>⌛</span><span>Esperando material</span><span>›</span></button>
     <button data-p="Resume el stock visible en esta pantalla"><span>▦</span><span>Revisar stock visible</span><span>›</span></button>
+    <button data-p="Abre una nueva orden de trabajo"><span>＋</span><span>Nuevo trabajo</span><span>›</span></button>
   </div></div>
   <div class="chat" id="messages"></div>
 </div>
 <div class="composer">
-  <div class="inputbar"><textarea id="input" rows="1" placeholder="Escribe sobre OTs, prioridades, stock o departamentos..."></textarea><button class="send" id="send">➤</button></div>
+  <div class="inputbar"><textarea id="input" rows="1" placeholder="Consulta o pide crear, editar, priorizar o anular una OT..."></textarea><button class="send" id="send">➤</button></div>
   <div class="walk"><button class="mic" id="mic">Mantener pulsado</button><span class="note" id="micNote">Whisper Large V3 - espanol ES</span></div>
   <div class="clearrow"><button class="clearbtn" id="clear" type="button" title="Borra solo esta conversación de IA">🗑 Limpiar diálogo</button></div>
   <div class="status" id="status">IA central - comprobando conexion...</div>
@@ -34,7 +35,7 @@ body{display:flex;flex-direction:column;background:radial-gradient(360px 220px a
 'use strict';
 const SCOPE='direccion_enlace_ot';
 const BRIDGE='https://gestion-taller-ia.taller-mantenimiento.workers.dev';
-const CHAT_KEY='ldh_ia_chat_direccion_enlace_ot_r12';
+const CHAT_KEY='ldh_ia_chat_direccion_enlace_ot_r13';
 const input=document.getElementById('input'),messages=document.getElementById('messages'),scroll=document.getElementById('scroll'),sendBtn=document.getElementById('send'),status=document.getElementById('status'),mic=document.getElementById('mic'),micNote=document.getElementById('micNote'),clearBtn=document.getElementById('clear');
 const state={busy:false,health:null,history:[],pendingAction:null,recorder:null,stream:null,chunks:[],micHold:false};
 const text=v=>String(v==null?'':v);const esc=s=>text(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -62,32 +63,82 @@ function clearConversation(){
   if(state.health?.hasKey)setStatus('IA central - '+model+' - solo Enlace OT - en linea','ok');
 }
 async function bridge(path,body,method='POST'){const opt={method,headers:{'Content-Type':'application/json'}};if(method!=='GET')opt.body=JSON.stringify(body||{});const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),30000);opt.signal=ctl.signal;try{const res=await fetch(BRIDGE+path,opt);const raw=await res.text();let obj={};try{obj=JSON.parse(raw)}catch(_){obj={error:raw||('HTTP '+res.status)}}if(!res.ok)throw new Error(obj.providerMessage||obj.error||('HTTP '+res.status));return obj}finally{clearTimeout(tm)}}
-let reqSeq=0,pending=new Map();
-window.addEventListener('message',e=>{const m=e.data||{};if(m.type!=='LDH_ENLACE_OT_AI_SNAPSHOT_RESPONSE')return;const p=pending.get(m.requestId);if(!p)return;pending.delete(m.requestId);p.resolve(m.data||{})});
+let reqSeq=0,pending=new Map(),pendingActions=new Map();
+window.addEventListener('message',e=>{
+  if(e.source!==parent)return;
+  const m=e.data||{};
+  if(m.type==='LDH_ENLACE_OT_AI_SNAPSHOT_RESPONSE'){
+    const p=pending.get(m.requestId);if(!p)return;pending.delete(m.requestId);p.resolve(m.data||{});return;
+  }
+  if(m.type==='LDH_ENLACE_OT_AI_ACTION_RESPONSE'){
+    const p=pendingActions.get(m.requestId);if(!p)return;pendingActions.delete(m.requestId);p.resolve(m.result||{});
+  }
+});
 function getSnapshot(){return new Promise((resolve,reject)=>{const id='r'+(++reqSeq);const tm=setTimeout(()=>{pending.delete(id);reject(new Error('No he podido leer la pantalla de Enlace OT.'))},2500);pending.set(id,{resolve:d=>{clearTimeout(tm);resolve(d)}});parent.postMessage({type:'LDH_ENLACE_OT_AI_SNAPSHOT_REQUEST',requestId:id},location.origin)})}
+function runAction(action){return new Promise((resolve,reject)=>{const id='a'+(++reqSeq);const tm=setTimeout(()=>{pendingActions.delete(id);reject(new Error('La accion ha tardado demasiado en responder.'))},45000);pendingActions.set(id,{resolve:r=>{clearTimeout(tm);resolve(r)}});state.pendingAction=action;parent.postMessage({type:'LDH_ENLACE_OT_AI_ACTION_REQUEST',requestId:id,action},location.origin)})}
+function parsePayload(raw){
+  let s=text(raw).trim();if(!s)return null;
+  s=s.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+  try{return JSON.parse(s)}catch(_){ }
+  const a=s.indexOf('{'),b=s.lastIndexOf('}');if(a>=0&&b>a){try{return JSON.parse(s.slice(a,b+1))}catch(_){ }}
+  return null;
+}
 async function send(v){
-  v=text(v).trim();if(!v||state.busy)return;input.value='';msg('user',v);busy(true,'IA central - leyendo solo Enlace OT...');
+  v=text(v).trim();if(!v||state.busy)return;input.value='';msg('user',v);busy(true,'IA central - consultando Enlace OT...');
   try{
     const snap=await getSnapshot();
-    const sys=['SCOPE OBLIGATORIO: direccion_enlace_ot.','Eres el Asistente IA exclusivo de Enlace OT Direccion.','Responde en espanol de Espana, breve y practica.','MODO ACTUAL: SOLO LECTURA.','AISLAMIENTO ESTRICTO: usa unicamente ENLACE_OT_DATA.','No tienes acceso directo a Agenda, Calculo, Preparacion, Fabricacion, Compras mantenimiento ni Vehiculos.','Si un dato no esta en ENLACE_OT_DATA, dilo y no lo inventes.','Responde directamente al usuario; no dejes la respuesta vacia.','ENLACE_OT_DATA='+JSON.stringify(snap)].join('\n');
-    const request={scope:SCOPE,messages:[{role:'system',content:sys},...state.history.slice(-6),{role:'user',content:v}],temperature:.05,reasoning_effort:'low',max_completion_tokens:1100};
+    const sys=[
+      'SCOPE OBLIGATORIO: direccion_enlace_ot.',
+      'Eres el Asistente IA exclusivo de Enlace OT Direccion.',
+      'Responde en espanol de Espana, breve y practica.',
+      'CAPACIDAD ACTUAL: CONSULTA Y GESTION CONTROLADA DE ORDENES DENTRO DE ENLACE OT.',
+      'AISLAMIENTO ESTRICTO: usa unicamente ENLACE_OT_DATA y las acciones permitidas de este programa.',
+      'No tienes acceso directo a Agenda, Calculo, Preparacion, Fabricacion, Compras mantenimiento ni Vehiculos.',
+      'No cambies manualmente estados de flujo del taller como fabricacion, pintura, almacen, terminado o entregado: esos estados los gobiernan sus modulos.',
+      'Acciones permitidas: open_new_order, create_order, open_edit_order, edit_order, change_priority, request_cancellation, view_order, archive_order.',
+      'Si el usuario dice solo nuevo trabajo o abre un nuevo trabajo, usa open_new_order.',
+      'Para create_order exige company, deliveryDate en YYYY-MM-DD, quantity y description. material, ironType, primer, ral y priority son opcionales.',
+      'Para edit_order, change_priority, request_cancellation, view_order y archive_order usa una referencia de OT existente y no la inventes.',
+      'Si falta un dato obligatorio o la referencia es ambigua, pregunta al usuario y NO propongas una accion.',
+      'La aplicacion pedira confirmacion antes de guardar cambios sensibles.',
+      'FORMATO OBLIGATORIO: devuelve SOLO JSON valido sin markdown.',
+      'Para responder sin accion: {"kind":"answer","message":"texto para el usuario"}.',
+      'Para una accion: {"kind":"action","message":"texto breve","action":{"name":"nombre_accion","params":{}}}.',
+      'En edit_order pon los cambios dentro de params.changes. Ejemplo: {"reference":"OT-...","changes":{"quantity":4}}.',
+      'No afirmes que una accion se ha completado antes de recibir el resultado de la aplicacion.',
+      'Si un dato no esta en ENLACE_OT_DATA, dilo y no lo inventes.',
+      'ENLACE_OT_DATA='+JSON.stringify(snap)
+    ].join('\n');
+    const request={scope:SCOPE,messages:[{role:'system',content:sys},...state.history.slice(-6),{role:'user',content:v}],temperature:.03,reasoning_effort:'low',max_completion_tokens:1200};
     let response=await bridge('/chat',request);
     let reply=extractReply(response);
     if(!reply){
-      const retry={...request,reasoning_effort:'low',max_completion_tokens:1500,messages:[{role:'system',content:sys+'\nIMPORTANTE: devuelve una respuesta final visible en content, sin dejarla vacia.'},...state.history.slice(-4),{role:'user',content:v}]};
-      response=await bridge('/chat',retry);
-      reply=extractReply(response);
+      const retry={...request,reasoning_effort:'low',max_completion_tokens:1600,messages:[{role:'system',content:sys+'\nIMPORTANTE: devuelve el JSON final visible en content, sin dejarlo vacio.'},...state.history.slice(-4),{role:'user',content:v}]};
+      response=await bridge('/chat',retry);reply=extractReply(response);
     }
-    if(!reply)throw new Error('La IA respondió sin texto final.');
-    msg('assistant',reply);state.history.push({role:'user',content:v},{role:'assistant',content:reply});state.history=state.history.slice(-6);save();
+    if(!reply)throw new Error('La IA respondio sin texto final.');
+    const payload=parsePayload(reply);
+    let assistantText='';
+    if(payload&&payload.kind==='action'&&payload.action&&payload.action.name){
+      const intro=text(payload.message).trim();if(intro)msg('assistant',intro);
+      busy(true,'IA central - ejecutando accion en Enlace OT...');
+      const result=await runAction(payload.action);state.pendingAction=null;
+      assistantText=text(result?.message||'Accion procesada.').trim();
+      msg(result?.ok?'assistant':(result?.cancelled?'assistant':'error'),assistantText);
+    }else{
+      assistantText=text(payload?.message||reply).trim();
+      if(!assistantText)throw new Error('La IA no ha devuelto una respuesta util.');
+      msg('assistant',assistantText);
+    }
+    state.history.push({role:'user',content:v},{role:'assistant',content:assistantText});state.history=state.history.slice(-6);save();
     const model=text(response?.model||state.health?.model||'openai/gpt-oss-120b').replace('openai/','');setStatus('IA central - '+model+' - solo Enlace OT - en linea','ok');
-  }catch(e){msg('error','Error IA: '+text(e?.message||e));setStatus('IA central - error','bad')}finally{busy(false)}
+  }catch(e){state.pendingAction=null;msg('error','Error IA: '+text(e?.message||e));setStatus('IA central - error','bad')}finally{busy(false)}
 }
 async function b64(blob){return await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]||'');r.onerror=rej;r.readAsDataURL(blob)})}
 async function startMic(){if(state.busy||state.recorder?.state==='recording')return;if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){msg('error','Este navegador no permite usar el microfono aqui.');return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});state.stream=stream;state.chunks=[];const mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';const rec=new MediaRecorder(stream,{mimeType:mime});state.recorder=rec;const started=performance.now();rec.ondataavailable=e=>{if(e.data&&e.data.size)state.chunks.push(e.data)};rec.onstop=async()=>{mic.classList.remove('recording');mic.textContent='Mantener pulsado';try{stream.getTracks().forEach(t=>t.stop())}catch(_){}state.recorder=null;const blob=new Blob(state.chunks,{type:mime});if(!blob.size||performance.now()-started<650){micNote.textContent='Pulsacion demasiado corta.';return}try{busy(true,'IA central - transcribiendo...');const tr=await bridge('/transcribe',{scope:SCOPE,audioBase64:await b64(blob),mimeType:mime,prompt:'IDIOMA OBLIGATORIO: espanol de Espana. Vocabulario: Enlace OT Direccion, orden de trabajo, prioridad, esperando material, fabricacion, pintura, almacen, entregado, stock.',temperature:0});const spoken=text(tr?.text).trim();busy(false);if(!spoken){micNote.textContent='No he reconocido una frase.';return}input.value=spoken;await send(spoken);micNote.textContent='Whisper Large V3 - espanol ES'}catch(e){busy(false);msg('error','Error de voz: '+text(e?.message||e))}};rec.start();mic.classList.add('recording');mic.textContent='Soltar para enviar';micNote.textContent='Escuchando...'}catch(e){msg('error','No puedo capturar el microfono: '+text(e?.message||e))}}
 document.querySelectorAll('[data-p]').forEach(b=>b.addEventListener('click',()=>send(b.dataset.p||'')));sendBtn.addEventListener('click',()=>send(input.value));if(clearBtn)clearBtn.addEventListener('click',clearConversation);input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(input.value)}});mic.addEventListener('pointerdown',e=>{e.preventDefault();state.micHold=true;startMic()});const end=e=>{if(!state.micHold&&!state.recorder)return;e?.preventDefault?.();state.micHold=false;try{if(state.recorder?.state==='recording')state.recorder.stop()}catch(_){}};mic.addEventListener('pointerup',end);window.addEventListener('pointerup',end);
 load();
-bridge('/health',null,'GET').then(h=>{state.health=h;messages.innerHTML='';msg('assistant','IA de Enlace OT Direccion conectada. Solo puedo ver los datos de este programa.');replay();setStatus('IA central - solo Enlace OT - en linea','ok')}).catch(()=>{messages.innerHTML='';msg('error','No he podido conectar con la IA central.');setStatus('IA central - no disponible','bad')});
+bridge('/health',null,'GET').then(h=>{state.health=h;messages.innerHTML='';msg('assistant','IA de Enlace OT Direccion conectada. Puedo consultar y gestionar las ordenes de este programa, con confirmacion antes de guardar cambios.');replay();setStatus('IA central - solo Enlace OT - en linea','ok')}).catch(()=>{messages.innerHTML='';msg('error','No he podido conectar con la IA central.');setStatus('IA central - no disponible','bad')});
 })();
 </script>
 </body>
