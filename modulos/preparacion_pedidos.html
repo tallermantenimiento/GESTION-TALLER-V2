@@ -5794,6 +5794,36 @@ function LDH_exactRealStock(db, companyId, materialId){
   const sameCompany = row => aliasMatch(companyAliases,[row&&row.companyId,row&&row.empresaId,row&&row.empresa,row&&row.company,row&&row.companyName,row&&row.empresaNombre]);
   const sameMaterial = row => aliasMatch(materialAliases,[row&&row.materialId,row&&row.matId,row&&row.material_id,row&&row.material,row&&row.mat,row&&row.materialName,row&&row.nombreMaterial,row&&row.name,row&&row.nombre]);
 
+  // V182 · MISMA FUENTE DE VERDAD QUE STOCK V117:
+  // si la ficha tiene físico maestro explícito, éste manda sobre un histórico
+  // compactado/incompleto. Pintura conserva movimientos como fuente principal.
+  let isPaintV182 = false;
+  try{
+    const matV182 = (db.materials||[]).find(m => {
+      const ids=[m&&m.id,m&&m.materialId,m&&m.matId,m&&m.material_id].map(v=>String(v??'').trim());
+      return ids.includes(String(materialId??'').trim());
+    }) || null;
+    const typeV182 = String(matV182 && (matV182.type||matV182.tipo||matV182.stockType) || '').toLowerCase();
+    isPaintV182 = typeV182 === 'pintura';
+  }catch(_){ }
+  if(!isPaintV182){
+    const masterRowsV182=(db.stock||[]).filter(s=>sameCompany(s)&&sameMaterial(s));
+    for(const sr of masterRowsV182){
+      if(String(sr&&sr.lengthMode||'').toLowerCase()==='mm'){
+        const raw=sr.lengthPhysicalMm ?? sr.physicalMm ?? sr.fisicoMm;
+        if(raw!==undefined && raw!==null && String(raw)!==''){
+          const n=Number(raw); if(Number.isFinite(n)) return Math.max(0,n);
+        }
+      }
+      const fieldsV182=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','real','stock'];
+      for(const k of fieldsV182){
+        if(sr[k]===undefined || sr[k]===null || String(sr[k])==='') continue;
+        const n=Number(sr[k]);
+        if(Number.isFinite(n)) return Math.max(0,n);
+      }
+    }
+  }
+
   const movs = (db.movements||[]).filter(m => sameCompany(m) && sameMaterial(m));
 
   // Solo los movimientos FISICOS sustituyen el saldo de la fila Stock.
@@ -18320,6 +18350,32 @@ function LDH_prepPhysicalRemoteV45(remoteDB, companyId, materialId) {
     return Math.max(0, Number(lengthRowV81.lengthPhysicalMm ?? 0) || 0);
   }
 
+  // V182 · Igual que Stock V117: para hierro/accesorios, si existe un físico
+  // maestro explícito en la fila Stock, manda sobre movimientos históricos.
+  // Pintura continúa calculándose por movimientos.
+  let isPaintV182 = false;
+  try{
+    const matV182=(Array.isArray(remoteDB.materials)?remoteDB.materials:[]).find((m)=>
+      String(m?.id ?? m?.materialId ?? m?.matId ?? m?.material_id ?? '')===String(materialId)
+    );
+    isPaintV182=String(matV182?.type ?? matV182?.tipo ?? matV182?.stockType ?? '').toLowerCase()==='pintura';
+  }catch(_){ }
+  if(!isPaintV182){
+    const masterRowV182=(Array.isArray(remoteDB.stock)?remoteDB.stock:[]).find((row)=>
+      String(row?.companyId ?? row?.empresaId ?? row?.company ?? row?.empresa ?? '')===String(companyId)
+      && String(row?.materialId ?? row?.matId ?? row?.material_id ?? '')===String(materialId)
+    );
+    if(masterRowV182){
+      const fieldsV182=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','real','stock'];
+      for(const k of fieldsV182){
+        const raw=masterRowV182[k];
+        if(raw===undefined || raw===null || String(raw)==='') continue;
+        const n=Number(raw);
+        if(Number.isFinite(n)) return Math.max(0,n);
+      }
+    }
+  }
+
   const movements = remoteDB.movements.filter((movement) =>
     String(movement?.companyId ?? movement?.empresaId ?? "") === String(companyId)
     && String(movement?.materialId ?? movement?.matId ?? "") === String(materialId)
@@ -22278,7 +22334,11 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
     requested,
     Math.max(0, Number(line?.aplicado_qty ?? 0) || 0)
   );
-  const targetPhysicalReceipt = Math.max(0, requested - appliedBefore);
+  const purchaseReceiptTargetV180 = Math.max(0, Number(line?.__ldh_physical_receipt_target_v180 ?? 0) || 0);
+  const purchaseReceiptOverrideV180 = purchaseReceiptTargetV180 > 0;
+  const targetPhysicalReceipt = purchaseReceiptOverrideV180
+    ? purchaseReceiptTargetV180
+    : Math.max(0, requested - appliedBefore);
   const aliases = LDH_prepReferenceAliasesV57(reference);
   const orderCompanyName = String(
     (window.metaActual ?? metaActual)?.empresa
@@ -22346,9 +22406,9 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         material.unit ?? material.unidad ?? LDH_prepLineUnitV66(line)
       );
       const receiptCycleV74 = LDH_prepSafeIdV66(
-        line?._ldh_receipt_cycle_v74
-        || line?._ldh_cleanup_tombstone_v62_at
-        || "base"
+        purchaseReceiptOverrideV180
+          ? (line?.compra_qty_pedido_id_v180 || line?.pedido_compras_id || "compra_v180")
+          : (line?._ldh_receipt_cycle_v74 || line?._ldh_cleanup_tombstone_v62_at || "base")
       );
       const operationId = "mov_prep_received_v74_"
         + LDH_prepSafeIdV66(reference) + "_"
@@ -22369,6 +22429,12 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         0,
         targetPhysicalReceipt - alreadyPhysicallyReceived
       );
+      // V182 · tomar el físico operativo ANTES de registrar esta recepción.
+      // Evita que un histórico antiguo negativo absorba entradas nuevas cuando
+      // Stock ya tiene un físico maestro normalizado (por ejemplo 0).
+      const physicalBeforeReceiptV182 = Math.max(0, Number(
+        LDH_prepPhysicalRemoteV45(remoteDB, companyId, materialId)
+      ) || 0);
       const now = new Date().toISOString();
       let changed = false;
 
@@ -22414,9 +22480,7 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         changed = true;
       }
 
-      const physical = LDH_prepPhysicalRemoteV45(
-        remoteDB, companyId, materialId
-      );
+      const physical = Math.max(0, physicalBeforeReceiptV182 + qtyToAdd);
       let stockRow = resolvedMaterialV98.stockRow || remoteDB.stock.find((row) =>
         LDH_prepRowCompanyIdV66(row) === companyId
         && LDH_prepRowMaterialIdV66(row) === materialId
@@ -22478,7 +22542,13 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
       const otherAssigned = matchingAssignments
         .filter((row) => !receiptRows.includes(row))
         .reduce((sum, row) => sum + LDH_prepRowQtyV66(row), 0);
-      const targetReceiptAssignment = Math.max(0, requested - otherAssigned);
+      const missingAssignmentV180 = Math.max(0, requested - otherAssigned);
+      // V180: si la recepcion procede de una compra manual/parcial, solo se
+      // reserva para la OT la cantidad que realmente ha entrado por esta linea.
+      // El exceso de compra queda fisico y libre en Stock.
+      const targetReceiptAssignment = purchaseReceiptOverrideV180
+        ? Math.min(missingAssignmentV180, targetPhysicalReceipt)
+        : missingAssignmentV180;
       let receiptAssignment = receiptRows[0] || null;
 
       if (targetReceiptAssignment > 0) {
@@ -22564,7 +22634,10 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
         qtyAdded: qtyToAdd,
         priorPhysicalReceipt: alreadyPhysicallyReceived,
         physical,
-        assigned: Math.max(requested, otherAssigned + targetReceiptAssignment),
+        assigned: purchaseReceiptOverrideV180
+          ? Math.min(requested, otherAssigned + targetReceiptAssignment)
+          : Math.max(requested, otherAssigned + targetReceiptAssignment),
+        purchaseReceiptTargetV180: purchaseReceiptOverrideV180 ? targetPhysicalReceipt : 0,
         excessPriorReceipt: Math.max(
           0,
           alreadyPhysicallyReceived - targetPhysicalReceipt
@@ -24174,7 +24247,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
 
 <style id="LDH_COMPRA_CONJUNTA_PREP_STYLE_V3_20260805">
 .ldh-prep-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}.ldh-prep-tab{border:1px solid rgba(56,189,248,.30);background:#071426;color:#9fb0c8;border-radius:11px;padding:9px 14px;font-weight:900;cursor:pointer}.ldh-prep-tab.active{background:linear-gradient(180deg,#075985,#0c4a6e);border-color:#38bdf8;color:#fff}.ldh-prep-tab-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;margin-left:5px;border-radius:999px;background:rgba(255,255,255,.13);font-size:10px}
-.ldh-group-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}.ldh-group-card{padding:14px;border:1px solid rgba(56,189,248,.25);border-radius:14px;background:linear-gradient(180deg,rgba(8,47,73,.38),rgba(2,6,23,.72));cursor:pointer}.ldh-group-card:hover{border-color:#38bdf8}.ldh-group-card.history{border-color:rgba(148,163,184,.25);background:linear-gradient(180deg,rgba(30,41,59,.72),rgba(2,6,23,.78))}.ldh-group-title{font-weight:950;color:#fff}.ldh-group-meta{margin-top:6px;color:#9fb0c8;font-size:12px;line-height:1.45}.ldh-group-state{display:inline-flex;margin-top:8px;padding:4px 8px;border-radius:999px;border:1px solid rgba(34,197,94,.38);background:rgba(20,83,45,.22);color:#bbf7d0;font-size:10px;font-weight:950}.ldh-group-state.warn{border-color:rgba(245,158,11,.48);background:rgba(120,53,15,.24);color:#fde68a}.ldh-group-state.bad{border-color:rgba(239,68,68,.48);background:rgba(127,29,29,.22);color:#fecaca}.ldh-group-state.archived{border-color:rgba(148,163,184,.44);background:rgba(51,65,85,.38);color:#e2e8f0}
+.ldh-group-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}.ldh-group-card{padding:14px;border:1px solid rgba(56,189,248,.25);border-radius:14px;background:linear-gradient(180deg,rgba(8,47,73,.38),rgba(2,6,23,.72));cursor:pointer}.ldh-group-card:hover{border-color:#38bdf8}.ldh-group-card.history{border-color:rgba(148,163,184,.25);background:linear-gradient(180deg,rgba(30,41,59,.72),rgba(2,6,23,.78))}.ldh-group-title{font-weight:950;color:#fff}.ldh-group-agenda-ident-v186{margin-top:7px;padding:6px 8px;border:1px solid rgba(250,204,21,.34);border-radius:8px;background:rgba(113,63,18,.13);color:#fde68a;font-size:11px;font-weight:800;line-height:1.25}.ldh-group-agenda-ident-v186 b{color:#facc15}.ldh-group-meta{margin-top:6px;color:#9fb0c8;font-size:12px;line-height:1.45}.ldh-group-state{display:inline-flex;margin-top:8px;padding:4px 8px;border-radius:999px;border:1px solid rgba(34,197,94,.38);background:rgba(20,83,45,.22);color:#bbf7d0;font-size:10px;font-weight:950}.ldh-group-state.warn{border-color:rgba(245,158,11,.48);background:rgba(120,53,15,.24);color:#fde68a}.ldh-group-state.bad{border-color:rgba(239,68,68,.48);background:rgba(127,29,29,.22);color:#fecaca}.ldh-group-state.archived{border-color:rgba(148,163,184,.44);background:rgba(51,65,85,.38);color:#e2e8f0}
 .ldh-group-modal-table{width:100%;border-collapse:collapse}.ldh-group-modal-table th,.ldh-group-modal-table td{padding:9px;border-bottom:1px solid rgba(255,255,255,.09);vertical-align:top}.ldh-group-breakdown{display:grid;gap:3px;color:#cbd5e1;font-size:11px}.ldh-group-total{font-size:16px;font-weight:950;color:#86efac}.ldh-group-warning{margin:10px 0;padding:10px;border:1px solid rgba(245,158,11,.45);border-radius:11px;background:rgba(120,53,15,.22);color:#fde68a}.ldh-group-ok{margin:10px 0;padding:10px;border:1px solid rgba(34,197,94,.35);border-radius:11px;background:rgba(20,83,45,.20);color:#bbf7d0}.ldh-group-info{margin:10px 0;padding:10px;border:1px solid rgba(148,163,184,.34);border-radius:11px;background:rgba(51,65,85,.24);color:#dbeafe}.ldh-group-part-list{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.ldh-group-part-pill{padding:4px 8px;border-radius:999px;border:1px solid rgba(148,163,184,.25);background:rgba(15,23,42,.7);font-size:10px;color:#dbeafe}.ldh-group-part-pill.preparacion{border-color:rgba(14,165,233,.45);color:#bae6fd}.ldh-group-part-pill.fabricacion{border-color:rgba(245,158,11,.5);color:#fde68a}.ldh-group-part-pill.pintura{border-color:rgba(139,92,246,.5);color:#ddd6fe}.ldh-group-part-pill.almacen{border-color:rgba(20,184,166,.5);color:#ccfbf1}.ldh-group-part-pill.entregado{border-color:rgba(34,197,94,.5);color:#bbf7d0}
 .ldh-history-tools{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px;border:1px solid rgba(148,163,184,.18);border-radius:13px;background:rgba(15,23,42,.55)}.ldh-history-tools-left,.ldh-history-tools-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.ldh-history-space{font-size:11px;color:#9fb0c8}.ldh-btn-danger-soft{border-color:rgba(239,68,68,.55)!important;background:linear-gradient(180deg,rgba(127,29,29,.72),rgba(69,10,10,.72))!important;color:#fecaca!important}.ldh-history-empty{grid-column:1/-1;opacity:.62;padding:20px;border:1px dashed rgba(148,163,184,.22);border-radius:13px;text-align:center}
 </style>
@@ -24189,6 +24262,27 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const fmt=v=>{const x=n(v);return Math.abs(x-Math.round(x))<1e-9?String(Math.round(x)):x.toLocaleString('es-ES',{maximumFractionDigits:3});};
   const isBar=line=>String(line&&(line.unit||line.unidad)||'').toLowerCase().includes('barra');
+  const techRefV186=value=>{const raw=String(value||'').trim().toUpperCase();const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?\b/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw;};
+  function agendaIdentificationV186(reference){
+    const target=techRefV186(reference);if(!target)return '';
+    const rows=[],seen=new Set();
+    for(const store of [localStorage,sessionStorage]){
+      try{
+        const raw=store.getItem('ldh_work_orders_v1');if(!raw)continue;
+        const parsed=JSON.parse(raw),list=Array.isArray(parsed)?parsed:(parsed&&Array.isArray(parsed.orders)?parsed.orders:[]);
+        list.forEach(o=>{if(!o||typeof o!=='object')return;const k=String(o.id||'')+'|'+String(o.reference||'');if(seen.has(k))return;seen.add(k);rows.push(o);});
+      }catch(_){ }
+    }
+    const ident=o=>String(o&&(o.identification||o.workIdentification||o.workLabel||o.referenceLabel||o.shortDescription)||'').trim();
+    for(const o of rows){if(techRefV186(o.reference||o.ref||'')===target){const v=ident(o);if(v)return v;}}
+    for(const o of rows){
+      const parts=o&&o.compositeV1&&Array.isArray(o.compositeV1.parts)?o.compositeV1.parts:[];
+      if(parts.some(part=>techRefV186(part&&(part.reference||part.partReference||part.displayReference||part.display_ref)||'')===target)){
+        const v=ident(o);if(v)return v;
+      }
+    }
+    return '';
+  }
   const groupIdOf=meta=>String(meta&&(meta.composite_group_id||meta.compositeGroupId)||'').trim();
   const getRaw=key=>{try{return getAny(key);}catch(e){try{return localStorage.getItem(key)||sessionStorage.getItem(key);}catch(_){return null;}}};
   const setRaw=(key,value)=>{try{if(typeof setAny==='function')return setAny(key,value);}catch(e){}try{localStorage.setItem(key,value);sessionStorage.setItem(key,value);return true;}catch(e){try{sessionStorage.setItem(key,value);return true;}catch(_){return false;}}};
@@ -24248,22 +24342,48 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const base=info&&info.matId?`id:${info.matId}`:`n:${norm(line.mat||line.material||line.name)}|u:${norm(unit)}|t:${norm(iron)}`;
     return `${base}|c:${norm(m.meta.empresa||m.meta.company)}`;
   }
+  function manualMap(group){
+    const leader=group&&group.members&&group.members[0];
+    const raw=leader&&leader.meta&&leader.meta.compra_conjunta_qty_manual_v180;
+    return raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:{};
+  }
+  function persistManualQty(group,key,qty){
+    const clean=Math.max(0,n(qty));
+    group.members.forEach(m=>{
+      const map=(m.meta.compra_conjunta_qty_manual_v180&&typeof m.meta.compra_conjunta_qty_manual_v180==='object'&&!Array.isArray(m.meta.compra_conjunta_qty_manual_v180))
+        ? {...m.meta.compra_conjunta_qty_manual_v180}:{};
+      map[key]=clean;
+      m.meta.compra_conjunta_qty_manual_v180=map;
+      setRaw('prep_meta_'+m.ref,JSON.stringify(m.meta));
+    });
+    return clean;
+  }
   function signature(group){
     const rows=[];
     group.members.forEach(m=>m.lines.forEach((line,index)=>rows.push([String(m.meta.composite_part_id||m.ref),index,String(line.linked_matId||line.stockMatId||line.matId||''),String(line.mat||line.material||line.name||''),String(line.unit||line.unidad||''),n(line.qty_pedida),n(line.qty_recibida),!!line.toBuy,n(line.aplicado_qty),n(line.stock_consumed_qty)])));
     rows.sort((a,b)=>JSON.stringify(a.slice(0,2)).localeCompare(JSON.stringify(b.slice(0,2))));
-    let h=2166136261,s=JSON.stringify(rows);for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0).toString(36);
+    const sigPayload={rows,manual:manualMap(group)};
+    let h=2166136261,s=JSON.stringify(sigPayload);for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0).toString(36);
   }
   function build(group){
-    const map=new Map();
+    const map=new Map(),manual=manualMap(group);
     group.members.forEach(m=>m.lines.forEach((line,index)=>{
-      if(!line||!line.toBuy)return;
-      const need=lineNeed(line);if(need<=0)return;
+      if(!line)return;
+      const requested=Math.max(0,n(line.qty_pedida??line.pedida??line.qty));
+      if(requested<=0)return;
+      const autoNeed=lineNeed(line);
       const info=stockInfo(m,line),key=itemKey(m,line,info),unit=String(line.unit||line.unidad||'ud').trim()||'ud';
-      if(!map.has(key))map.set(key,{key,name:String(line.mat||line.material||line.name||info?.mat?.name||'Material').trim(),unit,bar:isBar(line),needed:0,stockKnown:!!info.stockKnown,stock:info.stockKnown?n(info.stock):0,contributions:[]});
-      const item=map.get(key);item.needed+=need;if(info.stockKnown){item.stockKnown=true;item.stock=item.contributions.length?Math.min(item.stock,n(info.stock)):n(info.stock);}item.contributions.push({ref:m.ref,index,concept:String(m.meta.concepto||m.meta.composite_part_concept||''),need});
+      if(!map.has(key))map.set(key,{key,name:String(line.mat||line.material||line.name||info?.mat?.name||'Material').trim(),unit,bar:isBar(line),needed:0,autoNeeded:0,stockKnown:!!info.stockKnown,stock:info.stockKnown?n(info.stock):0,contributions:[]});
+      const item=map.get(key);item.needed+=requested;item.autoNeeded+=autoNeed;if(info.stockKnown){item.stockKnown=true;item.stock=item.contributions.length?Math.min(item.stock,n(info.stock)):n(info.stock);}item.contributions.push({ref:m.ref,index,concept:String(m.meta.concepto||m.meta.composite_part_concept||''),need:requested,autoNeed});
     }));
-    const items=[...map.values()].map(item=>({...item,purchase:item.stockKnown?Math.max(0,item.needed-item.stock):item.needed}));
+    const items=[...map.values()].map(item=>{
+      const rawSuggested=item.stockKnown?Math.max(0,item.autoNeeded-item.stock):item.autoNeeded;
+      const suggested=item.bar?Math.ceil(Math.max(0,rawSuggested-1e-9)):rawSuggested;
+      const hasManual=Object.prototype.hasOwnProperty.call(manual,item.key);
+      const rawPurchase=hasManual?Math.max(0,n(manual[item.key])):suggested;
+      const purchase=item.bar?Math.ceil(Math.max(0,rawPurchase-1e-9)):rawPurchase;
+      return {...item,suggested,purchase,manual:hasManual};
+    });
     return {group,items,totalPurchase:items.reduce((sum,item)=>sum+n(item.purchase),0),complete:group.members.length>=expected(group),currentSignature:signature(group)};
   }
   function purchaseStatuses(group){
@@ -24303,7 +24423,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     return true;
   }
   function snapshotFromData(data,purchaseId,sentAtMs,text){
-    return {version:2,purchaseId,sentAtMs,masterReference:masterRef(data.group),company:company(data.group),signature:data.currentSignature,text,items:data.items.map(it=>({name:it.name,unit:it.unit,bar:!!it.bar,needed:n(it.needed),stockKnown:!!it.stockKnown,stock:n(it.stock),purchase:n(it.purchase),contributions:it.contributions.map(c=>({ref:c.ref,concept:c.concept,need:n(c.need)}))}))};
+    return {version:3,purchaseId,sentAtMs,masterReference:masterRef(data.group),company:company(data.group),signature:data.currentSignature,text,items:data.items.map(it=>({name:it.name,unit:it.unit,bar:!!it.bar,needed:n(it.needed),autoNeeded:n(it.autoNeeded),suggested:n(it.suggested),stockKnown:!!it.stockKnown,stock:n(it.stock),purchase:n(it.purchase),manual:!!it.manual,contributions:it.contributions.map(c=>({ref:c.ref,index:c.index,concept:c.concept,need:n(c.need),autoNeed:n(c.autoNeed)}))}))};
   }
   function snapshotFor(group){const st=latestStatus(group);return st&&st.snapshot&&Array.isArray(st.snapshot.items)?st.snapshot:null;}
   function textFor(data){
@@ -24334,7 +24454,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const list=document.getElementById('lista');if(!list)return;
     let tabs=document.getElementById('ldhPrepTabs');
     if(!tabs){tabs=document.createElement('div');tabs.id='ldhPrepTabs';tabs.className='ldh-prep-tabs';list.parentNode.insertBefore(tabs,list);}
-    tabs.innerHTML='<button type="button" id="ldhTabIndividual" class="ldh-prep-tab active" onclick="LDH_CompraConjuntaV1.setTab(\'individual\')">Pedidos individuales</button><button type="button" id="ldhTabGroups" class="ldh-prep-tab" onclick="LDH_CompraConjuntaV1.setTab(\'groups\')">Compras conjuntas <span id="ldhGroupCount" class="ldh-prep-tab-count">0</span></button><button type="button" id="ldhTabHistory" class="ldh-prep-tab" onclick="LDH_CompraConjuntaV1.setTab(\'history\')">Histórico conjunto <span id="ldhHistoryCount" class="ldh-prep-tab-count">0</span></button>';
+    tabs.innerHTML=`<button type="button" id="ldhTabIndividual" class="ldh-prep-tab${activeTab==='individual'?' active':''}" onclick="LDH_CompraConjuntaV1.setTab('individual')">Pedidos individuales</button><button type="button" id="ldhTabGroups" class="ldh-prep-tab${activeTab==='groups'?' active':''}" onclick="LDH_CompraConjuntaV1.setTab('groups')">Compras conjuntas <span id="ldhGroupCount" class="ldh-prep-tab-count">0</span></button><button type="button" id="ldhTabHistory" class="ldh-prep-tab${activeTab==='history'?' active':''}" onclick="LDH_CompraConjuntaV1.setTab('history')">Histórico conjunto <span id="ldhHistoryCount" class="ldh-prep-tab-count">0</span></button>`;
     let groups=document.getElementById('ldhCompraGrupos');if(!groups){groups=document.createElement('div');groups.id='ldhCompraGrupos';groups.className='ldh-group-list hidden';list.parentNode.insertBefore(groups,list.nextSibling);}
     let history=document.getElementById('ldhCompraHistory');if(!history){history=document.createElement('div');history.id='ldhCompraHistory';history.className='ldh-group-list hidden';groups.parentNode.insertBefore(history,groups.nextSibling);}
     if(!document.getElementById('ldhGroupModal')){
@@ -24348,7 +24468,8 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
       const exp=expected(group),status=latestStatus(group),sig=signature(group),modified=!!status&&status.signature!==sig,dup=group.duplicates.length,ph=phaseData(group);let state='<span class="ldh-group-state warn">BORRADOR</span>';
       if(group.members.length<exp)state=`<span class="ldh-group-state bad">FALTAN ${exp-group.members.length} PARTIDAS</span>`;else if(dup)state=`<span class="ldh-group-state warn">${dup} PARTIDA DUPLICADA IGNORADA</span>`;else if(status&&modified)state='<span class="ldh-group-state warn">MODIFICADO DESPUÉS DE ENVIAR</span>';else if(status)state='<span class="ldh-group-state">✓ PEDIDO CONJUNTO ENVIADO</span>';
       const dupText=dup?` · ${dup} duplicada${dup===1?'':'s'} ignorada${dup===1?'':'s'}`:'';
-      return `<div class="ldh-group-card" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}','active')"><div class="ldh-group-title">🧩 ${esc(masterRef(group))}</div><div class="ldh-group-meta">${esc(company(group))} · ${esc(ph.text)}${dupText}</div>${state}</div>`;
+      const agendaIdent=agendaIdentificationV186(masterRef(group));
+      return `<div class="ldh-group-card" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}','active')"><div class="ldh-group-title">🧩 ${esc(masterRef(group))}</div>${agendaIdent?`<div class="ldh-group-agenda-ident-v186"><b>ℹ IDENTIFICACIÓN</b> · ${esc(agendaIdent)}</div>`:''}<div class="ldh-group-meta">${esc(company(group))} · ${esc(ph.text)}${dupText}</div>${state}</div>`;
     }).join('');
   }
   function renderHistory(groups){
@@ -24357,7 +24478,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const bytes=cacheBytes();
     const toolbar=`<div class="ldh-history-tools"><div class="ldh-history-tools-left"><strong>Compras conjuntas cerradas</strong><span class="ldh-history-space">Caché local: ${(bytes/1024).toFixed(1)} KB</span></div><div class="ldh-history-tools-right"><button class="btn" onclick="LDH_CompraConjuntaV1.freeCache()">Liberar caché local</button><button class="btn" onclick="LDH_CompraConjuntaV1.exportAllHistory()" ${groups.length?'':'disabled'}>⬇ Exportar histórico</button><button class="btn ldh-btn-danger-soft" onclick="LDH_CompraConjuntaV1.deleteAllHistory()" ${groups.length?'':'disabled'}>🗑 Eliminar todo el histórico</button></div></div>`;
     if(!groups.length){host.innerHTML=toolbar+'<div class="ldh-history-empty">Todavía no hay compras conjuntas archivadas.</div>';return;}
-    host.innerHTML=toolbar+groups.map(group=>{const ph=phaseData(group),st=latestStatus(group);return `<div class="ldh-group-card history" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}','history')"><div class="ldh-group-title">📦 ${esc(masterRef(group))}</div><div class="ldh-group-meta">${esc(company(group))} · ${esc(ph.text)}${st?.purchaseId?` · ${esc(st.purchaseId)}`:''}</div><span class="ldh-group-state archived">ARCHIVADO · COMPRA CERRADA</span></div>`;}).join('');
+    host.innerHTML=toolbar+groups.map(group=>{const ph=phaseData(group),st=latestStatus(group),agendaIdent=agendaIdentificationV186(masterRef(group));return `<div class="ldh-group-card history" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}','history')"><div class="ldh-group-title">📦 ${esc(masterRef(group))}</div>${agendaIdent?`<div class="ldh-group-agenda-ident-v186"><b>ℹ IDENTIFICACIÓN</b> · ${esc(agendaIdent)}</div>`:''}<div class="ldh-group-meta">${esc(company(group))} · ${esc(ph.text)}${st?.purchaseId?` · ${esc(st.purchaseId)}`:''}</div><span class="ldh-group-state archived">ARCHIVADO · COMPRA CERRADA</span></div>`;}).join('');
   }
   function renderGroups(){
     ensureUi();
@@ -24391,7 +24512,12 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     else if(group.duplicates.length)notice+=`<div class="ldh-group-warning">Se han detectado ${group.duplicates.length} envío${group.duplicates.length===1?'':'s'} duplicado${group.duplicates.length===1?'':'s'} de una misma partida. Se ignoran para el total.</div>`;
     if(currentMode==='active')notice+=!data.complete?`<div class="ldh-group-warning">Faltan ${expected(group)-group.members.length} partidas distintas por llegar desde Cálculo. La compra conjunta no se puede copiar todavía.</div>`:status&&modified?'<div class="ldh-group-warning">El grupo cambió después del último envío a Compras. Al confirmar se copiará la lista actualizada.</div>':status?'<div class="ldh-group-ok">Este pedido conjunto ya fue copiado. Se archivará automáticamente cuando todas las partidas salgan de Preparación.</div>':'<div class="ldh-group-ok">Grupo completo. Se copiará una sola lista y la orden principal pasará a ESPERANDO MATERIAL.</div>';
     const items=modalItems(group,data,currentMode);
-    const rows=items.length?items.map(it=>`<tr><td><strong>${esc(it.name)}</strong><div style="font-size:10px;color:#9fb0c8">${esc(it.unit)}</div></td><td><div class="ldh-group-breakdown">${(it.contributions||[]).map(c=>`<span>${esc(c.ref)} · ${esc(c.concept||'Concepto')} · ${fmt(c.need)}</span>`).join('')}</div></td><td>${fmt(it.needed)}</td><td>${it.stockKnown?fmt(it.stock):'N/D'}</td><td class="ldh-group-total">${fmt(it.purchase)}</td></tr>`).join(''):'<tr><td colspan="5" style="text-align:center;color:#9fb0c8">No hay desglose histórico disponible para este pedido antiguo.</td></tr>';
+    const rows=items.length?items.map(it=>{
+      const purchaseCell=currentMode==='history'
+        ? `<span class="ldh-group-total">${fmt(it.purchase)}</span>`
+        : `<div style="display:flex;align-items:center;gap:6px"><input type="number" min="0" step="${it.bar?'1':'0.01'}" value="${it.bar?String(Math.ceil(Math.max(0,n(it.purchase)-1e-9))):String(Number(n(it.purchase).toFixed(3)))}" style="width:90px;background:#071426;color:#fff;border:1px solid #3b82f6;border-radius:8px;padding:6px;font-weight:900" onchange="LDH_CompraConjuntaV1.setQty('${encodeURIComponent(it.key)}',this.value)"><span style="font-size:10px;color:#94a3b8">sug. ${it.bar?Math.ceil(Math.max(0,n(it.suggested??it.purchase)-1e-9)):fmt(it.suggested??it.purchase)}</span></div>`;
+      return `<tr><td><strong>${esc(it.name)}</strong><div style="font-size:10px;color:#9fb0c8">${esc(it.unit)}</div></td><td><div class="ldh-group-breakdown">${(it.contributions||[]).map(c=>`<span>${esc(c.ref)} · ${esc(c.concept||'Concepto')} · ${fmt(c.need)}</span>`).join('')}</div></td><td>${fmt(it.needed)}</td><td>${it.stockKnown?fmt(it.stock):'N/D'}</td><td class="ldh-group-total">${purchaseCell}</td></tr>`;
+    }).join(''):'<tr><td colspan="5" style="text-align:center;color:#9fb0c8">No hay desglose histórico disponible para este pedido antiguo.</td></tr>';
     document.getElementById('ldhGroupModalBody').innerHTML=`${notice}<div class="ldh-group-part-list">${parts}</div><table class="ldh-group-modal-table"><thead><tr><th>Material</th><th>Desglose</th><th>Necesarias</th><th>Stock libre</th><th>Pedir</th></tr></thead><tbody>${rows}</tbody></table>`;
     const copyBtn=document.getElementById('ldhGroupCopyBtn'),exportBtn=document.getElementById('ldhGroupExportBtn'),deleteBtn=document.getElementById('ldhGroupDeleteBtn');
     copyBtn.classList.toggle('hidden',currentMode==='history');exportBtn.classList.toggle('hidden',currentMode!=='history');deleteBtn.classList.toggle('hidden',currentMode!=='history');
@@ -24402,9 +24528,27 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const group=allGroups().find(g=>g.id===currentGroupId&&!g.deleted);if(!group)return;const data=build(group);if(!data.complete){alert('Faltan partidas por llegar a Preparación. No se ha copiado nada.');return;}if(data.totalPurchase<=0){alert('No hay cantidad pendiente para pedir a Compras.');return;}
     const previous=latestStatus(group);if(previous&&previous.signature===data.currentSignature&&!confirm('Este pedido conjunto ya fue copiado sin cambios. ¿Copiarlo otra vez?'))return;
     const txt=textFor(data),ok=await _copyTextToClipboard(txt);if(!ok){abrirModalCompras(txt);return;}
-    const purchaseId=`PC-${Date.now().toString(36).toUpperCase()}`,sentAtMs=Date.now(),snapshot=snapshotFromData(data,purchaseId,sentAtMs,txt),purchaseKeys=new Set(data.items.filter(i=>i.purchase>0).map(i=>i.key));
+    const purchaseId=`PC-${Date.now().toString(36).toUpperCase()}`,sentAtMs=Date.now(),snapshot=snapshotFromData(data,purchaseId,sentAtMs,txt);
+    // V180: reparte la cantidad realmente pedida del material conjunto entre sus
+    // partidas. El exceso sobre la necesidad total se asocia a la primera linea
+    // y, al recibirse, quedara libre en Stock.
+    const allocations=new Map();
+    data.items.filter(i=>i.purchase>0).forEach(item=>{
+      let remaining=Math.max(0,n(item.purchase));
+      (item.contributions||[]).forEach(c=>{
+        const take=Math.min(remaining,Math.max(0,n(c.need)));
+        if(take>0){allocations.set(`${c.ref}|${c.index}`,(allocations.get(`${c.ref}|${c.index}`)||0)+take);remaining-=take;}
+      });
+      const first=(item.contributions||[])[0];
+      if(remaining>0&&first)allocations.set(`${first.ref}|${first.index}`,(allocations.get(`${first.ref}|${first.index}`)||0)+remaining);
+    });
     group.members.forEach((m,memberIndex)=>{
-      m.lines.forEach(line=>{if(!line||!line.toBuy||lineNeed(line)<=0)return;const info=stockInfo(m,line),key=itemKey(m,line,info);if(!purchaseKeys.has(key))return;line.pedido_compras_info=true;line.pedido_compras_fecha=new Date(sentAtMs).toISOString();line.pedido_compras_group_id=group.id;line.pedido_compras_id=purchaseId;});
+      m.lines.forEach((line,lineIndex)=>{
+        if(!line)return;
+        const q=Math.max(0,n(allocations.get(`${m.ref}|${lineIndex}`)||0));
+        line.compra_qty_pedida_v180=q;line.compra_qty_pedido_id_v180=purchaseId;line.compra_qty_recibida_v180=0;
+        if(q>0){line.toBuy=true;line.pedido_compras_info=true;line.pedido_compras_fecha=new Date(sentAtMs).toISOString();line.pedido_compras_group_id=group.id;line.pedido_compras_id=purchaseId;}
+      });
       m.meta.compra_conjunta_v1={version:2,groupId:group.id,purchaseId,sentAtMs,signature:data.currentSignature,status:'sent',masterReference:masterRef(group),snapshot:memberIndex===0?snapshot:undefined};
       delete m.meta[DELETE_FLAG];setRaw('prep_recepcion_'+m.ref,JSON.stringify(m.lines));setRaw('prep_meta_'+m.ref,JSON.stringify(m.meta));
     });
@@ -24433,6 +24577,13 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
   }
   const api={
     setTab(name){activeTab=['groups','history'].includes(name)?name:'individual';ensureUi();document.getElementById('lista')?.classList.toggle('hidden',activeTab!=='individual');document.getElementById('ldhCompraGrupos')?.classList.toggle('hidden',activeTab!=='groups');document.getElementById('ldhCompraHistory')?.classList.toggle('hidden',activeTab!=='history');document.getElementById('ldhTabIndividual')?.classList.toggle('active',activeTab==='individual');document.getElementById('ldhTabGroups')?.classList.toggle('active',activeTab==='groups');document.getElementById('ldhTabHistory')?.classList.toggle('active',activeTab==='history');renderGroups();},
+    setQty(encodedKey,value){
+      const group=allGroups().find(g=>g.id===currentGroupId&&!g.deleted);if(!group)return;
+      const key=decodeURIComponent(String(encodedKey||''));
+      const item=build(group).items.find(row=>row.key===key);
+      const clean=item&&item.bar?Math.ceil(Math.max(0,n(value)-1e-9)):Math.max(0,n(value));
+      persistManualQty(group,key,clean);show(group.id,'active');renderGroups();
+    },
     open:show,
     close(){const m=document.getElementById('ldhGroupModal');if(m){m.classList.remove('active');m.setAttribute('aria-hidden','true');}currentGroupId='';currentMode='active';},
     copy,
@@ -25465,7 +25616,11 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const requested = Math.max(0, num(line?.qty_pedida ?? line?.qty));
     if(!requested) throw new Error('La linea no tiene cantidad pedida.');
     const appliedBefore = Math.min(requested, Math.max(0, num(line?.aplicado_qty)));
-    const targetPhysicalReceipt = Math.max(0, requested - appliedBefore);
+    const purchaseReceiptTargetV180 = Math.max(0, num(line?.__ldh_physical_receipt_target_v180));
+    const purchaseReceiptOverrideV180 = purchaseReceiptTargetV180 > 0;
+    const targetPhysicalReceipt = purchaseReceiptOverrideV180
+      ? purchaseReceiptTargetV180
+      : Math.max(0, requested - appliedBefore);
 
     let sourceDb = null;
     try{
@@ -25491,8 +25646,11 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     if(!materialId) throw new Error('El material de Ferreteria no tiene identificador.');
     const materialName = String(material.name ?? material.nombre ?? lineName(line));
     const aliases = referenceAliases(reference);
+    const operationCycleV180 = purchaseReceiptOverrideV180
+      ? safeId(line?.compra_qty_pedido_id_v180 || line?.pedido_compras_id || 'compra_v180')
+      : 'base';
     const operationId = 'mov_prep_received_fer_v69_'
-      + safeId(reference) + '_' + safeId(materialId) + '_' + String(index);
+      + safeId(reference) + '_' + safeId(materialId) + '_' + String(index) + '_' + operationCycleV180;
     const now = new Date().toISOString();
 
     const priorMovements = db.movements.filter(row => {
@@ -25504,7 +25662,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
       const source = norm(`${row?.source ?? ''} ${row?.reason ?? ''} ${row?.origen ?? ''}`);
       const sameLine = Number(row?.lineIndex ?? index) === Number(index);
       return rowId === operationId
-        || (sameMaterial && sameReference && sameLine
+        || (!purchaseReceiptOverrideV180 && sameMaterial && sameReference && sameLine
           && (source.includes('recibidofisicoferreteria') || source.includes('preparacionrecepcionferreteria')));
     });
     const alreadyReceived = priorMovements.reduce((sum,row) => sum + rowQty(row), 0);
@@ -25560,7 +25718,10 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const otherAssigned = matchingAssignments
       .filter(row => !receiptRows.includes(row))
       .reduce((sum,row) => sum + rowQty(row), 0);
-    const targetReceiptAssignment = Math.max(0, requested - otherAssigned);
+    const missingAssignmentV180 = Math.max(0, requested - otherAssigned);
+    const targetReceiptAssignment = purchaseReceiptOverrideV180
+      ? Math.min(missingAssignmentV180, targetPhysicalReceipt)
+      : missingAssignmentV180;
     let assignment = receiptRows[0] || null;
 
     if(targetReceiptAssignment > 0){
@@ -25614,6 +25775,10 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
       operationId,
       requested,
       qtyAdded:qtyToAdd,
+      assigned:purchaseReceiptOverrideV180
+        ? Math.min(requested, otherAssigned + targetReceiptAssignment)
+        : requested,
+      purchaseReceiptTargetV180:purchaseReceiptOverrideV180 ? targetPhysicalReceipt : 0,
       sourceKind:'ferreteria',
       excessPriorReceipt:Math.max(0, alreadyReceived - targetPhysicalReceipt)
     };
@@ -25683,14 +25848,22 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     current.matId = result.materialId;
     current.linked_matName = result.materialName;
     current.stockLinkLabel = result.materialName;
-    current.qty_recibida = requested;
-    current.recibida = requested;
-    current.aplicado_qty = requested;
-    current.ok = true;
-    current.completo = true;
-    current.done = true;
-    current.isDone = true;
-    current.isCompleted = true;
+    const purchaseTargetV180 = Math.max(0, Number(result?.purchaseReceiptTargetV180 || 0) || 0);
+    const assignedNowV180 = purchaseTargetV180 > 0
+      ? Math.min(requested, Math.max(Number(current.qty_recibida||0), Number(result?.assigned||0)))
+      : requested;
+    current.qty_recibida = assignedNowV180;
+    current.recibida = assignedNowV180;
+    current.aplicado_qty = Math.max(Number(current.aplicado_qty||0), assignedNowV180);
+    current.ok = requested > 0 && assignedNowV180 + 0.000001 >= requested;
+    current.completo = current.ok;
+    current.done = current.ok;
+    current.isDone = current.ok;
+    current.isCompleted = current.ok;
+    if(purchaseTargetV180 > 0){
+      current.compra_qty_recibida_v180 = purchaseTargetV180;
+      current.compra_qty_recibida_at_v180 = new Date().toISOString();
+    }
     current._ldh_received_operation_v69 = result.operationId;
     current._ldh_received_confirmed_v69_at = new Date().toISOString();
     if(result.sourceKind === 'ferreteria'){
@@ -25726,7 +25899,9 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
 
     const requested = Math.max(0, num(line.qty_pedida ?? line.qty));
     if(!requested) return;
-    if(num(line.qty_recibida ?? line.recibida) >= requested) return;
+    const purchaseTargetV180 = Math.max(0, num(line?.__ldh_physical_receipt_target_v180));
+    const purchaseReceivedV180 = Math.max(0, num(line?.compra_qty_recibida_v180));
+    if(num(line.qty_recibida ?? line.recibida) >= requested && purchaseTargetV180 <= purchaseReceivedV180) return;
 
     receiving.add(lockKey);
     const button = document.activeElement instanceof HTMLButtonElement
@@ -32589,6 +32764,411 @@ document.documentElement.dataset.ldhPrepV178='true';
   setInterval(refresh,700);
   console.info('[Preparacion V179] retorno directo al pedido compuesto activo solo mientras quedan partidas pendientes.');
 })();
+</script>
+
+
+<!-- LDH_PREP_V180_COMPRA_OPCIONAL_RECEPCION_REAL_20261006 -->
+<script id="LDH_PREP_V180_COMPRA_OPCIONAL_RECEPCION_REAL_20261006">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V180_COMPRA_OPCIONAL_RECEPCION_REAL__)return;
+  window.__LDH_PREP_V180_COMPRA_OPCIONAL_RECEPCION_REAL__=true;
+  const BUILD='PREPARACION-V184-COMPRA-OPCIONAL-SUGERENCIA-LIBRE-RECIBIDO-UNICO-20261006';
+  const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const fmt=v=>{const x=Math.max(0,n(v));return Math.abs(x-Math.round(x))<1e-9?String(Math.round(x)):String(Number(x.toFixed(3)));};
+  function lines(){try{return window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]);}catch(_){return [];}}
+  function isPletina(line){try{return !!(window.LDH_isPletinaMmLine&&window.LDH_isPletinaMmLine(line));}catch(_){return false;}}
+  function isBar(line){return !isPletina(line)&&String(line&&(line.unit||line.unidad)||'').toLowerCase().includes('barra');}
+  function wholeBarQty(line,value){const q=Math.max(0,n(value));return isBar(line)?Math.ceil(Math.max(0,q-1e-9)):q;}
+  function isNoStock(line){
+    const name=String(line&&(line.mat||line.material||line.name)||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    return !!(line&&line.nonStockMaterial===true)||name.trim()==='chapa escalon';
+  }
+  function linkedForInfo(line){try{return typeof getLinkedMatForLine==='function'?getLinkedMatForLine(line):null;}catch(_){return null;}}
+  function info(line){
+    try{
+      // V184 · Para perfileria, Compras usa EXACTAMENTE el mismo libre que la pill visible
+      // (fisico maestro - reservado - asignado). Evita sugerir 1 cuando la OT necesita 2
+      // y la unica barra fisica ya esta reservada para la propia OT.
+      if(isBar(line) && typeof window._v2CompanyStockInfo==='function'){
+        const linked=linkedForInfo(line);
+        const live=window._v2CompanyStockInfo(line,linked);
+        if(live && live.state==='ok'){
+          return {
+            stockKnown:true,
+            stock:Math.max(0,n(live.libre)),
+            physical:Math.max(0,n(live.real)),
+            reserved:Math.max(0,n(live.reservado)),
+            assigned:Math.max(0,n(live.asignado)),
+            matId:String(live.physicalMaterialIdV170||live.physicalMaterialIdV68||line?.linked_matId||line?.stockMatId||line?.matId||''),
+            mat:linked||null,
+            source:'stock_libre_pill_v184'
+          };
+        }
+      }
+      return typeof window._getStockInfoForCompra==='function'?window._getStockInfoForCompra(line):(typeof _getStockInfoForCompra==='function'?_getStockInfoForCompra(line):{stockKnown:false,stock:0});
+    }catch(_){return {stockKnown:false,stock:0};}
+  }
+  function need(line){return Math.max(0,n(line&&line.qty_pedida)-n(line&&line.qty_recibida));}
+  function suggested(line){const q=need(line),s=info(line);const raw=s&&s.stockKnown?Math.max(0,q-Math.max(0,n(s.stock))):q;return wholeBarQty(line,raw);}
+  function hasManual(line){return !!(line&&Object.prototype.hasOwnProperty.call(line,'compra_qty_manual_v180'));}
+  function quantity(line){return hasManual(line)?wholeBarQty(line,line.compra_qty_manual_v180):suggested(line);}
+  window.LDH_compraCantidadV180=quantity;
+  window.LDH_compraSugeridaV180=suggested;
+
+  window.LDH_setCompraQtyV180=function(index,value){
+    const line=lines()[index];if(!line)return;
+    const q=wholeBarQty(line,value);line.compra_qty_manual_v180=q;line.toBuy=q>0;
+    try{if(typeof window.guardarEstadoLocal==='function')window.guardarEstadoLocal();else guardarEstadoLocal();}catch(_){ }
+    try{if(typeof window.renderTabla==='function')window.renderTabla();}catch(_){ }
+    try{if(typeof window.updateBuyHeaderChecks==='function')window.updateBuyHeaderChecks();}catch(_){ }
+  };
+
+  function wrapToggle(){
+    const old=window.togglePedir;if(typeof old!=='function'||old.__v180)return;
+    const w=function(index,checked){
+      const line=lines()[index];
+      if(line&&checked&&!hasManual(line)&&suggested(line)<=0){
+        line.compra_qty_manual_v180=wholeBarQty(line,need(line)||n(line.qty_pedida));
+      }
+      const out=old.apply(this,arguments);
+      if(line&&checked&&quantity(line)<=0)line.toBuy=false;
+      try{if(typeof window.renderTabla==='function')window.renderTabla();}catch(_){ }
+      return out;
+    };w.__v180=true;window.togglePedir=w;try{togglePedir=w;}catch(_){ }
+  }
+
+  function injectControls(){
+    const arr=lines();if(!arr.length)return;
+    const groups=[
+      {body:document.getElementById('tbodyBarras'),idx:[]},
+      {body:document.getElementById('tbodyUnidades'),idx:[]}
+    ];
+    arr.forEach((line,index)=>{const bar=isPletina(line)||String(line&&(line.unit||line.unidad)||'').toLowerCase().includes('barra');(bar?groups[0]:groups[1]).idx.push(index);});
+    groups.forEach(g=>{if(!g.body)return;g.idx.forEach((index,pos)=>{
+      const tr=g.body.children[pos],line=arr[index];if(!tr||!line)return;const td=tr.children[0];if(!td)return;
+      let box=td.querySelector('.ldh-buy-qty-v180');
+      if(isPletina(line)){if(box)box.remove();return;}
+      if(!box){box=document.createElement('div');box.className='ldh-buy-qty-v180';box.style.cssText='margin-top:5px;display:grid;gap:2px;min-width:88px';td.appendChild(box);}
+      const q=quantity(line),s=suggested(line),bar=isBar(line);
+      box.innerHTML=`<label style="font-size:9px;color:#93c5fd;font-weight:800">${bar?'BARRAS A PEDIR':'CANT. PEDIR'}</label><input type="number" min="0" step="${bar?'1':'0.01'}" value="${fmt(q)}" style="width:82px;background:#061325;color:#fff;border:1px solid #2563eb;border-radius:7px;padding:4px 6px;font-weight:900" onchange="LDH_setCompraQtyV180(${index},this.value)" title="${bar?'Las barras solo se pueden pedir en unidades enteras.':''}"><span style="font-size:9px;color:#94a3b8">sug. ${fmt(s)}</span>`;
+      const ordered=Math.max(0,n(line.compra_qty_pedida_v180));
+      const received=Math.max(0,n(line.compra_qty_recibida_v180));
+      const outstanding=Math.max(0,ordered-received);
+      if(outstanding>0&&!isPletina(line)&&!isNoStock(line)){
+        const rb=tr.querySelector('.ldh-recibido-btn');
+        if(rb&&!/reposicion interna/i.test(String(rb.title||''))){rb.disabled=false;rb.classList.remove('disabled');rb.textContent='Recibir compra';rb.title=`Registrar entrada fisica del proveedor. Pendiente de esta compra: ${fmt(outstanding)}.`;}
+      }
+    });});
+  }
+
+  function wrapRender(){const old=window.renderTabla;if(typeof old!=='function'||old.__v180)return;const w=function(){const out=old.apply(this,arguments);injectControls();return out;};w.__v180=true;window.renderTabla=w;try{renderTabla=w;}catch(_){ }}
+
+  function installBuildCompraLines(){
+    const fn=function(linesIn){
+      const map={};
+      (linesIn||[]).forEach(line=>{
+        const needed=(typeof _needForCompra==='function')?_needForCompra(line):need(line);
+        const unit=String(line.unit||'ud').trim()||'ud';const s=info(line);const isBar=(typeof _unitIsBarra==='function')?_unitIsBarra(unit):unit.toLowerCase().includes('barra');const iron=isBar?String((window.metaActual&&window.metaActual.tipo_hierro)||'').trim():'';
+        const key=(s.stockKnown&&s.matId)?('id:'+s.matId):('n:'+((typeof normName==='function')?normName(line.mat):String(line.mat||'').toLowerCase())+'|'+unit+(iron?'|'+iron:''));
+        if(!map[key])map[key]={name:String(line.mat||s?.mat?.name||'Material'),unit,bar:!!isBar,neededTotal:0,neededAuto:0,manual:0,hasManual:false,stockKnown:!!s.stockKnown,stock:s.stockKnown?Math.max(0,n(s.stock)):0};
+        const it=map[key];it.neededTotal+=Math.max(needed,n(line.qty_pedida));if(hasManual(line)){it.hasManual=true;it.manual+=Math.max(0,n(line.compra_qty_manual_v180));}else it.neededAuto+=needed;
+        if(s.stockKnown){if(!it.stockKnown)it.stock=n(s.stock);else it.stock=Math.min(it.stock,n(s.stock));it.stockKnown=true;}
+      });
+      return Object.values(map).map(it=>{const rawAuto=it.stockKnown?Math.max(0,it.neededAuto-it.stock):it.neededAuto;const auto=it.bar?Math.ceil(Math.max(0,rawAuto-1e-9)):rawAuto;const rawPedir=Math.max(0,it.manual+auto);const pedir=it.bar?Math.ceil(Math.max(0,rawPedir-1e-9)):rawPedir;const fnum=(typeof _fmtNum==='function')?_fmtNum:fmt;const funit=(typeof _fmtUnit==='function')?_fmtUnit:((u)=>u);return `${it.name} - necesarias ${fnum(it.neededTotal)} ${funit(it.unit,it.neededTotal)} / ${it.stockKnown?'en stock '+fnum(it.stock)+' '+funit(it.unit,it.stock):'en stock N/D'} / pedir ${fnum(pedir)} ${funit(it.unit,pedir)}`;});
+    };
+    fn.__v180=true;window._buildCompraLines=fn;try{_buildCompraLines=fn;}catch(_){ }
+  }
+
+  function wrapCopy(){
+    const old=window.copiarListaCompras;if(typeof old!=='function'||old.__v180)return;
+    const w=async function(){
+      const meta=window.metaActual||(typeof metaActual!=='undefined'?metaActual:{});
+      const composite=String(meta&&(meta.composite_group_id||meta.compositeGroupId)||'').trim();
+      if(!composite){
+        const batchId='PI-'+Date.now().toString(36).toUpperCase();
+        lines().forEach(line=>{if(!line||!line.toBuy)return;const q=quantity(line);line.compra_qty_pedida_v180=Math.max(0,q);line.compra_qty_pedido_id_v180=batchId;line.compra_qty_recibida_v180=0;if(q>0){line.pedido_compras_info=true;line.pedido_compras_fecha=new Date().toISOString();}});
+        try{if(typeof window.guardarEstadoLocal==='function')window.guardarEstadoLocal();}catch(_){ }
+      }
+      return old.apply(this,arguments);
+    };w.__v180=true;window.copiarListaCompras=w;try{copiarListaCompras=w;}catch(_){ }
+  }
+
+  function hasReceiptWrapperInChain(fn,seen){
+    if(typeof fn!=='function')return false;
+    seen=seen||new Set();
+    if(seen.has(fn))return false;
+    seen.add(fn);
+    if(fn.__v180===true)return true;
+    // V184 · varios wrappers legacy guardan su funcion base en propiedades distintas.
+    // Recorremos esas referencias para no volver a envolver y no pedir Aceptar varias veces.
+    for(const key of Object.keys(fn)){
+      let child=null;try{child=fn[key];}catch(_){child=null;}
+      if(typeof child!=='function')continue;
+      const lk=String(key||'').toLowerCase();
+      if(lk.includes('base')||lk.includes('old')||lk.includes('wrapped')){
+        if(hasReceiptWrapperInChain(child,seen))return true;
+      }
+    }
+    return false;
+  }
+  function wrapReceived(){
+    const old=window.LDH_marcarRecibidoCompleto;
+    if(typeof old!=='function'||hasReceiptWrapperInChain(old))return;
+    const w=async function(index){
+      const line=lines()[index];if(!line||isPletina(line)||isNoStock(line))return old.apply(this,arguments);
+      // V187 · La recepción física de proveedor solo se intercepta cuando la línea
+      // pertenece a una ficha de Stock conocida. Accesorios/materiales sin vínculo
+      // conservan el flujo legacy de recepción sin Stock y no deben abrir el prompt
+      // de compra física ni intentar crear una entrada de Stock por esta vía.
+      const stockInfoV187=info(line);
+      if(!stockInfoV187||!stockInfoV187.stockKnown)return old.apply(this,arguments);
+      const ordered=Math.max(0,n(line.compra_qty_pedida_v180|| (line.toBuy?quantity(line):0)));
+      const received=Math.max(0,n(line.compra_qty_recibida_v180));
+      const outstanding=Math.max(0,ordered-received);
+      if(outstanding<=0)return old.apply(this,arguments);
+      const answer=prompt(`Cantidad recibida fisicamente del proveedor\n\nPedida: ${fmt(ordered)}\nYa recibida: ${fmt(received)}\nPendiente: ${fmt(outstanding)}`,fmt(outstanding));
+      if(answer===null)return;const nowQty=Math.max(0,n(answer));if(nowQty<=0)return;
+      if(isBar(line)&&!Number.isInteger(nowQty)){alert('Las barras recibidas deben ser un número entero.');return;}
+      const accepted=Math.min(nowQty,outstanding);line.__ldh_physical_receipt_target_v180=received+accepted;
+      try{return await old.apply(this,arguments);}finally{delete line.__ldh_physical_receipt_target_v180;}
+    };
+    Object.keys(old).forEach(k=>{try{w[k]=old[k];}catch(_){ }});
+    w.__v180=true;w.__v180Base=old;
+    window.LDH_marcarRecibidoCompleto=w;
+  }
+
+  function install(){wrapToggle();installBuildCompraLines();wrapCopy();wrapReceived();wrapRender();injectControls();window.LDH_PREP_V180=BUILD;document.documentElement.dataset.ldhPrepCompra='V180';}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
+  [120,450,1200,3000,6000].forEach(ms=>setTimeout(install,ms));
+  console.info('[Preparacion V180] compra opcional/parcial y recepcion fisica independiente de la necesidad de la OT.');
+})();
+</script>
+
+
+
+<!-- LDH_PREP_V181_BARRAS_ENTERAS_STOCK_NEGATIVO_UI_20261006 -->
+<script id="LDH_PREP_V181_BARRAS_ENTERAS_STOCK_NEGATIVO_UI_20261006">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V181_BARRAS_ENTERAS_STOCK_NEGATIVO_UI__)return;
+  window.__LDH_PREP_V181_BARRAS_ENTERAS_STOCK_NEGATIVO_UI__=true;
+  const BUILD='PREPARACION-V181-BARRAS-ENTERAS-STOCK-NEGATIVO-SEGURO-20261006';
+  const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  function arr(){try{return window.estadoMateriales||(typeof estadoMateriales!=='undefined'?estadoMateriales:[]);}catch(_){return [];}}
+  function linked(line){try{return typeof getLinkedMatForLine==='function'?getLinkedMatForLine(line):null;}catch(_){return null;}}
+  function stockInfo(line){try{return typeof _v2CompanyStockInfo==='function'?_v2CompanyStockInfo(line,linked(line)):null;}catch(_){return null;}}
+  function rowGroups(lines){
+    const groups=[{body:document.getElementById('tbodyBarras'),idx:[]},{body:document.getElementById('tbodyUnidades'),idx:[]}];
+    lines.forEach((line,index)=>{let bar=false;try{bar=!!(window.LDH_isPletinaMmLine&&window.LDH_isPletinaMmLine(line));}catch(_){ }if(!bar)bar=String(line&&(line.unit||line.unidad)||'').toLowerCase().includes('barra');(bar?groups[0]:groups[1]).idx.push(index);});
+    return groups;
+  }
+  function disableButton(btn,label,title){if(!btn)return;btn.disabled=true;btn.classList.add('disabled');btn.style.opacity='.48';btn.style.cursor='not-allowed';btn.textContent=label;btn.title=title;btn.onclick=null;btn.removeAttribute('onclick');}
+  function refresh(){
+    const lines=arr();if(!lines.length)return;
+    rowGroups(lines).forEach(group=>{if(!group.body)return;group.idx.forEach((index,pos)=>{
+      const tr=group.body.children[pos],line=lines[index];if(!tr||!line)return;
+      const info=stockInfo(line);if(!info||info.state!=='ok')return;
+      const real=n(info.real),free=Math.max(0,n(info.libre)),reserved=Math.max(0,n(info.reservado));
+      const pill=tr.querySelector('.stock-company-pill');
+      if(pill&&real<0){
+        // V182: nunca mostrar al operario un saldo histórico negativo como si
+        // fuese stock actual. Igual que Stock, el físico operativo mínimo es 0.
+        pill.classList.remove('danger','ldh-stock-deficit-v181');
+        pill.innerHTML=`${String(info.empresa||'Empresa')}: físico <b>0</b> · reservado <b>${reserved}</b> · libre <b>${free}</b> ${String(info.unit||'')}`;
+        pill.title='Stock operativo normalizado igual que el módulo Stock. Un histórico antiguo negativo no se usa como disponibilidad actual.';
+      }
+      const action=tr.children[4];if(action){
+        Array.from(action.querySelectorAll('button')).forEach(btn=>{
+          const txt=String(btn.textContent||'').trim().toUpperCase();
+          if((txt.startsWith('ASIGNAR LIBRE')||txt.startsWith('RESERVAR LIBRE'))&&free<=0){
+            disableButton(btn,'SIN STOCK LIBRE','No hay stock libre utilizable para esta empresa/material.');
+          }else if((txt.startsWith('CONSUMIR RESERVADO')||txt.startsWith('USAR RESERVA'))&&reserved<=0){
+            disableButton(btn,'SIN RESERVA','No hay reservas activas disponibles para este material en la empresa.');
+          }
+        });
+        const mark=Array.from(action.querySelectorAll('button')).find(b=>String(b.getAttribute('onclick')||'').includes('togglePedidoComprasInfo'));
+        if(mark){
+          mark.textContent=line.pedido_compras_info?'🛒 YA PEDIDO':'🛒 MARCAR COMO PEDIDO';
+          mark.title=line.pedido_compras_info?'Este material está marcado como ya pedido a Compras. Pulsa para desmarcarlo.':'Marca únicamente que el pedido a Compras ya se ha realizado; no cambia el stock ni la cantidad a pedir.';
+        }
+      }
+    });});
+  }
+  const base=window.renderTabla;
+  if(typeof base==='function'&&!base.__v181safe){
+    const wrapped=function(){const out=base.apply(this,arguments);try{refresh();}catch(_){ }return out;};
+    wrapped.__v181safe=true;window.renderTabla=wrapped;try{renderTabla=wrapped;}catch(_){ }
+  }
+  window.LDH_PREP_V181={build:BUILD,refresh};
+  window.LDH_PREP_V181_BUILD=BUILD;
+  document.documentElement.dataset.ldhPrepCompra='V181';
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(refresh,0),{once:true});else setTimeout(refresh,0);
+  [150,500,1200,3000].forEach(ms=>setTimeout(refresh,ms));
+  console.info('[Preparacion V181] barras enteras, déficit negativo visible/no utilizable y acciones sin stock deshabilitadas.');
+})();
+</script>
+
+<!-- LDH_PREP_V182_STOCK_MAESTRO_IGUAL_QUE_STOCK_20261006 -->
+<script>
+window.LDH_PREP_V182_BUILD='PREPARACION-V182-STOCK-MAESTRO-RECIBIDO-REAL-20261006';
+console.info('[Preparacion V182] físico maestro alineado con Stock; recepciones nuevas suman desde el físico operativo actual.');
+</script>
+
+
+<!-- LDH_PREP_V185_IDENTIFICACION_AGENDA_VISIBLE_20261006 -->
+<style id="LDH_PREP_V185_IDENTIFICACION_AGENDA_STYLE">
+#ldhAgendaIdentificationV185{display:none;margin:14px 0 4px;padding:11px 14px;border:1px solid rgba(250,204,21,.52);border-left:5px solid #facc15;border-radius:10px;background:rgba(113,63,18,.18);color:#fef3c7;font-size:13px;line-height:1.35;box-shadow:0 6px 18px rgba(0,0,0,.16)}
+#ldhAgendaIdentificationV185.show{display:block}
+#ldhAgendaIdentificationV185 strong{color:#fde047;margin-right:7px}
+.ldh-agenda-ident-note-v185{margin-top:7px;padding:6px 8px;border:1px solid rgba(250,204,21,.34);border-radius:8px;background:rgba(113,63,18,.13);color:#fde68a;font-size:11px;font-weight:800;line-height:1.25}
+.ldh-agenda-ident-note-v185 b{color:#facc15}
+</style>
+<script id="LDH_PREP_V185_IDENTIFICACION_AGENDA_VISIBLE_20261006">
+(function(){
+  'use strict';
+  if(window.__LDH_PREP_V185_IDENTIFICACION_AGENDA__)return;
+  window.__LDH_PREP_V185_IDENTIFICACION_AGENDA__=true;
+  const BUILD='PREPARACION-V185-IDENTIFICACION-AGENDA-VISIBLE-20261006';
+  const txt=v=>String(v==null?'':v).trim();
+  const tech=v=>{
+    const raw=txt(v).toUpperCase();
+    const m=raw.match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_\s]*([A-Z]{1,3}))?/);
+    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw;
+  };
+  function parse(raw,fallback){try{const v=JSON.parse(raw||'');return v==null?fallback:v;}catch(_){return fallback;}}
+  function currentMeta(){try{return (typeof metaActual!=='undefined'&&metaActual&&typeof metaActual==='object')?metaActual:{};}catch(_){return {};}}
+  function currentRef(){try{return txt(typeof refActual!=='undefined'?refActual:'');}catch(_){return '';}}
+  function readMeta(ref){
+    const key='prep_meta_'+txt(ref);
+    for(const store of [localStorage,sessionStorage]){
+      try{const raw=store.getItem(key);if(raw){const m=parse(raw,{});if(m&&typeof m==='object')return m;}}catch(_){ }
+    }
+    return {};
+  }
+  function orderRows(){
+    const out=[],seen=new Set();
+    for(const store of [localStorage,sessionStorage]){
+      try{
+        const raw=store.getItem('ldh_work_orders_v1');if(!raw)continue;
+        const parsed=parse(raw,[]);
+        const rows=Array.isArray(parsed)?parsed:(parsed&&Array.isArray(parsed.orders)?parsed.orders:[]);
+        rows.forEach(o=>{
+          if(!o||typeof o!=='object')return;
+          const k=txt(o.id)+'|'+txt(o.reference);
+          if(seen.has(k))return;
+          seen.add(k);out.push(o);
+        });
+      }catch(_){ }
+    }
+    return out;
+  }
+  function masterIdentification(order){
+    return txt(order&&(order.identification||order.workIdentification||order.workLabel||order.referenceLabel||order.shortDescription));
+  }
+  function findMasterOrder(meta,ref,rows){
+    rows=rows||orderRows();
+    meta=meta&&typeof meta==='object'?meta:{};
+    ref=txt(ref);
+    const oid=txt(meta.composite_master_order_id||meta.compositeMasterOrderId||meta.agenda_order_id||meta.agendaOrderId||meta.orderId||meta.workOrderId||meta.masterOrderId);
+    const gid=txt(meta.composite_group_id||meta.compositeGroupId);
+    const master=tech(meta.composite_master_reference||meta.compositeMasterReference||meta.masterReference||meta.master_ref||'');
+    const tref=tech(ref);
+    let order=rows.find(o=>oid&&txt(o.id)===oid)||null;
+    if(!order&&gid)order=rows.find(o=>txt(o&&o.compositeV1&&o.compositeV1.groupId)===gid)||null;
+    if(!order&&master)order=rows.find(o=>tech(o.reference)===master)||null;
+    if(!order&&tref)order=rows.find(o=>tech(o.reference)===tref)||null;
+    if(!order&&tref){
+      order=rows.find(o=>{
+        const parts=o&&o.compositeV1&&Array.isArray(o.compositeV1.parts)?o.compositeV1.parts:[];
+        return parts.some(p=>tech(p&&(p.reference||p.partReference||p.displayReference||p.display_ref)||'')===tref);
+      })||null;
+    }
+    if(!order&&tref){
+      const base=tref.replace(/-[A-Z]{1,3}$/,'');
+      order=rows.find(o=>tech(o.reference)===base)||null;
+    }
+    return order;
+  }
+  function agendaIdentification(meta,ref,rows){
+    const order=findMasterOrder(meta,ref,rows);
+    return masterIdentification(order);
+  }
+  function ensureDetail(){
+    const detail=document.getElementById('vistaDetalle'),panel=document.getElementById('panelHierro');
+    if(!detail||!panel)return null;
+    let el=document.getElementById('ldhAgendaIdentificationV185');
+    if(!el){
+      el=document.createElement('div');
+      el.id='ldhAgendaIdentificationV185';
+      panel.parentNode.insertBefore(el,panel);
+    }
+    return el;
+  }
+  function refreshDetail(){
+    const el=ensureDetail();if(!el)return;
+    const note=agendaIdentification(currentMeta(),currentRef(),orderRows());
+    if(!note){el.classList.remove('show');el.textContent='';return;}
+    el.innerHTML='<strong>ℹ IDENTIFICACIÓN · AGENDA</strong><span></span>';
+    el.querySelector('span').textContent=note;
+    el.classList.add('show');
+  }
+  function refreshList(){
+    const lista=document.getElementById('lista');if(!lista)return;
+    const rows=orderRows();
+    lista.querySelectorAll('.item[data-ref]').forEach(item=>{
+      try{
+        item.querySelectorAll('.ldh-agenda-ident-note-v185').forEach(n=>n.remove());
+        const ref=txt(item.dataset.ref);if(!ref)return;
+        const note=agendaIdentification(readMeta(ref),ref,rows);if(!note)return;
+        const div=document.createElement('div');
+        div.className='ldh-agenda-ident-note-v185';
+        const b=document.createElement('b');b.textContent='ℹ IDENTIFICACIÓN: ';
+        div.appendChild(b);div.appendChild(document.createTextNode(note));
+        item.appendChild(div);
+      }catch(_){ }
+    });
+  }
+  function refresh(){refreshDetail();refreshList();}
+
+  const oldRender=window.renderTabla;
+  if(typeof oldRender==='function'&&!oldRender.__ldhAgendaIdentificationV185){
+    const wrapped=function(){const out=oldRender.apply(this,arguments);try{refreshDetail();}catch(_){ }return out;};
+    wrapped.__ldhAgendaIdentificationV185=true;
+    wrapped.__ldhAgendaIdentificationV185Base=oldRender;
+    window.renderTabla=wrapped;try{renderTabla=wrapped;}catch(_){ }
+  }
+  const oldList=window.cargarLista;
+  if(typeof oldList==='function'&&!oldList.__ldhAgendaIdentificationV185){
+    const wrapped=function(){const out=oldList.apply(this,arguments);try{setTimeout(refreshList,0);}catch(_){ }return out;};
+    wrapped.__ldhAgendaIdentificationV185=true;
+    wrapped.__ldhAgendaIdentificationV185Base=oldList;
+    window.cargarLista=wrapped;try{cargarLista=wrapped;}catch(_){ }
+  }
+  window.addEventListener('storage',e=>{if(e&&e.key==='ldh_work_orders_v1')setTimeout(refresh,40);});
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(refresh,0),{once:true});else setTimeout(refresh,0);
+  [150,500,1200,3000].forEach(ms=>setTimeout(refresh,ms));
+  window.LDH_PREP_V185_IDENTIFICACION_AGENDA=BUILD;
+  document.documentElement.dataset.ldhPrepAgendaIdentification='V185';
+  console.info('[Preparacion V185] Identificacion de Agenda visible en lista y detalle; avisos operativos permanecen fuera de Preparacion.');
+})();
+</script>
+
+
+<!-- LDH_PREP_V186_IDENTIFICACION_GRUPOS_Y_TABS_REALES_20261006 -->
+<script id="LDH_PREP_V186_IDENTIFICACION_GRUPOS_Y_TABS_REALES_20261006">
+window.LDH_PREP_V186='PREPARACION-V186-IDENTIFICACION-AGENDA-EN-COMPRAS-CONJUNTAS-TAB-ACTIVA-20261006';
+document.documentElement.dataset.ldhPrepAgendaIdentification='V186';
+console.info('[Preparacion V186] Identificacion de Agenda visible tambien en compras conjuntas/historico; solo la pestana realmente abierta queda resaltada.');
+</script>
+
+
+
+<!-- LDH_PREP_V187_RECIBIDO_COMPRA_SOLO_STOCK_CONOCIDO_20261006 -->
+<script id="LDH_PREP_V187_RECIBIDO_COMPRA_SOLO_STOCK_CONOCIDO_20261006">
+window.LDH_PREP_V187='PREPARACION-V187-RECIBIDO-COMPRA-SOLO-STOCK-CONOCIDO-20261006';
+document.documentElement.dataset.ldhPrepCompraReceipt='V187';
+console.info('[Preparacion V187] Recibir compra solo intercepta materiales con Stock conocido; accesorios sin vinculo mantienen su recepcion legacy.');
 </script>
 
 </body></html>
