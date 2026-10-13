@@ -283,6 +283,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       </div>
       <div class="notice">Abre una <b>empresa</b>, despu&eacute;s un <b>color</b> y finalmente el <b>trabajo</b> que necesites. En cada color ver&aacute;s los <b>botes disponibles</b>, los <b>necesarios</b> y el <b>saldo final</b>. Si Preparaci&oacute;n no envi&oacute; el consumo, abre el trabajo y escribe directamente el total en <b>botes equivalentes de 4 L</b>, tal como aparece en C&aacute;lculo; pulsa <b>Guardar c&aacute;lculo</b> y la terminal calcula autom&aacute;ticamente solo las unidades pendientes. Los litros se muestran como equivalencia secundaria. No modifica el Stock.</div>
       <div id="workList" class="list"></div>
+      <div id="directCompanyListV87" class="list" style="margin-top:12px"></div>
     </div>
 
     <div id="directView" class="hidden">
@@ -1427,7 +1428,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
 
   function renderWorkCompanies(){
     const sel=$('workCompany'); const current=sel.value;
-    const names=Array.from(new Set(state.works.map(w=>w.company).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es',{sensitivity:'base'}));
+    const names=Array.from(new Set([...state.works.map(w=>w.company),...(state.directOrdersV83||[]).map(directPaintDataV83).filter(j=>j.active&&j.status==='pending').map(j=>j.companyName)].filter(Boolean))).sort((a,b)=>a.localeCompare(b,'es',{sensitivity:'base'}));
     sel.innerHTML='<option value="">Todas las empresas</option>'+names.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join('');
     if(names.includes(current)) sel.value=current;
   }
@@ -2252,14 +2253,50 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     return Array.from(map.values());
   }
 
+  // V87: Vista compartida, sin escribir fases de Fabricacion ni duplicar movimientos.
+  // La tarjeta original de SOLO PINTURA es la unica implementacion operativa.
+  function renderDirectInCompaniesV87(){
+    const host=$('directCompanyListV87');if(!host)return 0;
+    const q=norm($('workSearch').value),selected=text($('workCompany').value);
+    const existing=new Set((state.works||[]).map(w=>workIdentityKey(refOf(w))).filter(Boolean));
+    const jobs=(state.directOrdersV83||[]).map(directPaintDataV83).filter(j=>j.active&&j.status==='pending'&&!existing.has(workIdentityKey(j.ref)))
+      .filter(j=>(!selected||norm(j.companyName)===norm(selected))&&(!q||norm([j.ref,j.companyName,j.ral,j.identification,j.description].join(' ')).includes(q)));
+    host.replaceChildren();
+    if(!jobs.length)return 0;
+    const companies=new Map();
+    jobs.forEach(j=>{const company=j.companyName||'Sin empresa';if(!companies.has(company))companies.set(company,new Map());const colors=companies.get(company),ral=ralLabel(j.ral)||j.ral||'Sin RAL';if(!colors.has(ral))colors.set(ral,[]);colors.get(ral).push(j);});
+    [...companies.entries()].sort((a,b)=>a[0].localeCompare(b[0],'es')).forEach(([company,colors])=>{
+      const companyDetails=document.createElement('details');companyDetails.className='company-accordion';
+      const count=[...colors.values()].reduce((n,a)=>n+a.length,0);
+      const sum=document.createElement('summary');sum.className='company-summary';sum.innerHTML='<span class="accordion-title"><span class="accordion-arrow">›</span><span class="accordion-main"><span class="level-label level-company">EMPRESA</span><span class="accordion-name">'+esc(company)+'</span><span class="accordion-sub">'+count+' trabajo(s) · SOLO PINTURA</span></span></span><span class="summary-chip">🎨 SOLO PINTURA · '+count+'</span>';companyDetails.append(sum);
+      const body=document.createElement('div');body.className='company-body';
+      [...colors.entries()].sort((a,b)=>a[0].localeCompare(b[0],'es')).forEach(([ral,list])=>{
+        const colorDetails=document.createElement('details');colorDetails.className='paint-accordion';
+        const colorSummary=document.createElement('summary');colorSummary.className='paint-summary';colorSummary.style.gridTemplateColumns='1fr auto';
+        colorSummary.innerHTML='<span class="paint-summary-main"><span class="accordion-arrow">›</span><span class="accordion-main"><span class="level-label level-color">COLOR</span><span class="accordion-name">'+esc(ral)+'</span></span></span><span class="summary-chip">'+list.length+' OT</span>';
+        colorDetails.append(colorSummary);const area=document.createElement('div');area.className='paint-jobs';
+        list.forEach(j=>{const card=$('directListV83')?.querySelector('[data-direct-order="'+CSS.escape(j.orderId)+'"]');if(!card)return;
+          const detail=document.createElement('details');detail.className='work-accordion';
+          const summary=document.createElement('summary');summary.className='work-summary';summary.innerHTML='<span class="work-summary-main"><span class="accordion-arrow">›</span><span class="work-summary-title"><span class="ldh-tech-ref">'+esc(j.ref)+'</span><span class="ldh-work-ident">'+esc(j.identification||j.description||'Pintura directa')+'</span></span></span><span class="summary-chip">SOLO PINTURA</span>';
+          const content=document.createElement('div');content.className='work-body';const copy=card.cloneNode(true);copy.removeAttribute('data-direct-order');content.append(copy);detail.append(summary,content);area.append(detail);
+          copy.querySelectorAll('[data-direct-calc]').forEach(b=>b.onclick=()=>openDirectSurfaceModalV84(b.dataset.directCalc));
+          copy.querySelectorAll('[data-direct-loan-v84]').forEach(b=>b.onclick=()=>openDirectPaintLoanModalV84(b.dataset.directLoanV84));
+          copy.querySelectorAll('[data-direct-consume]').forEach(b=>b.onclick=()=>openDirectConsumeModalV83(b.dataset.directConsume));
+          copy.querySelectorAll('[data-direct-finish]').forEach(b=>b.onclick=()=>finalizeDirectPaintV83(b.dataset.directFinish,b));
+        });colorDetails.append(area);body.append(colorDetails);
+      });companyDetails.append(body);host.append(companyDetails);
+    });
+    return jobs.length;
+  }
   function renderWorks(){
     state.works=workRowsFromPackage(state.flowPackage);
     renderWorkCompanies();
     const rows=filteredWorks();
-    $('kJobs').textContent=rows.length;
+    const directCountV87=renderDirectInCompaniesV87();
+    $('kJobs').textContent=rows.length+directCountV87;
     const sums=rows.reduce((a,w)=>{a.f+=w.flow.fab;a.p+=w.flow.pintura;a.a+=w.flow.almacen;return a;},{f:0,p:0,a:0});
     $('kFab').textContent=fmt(sums.f); $('kPaint').textContent=fmt(sums.p); $('kStore').textContent=fmt(sums.a);
-    if(!rows.length){ $('workList').innerHTML='<div class="empty">No hay trabajos activos en Cabina.</div>'; return; }
+    if(!rows.length){ $('workList').innerHTML=directCountV87?'':'<div class="empty">No hay trabajos activos en Cabina.</div>'; return; }
 
     const root=$('workList');
     const forceOpen=!!norm($('workSearch').value)||!!text($('workCompany').value);
@@ -2563,6 +2600,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     root.querySelectorAll('[data-direct-loan-v84]').forEach(btn=>btn.onclick=()=>openDirectPaintLoanModalV84(btn.dataset.directLoanV84));
     root.querySelectorAll('[data-direct-consume]').forEach(btn=>btn.onclick=()=>openDirectConsumeModalV83(btn.dataset.directConsume));
     root.querySelectorAll('[data-direct-finish]').forEach(btn=>btn.onclick=()=>finalizeDirectPaintV83(btn.dataset.directFinish,btn));
+    renderWorks(); // V87: refrescar vista por empresa tras la nube de Agenda.
   }
 
   async function loadDirectCalibrationV84(){
