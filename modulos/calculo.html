@@ -149,7 +149,9 @@ tbody td,td{border-color:rgba(148,163,184,.12)!important}
 <style id="LDH_CALC_R10_VISUAL_20261002">
 body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189,248,.22)!important;border-radius:18px!important;background:linear-gradient(135deg,#0b172b,#07101f)!important;box-shadow:0 12px 30px rgba(15,23,42,.16);padding:10px 14px!important}.wrap{padding:18px 14px 60px!important}.hero{width:100%!important;max-width:none!important;margin-bottom:18px!important;border-radius:22px!important}.card{border-radius:20px!important}.summary .kpi{background:linear-gradient(180deg,#0e1a2f,#07101f)!important;border-color:rgba(56,189,248,.17)!important;border-radius:16px!important}.ldh-variable-snapshot-pill{display:inline-flex;margin-left:8px;padding:4px 8px;border:1px solid rgba(249,115,22,.38);border-radius:999px;background:rgba(249,115,22,.10);color:#fed7aa;font-size:10px;font-weight:950;vertical-align:middle}.agenda-handoff.variable{border-color:rgba(249,115,22,.42)!important;background:rgba(249,115,22,.10)!important;color:#ffedd5!important}
 @media(max-width:1180px){.topbar{margin:8px}.wrap{padding:14px 10px 40px!important}}
-</style>\n</head>
+</style>\n
+<meta name="ldh-ai-module" content="calculo">
+</head>
 <body>
 <!-- LDH_CALC_V23_RAL_AGENDA_AUTO_20260902 -->
 <!-- LDH_CALC_V27_RAL_INDIVIDUAL_PARTIDA_20261002 -->
@@ -297,10 +299,18 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
     return x.toLocaleString("es-ES",{maximumFractionDigits:dec});
   }
   function findDB(){
+    // LDH_CONCEPT_CATALOG_GUARD_V1: concepts: [] no es un catalogo valido.
+    // Comparar los dos almacenes antes de elegir: uno antiguo de 8 no debe
+    // ocultar otro mas completo de 28. Esta lectura no modifica datos.
+    let best = null;
     for(const k of DB_KEYS){
       const d = parse(getStore(k), null);
-      if(d && typeof d === "object" && Array.isArray(d.concepts)) return {key:k, db:d};
+      if(d && typeof d === "object" && Array.isArray(d.concepts) && d.concepts.length > 0){
+        if(!best || d.concepts.length > best.db.concepts.length) best = {key:k, db:d};
+      }
     }
+    if(best) return best;
+    console.warn('[Calculo] No existe un catalogo de conceptos verificado en el almacenamiento.');
     return {key:"ldh_db", db:{concepts:[]}};
   }
   function readStock(){
@@ -1805,6 +1815,140 @@ console.info('[Calculo V26] Recalculo tras borrado robusto incluso con recepcion
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(install,0),{once:true});else setTimeout(install,0);
 })();
 </script>
+
+
+
+<!-- LDH_AI_GLOBAL_CALCULO_CONTEXT_V1_20261007 -->
+<script id="LDH_AI_GLOBAL_CALCULO_CONTEXT_V1_20261007">
+(function(){
+  'use strict';
+  if(window.__LDH_AI_CALCULO_CONTEXT_V1__) return;
+  window.__LDH_AI_CALCULO_CONTEXT_V1__=true;
+
+  function txt(v){ return String(v == null ? '' : v).trim(); }
+  function num(v){ const n=Number(String(v == null ? '' : v).replace(',','.')); return Number.isFinite(n) ? n : 0; }
+  function visible(el){
+    if(!el) return false;
+    try{
+      const s=getComputedStyle(el);
+      if(s.display==='none'||s.visibility==='hidden') return false;
+      const r=el.getBoundingClientRect();
+      return r.width>0&&r.height>0;
+    }catch(_){ return false; }
+  }
+  function selectedText(id){
+    const el=document.getElementById(id);
+    if(!el) return '';
+    if(el.tagName==='SELECT') return txt(el.options && el.selectedIndex>=0 ? el.options[el.selectedIndex].textContent : el.value);
+    return txt(el.value || el.textContent);
+  }
+  function variableSnapshot(){
+    const out={};
+    document.querySelectorAll('#varsBox input[id^="var_"]').forEach(el=>{
+      const key=txt(el.id.replace(/^var_/,''));
+      if(key) out[key]=num(el.value);
+    });
+    return out;
+  }
+  function compactMap(obj,limit){
+    const entries=Object.entries(obj && typeof obj==='object' ? obj : {});
+    return entries.slice(0,limit||24).map(([name,value])=>({name:txt(name),cantidad:num(value)}));
+  }
+  function compactBars(rows){
+    return (Array.isArray(rows)?rows:[]).slice(0,28).map(row=>({
+      material:txt(row && (row.mat||row.material||row.name)),
+      cantidad_pedida:num(row && (row.qty_pedida ?? row.qty)),
+      unidad:txt(row && (row.unit||row.unidad)),
+      total_mm:num(row && (row.total_mm ?? row.mm)),
+      barras_necesarias:num(row && row.barras_necesarias),
+      pletina_mm:!!(row && row.pletina_mm),
+      material_stock_id:txt(row && (row.stockMatId||row.matId||row.linked_matId))
+    }));
+  }
+  function compactUnits(rows){
+    return (Array.isArray(rows)?rows:[]).slice(0,32).map(row=>({
+      material:txt(row && (row.mat||row.material||row.name)),
+      cantidad_pedida:num(row && (row.qty_pedida ?? row.qty)),
+      unidad:txt(row && (row.unit||row.unidad)),
+      color:txt(row && row.color),
+      material_stock_id:txt(row && (row.stockMatId||row.matId||row.linked_matId)),
+      stock_comun:!!(row && (row.sharedStock||row.sharedPool))
+    }));
+  }
+
+  window.LDH_AI_CONTEXT_PROVIDER=function(){
+    const app=window.App || null;
+    const last=app && app.last && typeof app.last==='object' ? app.last : null;
+    const handoff=app && app.agendaHandoff && typeof app.agendaHandoff==='object' ? app.agendaHandoff : null;
+    const weight=window.__LDH_CALC_WEIGHT_LAST && typeof window.__LDH_CALC_WEIGHT_LAST==='object' ? window.__LDH_CALC_WEIGHT_LAST : null;
+    const identBox=document.getElementById('referenceIdentification');
+    const planCard=document.getElementById('calcConceptPlans');
+
+    return {
+      modulo:'Cálculo',
+      modo:'solo_lectura_para_ia',
+      pantalla:{
+        referencia:txt(document.getElementById('refInput')?.value),
+        identificacion:txt(identBox?.textContent),
+        concepto:selectedText('conceptSelect'),
+        empresa:selectedText('companySelect'),
+        pintura:selectedText('paintSelect'),
+        variables:variableSnapshot(),
+        aviso_agenda:txt(document.getElementById('agendaHandoffNotice')?.textContent),
+        planos_visibles:!!(planCard && visible(planCard)),
+        planos_estado:txt(document.getElementById('calcConceptPlanStatus')?.textContent),
+        planos_cantidad:txt(document.getElementById('calcConceptPlanCount')?.textContent)
+      },
+      calculo_actual:last ? {
+        referencia:txt(last.ref),
+        identificacion:txt(last.identification||last.workLabel),
+        concepto:txt(last.concept||last.concepto),
+        empresa:txt(last.empresa||last.company),
+        variables:last.vars && typeof last.vars==='object' ? last.vars : {},
+        lineales_mm:compactMap(last.lineales,28),
+        unidades:compactMap(last.unidades,32),
+        barras:compactBars(last.barras),
+        accesorios:compactUnits(last.accesorios),
+        pintura_material_id:txt(last.paintMaterialId),
+        pintura_material:txt(last.paintMaterialName),
+        peso_utilizado_kg:num(last.peso_utilizado_kg),
+        peso_lineales_kg:num(last.peso_lineales_kg),
+        peso_unidades_kg:num(last.peso_unidades_kg)
+      } : null,
+      peso_actual:weight ? {
+        total_kg:num(weight.totalKg),
+        perfiles_kg:num(weight.lineKg),
+        unidades_kg:num(weight.unitKg),
+        accesorios_sin_peso:num(weight.unknownUnits)
+      } : null,
+      recibido_desde_agenda:handoff ? {
+        referencia:txt(handoff.partReference||handoff.reference),
+        identificacion:txt(handoff.partDescription||handoff.partLabel||handoff.identification||handoff.workIdentification),
+        concepto:txt(handoff.partConcept||handoff.calculationConcept||handoff.concept||handoff.concepto),
+        empresa:txt(handoff.companyName||handoff.companyId),
+        cantidad:num(handoff.partQuantity ?? handoff.quantity ?? handoff.cantidad ?? handoff.unidades),
+        ral:txt(handoff.agendaRal||handoff.ral),
+        pedido_compuesto:!!handoff.composite,
+        concepto_variable:!!(app && app.variableConceptSnapshot)
+      } : null,
+      acciones_disponibles:[
+        'Calcular ahora',
+        'Generar hoja de pedido',
+        'Preparación de pedido',
+        'Abrir Configuración',
+        'Abrir Preparación'
+      ],
+      criterio_importante:[
+        'La barra estándar es de 6000 mm.',
+        'Las pletinas se mantienen en mm reales y la compra se decide en Preparación según stock.',
+        'El peso de perfiles se calcula por metros reales utilizados, sin contar la merma de barras.',
+        'La IA puede explicar y guiar, pero no debe modificar ni enviar pedidos por iniciativa propia.'
+      ]
+    };
+  };
+})();
+</script>
+<script src="../asistente_ia_global.js" id="LDH_AI_GLOBAL_LOADER_CALCULO_20261007"></script>
 
 </body>
 </html>

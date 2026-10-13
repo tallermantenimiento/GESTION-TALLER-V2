@@ -33171,4 +33171,184 @@ document.documentElement.dataset.ldhPrepCompraReceipt='V187';
 console.info('[Preparacion V187] Recibir compra solo intercepta materiales con Stock conocido; accesorios sin vinculo mantienen su recepcion legacy.');
 </script>
 
+
+
+
+<!-- LDH_PREP_PILLS_NO_COMPRESION_AISLADO_20261008 -->
+<style id="LDH_PREP_PILLS_NO_COMPRESION_AISLADO_20261008">
+/* Solo presentación: respetar el formato de las pills de la operativa. */
+#bloqueBarras .stock-mini, #bloqueUnidades .stock-mini {
+  display:flex; flex-wrap:wrap; align-items:flex-start; gap:6px 10px;
+  min-width:0; width:100%; opacity:1;
+}
+#bloqueBarras .stock-mini > .link-pill,
+#bloqueUnidades .stock-mini > .link-pill {
+  display:inline-flex; flex:0 0 auto; max-width:100%;
+  width:max-content; white-space:nowrap;
+  align-items:center; vertical-align:middle;
+}
+/* Las celdas de material conservan espacio para las etiquetas sin afectar
+   a las cifras ni a los botones de recepción. */
+#bloqueBarras table td:nth-child(2),
+#bloqueUnidades table td:nth-child(2) { min-width:340px; }
+#bloqueBarras, #bloqueUnidades { overflow-x:auto; }
+</style>
+
+<!-- LDH_AI_GLOBAL_PREPARACION_OPERATIVA_R1_20261008 -->
+<script>
+(function(){
+  'use strict';
+
+  const text=v=>String(v==null?'':v).trim();
+  const num=v=>{ const n=Number(v); return Number.isFinite(n)?n:0; };
+  const list=v=>Array.isArray(v)?v:[];
+  const visible=el=>{
+    if(!el) return false;
+    if(el.closest && el.closest('#ldhFutureAiDock')) return false;
+    const cs=getComputedStyle(el);
+    if(cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity)===0) return false;
+    return !!(el.offsetWidth||el.offsetHeight||el.getClientRects().length);
+  };
+  const safe=(fn,fallback)=>{ try{ const v=fn(); return v==null?fallback:v; }catch(_){ return fallback; } };
+  const unique=arr=>Array.from(new Set(arr.map(text).filter(Boolean)));
+
+  function actionLabels(){
+    const nodes=[...document.querySelectorAll('button,a,[role="button"]')];
+    return unique(nodes.filter(visible).map(el=>{
+      const clone=el.cloneNode(true);
+      clone.querySelectorAll('.badge,.ordersCount,.wo-alert-count,.ldh-ai-badge,[aria-hidden="true"]').forEach(n=>n.remove());
+      return text(clone.textContent||el.getAttribute('aria-label')||el.getAttribute('title'));
+    })).slice(0,80);
+  }
+
+  function stockPillsFromRow(tr){
+    if(!tr) return {empresa:'',comun:'',otras:[]};
+    const company=tr.querySelector('.stock-company-pill');
+    const common=tr.querySelector('.stock-common-pill');
+    const pills=[...tr.querySelectorAll('.link-pill')].map(el=>text(el.textContent)).filter(Boolean);
+    return {
+      empresa:text(company?.textContent),
+      comun:text(common?.textContent),
+      otras:pills.filter(v=>v!==text(company?.textContent)&&v!==text(common?.textContent)).slice(0,8)
+    };
+  }
+
+  function materialRows(){
+    const rows=[];
+    const pushRows=(selector,tipo)=>{
+      [...document.querySelectorAll(selector)].forEach((tr,index)=>{
+        if(!visible(tr)) return;
+        const cells=tr.children||[];
+        const pills=stockPillsFromRow(tr);
+        const material=text(cells[1]?.querySelector('strong,b')?.textContent || cells[1]?.textContent).split('\n')[0].trim();
+        const requested=text(cells[2]?.textContent);
+        const received=text(cells[3]?.querySelector('input')?.value || cells[3]?.textContent);
+        const actions=unique([...(cells[4]?.querySelectorAll('button')||[])].filter(visible).map(b=>text(b.textContent)));
+        const obs=text(cells[5]?.querySelector('input,textarea')?.value || cells[5]?.textContent);
+        rows.push({
+          tipo,
+          indice:index,
+          material,
+          pedida:requested,
+          recibida:received,
+          stockEmpresa:pills.empresa,
+          stockComun:pills.comun,
+          otrasPills:pills.otras,
+          acciones:actions,
+          observaciones:obs
+        });
+      });
+    };
+    pushRows('#tbodyBarras tr','barra');
+    pushRows('#tbodyUnidades tr','unidad');
+    return rows.slice(0,100);
+  }
+
+  function visibleOrders(){
+    return [...document.querySelectorAll('#lista .item[data-ref]')]
+      .filter(visible)
+      .slice(0,80)
+      .map(item=>({
+        referencia:text(item.dataset.ref),
+        texto:text(item.textContent).replace(/\s+/g,' '),
+        identificacion:text(item.querySelector('.ldh-work-ident,.ldh-agenda-ident-note-v185')?.textContent),
+        estados:unique([...item.querySelectorAll('.badge')].map(x=>text(x.textContent)))
+      }));
+  }
+
+  function currentStateLines(){
+    return safe(()=>list(window.estadoMateriales||estadoMateriales).slice(0,100).map(line=>({
+      material:text(line?.mat||line?.material||line?.name||line?.nombre),
+      unidad:text(line?.unit||line?.unidad),
+      pedida:num(line?.qty_pedida??line?.pedida??line?.qty??line?.cantidad),
+      recibida:num(line?.qty_recibida??line?.recibida),
+      ok:!!(line?.ok||line?.completo||line?.done||line?.isDone||line?.isCompleted),
+      pedidoCompras:!!(line?.toBuy||line?.pedido_compras_info),
+      vinculoStock:text(line?.stockLinkLabel||line?.linked_matName||line?.linkedMatName),
+      vinculoStockId:text(line?.stockLinkId||line?.linked_matId||line?.linkedMatId||line?.stockMatId),
+      nota:text(line?.note||line?.obs||line?.observaciones)
+    })),[]);
+  }
+
+  window.LDH_AI_CONTEXT_PROVIDER=function(){
+    try{
+      const detail=document.getElementById('vistaDetalle');
+      const listView=document.getElementById('vistaLista');
+      const detailOpen=detail && !detail.classList.contains('hidden') && visible(detail);
+      const meta=safe(()=>window.metaActual||metaActual,{} )||{};
+      const ref=safe(()=>text(window.refActual||refActual),text(document.getElementById('ref')?.textContent));
+      const materials=materialRows();
+      const stateLines=currentStateLines();
+
+      return {
+        modulo:'Preparación de pedidos',
+        modo:'solo lectura para la IA',
+        vistaActual:detailOpen?'Detalle de pedido':'Listado de pedidos',
+        interfaz:{
+          referenciaAbierta:ref,
+          identificacion:text(document.getElementById('refIdent')?.textContent || document.getElementById('ldhAgendaIdentificationV185')?.textContent),
+          concepto:text(document.getElementById('concepto')?.textContent),
+          empresa:text(document.getElementById('empresaPrep')?.textContent || meta.empresa || meta.company || meta.emp),
+          unidades:text(document.getElementById('inputUnidades')?.value),
+          tipoHierro:text(document.getElementById('panelHierro')?.textContent).replace(/\s+/g,' '),
+          enFabricacion:!document.getElementById('pillFab')?.classList.contains('hidden'),
+          noAsignadoVisible:!document.getElementById('pillNoAsig')?.classList.contains('hidden')
+        },
+        pedidoActual:detailOpen?{
+          referencia:ref,
+          identificacion:text(document.getElementById('refIdent')?.textContent || document.getElementById('ldhAgendaIdentificationV185')?.textContent),
+          concepto:text(meta.concepto||meta.concept||document.getElementById('concepto')?.textContent),
+          empresa:text(meta.empresa||meta.company||meta.emp||document.getElementById('empresaPrep')?.textContent),
+          unidades:num(document.getElementById('inputUnidades')?.value||meta.unidades||meta.units),
+          materialesEstado:stateLines,
+          materialesVisibles:materials
+        }:null,
+        resumen:{
+          pedidosVisibles:visibleOrders().length,
+          materialesVisibles:materials.length,
+          lineasCompletas:stateLines.filter(x=>x.ok).length,
+          lineasPendientes:stateLines.filter(x=>!x.ok).length,
+          lineasMarcadasCompras:stateLines.filter(x=>x.pedidoCompras).length
+        },
+        pedidosVisibles:visibleOrders(),
+        materialesVisibles:materials,
+        accionesVisibles:actionLabels(),
+        reglas:[
+          'Preparación muestra y gestiona la recepción/asignación de materiales de una OT antes de Fabricación.',
+          'Las pills de Stock de empresa y Stock común deben leerse tal como aparecen en pantalla; reflejan la lógica operativa actual del módulo.',
+          'La IA es solo de lectura: puede explicar lo visible y guiar, pero no recibir, reservar, asignar, vincular, pedir, devolver, borrar ni mandar a Fabricación.'
+        ],
+        navegacion:{menu:'../index.html',fabricacion:'fabricacion.html',stock:'stock.html',ferreteria:'ferreteria.html'}
+      };
+    }catch(error){
+      return {modulo:'Preparación de pedidos',modo:'solo lectura para la IA',error:String(error&&error.message||error)};
+    }
+  };
+
+  window.LDH_PREP_AI_GLOBAL_R1='PREPARACION-AI-GLOBAL-R1-20261008';
+})();
+
+</script>
+<script src="../asistente_ia_global.js?v=20261008-27" data-ldh-ai-global-loader="preparacion"></script>
+<!-- /LDH_AI_GLOBAL_PREPARACION_OPERATIVA_R1_20261008 -->
 </body></html>

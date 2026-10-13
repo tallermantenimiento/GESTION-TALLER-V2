@@ -6896,5 +6896,217 @@ window.LDH_borrarMovimientosTodos = function(){
 })();
 </script>
 
+
+<!-- LDH_TABLEROS_AI_GLOBAL_LAYOUT_FIX_20261008 -->
+<style id="LDH_TABLEROS_AI_GLOBAL_LAYOUT_FIX_20261008">
+/* Tableros fuerza .app a 100vw. Con el asistente global visible dejamos
+   que el padding lateral reservado por el asistente reduzca el módulo. */
+@media (min-width:1181px){
+  body.ldh-ai-global-module .app{
+    width:auto!important;
+    max-width:none!important;
+    min-width:0!important;
+    margin:0!important;
+  }
+  body.ldh-ai-global-module .top,
+  body.ldh-ai-global-module .layout{
+    width:100%!important;
+    max-width:100%!important;
+    min-width:0!important;
+  }
+  body.ldh-ai-global-module .layout{
+    grid-template-columns:245px minmax(0,1fr)!important;
+  }
+  body.ldh-ai-global-module .side,
+  body.ldh-ai-global-module .maincard,
+  body.ldh-ai-global-module .top .brand,
+  body.ldh-ai-global-module .top .actions{
+    min-width:0!important;
+  }
+  body.ldh-ai-global-module #stockTableWrap{
+    width:100%!important;
+    max-width:100%!important;
+    overflow-x:auto!important;
+  }
+}
+</style>
+<!-- /LDH_TABLEROS_AI_GLOBAL_LAYOUT_FIX_20261008 -->
+
+<!-- LDH_AI_GLOBAL_TABLEROS_R1_20261008 · SOLO LECTURA -->
+<script id="LDH_AI_GLOBAL_CONTEXT_TABLEROS_R1_20261008">
+(function(){
+  'use strict';
+  const text=v=>String(v==null?'':v).trim();
+  const num=v=>{const n=Number(String(v==null?0:v).replace(',','.'));return Number.isFinite(n)?n:0;};
+  const list=v=>Array.isArray(v)?v:[];
+  const safe=(fn,fallback)=>{try{const v=fn();return v==null?fallback:v;}catch(_){return fallback;}};
+  const iso=v=>{try{return v?new Date(v).toISOString():'';}catch(_){return text(v);}};
+  const norm=v=>text(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  const state=()=>((typeof db!=='undefined'&&db)?db:{materials:[],stock:[],movements:[],reservations:[],assignments:[],jobs:[]});
+  const apartado=()=>safe(()=>localStorage.getItem('ldh_tableros_apartado_activo_v1')==='tableros auxiliares'?'tableros auxiliares':'tableros','tableros');
+  const apartadoLabel=()=>apartado()==='tableros auxiliares'?'Tableros AGLOMERADO':'Tableros DM';
+  const commonId=()=>text(typeof FER_COMMON_COMPANY_ID!=='undefined'?FER_COMMON_COMPANY_ID:'fer_common')||'fer_common';
+  const materialByAny=id=>safe(()=>typeof materialById==='function'?materialById(id):null,null)||list(state().materials).find(m=>text(m?.id)===text(id))||{};
+  const materialName=id=>{const m=materialByAny(id);return text(m.name||m.nombre||m.material||id);};
+  const stockRowAny=id=>list(state().stock).find(s=>text(s?.materialId||s?.matId)===text(id))||{};
+  const activeRow=x=>{
+    const st=norm(x&&(x.status||x.estado)||'activa');
+    return !['cancelada','cancelado','liberada','liberado','consumida','consumido','cerrada','cerrado','devuelta','devuelto','inactiva','inactivo','resuelta','resuelto','cancelada prueba','cancelada_prueba','recibida','recibido'].includes(st);
+  };
+  const sameMaterial=(row,mid)=>{
+    if(!row) return false;
+    const ids=[row.materialId,row.matId,row.stockMaterialId,row.v2MaterialId,row.toMaterialId].map(text).filter(Boolean);
+    if(ids.includes(text(mid))) return true;
+    const want=norm(materialName(mid));
+    const got=norm([row.materialName,row.material,row.mat,row.name,row.nombre,row.descripcion].filter(Boolean).join(' '));
+    return !!(want&&got&&(want===got||want.includes(got)||got.includes(want)));
+  };
+  const qty=row=>Math.max(0,num(row&&(row.pendingQty??row.qtyPending??row.pendiente??row.qty??row.cantidad??row.units??row.unidades??0)));
+  const physical=mid=>safe(()=>{
+    if(typeof window.ferRealStock==='function') return num(window.ferRealStock(mid));
+    if(typeof realStock==='function') return num(realStock(commonId(),mid));
+    return list(state().movements).filter(m=>text(m?.materialId||m?.matId)===text(mid)).reduce((sum,m)=>{
+      const t=norm(m?.type||m?.tipo||'entrada').replace(/ /g,'_');
+      const q=num(m?.qty??m?.cantidad);
+      if(['entrada','in','ajuste_pos','devolucion'].includes(t)) return sum+q;
+      if(['salida','out','ajuste_neg','consumo','salida_preparacion'].includes(t)) return sum-q;
+      return sum+q;
+    },0);
+  },0);
+  const reservationRows=mid=>safe(()=>{
+    if(typeof window.LDH_tablerosReservasActivasDominante==='function') return window.LDH_tablerosReservasActivasDominante(mid)||[];
+    const out=[];
+    list(state().assignments).forEach(a=>{
+      if(!sameMaterial(a,mid)||!activeRow(a)) return;
+      const ph=norm(a.phase||a.fase||'preparacion');
+      if(ph&&!['preparacion','fabricacion'].includes(ph)) return;
+      const typ=norm(a.assignmentType||a.reason||a.origen||a.source||'');
+      if(typ.includes('otra empresa')||typ.includes('prestamo')||typ.includes('deuda')||a.toCompanyId) return;
+      const q=qty(a);if(q>0)out.push({kind:'assignment',id:a.id||a.assignmentId||'',qty:q,ref:a.ref||a.jobRef||a.referencia||a.trabajoRef||'sin referencia',phase:a.phase||a.fase||'preparacion',raw:a});
+    });
+    list(state().reservations).forEach(r=>{
+      if(!sameMaterial(r,mid)||!activeRow(r)) return;
+      if(safe(()=>typeof isAutoReceivedPrepReservation==='function'&&isAutoReceivedPrepReservation(r),false)) return;
+      const q=qty(r);if(q>0)out.push({kind:'reservation',id:r.id||r.reservationId||'',qty:q,ref:r.ref||r.jobRef||r.referencia||r.trabajoRef||'sin referencia',phase:r.phase||r.fase||'preparacion',raw:r});
+    });
+    return out;
+  },[]);
+  const reserved=mid=>safe(()=>typeof window.LDH_tablerosReservadoDominante==='function'?num(window.LDH_tablerosReservadoDominante(mid)):reservationRows(mid).reduce((s,r)=>s+num(r.qty),0),0);
+
+  window.LDH_AI_CONTEXT_PROVIDER=function(){
+    try{
+      const d=state();
+      const ap=apartado();
+      const label=apartadoLabel();
+      const search=text(document.getElementById('search')?.value);
+      const searchNorm=norm(search);
+      const rows=list(d.stock).map(s=>({s,m:materialByAny(s.materialId||s.matId)})).filter(x=>x.m&&norm(x.m.type)===norm(ap));
+      const materials=rows.map(({s,m})=>{
+        const mid=text(m.id||s.materialId||s.matId);
+        const fisico=physical(mid);
+        const reservado=reserved(mid);
+        const libre=Math.max(0,fisico-reservado);
+        const minimo=num(s.min??s.minimum??s.minimo);
+        return {
+          id:mid,
+          material:text(m.name||m.nombre||m.material),
+          familia:text(m.family||m.familia||label),
+          apartado:label,
+          unidad:text(m.unit||m.unidad||'ud'),
+          ubicacion:text(s.location||s.ubicacion),
+          minimo,
+          fisico,
+          reservado,
+          libre,
+          agotado:libre<=0,
+          bajoMinimo:libre>0&&libre<=minimo
+        };
+      });
+      const visibleMaterials=(searchNorm?materials.filter(r=>norm([r.material,r.familia,r.ubicacion].join(' ')).includes(searchNorm)):materials).slice(0,100);
+      const typeIds=new Set(materials.map(r=>r.id));
+      const familyMap=new Map();
+      materials.forEach(r=>{
+        const key=r.familia||label;
+        if(!familyMap.has(key))familyMap.set(key,{familia:key,materiales:0,fisico:0,reservado:0,libre:0,agotados:0,bajoMinimo:0});
+        const g=familyMap.get(key);g.materiales++;g.fisico+=r.fisico;g.reservado+=r.reservado;g.libre+=r.libre;if(r.agotado)g.agotados++;if(r.bajoMinimo)g.bajoMinimo++;
+      });
+      const activeReservations=[];
+      materials.forEach(r=>reservationRows(r.id).forEach(x=>activeReservations.push({
+        id:text(x.id),tipo:text(x.kind),referencia:text(x.ref),fase:text(x.phase||'preparacion'),material:r.material,cantidad:num(x.qty)
+      })));
+      const recentMovements=list(d.movements)
+        .filter(m=>typeIds.has(text(m?.materialId||m?.matId)))
+        .slice().sort((a,b)=>(Date.parse(b?.date||b?.fecha||b?.createdAt)||0)-(Date.parse(a?.date||a?.fecha||a?.createdAt)||0))
+        .slice(0,60).map(m=>({
+          fecha:iso(m.date||m.fecha||m.createdAt),
+          tipo:text(m.type||m.tipo),
+          material:materialName(m.materialId||m.matId),
+          cantidad:num(m.qty??m.cantidad),
+          empresa:text(m.empresa||m.company||m.companyName||m.empresaNombre),
+          referencia:text(m.ref||m.referencia||m.jobRef||m.trabajo),
+          nota:text(m.note||m.nota),
+          origen:text(m.origen||m.source||m.reason||m.motivo)
+        }));
+      const outputStats=new Map();
+      recentMovements.filter(m=>norm(m.tipo)==='salida'&&m.empresa).forEach(m=>{
+        const k=m.empresa;if(!outputStats.has(k))outputStats.set(k,{empresa:k,salidas:0,cantidad:0});const g=outputStats.get(k);g.salidas++;g.cantidad+=num(m.cantidad);
+      });
+      const totalFisico=materials.reduce((a,r)=>a+r.fisico,0);
+      const totalReservado=materials.reduce((a,r)=>a+r.reservado,0);
+      const totalLibre=materials.reduce((a,r)=>a+r.libre,0);
+      const movementCount=list(d.movements).filter(m=>typeIds.has(text(m?.materialId||m?.matId))).length;
+
+      return {
+        modulo:'Tableros',
+        modo:'solo lectura para la IA',
+        modeloStock:'Stock común',
+        apartadoActual:label,
+        apartadosDisponibles:['Tableros DM','Tableros AGLOMERADO'],
+        interfaz:{
+          busqueda:search,
+          tipoMostrado:text(document.getElementById('activeTypePill')?.textContent),
+          kpiStockTotal:text(document.getElementById('kpiReal')?.textContent),
+          kpiMovimientos:text(document.getElementById('kpiReserved')?.textContent),
+          kpiBajoMinimo:text(document.getElementById('kpiLow')?.textContent),
+          kpiAgotado:text(document.getElementById('kpiMaterials')?.textContent)
+        },
+        resumen:{
+          materiales:materials.length,
+          fisico:totalFisico,
+          reservado:totalReservado,
+          libre:totalLibre,
+          movimientos:movementCount,
+          reservasActivas:activeReservations.length,
+          agotados:materials.filter(r=>r.agotado).length,
+          bajoMinimo:materials.filter(r=>r.bajoMinimo).length
+        },
+        familias:Array.from(familyMap.values()).slice(0,60),
+        materialesVisibles:visibleMaterials,
+        reservasActivas:activeReservations.slice(0,100),
+        movimientosRecientes:recentMovements,
+        salidasRecientesPorEmpresa:Array.from(outputStats.values()).sort((a,b)=>b.salidas-a.salidas).slice(0,30),
+        reglas:[
+          'Tableros trabaja con stock común: no existe un stock físico separado por empresa.',
+          'Tableros DM y Tableros AGLOMERADO son inventarios comunes independientes y solo se mezclan en el histórico si se consulta de forma global.',
+          'Físico es la suma neta de entradas y salidas del material del apartado actual.',
+          'Reservado incluye reservas y asignaciones activas de Preparación/Fabricación del material. Reservar reduce Libre, pero no descuenta el Físico.',
+          'Libre = Físico - Reservado y nunca se muestra negativo.',
+          'Bajo mínimo cuenta materiales con Libre mayor que cero y menor o igual al mínimo. Agotado cuenta materiales con Libre igual a cero.',
+          'Las salidas manuales pueden guardar empresa y referencia del trabajo para estadísticas, pero la existencia sigue perteneciendo al stock común.',
+          'La IA es solo de lectura: puede explicar stock, reservas, mínimos, movimientos, familias, salidas por empresa y dónde realizar una acción, pero no crear, editar, borrar, reservar, liberar, importar ni modificar datos.'
+        ],
+        accionesVisibles:['Menú','Tableros DM','Tableros AGLOMERADO','+ Material','+ Entrada','Entrada','Salida','Ver reservas','Ver bajo mínimos','Ver agotados','Editar','Borrar','Exportar JSON','Importar JSON'],
+        navegacion:{menu:'../index.html'}
+      };
+    }catch(error){
+      return {modulo:'Tableros',modo:'solo lectura para la IA',error:String(error&&error.message||error)};
+    }
+  };
+  window.LDH_TABLEROS_AI_GLOBAL_R1='TABLEROS-AI-GLOBAL-R1-20261008';
+})();
+</script>
+<script src="../asistente_ia_global.js?v=20261007-15" data-ldh-ai-global-loader="tableros"></script>
+<!-- /LDH_AI_GLOBAL_TABLEROS_R1_20261008 -->
+
 </body>
 </html>

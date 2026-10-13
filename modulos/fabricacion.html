@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="ldh-ai-module" content="fabricacion">
   <title>Fabricación · Gestión Taller</title>
   <meta name="ldh-fabricacion-v23" content="FABRICACION-V23-CABIN-DELETE-REGRESSION-HARDEN-20260930">
   <meta name="ldh-fabricacion-v22" content="FABRICACION-V22-CABIN-DELETE-APPROVAL-20260930">
@@ -2974,5 +2975,113 @@ console.info('[Fabricacion V20] phaseFlowV19 se aplica al final de la reconcilia
 </script>
 <!-- LDH_FABRICACION_V22_CABIN_DELETE_APPROVAL_20260930 -->
 <!-- LDH_FABRICACION_V23_REGRESSION_HARDEN_20260930 -->
+
+<!-- LDH_AI_GLOBAL_FABRICACION_R1_20261007 · SOLO LECTURA -->
+<script id="LDH_AI_GLOBAL_CONTEXT_FABRICACION_R1_20261007">
+(function(){
+  'use strict';
+  const text = v => String(v == null ? '' : v).trim();
+  const num = v => {
+    const x = Number(String(v == null ? 0 : v).replace(',', '.'));
+    return Number.isFinite(x) ? Math.max(0, x) : 0;
+  };
+  const flowOf = item => {
+    item = item && typeof item === 'object' ? item : {};
+    const f = item.flow && typeof item.flow === 'object' ? item.flow : {};
+    return {
+      fabricacion:num(f.fab ?? f.fabricacion ?? item.fab ?? item.enFabricacion),
+      pintura:num(f.pintura ?? f.paint ?? item.pintura ?? item.enPintura),
+      almacen:num(f.almacen ?? f.alm ?? item.almacen ?? item.enAlmacen),
+      entregado:num(f.entregado ?? item.delivered ?? item.entregado)
+    };
+  };
+  const workRef = item => text(item?.technical_ref || item?.technicalRef || item?.composite_part_reference || item?.ref || item?.referencia);
+  const compact = item => {
+    item = item && typeof item === 'object' ? item : {};
+    const flow = flowOf(item);
+    const unassigned = item.unassignedBorrow || item.unassigned_borrow || item.noAsignado || item.materialNoAsignado;
+    const uaItems = unassigned && Array.isArray(unassigned.items) ? unassigned.items : [];
+    const pendingUA = uaItems.filter(x => num(x?.qtyPending ?? x?.pending ?? x?.qty ?? x?.cantidad) > 0);
+    return {
+      referencia:workRef(item),
+      identificacion:text(item.identification || item.workIdentification || item.workLabel || item.referenceLabel || item.partDescription || item.composite_part_description),
+      concepto:text(item.concept || item.concepto || item.nombreConcepto),
+      empresa:text(item.company || item.empresa || item.empresaReceptora),
+      total:num(item.total || item.unidades || item.cantidad || item.uds),
+      fechaPedido:text(item.datePed || item.fechaPedido),
+      fechaPrevista:text(item.datePrev || item.fechaPrevista),
+      fase:text(item.fase || item.estado || item.status),
+      flow,
+      materialNoAsignado:pendingUA.length ? {lineas:pendingUA.length,cantidad:pendingUA.reduce((a,x)=>a+num(x?.qtyPending ?? x?.pending ?? x?.qty ?? x?.cantidad),0)} : null
+    };
+  };
+  window.LDH_AI_CONTEXT_PROVIDER = function(){
+    try{
+      const app = window.App;
+      const all = app && typeof app.allItems === 'function' ? app.allItems() : [];
+      const active = all.filter(item => item && !item.archived && !item.deleted);
+      const visible = app && typeof app.visibleItems === 'function' ? app.visibleItems() : active.filter(item => {
+        const f = flowOf(item);
+        return f.fabricacion + f.pintura > 0;
+      });
+      const totals = active.reduce((acc,item)=>{
+        const f = flowOf(item);
+        acc.fabricacion += f.fabricacion;
+        acc.pintura += f.pintura;
+        acc.almacen += f.almacen;
+        acc.entregado += f.entregado;
+        return acc;
+      },{fabricacion:0,pintura:0,almacen:0,entregado:0});
+      let cabinRequests=[];
+      try{ cabinRequests = app && typeof app.cabinDeleteRequests === 'function' ? app.cabinDeleteRequests() : []; }catch(_){ cabinRequests=[]; }
+      const byId = id => document.getElementById(id);
+      return {
+        modulo:'Fabricación',
+        descripcion:'Trabajos activos en Fabricación y Pintura, con reparto parcial de unidades entre FAB, PINT, ALM y ENT.',
+        modo:'solo lectura para la IA',
+        interfaz:{
+          busqueda:text(byId('q')?.value),
+          empresaFiltrada:text(byId('companyFilter')?.value) || 'Todas las empresas',
+          faseFiltrada:text(byId('stageFilter')?.value) || 'Fabricación y pintura',
+          estado:text(byId('status')?.textContent),
+          nube:text(byId('cloudStatus')?.textContent)
+        },
+        resumen:{
+          trabajosActivos:active.length,
+          trabajosVisibles:visible.length,
+          unidadesFabricacion:totals.fabricacion,
+          unidadesPintura:totals.pintura,
+          unidadesAlmacen:totals.almacen,
+          unidadesEntregadas:totals.entregado,
+          solicitudesEliminacionCabinaPendientes:cabinRequests.length
+        },
+        trabajosVisibles:visible.slice(0,50).map(compact),
+        solicitudesEliminacionCabina:cabinRequests.slice(0,20).map(r=>({
+          referencia:text(r?.ref || r?.reference),
+          identificacion:text(r?.identification),
+          empresa:text(r?.company),
+          concepto:text(r?.concept),
+          solicitadoPor:text(r?.requestedBy || 'Cabina')
+        })),
+        reglasDeFlujo:[
+          'A pintura mueve unidades FAB → PINT.',
+          'Volver a Fab mueve unidades PINT → FAB.',
+          'A almacén desde Fabricación mueve exclusivamente FAB → ALM y no consume pintura.',
+          'Las unidades PINT → ALM se confirman únicamente desde Terminal Cabina de Pintura, donde también se realiza el consumo físico de pintura y disolvente.',
+          'La IA es solo de lectura: puede explicar y guiar, pero no mover unidades, publicar nube, restaurar, aprobar eliminaciones ni borrar pedidos.'
+        ],
+        accionesVisibles:['A pintura','Fab','A almacén','Preparación','Ver','Eliminar','Actualizar','Publicar nube','Restaurar nube','Aprobar solicitud Cabina','Rechazar solicitud Cabina'],
+        navegacion:{menu:'index.html',preparacion:'preparacion_pedidos.html',almacen:'almacen.html'}
+      };
+    }catch(error){
+      return {modulo:'Fabricación',error:String(error && error.message || error)};
+    }
+  };
+})();
+
+</script>
+<script src="../asistente_ia_global.js?v=20261007-10" data-ldh-ai-global-loader="fabricacion"></script>
+<!-- /LDH_AI_GLOBAL_FABRICACION_R1_20261007 -->
+
 </body>
 </html>

@@ -6,6 +6,7 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="ldh-ai-module" content="ferreteria">
 <meta name="ldh-build" content="FERRETERIA-SYNC-COMPAT-20260817">
 <title>LDH v2 · Ferretería</title>
 <style>
@@ -5312,9 +5313,10 @@ window.LDH_borrarMovimientosTodos = function(){
   }
   function ferRowsK(){
     try{
+      const ap = localStorage.getItem('ldh_ferreteria_apartado_activo_v1') === 'prefabricados' ? 'prefabricados' : 'ferreteria';
       return (db.stock||[])
         .map(s=>({s:s,m:(typeof materialById==='function'?materialById(s.materialId):null)}))
-        .filter(x=>x.m && String(x.m.type||'')==='ferreteria');
+        .filter(x=>x.m && String(x.m.type||'').toLowerCase()===ap);
     }catch(e){return [];}
   }
   function kpiBody(items, mode){
@@ -7285,7 +7287,7 @@ window.LDH_borrarMovimientosTodos = function(){
     const q=(document.getElementById('search')?.value||'').trim().toLowerCase();
     const rows=(db.stock||[]).map(s=>({s,m:matR(s.materialId)})).filter(x=>typeOkR(x.m)).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q));
     let total=0,low=0,zero=0,resTotal=0;
-    rows.forEach(({s,m})=>{const r=realR(m.id),res=window.LDH_ferReservadoDominante(m.id),free=Math.max(0,r-res); total+=r; resTotal+=res; if(free<=0) zero++; else if(free<=Number(s.min||0)) low++;});
+    rows.forEach(({s,m})=>{const r=realR(m.id),res=window.LDH_ferReservadoDominante(m.id),free=Math.max(0,r-res); total+=r; resTotal+=res; if(r<=0) zero++; else if(r<=Number(s.min||0)) low++;});
     if(document.getElementById('kpiReal')) document.getElementById('kpiReal').textContent=fmtR(total);
     if(document.getElementById('kpiReserved')) document.getElementById('kpiReserved').textContent=fmtR((db.movements||[]).filter(m=>{const mt=matR(m.materialId);return typeOkR(mt);}).length);
     if(document.getElementById('kpiLow')) document.getElementById('kpiLow').textContent=low;
@@ -7665,5 +7667,168 @@ window.LDH_borrarMovimientosTodos = function(){
 <!-- /LDH_FERRETERIA_V2_FIRESTORE_SYNC_SAFE_20260817 -->
 
 <!-- LDH_FERRETERIA_COMPAT_MATID_AUTHOPTIONAL_20260817 -->
+
+
+<!-- LDH_FERRETERIA_STOCK_FISICO_UNICO_R2_20261007 -->
+<script id="LDH_FERRETERIA_STOCK_FISICO_UNICO_R2_20261007">
+(function(){
+  'use strict';
+  /*
+   * Fuente única de verdad para el stock físico visible de Ferretería/Prefabricados.
+   * El render dominante ya usa realStock('fer_common', materialId). La antigua
+   * ferRealStock sumaba movimientos de cualquier companyId y podía recuperar
+   * movimientos históricos de stocks por empresa (p.ej. Ferretería SKLUM),
+   * haciendo que KPI/"Ver bajo mínimos"/IA no coincidieran con la tabla visible.
+   */
+  window.LDH_ferStockFisicoComun = function(materialId){
+    try{
+      const cid = (typeof FER_COMMON_COMPANY_ID !== 'undefined' && FER_COMMON_COMPANY_ID)
+        ? FER_COMMON_COMPANY_ID : 'fer_common';
+      if(typeof realStock === 'function') return Number(realStock(cid, materialId) || 0);
+    }catch(e){}
+    return 0;
+  };
+  window.ferRealStock = function(materialId){
+    return window.LDH_ferStockFisicoComun(materialId);
+  };
+
+  /* Recalcula la pantalla con la misma fuente física que usa la tabla final. */
+  try{ if(typeof window.render === 'function') window.render(); }catch(e){}
+})();
+</script>
+<!-- /LDH_FERRETERIA_STOCK_FISICO_UNICO_R2_20261007 -->
+
+<!-- LDH_AI_GLOBAL_FERRETERIA_R1_20261007 · SOLO LECTURA -->
+<style id="LDH_AI_GLOBAL_FERRETERIA_LAYOUT_R1_20261007">
+/* Ferretería usa width:100vw en su chasis. Con IA global debe respetar la columna
+   derecha reservada por el núcleo, sin invadirla ni alterar la lógica del módulo. */
+body.ldh-ai-global-module .app{width:auto!important;max-width:none!important;margin:0!important}
+@media(max-width:1180px){body.ldh-ai-global-module .app{width:100vw!important}}
+</style>
+<script id="LDH_AI_GLOBAL_CONTEXT_FERRETERIA_R1_20261007">
+(function(){
+  'use strict';
+  const text=v=>String(v==null?'':v).trim();
+  const num=v=>{const n=Number(String(v==null?0:v).replace(',','.'));return Number.isFinite(n)?n:0;};
+  const apartado=()=>{
+    try{return localStorage.getItem('ldh_ferreteria_apartado_activo_v1')==='prefabricados'?'prefabricados':'ferreteria';}
+    catch(_){return 'ferreteria';}
+  };
+  const apartadoLabel=v=>v==='prefabricados'?'Prefabricados':'Ferretería común';
+  const materialTypeOk=(m,ap)=>{
+    const t=text(m&&m.type).toLowerCase();
+    return ap==='prefabricados'?t==='prefabricados':(t==='ferreteria'||t==='');
+  };
+  const stockFisico=materialId=>{
+    try{if(typeof window.LDH_ferStockFisicoComun==='function')return num(window.LDH_ferStockFisicoComun(materialId));}catch(_){}
+    try{if(typeof realStock==='function')return num(realStock(typeof FER_COMMON_COMPANY_ID!=='undefined'?FER_COMMON_COMPANY_ID:'fer_common',materialId));}catch(_){}
+    return 0;
+  };
+  const movementDate=m=>{
+    try{return new Date(m?.date||m?.fecha||m?.createdAt||m?.updatedAt||0).toISOString();}catch(_){return text(m?.date||m?.fecha);}
+  };
+  const materialName=id=>{
+    try{const m=typeof materialById==='function'?materialById(id):null;return text(m?.name||m?.nombre||id);}catch(_){return text(id);}
+  };
+  window.LDH_AI_CONTEXT_PROVIDER=function(){
+    try{
+      const ap=apartado();
+      const label=apartadoLabel(ap);
+      const data=(typeof db!=='undefined'&&db&&typeof db==='object')?db:{};
+      const materials=Array.isArray(data.materials)?data.materials:[];
+      const stock=Array.isArray(data.stock)?data.stock:[];
+      const movements=Array.isArray(data.movements)?data.movements:[];
+      const q=text(document.getElementById('search')?.value).toLowerCase();
+
+      const rows=stock.map(s=>({s,m:materials.find(m=>String(m?.id||m?.materialId||'')===String(s?.materialId||s?.matId||''))}))
+        .filter(x=>x.m&&materialTypeOk(x.m,ap))
+        .map(({s,m})=>{
+          const fisico=stockFisico(m.id);
+          const minimo=num(s.min??s.minimum??s.minimo);
+          return {
+            id:text(m.id),
+            material:text(m.name||m.nombre),
+            familia:text(m.family||m.familia||m.grp),
+            unidad:text(m.unit||m.unidad||'ud'),
+            ubicacion:text(s.location||s.ubicacion),
+            fisico,
+            libre:fisico,
+            minimo,
+            estado:fisico<=0?'agotado':(minimo>0&&fisico<=minimo?'bajo mínimo':'correcto')
+          };
+        });
+      const visible=q?rows.filter(r=>[r.material,r.familia,r.ubicacion].join(' ').toLowerCase().includes(q)):rows;
+      const movAp=movements.filter(m=>{
+        const mat=materials.find(x=>String(x?.id||'')===String(m?.materialId||m?.matId||''));
+        return !!(mat&&materialTypeOk(mat,ap));
+      });
+      const recientes=movAp.slice().sort((a,b)=>{
+        const ta=Date.parse(a?.date||a?.fecha||a?.createdAt||a?.updatedAt||0)||0;
+        const tb=Date.parse(b?.date||b?.fecha||b?.createdAt||b?.updatedAt||0)||0;
+        return tb-ta;
+      }).slice(0,20).map(m=>({
+        fecha:movementDate(m),
+        tipo:text(m.type||m.tipo||'movimiento'),
+        material:materialName(m.materialId||m.matId),
+        cantidad:num(m.qty??m.cantidad),
+        empresa:text(m.empresa||m.company||m.companyName||m.empresaNombre),
+        referencia:text(m.ref||m.referencia||m.jobRef||m.trabajoRef),
+        nota:text(m.note||m.obs||m.observaciones)
+      }));
+      const bajos=rows.filter(r=>r.fisico>0&&r.minimo>0&&r.fisico<=r.minimo);
+      const agotados=rows.filter(r=>r.fisico<=0);
+      let sync={};
+      try{sync=typeof window.LDH_FerreteriaV2SyncStatus==='function'?(window.LDH_FerreteriaV2SyncStatus()||{}):{};}catch(_){}
+      return {
+        modulo:'Ferretería',
+        apartadoActual:label,
+        descripcion:'Inventario común de Ferretería y Prefabricados. Ambos apartados son independientes y no trabajan por empresa como propietario del stock.',
+        modo:'solo lectura para la IA',
+        interfaz:{
+          busqueda:text(document.getElementById('search')?.value),
+          apartado:label,
+          stockTotal:text(document.getElementById('kpiReal')?.textContent),
+          movimientos:text(document.getElementById('kpiReserved')?.textContent),
+          bajoMinimo:text(document.getElementById('kpiLow')?.textContent),
+          agotados:text(document.getElementById('kpiMaterials')?.textContent)
+        },
+        resumen:{
+          materiales:rows.length,
+          materialesVisibles:visible.length,
+          stockFisicoTotal:rows.reduce((a,r)=>a+r.fisico,0),
+          movimientos:movAp.length,
+          materialesBajoMinimo:bajos.length,
+          materialesAgotados:agotados.length
+        },
+        materialesVisibles:visible.slice(0,60),
+        bajoMinimo:bajos.slice(0,30),
+        agotados:agotados.slice(0,30),
+        movimientosRecientes:recientes,
+        sincronizacion:{
+          activa:!!sync.started,
+          guardando:!!sync.saving,
+          modo:text(sync.mode),
+          build:text(sync.build)
+        },
+        reglas:[
+          'Ferretería común y Prefabricados son inventarios comunes independientes.',
+          'El stock disponible del apartado es el stock físico común; no pertenece a una empresa concreta.',
+          'Las salidas pueden guardar empresa y referencia del trabajo únicamente para trazabilidad y estadísticas.',
+          'Bajo mínimo significa stock físico mayor que cero y menor o igual al mínimo configurado; agotado significa stock físico menor o igual que cero.',
+          'La IA es solo de lectura: puede explicar, localizar materiales y guiar, pero no crear, editar, borrar, mover stock, importar/exportar JSON ni ejecutar sincronización.'
+        ],
+        accionesVisibles:['Ferretería común','Prefabricados','+ Material','+ Entrada','Entrada','Salida','Ver bajo mínimos','Ver agotados','Exportar JSON','Importar JSON','Menú'],
+        navegacion:{menu:'../index.html'}
+      };
+    }catch(error){
+      return {modulo:'Ferretería',error:String(error&&error.message||error)};
+    }
+  };
+})();
+</script>
+<script src="../asistente_ia_global.js?v=20261007-12" data-ldh-ai-global-loader="ferreteria"></script>
+<!-- /LDH_AI_GLOBAL_FERRETERIA_R1_20261007 -->
+
+<!-- LDH_FERRETERIA_KPI_MINIMO_FISICO_FIX_20261007 -->
 </body>
 </html>

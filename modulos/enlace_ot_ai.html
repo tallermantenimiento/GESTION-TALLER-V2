@@ -36,7 +36,7 @@ body{display:flex;flex-direction:column;background:radial-gradient(360px 220px a
 'use strict';
 const SCOPE='direccion_enlace_ot';
 const BRIDGE='https://gestion-taller-ia.taller-mantenimiento.workers.dev';
-const CHAT_KEY='ldh_ia_chat_direccion_enlace_ot_r15';
+const CHAT_KEY='ldh_ia_chat_direccion_enlace_ot_v1';
 const input=document.getElementById('input'),messages=document.getElementById('messages'),scroll=document.getElementById('scroll'),sendBtn=document.getElementById('send'),status=document.getElementById('status'),mic=document.getElementById('mic'),micNote=document.getElementById('micNote'),clearBtn=document.getElementById('clear');
 const state={busy:false,health:null,history:[],pendingAction:null,recorder:null,stream:null,chunks:[],micHold:false};
 const text=v=>String(v==null?'':v);const esc=s=>text(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -79,7 +79,16 @@ function clearConversation(){
   const model=text(state.health?.model||'openai/gpt-oss-120b').replace('openai/','');
   if(state.health?.hasKey)setStatus('IA central - '+model+' - solo Enlace OT - en linea','ok');
 }
-async function bridge(path,body,method='POST'){const opt={method,headers:{'Content-Type':'application/json'}};if(method!=='GET')opt.body=JSON.stringify(body||{});const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),30000);opt.signal=ctl.signal;try{const res=await fetch(BRIDGE+path,opt);const raw=await res.text();let obj={};try{obj=JSON.parse(raw)}catch(_){obj={error:raw||('HTTP '+res.status)}}if(!res.ok)throw new Error(obj.providerMessage||obj.error||('HTTP '+res.status));return obj}finally{clearTimeout(tm)}}
+async function bridge(path,body,method='POST'){
+  const opt={method,headers:{'Content-Type':'application/json'}};
+  if(method!=='GET')opt.body=JSON.stringify(body||{});
+  const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),30000);opt.signal=ctl.signal;
+  try{
+    const res=await fetch(BRIDGE+path,opt);const raw=await res.text();let obj={};
+    try{obj=JSON.parse(raw)}catch(_){obj={error:raw||('HTTP '+res.status)}}
+    if(!res.ok)throw new Error(obj.providerMessage||obj.error||('HTTP '+res.status));return obj;
+  }finally{clearTimeout(tm)}
+}
 let reqSeq=0,pending=new Map(),pendingActions=new Map();
 window.addEventListener('message',e=>{
   if(e.source!==parent)return;
@@ -164,7 +173,7 @@ async function b64(blob){return await new Promise((res,rej)=>{const r=new FileRe
 async function startMic(){if(state.busy||state.recorder?.state==='recording')return;if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){msg('error','Este navegador no permite usar el microfono aqui.');return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});state.stream=stream;state.chunks=[];const mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';const rec=new MediaRecorder(stream,{mimeType:mime});state.recorder=rec;const started=performance.now();rec.ondataavailable=e=>{if(e.data&&e.data.size)state.chunks.push(e.data)};rec.onstop=async()=>{mic.classList.remove('recording');mic.textContent='Mantener pulsado';try{stream.getTracks().forEach(t=>t.stop())}catch(_){}state.recorder=null;const blob=new Blob(state.chunks,{type:mime});if(!blob.size||performance.now()-started<650){micNote.textContent='Pulsacion demasiado corta.';return}try{busy(true,'IA central - transcribiendo...');const tr=await bridge('/transcribe',{scope:SCOPE,audioBase64:await b64(blob),mimeType:mime,prompt:'IDIOMA OBLIGATORIO: espanol de Espana. Nombres exactos de empresa: SKLUM (pronunciado es-clum; si oyes esplume, esplum, explom, esclum, es clum o skloom, escribe SKLUM), PROCEED, REYNOLDS, WOODS, STOCK COMUN. Vocabulario del taller: Enlace OT Direccion, orden de trabajo, mesas de empaquetado, mesa de empaquetado, prioridad maxima, pasado manana, RAL 7016, esperando material, fabricacion, pintura, almacen, entregado, stock.',temperature:0});const spoken=normalizeKnownTerms(text(tr?.text).trim());busy(false);if(!spoken){micNote.textContent='No he reconocido una frase.';return}input.value=spoken;await send(spoken);micNote.textContent='Whisper Large V3 - espanol ES'}catch(e){busy(false);msg('error','Error de voz: '+text(e?.message||e))}};rec.start();mic.classList.add('recording');mic.textContent='Soltar para enviar';micNote.textContent='Escuchando...'}catch(e){msg('error','No puedo capturar el microfono: '+text(e?.message||e))}}
 document.querySelectorAll('[data-p]').forEach(b=>b.addEventListener('click',()=>send(b.dataset.p||'')));sendBtn.addEventListener('click',()=>send(input.value));if(clearBtn)clearBtn.addEventListener('click',clearConversation);input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(input.value)}});mic.addEventListener('pointerdown',e=>{e.preventDefault();state.micHold=true;startMic()});const end=e=>{if(!state.micHold&&!state.recorder)return;e?.preventDefault?.();state.micHold=false;try{if(state.recorder?.state==='recording')state.recorder.stop()}catch(_){}};mic.addEventListener('pointerup',end);window.addEventListener('pointerup',end);
 load();
-bridge('/health',null,'GET').then(h=>{state.health=h;messages.innerHTML='';msg('assistant','IA de Enlace OT Direccion conectada. Puedo consultar y gestionar las ordenes de este programa, con confirmacion antes de guardar cambios.');replay();setStatus('IA central - solo Enlace OT - en linea','ok')}).catch(()=>{messages.innerHTML='';msg('error','No he podido conectar con la IA central.');setStatus('IA central - no disponible','bad')});
+bridge('/health',null,'GET').then(h=>{state.health=h;messages.innerHTML='';msg('assistant','IA de Enlace OT Direccion conectada. Puedo consultar y gestionar las ordenes de este programa, con confirmacion antes de guardar cambios.');replay();setStatus('IA central - solo Enlace OT - en linea','ok')}).catch(e=>{messages.innerHTML='';msg('error','No he podido conectar con la IA central: '+text(e?.message||e));setStatus('IA central - no disponible','bad')});
 })();
 </script>
 </body>

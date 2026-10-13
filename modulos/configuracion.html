@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="ldh-ai-module" content="configuracion">
 <meta name="ldh-build" content="CONFIG-PLETINA-MM-V2-CONCEPT-GUARD-REF-VISIBLE-V132-20260901">
 <title>LOS DEL HIERRO'S - Gestión Integral</title>
 <style>
@@ -1813,7 +1814,15 @@ _fmtPartialStore(s){
     },
 
     loadData() {
+        // LDH_CONCEPT_CATALOG_GUARD_V1: una instalacion sin catalogo verificado
+        // nunca debe fabricar conceptos de ejemplo ni publicarlos como originales.
         const stored = _getStoreItem('ldh_db');
+        let conceptCatalogVerified = false;
+        try {
+            const catalogCandidate = stored ? JSON.parse(stored) : null;
+            conceptCatalogVerified = !!(catalogCandidate && Array.isArray(catalogCandidate.concepts) && catalogCandidate.concepts.length > 0);
+        } catch (_) { conceptCatalogVerified = false; }
+        this.conceptCatalogVerified = conceptCatalogVerified;
         if(stored) {
             this.state = JSON.parse(stored);
             // Asegurar campos nuevos (migración aditiva)
@@ -1837,18 +1846,15 @@ _fmtPartialStore(s){
             }catch(e){}
 
         } else {
-            // Datos semilla si está vacío
+            // Sin catalogo autoritativo no se generan conceptos de muestra.
+            // El usuario podra crear o importar sus propios conceptos expresamente.
             this.state = {};
             this.state.deliveryCompanies = [];
             this.state.deliveries = [];
             this.state.purchases = [];
             this.state.miniAgenda = [];
-            this.state.concepts = [{
-                name: "Puerta Básica",
-                vars: ["cantidad"],
-                lines: ["tubo40=6000", "pletina=2000"],
-                units: ["cerradura=1", "bisagra=2"]
-            }];
+            this.state.concepts = [];
+            console.warn('[Conceptos] Catalogo no verificado: no se crea ni publica una plantilla provisional.');
         }
         // === LDH RECUPERACION ADITIVA + BLINDAJE DE CONCEPTOS 2026-09-01 ===
         // Los conceptos A/B/C/D se recuperan una sola vez como conceptos vacios.
@@ -1858,7 +1864,9 @@ _fmtPartialStore(s){
                 this.state.conceptTombstones = {};
             }
             const RECOVER_KEY = 'LDH_RECOVER_CONCEPTO_VARIABLE_ABCD_20260901_V1';
-            if(localStorage.getItem(RECOVER_KEY) !== '1') {
+            // Solo ejecutar la migracion ABCD sobre un catalogo previamente existente;
+            // nunca convertir un navegador nuevo/vacio en fuente de conceptos inventados.
+            if(conceptCatalogVerified && localStorage.getItem(RECOVER_KEY) !== '1') {
                 const now = Date.now();
                 const wanted = [
                     'CONCEPTO VARIABLE (A)',
@@ -1953,7 +1961,17 @@ _fmtPartialStore(s){
 
 
 saveData() {
-        _setStoreItem('ldh_db', JSON.stringify(this.state));
+        // LDH_CONCEPT_CATALOG_GUARD_V1: no permitir una escritura vacia accidental.
+        const conceptCount = Array.isArray(this.state?.concepts) ? this.state.concepts.length : 0;
+        if(conceptCount === 0) {
+            let previous = null;
+            try { previous = JSON.parse(_getStoreItem('ldh_db') || 'null'); } catch (_) {}
+            if(Array.isArray(previous?.concepts) && previous.concepts.length > 0) {
+                console.error('[Conceptos] Guardado bloqueado: un catalogo vacio intenta reemplazar otro con datos.');
+                return false;
+            }
+        }
+        return _setStoreItem('ldh_db', JSON.stringify(this.state));
     },
 
     router(viewName) {
@@ -8029,10 +8047,28 @@ window.ejecutarDevolucion = function(matId, maxQty){
     }
 
     let all = collectLocalStorage();
-    try{
-      const remote = await readRemoteStorage(docId);
-      if(remote && remote.all) all = mergeLocalIntoRemoteStorage(remote.all, all);
-    }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar con remoto antes de subir", e); }
+    // LDH_CONCEPT_CATALOG_GUARD_V1: fallo de lectura remota = no publicar.
+    // Si existe nube, hay que fusionar ANTES de generar nuevos chunks.
+    let remote;
+    try {
+      remote = await readRemoteStorage(docId);
+    } catch (e) {
+      console.error('[Conceptos] Subida suspendida: imposible verificar catalogo remoto.', e);
+      return {skipped:true, reason:'remote_catalog_unverified'};
+    }
+    if(remote && remote.all) all = mergeLocalIntoRemoteStorage(remote.all, all);
+    const storedCatalog = parseSafeJSON(all.ldh_db, null);
+    const conceptCount = Array.isArray(storedCatalog?.concepts) ? storedCatalog.concepts.length : 0;
+    const remoteCatalog = remote && remote.all ? parseSafeJSON(remote.all.ldh_db, null) : null;
+    const remoteCount = Array.isArray(remoteCatalog?.concepts) ? remoteCatalog.concepts.length : 0;
+    if(conceptCount === 0 && remoteCount === 0) {
+      console.warn('[Conceptos] Subida suspendida: catalogo vacio y sin origen verificado.');
+      return {skipped:true, reason:'concept_catalog_unverified'};
+    }
+    if(remoteCount > 0 && conceptCount === 0) {
+      console.error('[Conceptos] Subida suspendida: se perderia el catalogo remoto.');
+      return {skipped:true, reason:'concept_catalog_would_be_lost'};
+    }
     const json = JSON.stringify(all);
     const hash = fastHash(json);
     let sharedHash = "";
@@ -9355,6 +9391,133 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,0),{once:true});else setTimeout(boot,0);
 })();
 </script>
+
+
+
+<!-- LDH_AI_GLOBAL_CONFIGURACION_R1_20261007 -->
+<script id="LDH_AI_GLOBAL_CONFIGURACION_R1_20261007">
+(function(){
+  'use strict';
+
+  function txt(id){
+    const el=document.getElementById(id);
+    return el ? String(('value' in el ? el.value : el.textContent) || '').trim() : '';
+  }
+  function safeArray(v){ return Array.isArray(v) ? v : []; }
+  function visible(el){
+    if(!el) return false;
+    const cs=getComputedStyle(el);
+    return cs.display!=='none' && cs.visibility!=='hidden';
+  }
+  function tableRows(tableId){
+    const table=document.getElementById(tableId);
+    if(!table) return [];
+    return Array.from(table.querySelectorAll('tbody tr')).map(tr=>{
+      const inputs=Array.from(tr.querySelectorAll('input,select'));
+      const values=inputs.map(el=>String(el.value||'').trim());
+      return {
+        material: values[0]||'',
+        cantidad: values[1]||'',
+        variable: values[2]||'',
+        pintar: !!tr.querySelector('input[type="checkbox"]:checked'),
+        stockMaterialId: String(tr.dataset.stockMatId||'').trim()
+      };
+    }).filter(r=>r.material||r.cantidad||r.variable||r.stockMaterialId);
+  }
+  function standardContext(){
+    const state=(window.App&&App.state)||{};
+    const selected=txt('cfgListSel');
+    const concept=safeArray(state.concepts).find(c=>c&&c.name===selected)||null;
+    const tableMode=visible(document.getElementById('cfgTableEditor'));
+    const currentName=txt('cfgName')||selected;
+    const vars=txt('cfgVars').split(',').map(s=>s.trim()).filter(Boolean);
+    const lines=concept&&Array.isArray(concept.lines)
+      ? concept.lines.slice()
+      : txt('cfgTxtLines').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+    const units=concept&&Array.isArray(concept.units)
+      ? concept.units.slice()
+      : txt('cfgTxtUnits').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+    const links=(concept&&concept.stockLinks)||{lines:{},units:{}};
+    const planRows=Array.from(document.querySelectorAll('#conceptPlanList .ldh-plan-row')).map(row=>{
+      const name=row.querySelector('.ldh-plan-name')?.textContent?.trim()||'';
+      const meta=row.querySelector('.ldh-plan-meta')?.textContent?.trim()||'';
+      return {name,meta};
+    }).filter(x=>x.name||x.meta);
+    return {
+      mode:'concepto_estandar',
+      selectedConcept:selected||null,
+      currentName:currentName||null,
+      variables:vars,
+      profiles:lines,
+      accessories:units,
+      stockLinks:{
+        profiles:Object.assign({},links.lines||{}),
+        accessories:Object.assign({},links.units||{})
+      },
+      editor:tableMode?'tablas':'texto',
+      plans:{countText:document.getElementById('conceptPlanCount')?.textContent?.trim()||'',items:planRows.slice(0,20)},
+      pletinaRule:'En perfiles de pletina se configuran los mm reales utilizados por unidad; la compra por barras se resuelve después en Preparación.'
+    };
+  }
+  function variableContext(){
+    const state=(window.App&&App.state)||{};
+    const type=txt('ldhVcType')||'simple';
+    const simple=(type!=='compound');
+    const prefix=simple?'ldhVcSimple':'ldhVcPart';
+    const selectedId=txt('ldhVcSaved');
+    const selected=safeArray(state.variableConceptsV1).find(v=>v&&String(v.id||'')===selectedId)||null;
+    const partName=simple?'':txt('ldhVcPartName');
+    const partButtons=Array.from(document.querySelectorAll('#ldhVcParts button')).map(b=>b.textContent.trim()).filter(Boolean);
+    return {
+      mode:'concepto_variable',
+      selectedId:selectedId||null,
+      savedName:selected&&selected.name||null,
+      currentName:txt('ldhVcName')||selected?.name||null,
+      type:type,
+      archived:!!(selected&&selected.archived),
+      currentPart:partName||null,
+      parts:partButtons,
+      variables:(txt(simple?'ldhVcSimpleVars':'ldhVcPartVars')||'').split(',').map(s=>s.trim()).filter(Boolean),
+      profiles:tableRows(prefix+'Lines'),
+      accessories:tableRows(prefix+'Units'),
+      paintInfo:txt(prefix+'PaintInfo')||null,
+      status:txt('ldhVcStatus')||null
+    };
+  }
+
+  window.LDH_AI_CONTEXT_PROVIDER=function(){
+    const state=(window.App&&App.state)||{};
+    const variablePanel=document.getElementById('ldhVariableConceptPanel');
+    const isVariable=visible(variablePanel) || location.hash==='#variable';
+    return {
+      module:'Configuración de Conceptos',
+      section:isVariable?'Conceptos variables / a medida':'Conceptos estándar',
+      counts:{
+        standardConcepts:safeArray(state.concepts).length,
+        variableConcepts:safeArray(state.variableConceptsV1).length
+      },
+      current:isVariable?variableContext():standardContext(),
+      visibleActions:[
+        'Guardar Concepto','Eliminar','Exportar JSON','Importar JSON','Vincular plano',
+        'Conceptos estándar','Conceptos variables / a medida','Cálculo de pintura'
+      ],
+      readOnlyNotice:'Este contexto es solo de lectura para el asistente. La IA puede explicar y guiar, pero no guardar, borrar ni modificar conceptos.'
+    };
+  };
+
+  function loadGlobalAI(){
+    if(document.querySelector('script[data-ldh-ai-global-loader="configuracion"]')) return;
+    const s=document.createElement('script');
+    s.src='../asistente_ia_global.js';
+    s.defer=true;
+    s.dataset.ldhAiGlobalLoader='configuracion';
+    document.body.appendChild(s);
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',loadGlobalAI,{once:true});
+  else loadGlobalAI();
+})();
+</script>
+<!-- /LDH_AI_GLOBAL_CONFIGURACION_R1_20261007 -->
 
 </body></html>
 
