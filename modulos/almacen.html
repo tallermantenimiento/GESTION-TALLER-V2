@@ -54,6 +54,22 @@
     @media(max-width:900px){.wrap{padding:18px 10px 40px}table,thead,tbody,tr,td,th{display:block}thead{display:none}tr{border-bottom:1px solid rgba(148,163,184,.2);padding:10px}td{border:0;padding:6px 0}.actions{justify-content:flex-start}}
   </style>
   <meta name="ldh-ai-module" content="almacen">
+<style id="LDH_PINTURA_DIRECTA_ALMACEN_ESTILO">
+/* Corporate style: light outside, dark navy cards; ordinary delivery layout unchanged */
+html,body{background:#eaf1f8!important}
+.wrap{background:#eaf1f8;color:#f8fafc}
+#ldhDirectWarehouse{border-color:#075985;background:linear-gradient(145deg,#0d2843,#09172c)}
+#ldhDirectWarehouse .ldh-dir-comp{margin:12px 0;border:1px solid #38bdf899;border-radius:14px;overflow:hidden;background:#07172e}
+#ldhDirectWarehouse summary{cursor:pointer;list-style:none;padding:14px;font-weight:900;background:#153856;color:white}
+#ldhDirectWarehouse details details{margin:10px;border:1px solid #c084fc65;border-radius:12px;overflow:hidden}
+#ldhDirectWarehouse details details summary{background:#351540}
+#ldhDirectWarehouse .ldh-dir-body{padding:15px;background:#07172e}
+#ldhDirectWarehouse .ldh-dir-meta{color:#b5c9db;font-size:12px;margin:7px 0 12px}
+#ldhDirectWarehouse .ldh-dir-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+#ldhDirectWarehouse .ldh-dir-stat{display:inline-block;border:1px solid #284e70;border-radius:12px;padding:9px 14px;margin-right:7px;color:#e2e8f0}
+#ldhDirectWarehouse .ldh-dir-stat strong{display:block;color:white;font-size:20px}
+#ldhDirectWarehouse .ldh-dir-notice{padding:10px;border:1px solid #fbbf2480;border-radius:10px;background:#38260e;color:#fce7ac;font-size:12px;margin:12px 0}
+</style>
 </head>
 <body>
   <div class="topbar">
@@ -76,6 +92,14 @@
       <span id="status" class="status">Cargando...</span><span id="cloudStatus" class="status">Nube: esperando...</span>
     </div>
 
+    <section class="card" id="ldhDirectWarehouse" aria-label="Órdenes de solo pintura" style="display:none">
+      <h2 class="section-title">🎨 SOLO PINTURA · Pendientes de entrega <span class="badge b-blue" id="ldhDirectBadge">0</span></h2>
+      <div class="ldh-dir-notice">Recepción directa desde Cabina. Los consumos se gestionan exclusivamente en Cabina; aquí solo se registran entregas. FAB/PINT/ALM/ENT normales no se modifican.</div>
+      <div id="ldhDirectWarehouseOrders"></div>
+      <h2 class="section-title" style="margin-top:20px">✅ SOLO PINTURA · Entregados</h2>
+      <div id="ldhDirectWarehouseDelivered"></div>
+      <div id="ldhDirectWarehouseCloud" class="muted">Conectando con Agenda…</div>
+    </section>
     <section class="card">
       <h2 class="section-title">📦 Pedidos en almacén</h2>
       <div id="list"></div>
@@ -1552,5 +1576,68 @@
 </script>
 <script src="../asistente_ia_global.js?v=20261007-3"></script>
 
+<script type="module" id="LDH_ALMACEN_SOLO_PINTURA_CLOUD_R1">
+import {initializeApp,getApps} from 'https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js';
+import {getAuth,onAuthStateChanged,signInAnonymously} from 'https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js';
+import {getFirestore,collection,doc,onSnapshot,query,where,runTransaction} from 'https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js';
+(function(){
+  const CFG={
+    apiKey: "AIzaSyDGIfICSG_KE6QzmKHj3CzgvYeHaUcgARo",
+    authDomain: "gestion-taller-2a439.firebaseapp.com",
+    projectId: "gestion-taller-2a439",
+    storageBucket: "gestion-taller-2a439.firebasestorage.app",
+    messagingSenderId: "498579673950",
+    appId: "1:498579673950:web:eb626781a5b509957db5cf"
+  };
+  const app=getApps().find(a=>a.name==='ldh-almacen-direct-orders-r1')||initializeApp(CFG,'ldh-almacen-direct-orders-r1');
+  const auth=getAuth(app), db=getFirestore(app), col=collection(db,'taller_data','work_orders','orders');
+  const root=document.getElementById('ldhDirectWarehouse'),pending=document.getElementById('ldhDirectWarehouseOrders'),done=document.getElementById('ldhDirectWarehouseDelivered'),status=document.getElementById('ldhDirectWarehouseCloud');
+  const esc=v=>String(v??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
+  const name=v=>String(v??'').trim(), n=v=>{const x=Number(v);return Number.isFinite(x)?x:0};
+  const qty=o=>Math.max(1,Math.floor(n(o.directPaintV1?.quantity||o.quantity)||1));
+  const delivered=o=>Math.min(qty(o),Math.max(0,Math.floor(n(o.directPaintV1?.deliveryV1?.delivered))));
+  const key=o=>name(o.id), ref=o=>name(o.reference||o.directPaintV1?.reference);
+  const valid=o=>o&&o.directPaintWarehouseV1===true&&o.directPaintV1?.status==='completed'&&o.directPaintV1?.active===false&&o.status!=='cancelled'&&o.status!=='deleted';
+  root.style.display='block';pending.innerHTML='<div class="empty">Esperando órdenes SOLO PINTURA…</div>';done.innerHTML='<div class="empty">Sin entregas cargadas.</div>';
+  let rows=[], unsubscribe=null, busy=false;
+  const preserved=()=>new Set([...root.querySelectorAll('details[open]')].map(x=>x.dataset.fold).filter(Boolean));
+  function render(){
+    const opened=preserved(),s=name(document.getElementById('q')?.value).toLowerCase(),filter=name(document.getElementById('companyFilter')?.value).toLowerCase();
+    const eligible=rows.filter(valid).filter(o=>!filter||name(o.companyName).toLowerCase()===filter).filter(o=>!s||[ref(o),o.companyName,o.identification,o.description,o.directPaintV1?.ral].some(x=>name(x).toLowerCase().includes(s)));
+    const create=orders=>{if(!orders.length)return '<div class="empty">No hay órdenes SOLO PINTURA en este estado.</div>';const by={};orders.forEach(o=>{const c=name(o.companyName||o.directPaintV1?.companyName)||'Sin empresa';(by[c]||(by[c]=[])).push(o)});return Object.entries(by).sort((a,b)=>a[0].localeCompare(b[0],'es')).map(([company,jobs])=>'<details class="ldh-dir-comp" data-fold="company:'+esc(company)+'" '+(opened.has('company:'+company)?'open':'')+'><summary>🏭 '+esc(company)+' · '+jobs.length+' OT</summary>'+jobs.map(o=>{const count=qty(o),sent=delivered(o),left=count-sent,id=key(o),fold='ot:'+id;return '<details data-fold="'+esc(fold)+'" '+(opened.has(fold)?'open':'')+'><summary>🎨 '+esc(ref(o))+' · '+esc(o.identification||o.directPaintV1?.identification||o.description||'Pintura')+' · '+(left?'ALM '+left:'ENT '+sent)+'</summary><div class="ldh-dir-body"><div class="ldh-dir-meta">'+esc(company)+' · '+esc(o.directPaintV1?.ral||o.ral)+' · '+esc(o.description||'')+' · SOLO PINTURA · sin Fabricación</div><span class="ldh-dir-stat"><strong>'+count+'</strong>Unidades</span><span class="ldh-dir-stat"><strong>'+left+'</strong>Pendientes</span><span class="ldh-dir-stat"><strong>'+sent+'</strong>Entregadas</span><div class="ldh-dir-actions">'+(left?'<button class="btn green" data-direct-id="'+esc(id)+'" data-direct-op="deliver">📦 Entregar</button>':'')+(sent&&o.status==='pending'?'<button class="btn orange" data-direct-id="'+esc(id)+'" data-direct-op="revert">↩ Rectificar entrega</button>':'')+'</div></div></details>'}).join('')+'</details>').join('')};
+    pending.innerHTML=create(eligible.filter(o=>o.status==='pending'&&delivered(o)<qty(o)));
+    done.innerHTML=create(eligible.filter(o=>delivered(o)>=qty(o)));
+    const left=eligible.filter(o=>o.status==='pending').reduce((v,o)=>v+qty(o)-delivered(o),0);
+    document.getElementById('ldhDirectBadge').textContent=left+' uds';
+    root.style.display='block';
+  }
+  async function perform(id,back){
+    if(busy)return;const o=rows.find(x=>key(x)===id&&valid(x)&&x.status==='pending');if(!o)return alert('La OT ya no está disponible. Actualiza.');
+    const max=back?delivered(o):qty(o)-delivered(o);if(max<=0)return;
+    const raw=prompt(back?'Unidades a rectificar:':'Unidades a entregar:',String(max));if(raw===null)return;
+    const count=Number(raw);if(!Number.isInteger(count)||count<1||count>max)return alert('Introduce un número entero de 1 a '+max);
+    if(!confirm((back?'Rectificar':'Registrar entrega de')+' '+count+' unidad(es) · '+ref(o)+'? Esta operación se guardará en la nube.'))return;
+    busy=true;
+    try{await runTransaction(db,async tx=>{
+      const record=doc(col,id),snap=await tx.get(record);if(!snap.exists())throw Error('La orden ya no existe');const live={id,...snap.data()};if(!valid(live)||live.status!=='pending')throw Error('La orden ya no está disponible');
+      const total=qty(live),before=delivered(live),after=before+(back?-count:count);if(after<0||after>total)throw Error('La cantidad ya ha cambiado: actualiza antes de continuar');
+      const old=live.directPaintV1.deliveryV1||{},history=Array.isArray(old.history)?old.history.slice(-79):[];
+      history.push({type:back?'rectificacion_entrega':'entrega',quantity:count,before,after,atMs:Date.now(),source:'almacen_direct_r1'});
+      tx.update(record,{'directPaintV1.deliveryV1':{delivered:after,history,updatedAtMs:Date.now()},updatedAtMs:Date.now()});
+    });status.textContent='Entrega confirmada en nube';}
+    catch(e){console.error(e);alert('No se ha podido confirmar en la nube. No se considera entregado: '+String(e.message||e));}
+    finally{busy=false}
+  }
+  root.addEventListener('click',e=>{const btn=e.target.closest('button[data-direct-id]');if(btn)perform(btn.dataset.directId,btn.dataset.directOp==='revert')});
+  const originalFilters=['q','companyFilter'];originalFilters.forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener(id==='q'?'input':'change',()=>render())});
+  onAuthStateChanged(auth,async user=>{
+    if(unsubscribe){unsubscribe();unsubscribe=null;}if(!user){status.textContent='Conexión pendiente de iniciar sesión';try{await signInAnonymously(auth)}catch(e){status.textContent='No disponible: autenticación de Agenda denegada';}return;}
+    status.textContent='Consultando entregas SOLO PINTURA…';
+    unsubscribe=onSnapshot(query(col,where('directPaintWarehouseV1','==',true)),snap=>{
+      rows=snap.docs.map(d=>({id:d.id,...d.data()}));status.textContent='Órdenes SOLO PINTURA sincronizadas';render();
+    },e=>{console.error(e);status.textContent='No se pueden leer las OT de Agenda: '+String(e.code||e.message||e)});
+  });
+})();
+</script>
 </body>
 </html>

@@ -1920,6 +1920,8 @@ tbody td,td{border-color:rgba(148,163,184,.12)!important}
         <button type="button" class="wo-cancel" onclick="WorkOrders.closeModal()">Cancelar</button>
         <button type="button" id="woSaveBtn" class="wo-save" onclick="WorkOrders.saveWork()">Guardar trabajo</button>
         <button type="button" id="woDirectSaveSendBtn" class="wo-save wo-direct-save-send" onclick="WorkOrders.prepareDirectPaintFromForm()">🎨 GUARDAR Y ENVIAR A PINTURA</button>
+        <button type="button" id="woCalcPaintOnlyV33" class="wo-save" hidden onclick="WorkOrders.goPaintCalculationV33()">🧮 MANDAR A CÁLCULO DE PINTURA</button>
+        <button type="button" id="woSendPaintOnlyV33" class="wo-save wo-direct-save-send" hidden onclick="WorkOrders.sendCalculatedPaintV33()">🎨 ENVIAR A PINTURA</button>
         <button type="button" id="woSavePrintBtn" class="wo-save-print" onclick="WorkOrders.saveAndPrint()">🖨 Imprimir orden</button>
       </div>
     </div>
@@ -8013,6 +8015,16 @@ window.ejecutarDevolucion = function(matId, maxQty){
     if(f.entregado>0) parts.push(`<span class="wo-phase-pill ent">ENT <strong>${esc(f.entregado)}</strong></span>`);
     return parts.length?`<span class="wo-phase-pills">${parts.join('')}</span>`:'';
   }
+  function directPaintDeliveryPills(order){
+    const d=normalizeDirectPaintV1(order&&order.directPaintV1);
+    if(!d||d.active||d.status!=='completed')return '';
+    const q=Math.max(1,Math.round(Number(d.quantity)||1));
+    const delivered=Math.min(q,Math.max(0,Math.floor(Number(d.deliveryV1&&d.deliveryV1.delivered)||0)));
+    const waiting=q-delivered, parts=[];
+    if(waiting)parts.push(`<span class="wo-phase-pill alm">ALM <strong>${waiting}</strong></span>`);
+    if(delivered)parts.push(`<span class="wo-phase-pill ent">ENT <strong>${delivered}</strong></span>`);
+    return parts.length?`<span class="wo-phase-pills">${parts.join('')}</span>`:'';
+  }
   function workflowView(order){
     const state = normalizeWorkflowState(order);
     const views={
@@ -8164,6 +8176,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       estimateConfigured:d.estimateConfigured===true||!!normalizeDirectPaintEstimateV1(d.estimateV1||d.estimate),
       estimateV1:normalizeDirectPaintEstimateV1(d.estimateV1||d.estimate),
       routeType:normText(d.routeType)||'solo_pintura',
+      deliveryV1: d.deliveryV1&&typeof d.deliveryV1==='object' ? {delivered:Math.max(0,Math.min(Math.max(1,Number(d.quantity)||1),Number(d.deliveryV1.delivered)||0)),history:Array.isArray(d.deliveryV1.history)?d.deliveryV1.history.slice(-100):[]} : {delivered:0,history:[]},
       source:normText(d.source)||'agenda_direct_paint_v1'
     };
   }
@@ -8203,6 +8216,15 @@ window.ejecutarDevolucion = function(matId, maxQty){
       operationalNoticeV1: normText(o.operationalNoticeV1 || o.operationalNotice || o.avisoOperativo || o.aviso),
       operationalNoticeUpdatedAtMs: Number(o.operationalNoticeUpdatedAtMs || o.avisoUpdatedAtMs)||0,
       directPaintV1,
+      directPaintCalcV33: o.directPaintCalcV33 && typeof o.directPaintCalcV33==='object' ? {
+        version:1, status:normText(o.directPaintCalcV33.status),
+        estimateV1:normalizeDirectPaintEstimateV1(o.directPaintCalcV33.estimateV1),
+        paintName:normText(o.directPaintCalcV33.paintName),
+        sourceRal:normText(o.directPaintCalcV33.sourceRal),
+        sourceCompanyId:normText(o.directPaintCalcV33.sourceCompanyId),
+        sourceQuantity:Number(o.directPaintCalcV33.sourceQuantity)||0,
+        updatedAtMs:Number(o.directPaintCalcV33.updatedAtMs)||0
+      } : null,
       directPaintActiveV1: !!(directPaintV1 && directPaintV1.active),
       priority: Math.max(1, Math.round(Number(o.priority)||1)),
       status: normText(o.status) || 'pending',
@@ -8944,7 +8966,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
           ].filter(Boolean).join(' ');
           return `<tr data-ldh-order-id="${esc(o.id)}" data-ldh-order-ref="${esc(o.reference || '')}"${rowClasses ? ` class="${rowClasses}"` : ''}>
             <td><select class="wo-priority" aria-label="Elegir orden de ejecución de ${esc(o.reference)}" title="Seleccionar posición" onchange="WorkOrders.changePriority('${esc(o.id)}',this)">${Array.from({length:rows.length},(_,position)=>`<option value="${position+1}"${position===index?' selected':''}>${position+1}</option>`).join('')}</select></td>
-            <td class="wo-reference">${orderRefHtml(o)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${directPaintPill(o)}${o.operationalNoticeV1?`<span class="wo-operational-notice-pill">⚠ AVISO · ${esc(o.operationalNoticeV1)}</span>`:''}${phasePills(o)}${cancellationPending?'<span class="wo-cancel-request-pill">⚠ ANULACIÓN PENDIENTE</span>':''}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}${priorityNotice?'<span class="wo-new-order-pill">↕ CAMBIO PRIORIDAD</span>':''}</td>
+            <td class="wo-reference">${orderRefHtml(o)}${workflow.label?`<span class="wo-workflow-pill ${workflow.pillClass}"><span class="wo-workflow-dot"></span>${esc(workflow.label)}</span>`:''}${directPaintPill(o)}${!directPending&&o.directPaintCalcV33?.status==='pending'?'<span class="wo-direct-paint-pill">🧮 PENDIENTE CÁLCULO PINTURA</span>':(!directPending&&o.directPaintCalcV33?.status==='calculated'?'<span class="wo-direct-paint-pill">🧮 CÁLCULO PINTURA LISTO</span>':'')}${o.operationalNoticeV1?`<span class="wo-operational-notice-pill">⚠ AVISO · ${esc(o.operationalNoticeV1)}</span>`:''}${phasePills(o)}${directPaintDeliveryPills(o)}${cancellationPending?'<span class="wo-cancel-request-pill">⚠ ANULACIÓN PENDIENTE</span>':''}${newOrderNotice?'<span class="wo-new-order-pill">＋ NUEVA ORDEN</span>':''}${priorityNotice?'<span class="wo-new-order-pill">↕ CAMBIO PRIORIDAD</span>':''}</td>
             <td>${esc(fmtDate(o.entryDate))}</td>
             <td>${esc(fmtDate(o.deliveryDate))}</td>
             <td class="wo-company">${esc(o.companyName)}</td>
@@ -8953,7 +8975,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
             <td>${esc(finishText(o))}</td>
             <td><div class="wo-actions">
               ${visibleNotice?`<button type="button" class="wo-small-btn wo-seen-new-btn" onclick="WorkOrders.acknowledgeOrderNotifications('${esc(o.id)}',this)">✓ VISTO</button>`:''}
-              ${!directPending && ['','preparing'].includes(workflow.state)?`<button type="button" class="wo-small-btn wo-send-calc-btn" onclick="WorkOrders.sendToCalculation('${esc(o.id)}')">${workflow.state === 'preparing' ? '↗ ABRIR CÁLCULO' : '➡ MANDAR A CÁLCULO'}</button>`:''}
+              ${!directPending && !o.directPaintCalcV33 && ['','preparing'].includes(workflow.state)?`<button type="button" class="wo-small-btn wo-send-calc-btn" onclick="WorkOrders.sendToCalculation('${esc(o.id)}')">${workflow.state === 'preparing' ? '↗ ABRIR CÁLCULO' : '➡ MANDAR A CÁLCULO'}</button>`:''}
               ${directEligible?`<button type="button" class="wo-small-btn wo-direct-paint-send-btn" onclick="WorkOrders.openDirectPaintConfiguratorForOrderV28('${esc(o.id)}')">🎨 ENVIAR SOLO A PINTURA</button>`:''}
               ${directPending?`<button type="button" class="wo-small-btn wo-direct-paint-active-btn" disabled>🎨 EN CABINA</button>`:''}
               <button type="button" class="wo-small-btn" onclick="WorkOrders.viewOrder('${esc(o.id)}')">Ver</button>
@@ -9130,6 +9152,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
       this.renderCompanyOptions();
       document.getElementById('woCompany').value = '';
       const directBtn=document.getElementById('woDirectSaveSendBtn');if(directBtn)directBtn.hidden=false;
+      const calcBtn=document.getElementById('woCalcPaintOnlyV33');if(calcBtn)calcBtn.hidden=true;
+      const sendBtn=document.getElementById('woSendPaintOnlyV33');if(sendBtn)sendBtn.hidden=true;
       this.openModal();
     },
 
@@ -9158,6 +9182,9 @@ window.ejecutarDevolucion = function(matId, maxQty){
       document.getElementById('woPrimer').checked = !!o.primer;
       document.getElementById('woRal').value = o.ral;
       const directBtn=document.getElementById('woDirectSaveSendBtn');if(directBtn)directBtn.hidden=true;
+      const eligible=o.status==='pending'&&!o.compositeV1&&!o.directPaintV1?.active&&!normalizeWorkflowState(o)&&Object.values(phaseFlow(o)).every(v=>Number(v)===0);
+      const calcBtn=document.getElementById('woCalcPaintOnlyV33');if(calcBtn)calcBtn.hidden=!eligible;
+      const sendBtn=document.getElementById('woSendPaintOnlyV33');if(sendBtn)sendBtn.hidden=!(eligible&&o.directPaintCalcV33?.status==='calculated'&&o.directPaintCalcV33?.estimateV1&&o.directPaintCalcV33?.sourceRal===o.ral&&o.directPaintCalcV33?.sourceCompanyId===o.companyId&&Number(o.directPaintCalcV33?.sourceQuantity)===Number(o.quantity));
       this.openModal();
     },
 
@@ -9385,6 +9412,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
         row.operationalNoticeV1 = normText(existing.operationalNoticeV1);
         row.operationalNoticeUpdatedAtMs = Number(existing.operationalNoticeUpdatedAtMs)||0;
         row.directPaintV1 = existing.directPaintV1 ? normalizeDirectPaintV1(existing.directPaintV1) : null;
+        row.directPaintCalcV33 = existing.directPaintCalcV33 || null;
         row.directPaintActiveV1 = !!(row.directPaintV1 && row.directPaintV1.active);
         row.compositeV1 = existing.compositeV1 ? normalizeCompositeV1(existing.compositeV1,existing) : null;
       }
@@ -9588,10 +9616,66 @@ window.ejecutarDevolucion = function(matId, maxQty){
       return true;
     },
 
+    // V33: solo OTs guardadas, sin consumo ni cambio de fase al entrar en calculo.
+    async goPaintCalculationV33(){
+      const id=normText(document.getElementById('woEditId')?.value);
+      const o=this.orders.find(x=>x.id===id&&x.status==='pending');
+      if(!o)return alert('Guarda la OT antes de mandarla a Cálculo de Pintura.');
+      const f=phaseFlow(o);
+      if(o.compositeV1||o.directPaintV1?.active||normalizeWorkflowState(o)||Object.values(f).some(v=>Number(v)>0))return alert('Esta OT ya ha iniciado otro circuito. No se modificará.');
+      if(!normText(o.ral))return alert('Completa primero el Lacado RAL y guarda la orden.');
+      const row=this.collectForm();
+      if(JSON.stringify([row.reference,row.ral,row.quantity,row.companyId,row.description])!==JSON.stringify([o.reference,o.ral,o.quantity,o.companyId,o.description]))return alert('Hay cambios sin guardar en esta ficha. Pulsa Guardar trabajo y vuelve a abrirla antes de continuar.');
+      const request={version:1,orderId:o.id,reference:o.reference,companyId:o.companyId,companyName:o.companyName,quantity:o.quantity,ral:o.ral,identification:orderIdentification(o),createdAtMs:Date.now()};
+      if(!this.cloud?.saveOrder&&!this.cloud?.saveOrders)return alert('Espera a que Agenda esté conectada antes de iniciar Cálculo de Pintura.');
+      const previous=o.directPaintCalcV33;
+      o.directPaintCalcV33={version:1,status:'pending',estimateV1:previous?.estimateV1||null,paintName:previous?.paintName||'',updatedAtMs:Date.now()};
+      try{
+        if(this.cloud.saveOrder)await this.cloud.saveOrder(o);else await this.cloud.saveOrders([o]);
+        writeOrders(this.orders);this.render();
+        sessionStorage.setItem('ldh_paint_calculation_request_v33',JSON.stringify(request));
+        window.location.href='calculo_pintura.html?ldh_paint_ot='+encodeURIComponent(o.id);
+      }catch(e){o.directPaintCalcV33=previous;console.error('No se pudo dejar cálculo pendiente',e);alert('No se ha confirmado en la nube el inicio del cálculo. No se ha enviado a Pintura.');}
+    },
+    async sendCalculatedPaintV33(){
+      const id=normText(document.getElementById('woEditId')?.value);
+      const o=this.orders.find(x=>x.id===id&&x.status==='pending');
+      if(!o)return;
+      const calc=o.directPaintCalcV33;
+      if(calc?.status!=='calculated'||!normalizeDirectPaintEstimateV1(calc.estimateV1))return alert('Primero realiza y guarda el Cálculo de Pintura de esta OT.');
+      if(calc.sourceRal!==o.ral||calc.sourceCompanyId!==o.companyId||Number(calc.sourceQuantity)!==Number(o.quantity))return alert('La empresa, RAL o cantidad han cambiado tras el cálculo. Debes recalcular antes de enviar a Cabina.');
+      const row=this.collectForm();
+      if(JSON.stringify([row.reference,row.ral,row.quantity,row.companyId,row.description])!==JSON.stringify([o.reference,o.ral,o.quantity,o.companyId,o.description]))return alert('Hay cambios sin guardar. Guarda la ficha y vuelve a abrirla antes de enviar a Cabina.');
+      if(!confirm('La OT '+o.reference+' se enviará a Cabina como SOLO PINTURA.\n\nSe usará el cálculo guardado ('+calc.estimateV1.surfaceM2+' m²; '+calc.estimateV1.estimatedLiters+' L).\n\nNo pasará por Cálculo de Hierro, Preparación ni Fabricación. ¿Continuar?'))return;
+      await this.sendDirectToPaint(id,{estimate:calc.estimateV1,skipConfirm:true});
+      if(o.directPaintV1?.active)this.closeModal();
+    },
+    async acceptPaintCalculationV33(payload){
+      if(!payload||payload.version!==1)return;
+      const o=this.orders.find(x=>x.id===payload.orderId&&x.status==='pending');
+      if(!o||o.reference!==payload.reference)return;
+      const est=normalizeDirectPaintEstimateV1(payload.estimateV1);
+      if(!est||!(est.surfaceM2>0)||!(est.estimatedLiters>0))return;
+      if(!this.cloud?.saveOrder&&!this.cloud?.saveOrders)return;
+      if(o.directPaintV1?.active||o.compositeV1||normalizeWorkflowState(o)||Object.values(phaseFlow(o)).some(v=>Number(v)>0))return;
+      if(o.ral!==payload.ral||o.companyId!==payload.companyId||Number(o.quantity)!==Number(payload.quantity))return alert('La OT cambió desde que se calculó. El cálculo no se ha aplicado; vuelve a calcular con los datos actuales.');
+      const old=o.directPaintCalcV33;
+      o.directPaintCalcV33={version:1,status:'calculated',estimateV1:est,paintName:normText(payload.paintName),sourceRal:o.ral,sourceCompanyId:o.companyId,sourceQuantity:o.quantity,updatedAtMs:Date.now()};
+      try{
+        if(this.cloud.saveOrder)await this.cloud.saveOrder(o);else await this.cloud.saveOrders([o]);
+        writeOrders(this.orders);this.render();
+        sessionStorage.removeItem('ldh_paint_calculation_result_v33');
+        alert('Cálculo guardado en la OT '+o.reference+'. Sigue en Agenda. Abre su ficha y pulsa ENVIAR A PINTURA cuando quieras.');
+      }catch(e){o.directPaintCalcV33=old;console.error(e);this.updateSyncStatus('Cálculo pendiente de sincronización',false);}
+    },
     async sendDirectToPaint(id,options){
       options=options&&typeof options==='object'?options:{};
       const order = this.orders.find(item=>item.id===id && item.status === 'pending');
       if(!order) return;
+      if(!order.directPaintCalcV33 || order.directPaintCalcV33.status!=='calculated' || !normalizeDirectPaintEstimateV1(order.directPaintCalcV33.estimateV1) || order.directPaintCalcV33.sourceRal!==order.ral || order.directPaintCalcV33.sourceCompanyId!==order.companyId || Number(order.directPaintCalcV33.sourceQuantity)!==Number(order.quantity)){
+        alert('Antes de enviar a Cabina, completa y guarda el Cálculo de Pintura desde la ficha de la OT.');
+        return;
+      }
       if(order.directPaintV1&&order.directPaintV1.active){alert('Esta OT ya está activa en PINTURA DIRECTA.');return;}
       if(!this.cloud?.saveOrders && !this.cloud?.saveOrder){
         alert('Espera a que aparezca “Sincronización: conectada” antes de enviar el trabajo directamente a Pintura. No se ha cambiado ningún dato.');
@@ -9612,7 +9696,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
         return;
       }
       const qty=Math.max(1,Math.round(Number(order.quantity)||1));
-      const ident=orderIdentification(order),estimate=normalizeDirectPaintEstimateV1(options.estimate),cabinNote=normText(options.cabinNote || order.directPaintV1?.cabinNote || '').slice(0,220);
+      const ident=orderIdentification(order),estimate=normalizeDirectPaintEstimateV1(order.directPaintCalcV33.estimateV1),cabinNote=normText(options.cabinNote || order.directPaintV1?.cabinNote || '').slice(0,220);
       const estimateText=estimate?`\nSuperficie: ${estimate.surfaceM2.toLocaleString('es-ES',{maximumFractionDigits:3})} m²\nEstimación: ${estimate.estimatedLiters.toLocaleString('es-ES',{maximumFractionDigits:3})} L · ${estimate.estimatedBotesEq.toLocaleString('es-ES',{maximumFractionDigits:3})} botes eq 4 L`:'\nCálculo de superficie: SIN CONFIGURAR';
       const msg=`¿Enviar SOLO A PINTURA?\n\nReferencia: ${order.reference}\nEmpresa: ${order.companyName}\nCantidad: ${qty}\nRAL: ${order.ral}\n${ident?'Identificación: '+ident+'\n':''}${cabinNote?'Nota Cabina: '+cabinNote+'\n':''}${estimateText}\n\nEste circuito NO pasa por Cálculo, Preparación ni Fabricación y NO crea cantidades FAB/PINT/ALM/ENT. El consumo real se registrará después desde la Terminal de Cabina.`;
       if(!options.skipConfirm&&!confirm(msg)) return;
@@ -12092,4 +12176,37 @@ Por seguridad no se tocará hasta limpiar primero esa evidencia.`);
 
 <!-- LDH_ASISTENTE_IA_GLOBAL_R1_20261007 · cargador comun, sin duplicar el asistente -->
 <script src="../asistente_ia_global.js?v=20261007-2"></script>
+<style>#woCalcPaintOnlyV33[hidden],#woSendPaintOnlyV33[hidden]{display:none!important}</style>
+<script id="LDH_AGENDA_V33_PAINT_CALC_RETURN">
+(function(){
+  let busy=false;
+  function check(){
+    if(busy)return;
+    let raw;try{raw=sessionStorage.getItem('ldh_paint_calculation_result_v33');}catch(e){return;}
+    if(!raw||!window.WorkOrders)return;
+    
+    const w=window.WorkOrders;
+    // En produccion sigue siendo obligatoria la carga confirmada de nube.
+    // En TEST_AISLADO, la nube real esta bloqueada; aceptar solo una OT presente
+    // en el registro local y siempre con las validaciones originales de referencia,
+    // empresa, RAL y cantidad de acceptPaintCalculationV33.
+    if(!w.cloudOrdersSnapshotReady)return;
+    try{const payload=JSON.parse(raw);busy=true;Promise.resolve(window.WorkOrders.acceptPaintCalculationV33(payload)).finally(()=>{busy=false;});}catch(e){busy=false;console.warn('Retorno Cálculo de Pintura',e);}
+  }
+  function openOrdersOnReturn(){
+    const params=new URLSearchParams(location.search);
+    if(params.get('ldh_paint_return')!=='1')return;
+    const w=window.WorkOrders;
+    if(!w||typeof w.showPanel!=='function')return;
+    w.showPanel('orders');
+    try{history.replaceState(null,'',location.pathname+'#orders');}catch(_){ }
+  }
+  window.addEventListener('load',()=>{openOrdersOnReturn();check();});
+  if(new URLSearchParams(location.search).get('ldh_paint_return')==='1'){
+    let tries=0;const navTimer=setInterval(()=>{openOrdersOnReturn();if(++tries>=10 || window.WorkOrders?.activePanel==='orders')clearInterval(navTimer);},300);
+  }
+  const timer=setInterval(()=>{check();if(!sessionStorage.getItem('ldh_paint_calculation_result_v33'))clearInterval(timer);},1800);
+  setTimeout(()=>clearInterval(timer),120000);
+})();
+</script>
 </body></html>
