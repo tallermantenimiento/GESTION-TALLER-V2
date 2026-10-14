@@ -3827,6 +3827,37 @@ window.LDH_prepDeletePermanentlyV159=function(ref){
   return ok;
 };
 
+/* V188 · Cierre entregado: filtro exclusivamente visual y de solo lectura.
+   Exige confirmacion coincidente de cuatro pools de ldh_db, sin reescribir
+   recepciones ni cambiar fases. Si no hay datos fiables, deja la OT visible. */
+function LDH_prepEntregadoConfirmadoV188(ref,meta){
+  try{
+    const db=JSON.parse(getAny('ldh_db')||'{}');
+    const pools=['deliveries','fabricacion','fab','trabajos'];
+    const tech=LDH_extractTechnicalRefV143(ref).toUpperCase();
+    if(!tech)return false;
+    for(const pool of pools){
+      const arr=db&&db[pool];
+      if(!Array.isArray(arr))return false;
+      const matches=arr.filter(x=>x&&LDH_extractTechnicalRefV143(x.ref||x.referencia||'').toUpperCase()===tech);
+      if(matches.length!==1)return false;
+      const it=matches[0],f=it.flow||{};
+      const total=Number(it.total??it.unidades??it.cantidad);
+      const fab=Number(f.fab??f.fabricacion??it.fab??0);
+      const paint=Number(f.pintura??it.pintura??0);
+      const store=Number(f.almacen??it.almacen??0);
+      const delivered=Number(f.entregado??it.entregado??it.delivered??0);
+      if(![total,fab,paint,store,delivered].every(Number.isFinite)||total<=0||
+         fab!==0||paint!==0||store!==0||delivered<total)return false;
+    }
+    const blocks=[meta?.unassignedBorrow,meta?.unassigned_borrow,
+      (typeof getGlobalBorrow==='function'?getGlobalBorrow(ref):null)];
+    if(blocks.some(ub=>ub&&Array.isArray(ub.items)&&ub.items.some(it=>
+      Number(it?.qtyPending??it?.pendingQty??it?.pending??it?.qty_pending??0)>0)))return false;
+    if(typeof window.LDH_trabajoTieneDeuda==='function'&&window.LDH_trabajoTieneDeuda(ref))return false;
+    return true;
+  }catch(_){return false;}
+}
 /* ========= LISTA DE PEDIDOS (pill por RECEPCIÓN) ========= */
 function cargarLista() {
   const lista = document.getElementById("lista");
@@ -3881,6 +3912,10 @@ function cargarLista() {
       try{ removeAny(k); }catch(_){ }
       return;
     }
+
+    // V188: ENTREGADO confirmado no vuelve a Pedidos en curso por recepcion parcial antigua.
+    // No borra ninguna clave; si existe deuda, la ficha sigue visible.
+    if(LDH_prepEntregadoConfirmadoV188(ref,meta))return;
 
     const lines = JSON.parse(getAny(k) || "[]");
     const totalLines = lines.length;
