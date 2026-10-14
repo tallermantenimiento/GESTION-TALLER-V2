@@ -13,6 +13,7 @@
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
+<meta name="ldh-prep-advanced-list-build" content="PREPARACION-V189-FILTRO-FASE-AVANZADA-LECTURA-20261014" />
 <meta name="ldh-prep-nav-safe-build" content="PREPARACION-V177-NO-REHIDRATAR-FAB-20261014" />
 <meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
 <title>Preparación de pedidos</title>
@@ -3858,6 +3859,48 @@ function LDH_prepEntregadoConfirmadoV188(ref,meta){
     return true;
   }catch(_){return false;}
 }
+/* V189 · Filtro visual de pedidos ya trasladados a Fabricacion o fases posteriores.
+   Solo lectura: requiere 4 snapshots coincidentes y preserva cualquier deuda.
+   No modifica recepciones, inventario, metas, ni Firestore. */
+function LDH_prepAvanzadoConfirmadoV189(ref,meta){
+  try{
+    const key=LDH_extractTechnicalRefV143(ref).toUpperCase();
+    if(!key)return false;
+    const db=JSON.parse(getAny('ldh_db')||'{}');
+    const pools=['deliveries','fabricacion','fab','trabajos'];
+    const stages=[];
+    for(const pool of pools){
+      const rows=db&&db[pool];
+      if(!Array.isArray(rows))return false;
+      const found=rows.filter(x=>x&&LDH_extractTechnicalRefV143(x.ref||x.referencia||'').toUpperCase()===key);
+      if(found.length!==1)return false;
+      const x=found[0];
+      if(x.deleted===true||x.eliminado===true)return false;
+      const f=x.flow||{};
+      const total=Number(x.total??x.unidades??x.cantidad);
+      const fab=Number(f.fab??f.fabricacion??x.fab??0);
+      const paint=Number(f.pintura??x.pintura??0);
+      const store=Number(f.almacen??x.almacen??0);
+      const delivered=Number(f.entregado??x.entregado??x.delivered??0);
+      if(![total,fab,paint,store,delivered].every(Number.isFinite)||total<=0||
+         [fab,paint,store,delivered].some(n=>n<0)||
+         Math.abs(fab+paint+store+delivered-total)>0.001)return false;
+      const phase=String(x.fase||x.phase||x.estado||'').trim().toLowerCase();
+      const advanced=phase==='fabricacion'||phase==='pintura'||phase==='almacen'||
+        phase==='entregado'||phase==='terminado'||
+        fab>0||paint>0||store>0||delivered>0;
+      if(!advanced)return false;
+      stages.push([fab,paint,store,delivered].join('|'));
+    }
+    if(new Set(stages).size!==1)return false;
+    const blocks=[meta?.unassignedBorrow,meta?.unassigned_borrow,
+      (typeof getGlobalBorrow==='function'?getGlobalBorrow(ref):null)];
+    if(blocks.some(ub=>ub&&Array.isArray(ub.items)&&ub.items.some(it=>
+      Number(it?.qtyPending??it?.pendingQty??it?.pending??it?.qty_pending??0)>0)))return false;
+    if(typeof window.LDH_trabajoTieneDeuda==='function'&&window.LDH_trabajoTieneDeuda(ref))return false;
+    return true;
+  }catch(_){return false;}
+}
 /* ========= LISTA DE PEDIDOS (pill por RECEPCIÓN) ========= */
 function cargarLista() {
   const lista = document.getElementById("lista");
@@ -3916,6 +3959,10 @@ function cargarLista() {
     // V188: ENTREGADO confirmado no vuelve a Pedidos en curso por recepcion parcial antigua.
     // No borra ninguna clave; si existe deuda, la ficha sigue visible.
     if(LDH_prepEntregadoConfirmadoV188(ref,meta))return;
+
+    // V189: una OT ya avanzada deja de ser un pedido en curso aunque su
+    // recepcion legacy siga parcial; una deuda impide ocultarla.
+    if(LDH_prepAvanzadoConfirmadoV189(ref,meta))return;
 
     const lines = JSON.parse(getAny(k) || "[]");
     const totalLines = lines.length;
