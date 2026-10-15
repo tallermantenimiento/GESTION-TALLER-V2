@@ -412,7 +412,7 @@
 <header>
   <div class="wrap">
     <div class="row">
-      <h1>🛠️ Gestión de Herramientas</h1><span class="pill">V31.19 · control por operario + tarjetas visuales en dotación personal</span>
+      <h1>🛠️ Gestión de Herramientas</h1><span class="pill">NOU V33 · movimientos de depósito concurrentes</span>
       <span id="statusPill" class="pill">Cargando…</span>
       <div class="spacer"></div>
       <button class="btn primary" id="btnNuevo">+ Herramienta</button>
@@ -577,7 +577,7 @@ function processImage(file, callback) {
   reader.readAsDataURL(file);
 }
 
-let db = { schemaVersion:17, tools: [], history: [], library: null, familyOrder: [], operators: [], protections: [], protectionOrder: [], protectionOrderUpdatedAt: "", protectionDeliveries: [], protectionHistory: [], protectionDeletedIds: [], protectionHistoryDeletedIds: [], departments: [], departmentOrder: [], departmentOrderUpdatedAt: "", personalCatalog: [], personalDepartmentTemplates: [], personalAssignments: [], personalDeliveries: [], personalLoans: [], personalHistory: [] };
+let db = { schemaVersion:17, tools: [], history: [], library: null, familyOrder: [], operators: [], protections: [], protectionOrder: [], protectionOrderUpdatedAt: "", protectionDeliveries: [], protectionHistory: [], protectionDeletedIds: [], protectionHistoryDeletedIds: [], departments: [], departmentOrder: [], departmentOrderUpdatedAt: "", personalCatalog: [], personalDepartmentTemplates: [], personalAssignments: [], personalDeliveries: [], personalLoans: [], personalHistory: [], personalDeposits: [], personalRepairCases: [], personalKitEvents: [] };
 let cfg = { warnDays: 7, dangerDays: 30, familyOpen: {}, floatingPos: null, inventoryFilter:"all", historyHiddenBefore:"" };
 let selected = new Set();
 let dragSrcIndex = null; 
@@ -900,6 +900,9 @@ function loadAll(){
   if(!Array.isArray(db.personalDeliveries)) db.personalDeliveries=[];
   if(!Array.isArray(db.personalLoans)) db.personalLoans=[];
   if(!Array.isArray(db.personalHistory)) db.personalHistory=[];
+  if(!Array.isArray(db.personalDeposits)) db.personalDeposits=[];
+  if(!Array.isArray(db.personalRepairCases)) db.personalRepairCases=[];
+  if(!Array.isArray(db.personalKitEvents)) db.personalKitEvents=[];
 
   for(const ppe of db.protections){
     if(!ppe.id) ppe.id=uid();
@@ -3219,7 +3222,7 @@ function personalLoanDueHtml(l){
 }
 function personalLoanedOutQty(assignmentId){ return personalActiveLoans().filter(l=>String(l.assignmentId)===String(assignmentId)).reduce((a,l)=>a+Number(l.qty||0),0); }
 function personalIncidentTotal(a){ return Number(a?.damagedQty||0)+Number(a?.brokenQty||0)+Number(a?.wornQty||0)+Number(a?.missingQty||0); }
-function personalAssignmentAvailable(a){ return Math.max(0,Number(a?.qty||0)-personalIncidentTotal(a)-personalLoanedOutQty(a?.id)); }
+function personalAssignmentAvailable(a){ return Math.max(0,Number(a?.qty||0)-personalIncidentTotal(a)-personalLoanedOutQty(a?.id)-Number(a?.repairQty||0)); }
 function personalReasonLabel(v){ return ({alta:'Alta / incorporación',ampliacion:'Ampliación de dotación',reposicion:'Reposición',desgaste:'Desgaste',rotura:'Rotura',perdida:'Pérdida',otro:'Otro'})[v]||v||'—'; }
 function personalConditionLabel(v){ return ({ok:'OK',damaged:'Dañada',broken:'Rotura',worn:'Desgaste',lost:'Pérdida / no devuelta'})[v]||v||'—'; }
 function personalHistoryLabel(v){ return ({DELIVERY:'Entrega / reposición',INCIDENT:'Incidencia',LOAN_OUT:'Préstamo a otro operario',LOAN_RETURN:'Devolución de préstamo',WITHDRAW:'Retirada de dotación',TRANSFER:'Traspaso definitivo',DEPT_CHANGE:'Cambio de departamento'})[v]||v||'Movimiento'; }
@@ -3401,6 +3404,7 @@ function openPersonalOperatorForm(id=''){
       if(!op){ db.operators.push({id:uid(),name,phone,dept:dep?.name||'',departmentId:dep?.id||'',archived:false,createdAt:nowIso(),updatedAt:nowIso()}); saveAll(); closeAuxModal(); openPeopleDepartmentManager(); render(); renderPersonalCenter(); return; }
       const oldDep=personalDeptForOp(op); const changing=String(oldDep?.id||'')!==String(dep?.id||'');
       if(changing&&personalOperatorOpenLoanCount(op.id)>0)return alert('No se puede cambiar de departamento mientras tenga préstamos personales abiertos. Devuélvelos primero.');
+      if(changing&&personalAssignmentsFor(op.id).some(a=>Number(a.repairQty||0)>0))return alert('Hay herramientas en reparación. Deben regresar al titular antes de cambiar de departamento.');
       const pending={name,phone,departmentId:dep?.id||'',departmentName:dep?.name||''};
       if(changing&&dep&&personalAssignmentsFor(op.id).length){ openPersonalDepartmentChangeReview(op.id,pending); return; }
       op.name=name; op.phone=phone; op.departmentId=dep?.id||''; op.dept=dep?.name||''; op.updatedAt=nowIso(); personalSyncCurrentNames(op);
@@ -3433,9 +3437,9 @@ function openPersonalCatalogManager(){
 window.openPersonalCatalogManager=openPersonalCatalogManager;
 function openPersonalCatalogForm(id=''){
   const c=id?personalCatalogById(id):null;
-  showAuxModal(c?'Editar herramienta personal':'Nueva herramienta personal',`<div class="form"><div><label>Nombre *</label><input id="pcName" value="${esc(c?.name||'')}" placeholder="Ej. Llave Allen 5"/></div><div><label>Modelo / medida</label><input id="pcVariant" value="${esc(c?.variant||'')}"/></div><div><label>Icono / emoji</label><input id="pcIcon" value="${esc(c?.icon||'🧰')}"/></div><div><label>Observación</label><input id="pcNotes" value="${esc(c?.notes||'')}"/></div></div>`,[
+  showAuxModal(c?'Editar herramienta personal':'Nueva herramienta personal',`<div class="form"><div><label>Nombre *</label><input id="pcName" value="${esc(c?.name||'')}" placeholder="Ej. Llave Allen 5"/></div><div><label>Modelo / medida</label><input id="pcVariant" value="${esc(c?.variant||'')}"/></div><div><label>Icono / emoji</label><input id="pcIcon" value="${esc(c?.icon||'🧰')}"/></div><div><label>Piezas del juego (una por línea)</label><textarea id="pcPieces">${esc((c?.pieces||[]).join("\n"))}</textarea></div><div><label>Observación</label><input id="pcNotes" value="${esc(c?.notes||'')}"/></div></div>`,[
     {text:'Cancelar',className:'btn',onClick:closeAuxModal},
-    {text:'Guardar',className:'btn primary',onClick:()=>{ const name=normName($('pcName').value); if(!name)return alert('Nombre obligatorio.'); const at=nowIso(); const icon=normalizePersonalIconValue($('pcIcon').value)||'🧰'; if(c){c.name=name;c.variant=normName($('pcVariant').value);c.icon=icon;c.notes=normName($('pcNotes').value);c.updatedAt=at;} else db.personalCatalog.push({id:uid(),name,variant:normName($('pcVariant').value),icon,notes:normName($('pcNotes').value),archived:false,createdAt:at,updatedAt:at}); saveAll(); closeAuxModal(); openPersonalCatalogManager(); renderPersonalCenter(); }}
+    {text:'Guardar',className:'btn primary',onClick:()=>{ const name=normName($('pcName').value); if(!name)return alert('Nombre obligatorio.'); const at=nowIso(); const icon=normalizePersonalIconValue($('pcIcon').value)||'🧰'; const pieces=($('pcPieces')?.value||'').split('\n').map(normName).filter(Boolean);if(c){c.pieces=pieces;c.name=name;c.variant=normName($('pcVariant').value);c.icon=icon;c.notes=normName($('pcNotes').value);c.updatedAt=at;} else db.personalCatalog.push({id:uid(),name,pieces,variant:normName($('pcVariant').value),icon,notes:normName($('pcNotes').value),archived:false,createdAt:at,updatedAt:at}); saveAll(); closeAuxModal(); openPersonalCatalogManager(); renderPersonalCenter(); }}
   ]);
 }
 window.openPersonalCatalogForm=openPersonalCatalogForm;
@@ -3477,6 +3481,8 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
           if(qty>pending)return alert(`${c.name}: intentas reponer ${qty}, pero solo hay ${pending} unidad(es) pendientes de ese tipo.`);
         }
       }
+      const managedDeposit=items.filter(({catalog:c})=>personalDepositRecord(dep?.id||'',c.id));
+      for(const {catalog:c,qty} of managedDeposit){if(personalDepositQty(dep?.id||'',c.id)<qty)return alert(`${c.name}: no hay suficientes unidades en el depósito del departamento.`);}
       const at=nowIso(),deliveryId=uid(),snapshots=[];
       for(const {catalog:c,qty} of items){
         let a=personalAssignmentFor(op.id,c.id);
@@ -3488,6 +3494,7 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
         personalRecordHistory('DELIVERY',{operatorId:op.id,operatorName:op.name,departmentId:dep?.id||'',departmentName:dep?.name||'',assignmentId:a.id,toolId:c.id,toolName:c.name,qty,reason,deliveredBy,notes:note,deliveryId,at});
       }
       db.personalDeliveries.push({id:deliveryId,operatorId:op.id,operatorName:op.name,departmentId:dep?.id||'',departmentName:dep?.name||op.dept||'',deliveredBy,reason,notes:note,items:snapshots,status:'active',at,createdAt:at,updatedAt:at});
+      for(const {catalog:c,qty} of managedDeposit){const row=personalDepositRecord(dep?.id||'',c.id);personalDepositMove(row,-qty,'DELIVERY',at);}
       cfg.lastPersonalDeliveredBy=deliveredBy; saveAll(); closeAuxModal(); openPersonalCenter();
     }}
   ]);
@@ -3577,6 +3584,7 @@ function openPersonalWithdraw(operatorId,assignmentId){
   const a=(db.personalAssignments||[]).find(x=>String(x.id)===String(assignmentId));
   if(!op||!a)return;
   if(personalLoanedOutQty(a.id)>0)return alert('Esta herramienta tiene un préstamo abierto. Debe cerrarse antes de retirarla de la dotación.');
+  if(Number(a.repairQty||0)>0)return alert('Esta herramienta tiene unidades en reparación. Deben regresar a su titular antes de retirarla.');
   const max=Number(a.qty||0); if(max<=0)return;
   showAuxModal(`Retirar de dotación · ${esc(a.toolName)}`,`<div class="audit-note">Usa <b>Retirar</b> solo cuando la herramienta deja definitivamente de formar parte de la dotación del operario. Para una <b>rotura, pérdida o desgaste pendiente de reposición</b>, usa el botón <b>Incidencia</b> de la línea.</div><div class="form"><div><label>Cantidad · máx. ${max}</label><input id="pwQty" type="number" min="1" max="${max}" value="${max}"/></div><div><label>Motivo</label><select id="pwReason"><option value="devolucion">Devuelta / retirada</option><option value="baja">Baja definitiva</option><option value="otro">Otro</option></select></div><div style="grid-column:1/-1"><label>Observación</label><textarea id="pwNote"></textarea></div></div>`,[
     {text:'Cancelar',className:'btn',onClick:closeAuxModal},
@@ -3591,6 +3599,7 @@ function openPersonalWithdraw(operatorId,assignmentId){
       const cap=(field)=>{a[field]=Math.min(Number(a[field]||0),a.qty);};
       cap('damagedQty');cap('brokenQty');cap('wornQty');cap('missingQty');
       a.updatedAt=at;if(a.qty<=0)a.closedAt=at;
+      if($('pwReason').value==='devolucion'){const row=personalDepositRecord(a.departmentId,a.toolId);if(row){personalDepositMove(row,q,'RETURN',at);}}
       personalRecordHistory('WITHDRAW',{operatorId:op.id,operatorName:op.name,departmentId:a.departmentId,departmentName:a.departmentName,assignmentId:a.id,toolId:a.toolId,toolName:a.toolName,qty:q,reason:$('pwReason').value,notes:normName($('pwNote').value),at});
       saveAll();closeAuxModal();openPersonalCenter();
     }}
@@ -3852,17 +3861,116 @@ function renderPersonalCenter(){
     if(search) rows=rows.filter(o=>personalNormKey([o.name,o.phone,'sin departamento'].join(' ')).includes(search)||personalAssignmentsFor(o.id).some(a=>personalNormKey([a.toolName,a.variant].join(' ')).includes(search)));
     if(rows.length) groups.push(personalRenderDepartmentGroup(null,rows,activeLoans,{forcedOpen:!!search||filter==='__unassigned__',unassigned:true,forceOperatorsOpen:!!search}));
   }
-  host.innerHTML=`<div class="ppe-kpis"><div class="ppe-kpi"><small>Departamentos</small><b>${deps.length}</b></div><div class="ppe-kpi"><small>Operarios activos</small><b>${ops.length}</b></div><div class="ppe-kpi"><small>Herramientas asignadas</small><b>${totalUnits}</b></div><div class="ppe-kpi"><small>Préstamos personales abiertos</small><b>${activeLoans.length}</b>${overdueLoans.length?`<span class="personal-alert-badge overdue" style="margin-top:6px">⏰ Retrasados: ${overdueLoans.length}</span>`:''}</div></div><div class="personal-toolbar"><select id="personalDeptFilter">${depOptions}</select><input id="personalSearch" placeholder="Buscar operario o herramienta..." value="${esc(cfg.personalSearch||'')}"/><button class="btn personal-pending-toggle ${pendingOnly?'active':''}" id="personalOnlyPending">${pendingOnly?'✓ ':''}Solo pendientes</button><button class="btn" id="personalManagePeople">Departamentos y operarios</button><button class="btn" id="personalCatalog">Catálogo personal</button><button class="btn" id="personalDeliveryControl">Control por operario</button><span class="pill">Incidencias activas: ${incidents}</span><span class="pill">Reposiciones: ${repos}</span></div>${groups.join('')||'<div class="small" style="padding:18px;text-align:center">No hay operarios para los filtros actuales.</div>'}`;
+  host.innerHTML=`<div class="ppe-kpis"><div class="ppe-kpi"><small>Departamentos</small><b>${deps.length}</b></div><div class="ppe-kpi"><small>Operarios activos</small><b>${ops.length}</b></div><div class="ppe-kpi"><small>Herramientas asignadas</small><b>${totalUnits}</b></div><div class="ppe-kpi"><small>Préstamos personales abiertos</small><b>${activeLoans.length}</b>${overdueLoans.length?`<span class="personal-alert-badge overdue" style="margin-top:6px">⏰ Retrasados: ${overdueLoans.length}</span>`:''}</div></div><div class="personal-toolbar"><select id="personalDeptFilter">${depOptions}</select><input id="personalSearch" placeholder="Buscar operario o herramienta..." value="${esc(cfg.personalSearch||'')}"/><button class="btn personal-pending-toggle ${pendingOnly?'active':''}" id="personalOnlyPending">${pendingOnly?'✓ ':''}Solo pendientes</button><button class="btn" id="personalManagePeople">Departamentos y operarios</button><button class="btn" id="personalCatalog">Catálogo personal</button><button class="btn" id="personalDepositsNOU">Depósitos</button><button class="btn" id="personalKitsNOU">Juegos / piezas</button><button class="btn" id="personalExitManagerNOU">Bajas</button><button class="btn" id="personalRepairsNOU">Reparaciones</button><button class="btn" id="personalDeliveryControl">Control por operario</button><span class="pill">Incidencias activas: ${incidents}</span><span class="pill">Reposiciones: ${repos}</span></div>${groups.join('')||'<div class="small" style="padding:18px;text-align:center">No hay operarios para los filtros actuales.</div>'}`;
   if($('personalDeptFilter'))$('personalDeptFilter').onchange=e=>{cfg.personalDepartmentFilter=e.target.value||'';saveAll();renderPersonalCenter();};
   if($('personalSearch'))$('personalSearch').oninput=e=>{cfg.personalSearch=e.target.value||'';renderPersonalCenter();};
   if($('personalOnlyPending'))$('personalOnlyPending').onclick=()=>{cfg.personalOnlyPending=!cfg.personalOnlyPending;saveAll();renderPersonalCenter();};
   if($('personalManagePeople'))$('personalManagePeople').onclick=openPeopleDepartmentManager;
   if($('personalCatalog'))$('personalCatalog').onclick=openPersonalCatalogManager;
+  if($('personalDepositsNOU'))$('personalDepositsNOU').onclick=openPersonalDepositsNOU;
+  if($('personalKitsNOU'))$('personalKitsNOU').onclick=()=>{const rows=(db.personalAssignments||[]).filter(a=>Number(a.qty||0)>0&&(personalCatalogById(a.toolId)?.pieces||[]).length).map(a=>`<tr><td>${esc(a.operatorName)}</td><td>${esc(a.toolName)}</td><td><button class="btn primary" onclick="closeModal();openPersonalKitNOU('${a.operatorId}','${a.toolId}')">Abrir juego</button></td></tr>`).join('');showModal('Juegos por piezas',`<table><tbody>${rows||'<tr><td>No hay juegos asignados.</td></tr>'}</tbody></table>`,[{text:'Cerrar',className:'btn',onClick:closeModal}]);};
+  if($('personalRepairsNOU'))$('personalRepairsNOU').onclick=openPersonalRepairNOU;
+  if($('personalExitManagerNOU'))$('personalExitManagerNOU').onclick=()=>{const rows=personalActiveOperators().map(o=>`<tr><td>${esc(o.name)}</td><td>${esc(o.dept||'Sin departamento')}</td><td><button class="btn danger" onclick="closeModal();openPersonalExitNOU('${o.id}')">Dar de baja</button></td></tr>`).join('');showModal('Bajas de operarios',`<table><tbody>${rows}</tbody></table>`,[{text:'Cerrar',className:'btn',onClick:closeModal}]);};
   if($('personalDeliveryControl'))$('personalDeliveryControl').onclick=openPersonalDeliveryControl;
 }
 window.renderPersonalCenter=renderPersonalCenter;
 function openPersonalCenter(){ setMainSection('personal'); renderPersonalCenter(); }
 window.openPersonalCenter=openPersonalCenter;
+
+
+
+/* V32 NOU - ampliaciones nativas, basadas en el mismo db y saveAll/LiveSync */
+function personalExtInit(){
+  ensurePersonalData();
+  db.personalDeposits ??= [];
+  db.personalRepairCases ??= [];
+  db.personalKitEvents ??= [];
+  for(const c of db.personalCatalog||[]) if(!Array.isArray(c.pieces)) c.pieces=[];
+}
+function personalDepositRecord(deptId,toolId){
+  personalExtInit();
+  return db.personalDeposits.find(x=>String(x.departmentId)===String(deptId)&&String(x.toolId)===String(toolId))||null;
+}
+function personalDepositQty(deptId,toolId){return Math.max(0,Number(personalDepositRecord(deptId,toolId)?.qty||0));}
+
+// V33: libro de movimientos por deposito. Cada operacion tiene ID unico; merge es idempotente.
+function personalDepositMove(row, delta, reason, at=nowIso()){
+  if(!row) return;
+  if(!Array.isArray(row.movements)){
+    row.baseQty=Number(row.qty||0);
+    row.movements=[];
+  }
+  if(!Number.isFinite(Number(row.baseQty))) row.baseQty=Number(row.qty||0);
+  const movement={id:uid(),delta:Number(delta),reason,at};
+  row.movements.push(movement);
+  row.qty=Number(row.baseQty)+row.movements.reduce((n,e)=>n+Number(e.delta||0),0);
+  row.updatedAt=at;
+}
+
+function openPersonalDepositsNOU(){
+ personalExtInit();
+ const deps=personalDepartments(),cat=personalCatalogActive();
+ const data=deps.map(dep=>`<details style="margin:8px 0;padding:12px;border:1px solid #334155;border-radius:12px"><summary><b>${esc(dep.name)}</b></summary><div class="row" style="margin:10px 0"><button class="btn primary" onclick="openPersonalDepositEntryNOU('${dep.id}')">+ Entrada / ajuste</button></div><table><thead><tr><th>Herramienta</th><th>En depósito</th><th>En reparación</th></tr></thead><tbody>${cat.map(c=>`<tr><td>${personalToolIdentity(c)}</td><td>${personalDepositQty(dep.id,c.id)}</td><td>${(db.personalRepairCases||[]).filter(r=>r.departmentId===dep.id&&r.toolId===c.id&&r.status==='open').reduce((a,r)=>a+Number(r.qty||0),0)}</td></tr>`).join('')}</tbody></table></details>`).join('');
+ showModal('Depósitos · Dotación personal',`<div class="audit-note">Inventario independiente de Préstamos generales y EPIs. Las entradas y salidas quedan registradas en el historial común de Dotación personal.</div>${data||'Crea primero departamentos.'}`,[{text:'Cerrar',className:'btn',onClick:closeModal}]);
+}
+function openPersonalDepositEntryNOU(deptId){
+ const dep=personalDeptById(deptId),cats=personalCatalogActive();if(!dep)return;
+ showAuxModal('Entrada de depósito · '+esc(dep.name),`<div class="form"><div><label>Herramienta</label><select id="peTool">${cats.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></div><div><label>Cantidad recibida</label><input id="peQty" type="number" min="1" step="1" value="1"/></div></div>`,[{text:'Cancelar',className:'btn',onClick:closeAuxModal},{text:'Registrar entrada',className:'btn primary',onClick:()=>{const tid=$('peTool').value,qty=Number($('peQty').value);if(!Number.isSafeInteger(qty)||qty<1||qty>10000)return alert('Cantidad incorrecta');const now=nowIso();let r=personalDepositRecord(deptId,tid);if(!r){r={id:'deposit_'+deptId+'_'+tid,departmentId:deptId,toolId:tid,qty:0,updatedAt:now};db.personalDeposits.push(r);}personalDepositMove(r,qty,'DEPOSIT_IN',now);personalRecordHistory('DEPOSIT_IN',{departmentId:deptId,departmentName:dep.name,toolId:tid,toolName:personalCatalogById(tid)?.name||'',qty,at:now});saveAll();closeAuxModal();openPersonalDepositsNOU();renderPersonalCenter();}}]);
+}
+function openPersonalKitNOU(operatorId,toolId){
+ personalExtInit();const op=db.operators.find(o=>String(o.id)===String(operatorId)),c=personalCatalogById(toolId),a=personalAssignmentFor(operatorId,toolId);if(!op||!c||!a||!c.pieces?.length)return alert('No hay juego por piezas asignado.');
+ a.pieceState??={};let rows=c.pieces.map(piece=>{const ev=db.personalKitEvents.filter(e=>e.operatorId===operatorId&&e.toolId===toolId&&e.piece===piece&&e.type==='REPLACEMENT').sort((x,y)=>Date.parse(x.at)-Date.parse(y.at));let freq=ev.length+' reposición(es)';if(ev.length>1){let gaps=ev.slice(1).map((e,i)=>(Date.parse(e.at)-Date.parse(ev[i].at))/86400000);freq+=' · media '+(gaps.reduce((x,y)=>x+y,0)/gaps.length).toFixed(1)+' días';}return `<tr><td>${esc(piece)}</td><td>${esc(a.pieceState[piece]||'correcta')}</td><td>${freq}</td><td><button class="btn" onclick="openPersonalKitActionNOU('${operatorId}','${toolId}',${JSON.stringify(piece).replace(/"/g,'&quot;')})">Incidencia / Reponer</button></td></tr>`}).join('');
+ showModal('Juego por piezas · '+esc(c.name),`<div class="audit-note">Titular: ${esc(op.name)}. La reposición de piezas no incrementa el número de juegos.</div><table><thead><tr><th>Pieza</th><th>Estado</th><th>Frecuencia</th><th>Acción</th></tr></thead><tbody>${rows}</tbody></table>`,[{text:'Cerrar',className:'btn',onClick:closeModal}]);
+}
+function openPersonalKitActionNOU(opId,tid,piece){
+ const a=personalAssignmentFor(opId,tid);if(!a)return;
+ showAuxModal('Pieza · '+esc(piece),`<label>Operación</label><select id="kitOperation"><option value="INCIDENT">Registrar incidencia</option><option value="REPLACEMENT">Reponer pieza</option></select><label>Motivo obligatorio</label><select id="kitCause"><option value="">Seleccionar...</option><option value="perdida">Pérdida</option><option value="rotura">Rotura</option><option value="desgaste">Desgaste</option><option value="averia">Avería</option><option value="otro">Otro</option></select><label>Descripción opcional</label><input id="kitNote"/>`,[{text:'Cancelar',className:'btn',onClick:closeAuxModal},{text:'Guardar',className:'btn primary',onClick:()=>{const type=$('kitOperation').value,cause=$('kitCause').value;if(!cause)return alert('Indica el motivo');a.pieceState??={};a.pieceState[piece]=type==='REPLACEMENT'?'correcta':cause;const at=nowIso();a.updatedAt=at;const ev={id:uid(),type,operatorId:opId,toolId:tid,piece,cause,notes:normName($('kitNote').value),at};db.personalKitEvents.push(ev);personalRecordHistory(type==='INCIDENT'?'KIT_INCIDENT':'KIT_REPLACEMENT',{...ev,operatorName:db.operators.find(o=>o.id===opId)?.name||'',toolName:personalCatalogById(tid)?.name||''});saveAll();closeAuxModal();openPersonalKitNOU(opId,tid);renderPersonalCenter();}}]);
+}
+function openPersonalExitNOU(opId){
+ const op=db.operators.find(o=>String(o.id)===String(opId));if(!op||op.archived)return;
+ if(personalOperatorCommonLoanCount(op)||personalOperatorOpenLoanCount(op.id))return alert('Tiene préstamos pendientes. Deben devolverse antes de la baja.');
+ const held=personalAssignmentsFor(opId).filter(a=>Number(a.qty||0)>0);
+ showAuxModal('Baja definitiva · '+esc(op.name),`<div class="audit-note">${held.length?'Tiene '+held.length+' referencias asignadas. Deben devolverse primero desde Dotación personal.':'No tiene asignaciones pendientes.'}</div><label>Fecha de baja</label><input id="exitDateNOU" type="date" value="${new Date().toISOString().slice(0,10)}"/><label>Motivo / observación</label><textarea id="exitNoteNOU"></textarea>`,[{text:'Cancelar',className:'btn',onClick:closeAuxModal},{text:'Confirmar baja',className:'btn danger',onClick:()=>{if((db.personalRepairCases||[]).some(r=>r.operatorId===opId&&r.status==='open'))return alert('Hay reparaciones pendientes con este titular.');if(personalAssignmentsFor(opId).some(a=>Number(a.qty||0)>0))return alert('Retira o transfiere primero la dotación personal.');const dt=$('exitDateNOU').value;if(!dt)return alert('Indica la fecha');const at=nowIso();op.archived=true;op.archivedAt=at;op.exitDate=dt;op.exitNote=normName($('exitNoteNOU').value);op.updatedAt=at;personalRecordHistory('OPERATOR_EXIT',{operatorId:opId,operatorName:op.name,exitDate:dt,notes:op.exitNote,at});saveAll();closeAuxModal();render();renderPersonalCenter();}}]);
+}
+window.openPersonalDepositsNOU=openPersonalDepositsNOU;
+window.openPersonalDepositEntryNOU=openPersonalDepositEntryNOU;
+window.openPersonalKitNOU=openPersonalKitNOU;
+window.openPersonalKitActionNOU=openPersonalKitActionNOU;
+window.openPersonalExitNOU=openPersonalExitNOU;
+
+function openPersonalRepairNOU(){
+ personalExtInit();
+ const rows=(db.personalRepairCases||[]).filter(x=>x.status==='open'&&Number(x.qty||0)>0).map(r=>{
+ const op=db.operators.find(x=>x.id===r.operatorId),c=personalCatalogById(r.toolId);
+ return `<tr><td>${personalToolIdentity(c||{name:r.toolName||'',icon:'🧰'})}</td><td>${esc(op?.name||r.operatorName||'Sin titular')}</td><td>${Number(r.qty||0)}</td><td>${new Date(r.openedAt).toLocaleDateString('es-ES')}</td><td><button class="btn primary" onclick="openPersonalRepairReturnNOU('${r.id}')">Reparada / devolver</button></td></tr>`;
+ }).join('');
+ showModal('Reparaciones de dotación personal',`<div class="audit-note">Cada reparación conserva el titular original. Al cerrarla, la herramienta vuelve a su operario, no al depósito.</div><button class="btn" id="newPersonalRepairNOU">+ Enviar a reparación</button><table><thead><tr><th>Herramienta</th><th>Titular</th><th>Cantidad</th><th>Fecha de envío</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5">No hay reparaciones abiertas.</td></tr>'}</tbody></table>`,[{text:'Cerrar',className:'btn',onClick:closeModal}]);
+ $('newPersonalRepairNOU').onclick=openPersonalRepairSendNOU;
+}
+function openPersonalRepairSendNOU(){
+ personalExtInit();
+ const available=(db.personalAssignments||[]).filter(a=>Number(a.qty||0)>0&&personalAssignmentAvailable(a)>0);
+ if(!available.length)return alert('No hay dotaciones personales disponibles para enviar a reparación.');
+ showAuxModal('Enviar dotación a reparación',`<label>Herramienta y titular</label><select id="repairAssignmentNOU">${available.map(a=>`<option value="${a.id}">${esc(a.operatorName||'Operario')} · ${esc(a.toolName)} (${personalAssignmentAvailable(a)} libres)</option>`).join('')}</select><label>Cantidad</label><input id="repairQuantityNOU" type="number" min="1" max="9999" step="1" value="1"/><label>Motivo obligatorio</label><input id="repairReasonNOU"/><label>Observaciones</label><textarea id="repairNoteNOU"></textarea>`,[{text:'Cancelar',className:'btn',onClick:closeAuxModal},{text:'Enviar a reparación',className:'btn primary',onClick:()=>{
+ const a=db.personalAssignments.find(x=>x.id===$('repairAssignmentNOU').value),qty=Number($('repairQuantityNOU').value),reason=normName($('repairReasonNOU').value);if(!a||!Number.isSafeInteger(qty)||qty<1||qty>personalAssignmentAvailable(a))return alert('Cantidad superior a la disponible.');if(!reason)return alert('Indica el motivo.');
+ const at=nowIso(),r={id:uid(),operatorId:a.operatorId,operatorName:a.operatorName,toolId:a.toolId,toolName:a.toolName,departmentId:a.departmentId,qty,originalQty:qty,reason,notes:normName($('repairNoteNOU').value),openedAt:at,updatedAt:at,status:'open'};
+ // The repaired object remains owned, but is excluded from available stock.
+ a.repairQty=Number(a.repairQty||0)+qty;a.updatedAt=at;db.personalRepairCases.push(r);
+ personalRecordHistory('PERSONAL_REPAIR_IN',{operatorId:a.operatorId,operatorName:a.operatorName,toolId:a.toolId,toolName:a.toolName,qty,repairCaseId:r.id,reason,notes:r.notes,at});saveAll();closeAuxModal();openPersonalRepairNOU();renderPersonalCenter();
+ }}]);
+}
+function openPersonalRepairReturnNOU(caseId){
+ personalExtInit();const r=db.personalRepairCases.find(x=>x.id===caseId&&x.status==='open');if(!r)return;
+ showAuxModal('Devolver reparación · '+esc(r.toolName||''),`<div class="audit-note">Titular original: <b>${esc(r.operatorName||'')}</b> · Pendientes ${Number(r.qty||0)}. La devolución será a este mismo titular.</div><label>Cantidad reparada</label><input id="repairReturnQtyNOU" type="number" min="1" max="${r.qty}" step="1" value="${r.qty}"/><label>Recibido por</label><input id="repairReceivedByNOU"/><label>Observación</label><textarea id="repairReturnNoteNOU"></textarea>`,[{text:'Cancelar',className:'btn',onClick:closeAuxModal},{text:'Marcar reparada',className:'btn primary',onClick:()=>{
+ const qty=Number($('repairReturnQtyNOU').value);if(!Number.isSafeInteger(qty)||qty<1||qty>Number(r.qty||0))return alert('Cantidad inválida.');
+ const a=personalAssignmentFor(r.operatorId,r.toolId);if(!a||Number(a.repairQty||0)<qty)return alert('No se encuentra la dotación del titular o está descuadrada.');
+ const at=nowIso();a.repairQty-=qty;a.updatedAt=at;r.qty-=qty;r.updatedAt=at;if(!r.qty){r.status='closed';r.closedAt=at;}
+ personalRecordHistory('PERSONAL_REPAIR_OUT',{operatorId:r.operatorId,operatorName:r.operatorName,toolId:r.toolId,toolName:r.toolName,qty,repairCaseId:r.id,receivedBy:normName($('repairReceivedByNOU').value),notes:normName($('repairReturnNoteNOU').value),at});saveAll();closeAuxModal();openPersonalRepairNOU();renderPersonalCenter();
+ }}]);
+}
+window.openPersonalRepairNOU=openPersonalRepairNOU;
+window.openPersonalRepairSendNOU=openPersonalRepairSendNOU;
+window.openPersonalRepairReturnNOU=openPersonalRepairReturnNOU;
 
 
 function openLoanAction(id){
@@ -4081,6 +4189,32 @@ boot();
     const pdMap=new Map(); [...(r.personalDeliveries||[]),...(l.personalDeliveries||[])].forEach(x=>{if(!x||!x.id)return;const prev=pdMap.get(x.id);pdMap.set(x.id,chooseNewer(prev,x,["updatedAt","at","createdAt"]));}); m.personalDeliveries=[...pdMap.values()];
     const plMap=new Map(); [...(r.personalLoans||[]),...(l.personalLoans||[])].forEach(x=>{if(!x||!x.id)return;const prev=plMap.get(x.id);plMap.set(x.id,chooseNewer(prev,x,["updatedAt","returnedAt","outAt"]));}); m.personalLoans=[...plMap.values()];
     m.personalHistory=mergeArrayByIdentity(r.personalHistory,l.personalHistory,x=>x.id||[x.type,x.operatorId,x.toolId,x.loanId,x.deliveryId,x.at].join("|"));
+    // Los depositos son contadores derivados de movimientos identificados, no last-write-wins.
+    const depositRows=new Map();
+    for(const item of [...(r.personalDeposits||[]),...(l.personalDeposits||[])]){
+      if(!item||!item.id)continue;
+      const key=String(item.departmentId||'')+'|'+String(item.toolId||'');
+      const old=depositRows.get(key);
+      if(!old){depositRows.set(key,Object.assign({},item));continue;}
+      const oldHas=Array.isArray(old.movements),newHas=Array.isArray(item.movements);
+      if(!oldHas&&!newHas){depositRows.set(key,chooseNewer(old,item,['updatedAt','createdAt']));continue;}
+      const base=oldHas?Number(old.baseQty):newHas?Number(item.baseQty):Number(old.qty||0);
+      const events=new Map();
+      for(const ev of [...(old.movements||[]),...(item.movements||[])]) if(ev&&ev.id)events.set(ev.id,ev);
+      const movements=[...events.values()].sort((a,b)=>String(a.id).localeCompare(String(b.id)));
+      const merged=Object.assign({},old,item,{baseQty:Number.isFinite(base)?base:Number(old.qty||0),movements});
+      merged.qty=merged.baseQty+movements.reduce((n,e)=>n+Number(e.delta||0),0);
+      merged.updatedAt=String(old.updatedAt||'')>String(item.updatedAt||'')?old.updatedAt:item.updatedAt;
+      // Un saldo negativo revela entregas concurrentes superiores al disponible: no esconderlo.
+      if(merged.qty<0)merged.syncConflict='DEPOSIT_NEGATIVE_BALANCE';else delete merged.syncConflict;
+      depositRows.set(key,merged);
+    }
+    m.personalDeposits=[...depositRows.values()];
+    for(const key of ['personalRepairCases','personalKitEvents']){
+      const rows=new Map();for(const item of [...(r[key]||[]),...(l[key]||[])]){
+        if(!item||!item.id)continue;rows.set(item.id,chooseNewer(rows.get(item.id),item,['updatedAt','closedAt','at','createdAt']));
+      }m[key]=[...rows.values()];
+    }
     m.familyOrder=[...new Set([...(l.familyOrder||[]),...(r.familyOrder||[])])];
     m.library=Object.assign({},r.library||{},l.library||{}); m.schemaVersion=Math.max(Number(r.schemaVersion||0),Number(l.schemaVersion||0),17); m.updatedAt=(String(l.updatedAt||"")>String(r.updatedAt||""))?l.updatedAt:r.updatedAt;
     return JSON.stringify(m);
