@@ -9680,8 +9680,18 @@ window.ejecutarDevolucion = function(matId, maxQty){
       options=options&&typeof options==='object'?options:{};
       const order = this.orders.find(item=>item.id===id && item.status === 'pending');
       if(!order) return;
-      if(!order.directPaintCalcV33 || order.directPaintCalcV33.status!=='calculated' || !normalizeDirectPaintEstimateV1(order.directPaintCalcV33.estimateV1) || order.directPaintCalcV33.sourceRal!==order.ral || order.directPaintCalcV33.sourceCompanyId!==order.companyId || Number(order.directPaintCalcV33.sourceQuantity)!==Number(order.quantity)){
-        alert('Antes de enviar a Cabina, completa y guarda el Cálculo de Pintura desde la ficha de la OT.');
+      // R74: SOLO PINTURA admite envío sin configurar. Si se calculó en el
+      // configurador, la estimación completa viaja con la OT y se guarda en nube.
+      const submittedEstimate=normalizeDirectPaintEstimateV1(options.estimate);
+      const savedCalc=order.directPaintCalcV33;
+      const savedEstimate=(savedCalc?.status==='calculated' &&
+        savedCalc.sourceRal===order.ral &&
+        savedCalc.sourceCompanyId===order.companyId &&
+        Number(savedCalc.sourceQuantity)===Number(order.quantity))
+          ? normalizeDirectPaintEstimateV1(savedCalc.estimateV1) : null;
+      const estimateForSend=submittedEstimate || (options.estimate===null ? null : savedEstimate);
+      if(options.estimate && !submittedEstimate){
+        alert('El cálculo introducido no es válido. No se ha enviado la OT.');
         return;
       }
       if(order.directPaintV1&&order.directPaintV1.active){alert('Esta OT ya está activa en PINTURA DIRECTA.');return;}
@@ -9704,12 +9714,18 @@ window.ejecutarDevolucion = function(matId, maxQty){
         return;
       }
       const qty=Math.max(1,Math.round(Number(order.quantity)||1));
-      const ident=orderIdentification(order),estimate=normalizeDirectPaintEstimateV1(order.directPaintCalcV33.estimateV1),cabinNote=normText(options.cabinNote || order.directPaintV1?.cabinNote || '').slice(0,220);
+      const ident=orderIdentification(order),estimate=estimateForSend,cabinNote=normText(options.cabinNote || order.directPaintV1?.cabinNote || '').slice(0,220);
       const estimateText=estimate?`\nSuperficie: ${estimate.surfaceM2.toLocaleString('es-ES',{maximumFractionDigits:3})} m²\nEstimación: ${estimate.estimatedLiters.toLocaleString('es-ES',{maximumFractionDigits:3})} L · ${estimate.estimatedBotesEq.toLocaleString('es-ES',{maximumFractionDigits:3})} botes eq 4 L`:'\nCálculo de superficie: SIN CONFIGURAR';
       const msg=`¿Enviar SOLO A PINTURA?\n\nReferencia: ${order.reference}\nEmpresa: ${order.companyName}\nCantidad: ${qty}\nRAL: ${order.ral}\n${ident?'Identificación: '+ident+'\n':''}${cabinNote?'Nota Cabina: '+cabinNote+'\n':''}${estimateText}\n\nEste circuito NO pasa por Cálculo, Preparación ni Fabricación y NO crea cantidades FAB/PINT/ALM/ENT. El consumo real se registrará después desde la Terminal de Cabina.`;
       if(!options.skipConfirm&&!confirm(msg)) return;
       const previous=order.directPaintV1 ? normalizeDirectPaintV1(order.directPaintV1) : null;
+      const previousCalc=order.directPaintCalcV33 || null;
       const now=Date.now();
+      if(estimate){
+        order.directPaintCalcV33={version:1,status:'calculated',estimateV1:estimate,
+          sourceRal:order.ral,sourceCompanyId:order.companyId,sourceQuantity:order.quantity,
+          updatedAtMs:now};
+      }
       order.directPaintV1=normalizeDirectPaintV1({
         version:1,active:true,status:'pending',reference:order.reference,
         identification:ident,description:order.description,cabinNote,
@@ -9729,6 +9745,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       }catch(error){
         console.error('No se pudo enviar la OT a Pintura directa',error);
         order.directPaintV1=previous;
+        order.directPaintCalcV33=previousCalc;
         order.directPaintActiveV1=!!(previous&&previous.active);
         order.updatedAtMs=Date.now();
         writeOrders(this.orders);
