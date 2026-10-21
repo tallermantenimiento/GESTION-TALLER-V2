@@ -11834,6 +11834,22 @@ console.info('[Agenda] Estructura de OT bloqueada al iniciar Cálculo/Preparaci�
       ent:num(f.entregado??f.delivered??f.ent)
     };
   }
+  // R76: solo la fase EN PINTURA no constituye un movimiento para una OT directa.
+  // Una operación real de Cabina o un préstamo no verificado impiden la eliminación.
+  function directUnworkedForCancellationR76(order){
+    if(!order || order.directPaintActiveV1!==true) return false;
+    const d=order.directPaintV1;
+    if(!d || d.active===false || String(d.status||'pending').toLowerCase()!=='pending') return false;
+    const f=flowOf(order);
+    if(f.fab+f.pint+f.alm+f.ent>0) return false;
+    if(num(d.paintedUnitsV1)>0 || num(d.consumedBotesEq)>0 || num(d.consumedLiters)>0) return false;
+    if((Array.isArray(d.paintedEventsV1)&&d.paintedEventsV1.length) ||
+       (Array.isArray(d.consumptionEventsV1)&&d.consumptionEventsV1.length) ||
+       (Array.isArray(d.consumptionOperationsV84)&&d.consumptionOperationsV84.length)) return false;
+    const req=order.directPaintExitRequestV1;
+    if(req && ['pending','pending_agenda','approved'].includes(String(req.status||'').toLowerCase())) return false;
+    return true;
+  }
   function productiveStarted(order){
     const f=flowOf(order);
     if(f.fab+f.pint+f.alm+f.ent>0) return true;
@@ -12018,6 +12034,14 @@ Por seguridad no se tocará hasta limpiar primero esa evidencia.`);
             return;
           }
         }
+        if(directUnworkedForCancellationR76(order)){
+          if(button) button.blur();
+          // Stock de Cabina esta en otro proyecto. No inferir que no existen prestamos
+          // porque no se vean desde Agenda: exigir comprobacion del responsable.
+          if(!confirm('SOLO PINTURA · '+order.reference+'\n\nNo hay pintadas, consumos ni fases contabilizadas en la OT.\n\nAntes de anular, verifica en Cabina > Préstamos que NO existe ninguna reserva o préstamo pendiente para esta OT.\n\n¿Has comprobado que no hay préstamos ni reservas asociados?')) return;
+          return this.deleteOrderPermanently(order,'agenda-direct-paint-cancel-unworked-r76',
+            '¿Anular '+order.reference+'?\n\nSe retirará de Agenda y Cabina mediante el borrado sincronizado de la OT. No se modificará Stock. Esta operación solo es válida si NO existen movimientos, préstamos ni reservas.');
+        }
         if(productiveStarted(order)){
           if(button) button.blur();
           alert(advancedMessage(order));
@@ -12045,6 +12069,7 @@ Por seguridad no se tocará hasta limpiar primero esa evidencia.`);
 })();
 </script>
 
+<!-- LDH_AGENDA_R76_DIRECT_CANCEL_ZERO_ACTIVITY_20261021 -->
 <!-- LDH_AGENDA_V32_GUARDADO_VARIABLE_ROBUSTO_20261002 -->
 <style id="LDH_AGENDA_V32_VARIABLE_MODE_STYLE">
   .wo-variable-parent-hidden{display:none!important}
