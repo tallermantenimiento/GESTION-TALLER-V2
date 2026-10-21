@@ -13,7 +13,7 @@
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
-<meta name="ldh-prep-advanced-list-build" content="PREPARACION-V191-PENDIENTES-LECTURA-CONSERVADORA-20261021" />
+<meta name="ldh-prep-advanced-list-build" content="PREPARACION-V193-FASE-REAL-FIRESTORE-20261021" />
 <meta name="ldh-prep-nav-safe-build" content="PREPARACION-V177-NO-REHIDRATAR-FAB-20261014" />
 <meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
 <title>Preparación de pedidos</title>
@@ -33517,105 +33517,123 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
 </script>
 <script src="../asistente_ia_global.js?v=20261008-27" data-ldh-ai-global-loader="preparacion"></script>
 <!-- /LDH_AI_GLOBAL_PREPARACION_OPERATIVA_R1_20261008 -->
-<!-- LDH_PREP_V192_PENDING_LIST_PHASE_GUARD_20261021 -->
-<script id="LDH_PREP_V192_PENDING_LIST_PHASE_GUARD_20261021">
+<!-- LDH_PREP_V193_FASE_REAL_SOLO_LECTURA_20261021 -->
+<script id="LDH_PREP_V193_FASE_REAL_SOLO_LECTURA_20261021">
 (function(){
-  'use strict';
-  // Diagnostico/visibilidad exclusivamente: nunca escribe recepciones, Stock o nube.
-  const BUILD='PREPARACION-V192-TARJETAS-PENDIENTES-EXCLUIR-ALMACEN-ENTREGADO-20261021';
-  const prefix='prep_recepcion_';
-  const num=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
-  const txt=v=>String(v??'').trim();
-  const esc=v=>txt(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const tech=v=>{const raw=txt(v).toUpperCase();const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw;};
-  function read(key){try{if(typeof getAny==='function')return getAny(key);}catch(_){}for(const st of [localStorage,sessionStorage])try{const x=st.getItem(key);if(x!==null)return x;}catch(_){}return null;}
-  function obj(key,fallback){try{return JSON.parse(read(key)||'null')??fallback;}catch(_){return fallback;}}
-  function pending(lines){
-    return Array.isArray(lines)&&lines.some(l=>{
-      if(!l||typeof l!=='object')return false;
-      const needed=num(l.qty_pedida??l.pedida??l.qty??l.cantidad??l.required??0);
-      const received=num(l.qty_recibida??l.recibida??l.received??0);
-      return needed>0 && received+1e-6<needed;
-    });
-  }
-  // La fase productiva tiene prioridad sobre recepciones antiguas. Solo lectura.
-  // Excluimos una OT cuando el flujo confirma que TODAS sus unidades estan ya
-  // en almacen o entregadas, sin actividad restante en fabricacion o pintura.
-  function alreadyInWarehouseOrDelivered(ref,meta){
-    const key=tech(ref);
-    const db=obj('ldh_db',{});
-    const rows=[];
-    for(const pool of ['deliveries','fabricacion','fab','trabajos','almacen','entregados']){
-      for(const row of (Array.isArray(db?.[pool])?db[pool]:[])){
-        if(row&&tech(row.ref||row.referencia||row.jobRef||'')===key)rows.push({row,pool});
-      }
-    }
-    for(const {row,pool} of rows){
-      if(row.deleted===true||row.archived===true||row.eliminado===true)return true;
-      const f=row.flow&&typeof row.flow==='object'?row.flow:{};
-      const fab=num(f.fab??f.fabricacion??row.fab??row.enFabricacion??0);
-      const pint=num(f.pintura??f.paint??row.pintura??row.enPintura??0);
-      const alm=num(f.almacen??f.alm??row.almacen??row.enAlmacen??0);
-      const ent=num(f.entregado??row.entregado??row.delivered??0);
-      const total=num(row.total??row.unidades??row.cantidad??row.uds??meta?.unidades??0);
-      if(total>0&&fab<=0&&pint<=0&&alm+ent+1e-6>=total)return true;
-      const status=txt(row.fase||row.estado||row.status||'').toLowerCase();
-      if((pool==='entregados'||status==='entregado'||status==='archivado')&&fab<=0&&pint<=0)return true;
-    }
-    // Solo usamos la meta si no existe una fila productiva autoritativa.
-    if(!rows.length){
-      const m=meta||{};
-      const state=txt(m.fase||m.estado||m.workflow_stage||'').toLowerCase();
-      if(m.entregado===true||m.en_entregado===true||m.archived===true||m.en_almacen===true||m.almacen_ts||/^(almacen|entregado|archivado)$/.test(state))return true;
-    }
-    return false;
-  }
-  function scan(){
-    const refs=new Set();
-    for(const st of [localStorage,sessionStorage])try{for(let i=0;i<st.length;i++){const k=st.key(i)||'';if(k.startsWith(prefix)&&k.length>prefix.length)refs.add(k.slice(prefix.length));}}catch(_){}
-    return [...refs].map(ref=>({ref,meta:obj('prep_meta_'+ref,{}),lines:obj(prefix+ref,[])}))
-      .filter(r=>r.meta?.deleted_from_preparation!==true&&r.meta?.deleted!==true&&pending(r.lines)&&!alreadyInWarehouseOrDelivered(r.ref,r.meta));
-  }
-  let scheduled=false;
-  function addMissing(){
-    scheduled=false;
-    const host=document.getElementById('lista');
-    if(!host)return;
-    host.querySelectorAll('.ldh-v191-pending,.ldh-v192-pending').forEach(el=>el.remove());
-    const known=new Set([...host.querySelectorAll('.item[data-ref]')].map(n=>tech(n.dataset.ref)));
-    let added=0;
-    for(const r of scan()){
-      const key=tech(r.ref);
-      if(!key||known.has(key))continue;
-      const count=r.lines.filter(l=>num(l.qty_pedida??l.pedida??l.qty??l.cantidad??0)>num(l.qty_recibida??l.recibida??0)+1e-6).length;
-      const id=txt(r.meta.identification||r.meta.workIdentification||r.meta.workLabel||r.meta.referenceLabel);
-      const card=document.createElement('div');
-      card.className='item ldh-v192-pending';card.dataset.ref=r.ref;card.dataset.refNorm=r.ref.toLowerCase();
-      card.innerHTML='<div class="ldh-card-head"><span class="ldh-tech-ref">'+esc(r.ref)+'</span><div class="ldh-card-status"><span class="badge b-pa">PARCIAL</span></div></div>'+
-        (id?'<div class="ldh-card-ident">'+esc(id)+'</div>':'')+
-        '<div class="ldh-card-meta">'+esc(r.meta.concepto||r.meta.concept||'Pedido con recepción pendiente')+' · '+esc(r.meta.unidades||1)+' uds · '+esc(r.meta.empresa||r.meta.company||'')+'</div>'+
-        '<div class="ldh-card-meta" style="color:#fde68a;font-weight:800;margin-top:7px">'+count+' línea(s) pendientes · La OT puede seguir en Fabricación</div>';
-      card.onclick=()=>{if(typeof window.abrirPedido==='function')window.abrirPedido(r.ref);};
-      host.appendChild(card);known.add(key);added++;
-    }
-    if(added)console.info('[Preparación V192] Tarjetas incompletas recuperadas solo en lista:',added);
-  }
-  function schedule(){if(scheduled)return;scheduled=true;setTimeout(addMissing,20);}
-  let tries=0;
-  function install(){
-    const old=window.cargarLista;
-    if(typeof old!=='function'){if(++tries<40)setTimeout(install,80);return;}
-    if(old.__ldhPrepV192)return;
-    const wrapped=function(){const out=old.apply(this,arguments);schedule();return out;};
-    wrapped.__ldhPrepV192=true;wrapped.__ldhPrepV192Base=old;
-    window.cargarLista=wrapped;
-    try{cargarLista=wrapped;}catch(_){}
-    schedule();
-  }
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
-  window.addEventListener('storage',ev=>{if(ev?.key?.startsWith(prefix)||ev?.key?.startsWith('prep_meta_'))schedule();});
-  window.LDH_PREP_V192_SCAN_PENDING=()=>scan().map(r=>({ref:r.ref,pending:r.lines.filter(l=>num(l.qty_pedida??l.pedida??l.qty??0)>num(l.qty_recibida??l.recibida??0)+1e-6).length}));
-  console.info('[Preparación V192] Recuperación visual de fichas incompletas activa; sin escrituras.');
+ 'use strict';
+ // Exclusivamente visibilidad. NO escribe en localStorage, Firestore, Stock o recepciones.
+ const TOL=0.000001,prefix='prep_recepcion_';
+ const txt=v=>String(v??'').trim();
+ const num=v=>{const n=Number(String(v??0).replace(',','.'));return Number.isFinite(n)?Math.max(0,n):0;};
+ const refKey=v=>{const m=txt(v).toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):txt(v).toUpperCase();};
+ const esc=v=>txt(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const parse=(v,f)=>{try{return typeof v==='string'?JSON.parse(v):v??f;}catch(_){return f;}};
+ function read(k){try{if(typeof getAny==='function')return getAny(k);}catch(_){}for(const st of [localStorage,sessionStorage])try{const s=st.getItem(k);if(s!==null)return s;}catch(_){}return null;}
+ function linesPending(lines){return Array.isArray(lines)&&lines.some(l=>l&&num(l.qty_pedida??l.pedida??l.qty??l.cantidad)>num(l.qty_recibida??l.recibida)+TOL);}
+ function flowOf(row){const f=row?.flow&&typeof row.flow==='object'?row.flow:row||{};return {fab:num(f.fab??f.fabricacion),pint:num(f.pintura??f.paint),alm:num(f.almacen??f.alm),ent:num(f.entregado??row?.delivered)};}
+ // Fuente de verdad: phaseFlowV19, obtenido de taller_data/fabricacion EN NUBE.
+ // Una entrada con actividades en FAB/PINT no se retira por datos residuales.
+ function classified(row){
+   if(!row||typeof row!=='object')return 'unknown';
+   if(row.deleted===true||row.eliminado===true||row.archived===true)return 'closed';
+   const f=flowOf(row),total=num(row.total??row.unidades??row.cantidad);
+   const stage=txt(row.fase||row.estado||row.status).toLowerCase();
+   if(f.fab> TOL||f.pint>TOL)return 'active';
+   if(f.alm>TOL||f.ent>TOL){
+     if(total>0 && f.alm+f.ent+TOL<total)return 'active';
+     return 'closed';
+   }
+   if(['almacen','en almacen','entregado','archivado','terminado'].includes(stage))return 'closed';
+   return 'unknown';
+ }
+ let phaseMap=new Map(), cloudLoaded=false, lastError='';
+ function interpretCloud(pkg){
+   const out=new Map();const map=pkg?.phaseFlowV19;
+   if(map&&typeof map==='object')for(const [key,row] of Object.entries(map)){
+     const ref=refKey(row?.workRef||row?.displayRef||decodeURIComponent(key));
+     if(ref)out.set(ref,row);
+   }
+   // Respaldos: solo si la OT no existe en el mapa autoritativo.
+   const db=parse(pkg?.ldh_db,{}),over=parse(pkg?.overrides,{});
+   for(const pool of ['deliveries','fabricacion','fab','trabajos'])for(const row of (Array.isArray(db?.[pool])?db[pool]:[])){
+     const ref=refKey(row?.ref||row?.referencia||row?.jobRef);
+     if(ref&&!out.has(ref))out.set(ref,row);
+   }
+   for(const [ref,ov] of Object.entries(over||{})){
+     const k=refKey(ref);if(k&&!out.has(k))out.set(k,ov);
+   }
+   return out;
+ }
+ function phase(ref){
+   const k=refKey(ref);
+   if(cloudLoaded&&phaseMap.has(k))return classified(phaseMap.get(k));
+   // Evita depender del ldh_db obsoleto si la nube confirma otra fase.
+   const local=parse(read('ldh_db'),{}),map=local?.phaseFlowV19;
+   if(map)for(const [key,row]of Object.entries(map))if(refKey(row?.workRef||row?.displayRef||key)===k)return classified(row);
+   return 'unknown';
+ }
+ function scan(){
+   const refs=new Set();for(const st of [localStorage,sessionStorage])try{for(let i=0;i<st.length;i++){const key=st.key(i)||'';if(key.startsWith(prefix))refs.add(key.slice(prefix.length));}}catch(_){}
+   return [...refs].map(ref=>({ref,meta:parse(read('prep_meta_'+ref),{}),lines:parse(read(prefix+ref),[])}))
+     .filter(e=>e.meta?.deleted!==true&&e.meta?.deleted_from_preparation!==true&&linesPending(e.lines));
+ }
+ let scheduled=false, busy=false;
+ function reconcile(){
+   scheduled=false;
+   const host=document.getElementById('lista');if(!host||busy)return;
+   busy=true;
+   try{
+     host.querySelectorAll('.ldh-v191-pending,.ldh-v192-pending,.ldh-v193-pending').forEach(el=>el.remove());
+     const visible=new Set();
+     for(const card of host.querySelectorAll('.item[data-ref]')){
+       const ref=card.dataset.ref,key=refKey(ref);
+       const status=phase(ref);
+       if(status==='closed')card.style.setProperty('display','none','important');
+       else card.style.removeProperty('display');
+       visible.add(key);
+     }
+     for(const entry of scan()){
+       const key=refKey(entry.ref);if(visible.has(key)||phase(entry.ref)==='closed')continue;
+       // Recuperamos solo si se conoce una fase activa, o si Prep no se envio a produccion.
+       const metaStage=txt(entry.meta?.fase||entry.meta?.estado).toLowerCase();
+       const advanced=!!(entry.meta?.en_fabricacion||entry.meta?.en_pintura||entry.meta?.en_almacen||entry.meta?.entregado||/fabric|pint|almac|entreg/.test(metaStage));
+       if(advanced && phase(entry.ref)!=='active')continue;
+       const count=entry.lines.filter(l=>l&&num(l.qty_pedida??l.pedida??l.qty??l.cantidad)>num(l.qty_recibida??l.recibida)+TOL).length;
+       const ident=txt(entry.meta.identification||entry.meta.workIdentification||entry.meta.workLabel||entry.meta.referenceLabel);
+       const card=document.createElement('div');card.className='item ldh-v193-pending';card.dataset.ref=entry.ref;
+       card.innerHTML='<div class="ldh-card-head"><span class="ldh-tech-ref">'+esc(entry.ref)+'</span><div class="ldh-card-status"><span class="badge b-pa">PARCIAL</span></div></div>'+
+         (ident?'<div class="ldh-card-ident">'+esc(ident)+'</div>':'')+
+         '<div class="ldh-card-meta">'+esc(entry.meta.concepto||entry.meta.concept||'Pedido con recepción pendiente')+' · '+esc(entry.meta.unidades||1)+' uds · '+esc(entry.meta.empresa||entry.meta.company||'')+'</div>'+
+         '<div class="ldh-card-meta" style="color:#fde68a;font-weight:800;margin-top:7px">'+count+' línea(s) pendientes</div>';
+       card.onclick=()=>{if(typeof window.abrirPedido==='function')window.abrirPedido(entry.ref);};
+       host.appendChild(card);visible.add(key);
+     }
+   }finally{busy=false;}
+ }
+ function schedule(){if(scheduled)return;scheduled=true;setTimeout(reconcile,30);}
+ function install(){
+   const old=window.cargarLista;
+   if(typeof old!=='function'){setTimeout(install,100);return;}
+   if(old.__ldhPrepV193)return;
+   const wrapped=function(){const result=old.apply(this,arguments);schedule();return result;};
+   wrapped.__ldhPrepV193=true;window.cargarLista=wrapped;try{cargarLista=wrapped;}catch(_){}
+   schedule();
+ }
+ function cloud(){
+   if(!window.firebase?.firestore){setTimeout(cloud,300);return;}
+   try{
+     const app=(firebase.apps||[]).find(a=>a?.options?.projectId==='gestion-taller-v2');
+     if(!app){lastError='No se encontro Firebase gestion-taller-v2';return;}
+     firebase.firestore(app).collection('taller_data').doc('fabricacion').onSnapshot(snap=>{
+       if(!snap.exists){cloudLoaded=false;return;}
+       phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;lastError='';schedule();
+     },err=>{lastError=String(err?.message||err);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
+   }catch(e){lastError=String(e?.message||e);console.warn('[Preparacion V193] Estado fase',e);}
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{install();cloud();},{once:true});else{install();cloud();}
+ window.addEventListener('storage',e=>{if(e.key==='ldh_db'||e.key?.startsWith(prefix)||e.key?.startsWith('prep_meta_'))schedule();});
+ window.LDH_PREP_V193_STATUS=()=>({cloudLoaded,refs:phaseMap.size,lastError,diagnostico:['OT-260902-002','OT-261013-002'].map(ref=>({ref,phase:phase(ref),nube:phaseMap.get(ref)?.flow||null}))});
+ console.info('[Preparacion V193] Visibilidad por fase Firestore phaseFlowV19; solo lectura.');
 })();
 </script>
 
