@@ -1636,7 +1636,8 @@ tbody td,td{border-color:rgba(148,163,184,.12)!important}
 </style>
 
 
-<meta name="ldh-ai-module" content="agenda">
+<meta name="ldh-ai-module" content="agenda"><meta name="ldh-nou-revision" content="R49-AGENDA-NAV-R48-PLUS-CABINA-READONLY">
+<meta name="ldh-cabina-pilot" content="R72-PAREJA-PILOTO-SIN-DATOS-FICTICIOS">
 </head>
 <body>
 
@@ -1652,9 +1653,9 @@ tbody td,td{border-color:rgba(148,163,184,.12)!important}
     </div>
 
     <div class="wo-tabs" role="tablist" aria-label="Apartados de Agenda">
-      <button type="button" class="wo-tab active" id="woTabDaily" onclick="WorkOrders.showPanel('daily')">Agenda diaria</button>
-      <button type="button" class="wo-tab" id="woTabOrders" onclick="WorkOrders.showPanel('orders')">Trabajos pendientes <span id="woPendingCount">0</span><span id="woAlertCount" class="wo-alert-count" hidden>0</span></button>
-      <button type="button" class="wo-tab" id="woTabHistory" onclick="WorkOrders.showPanel('history')">Histórico <span id="woHistoryCount">0</span></button>
+      <button type="button" class="wo-tab active" id="woTabDaily" onclick="LDH_agendaSwitchTabSafe('daily')">Agenda diaria</button>
+      <button type="button" class="wo-tab" id="woTabOrders" onclick="LDH_agendaSwitchTabSafe('orders')">Trabajos pendientes <span id="woPendingCount">0</span><span id="woAlertCount" class="wo-alert-count" hidden>0</span></button>
+      <button type="button" class="wo-tab" id="woTabHistory" onclick="LDH_agendaSwitchTabSafe('history')">Histórico <span id="woHistoryCount">0</span></button>
     </div>
 
     <section id="woNotifications" class="wo-notification-center" hidden aria-live="polite">
@@ -8185,7 +8186,14 @@ window.ejecutarDevolucion = function(matId, maxQty){
     if(!d)return '';
     const done=d.status==='completed'||!d.active;
     if(done)return `<span class="wo-direct-paint-pill done">🎨 SOLO PINTURA</span>`;
-    return `<span class="wo-workflow-pill wo-painting"><span class="wo-workflow-dot"></span>EN PINTURA</span><span class="wo-direct-paint-pill">🎨 SOLO PINTURA</span>`;
+    // NOU: pintar una pieza es un movimiento parcial visible desde Agenda.
+    // Se lee el valor REAL escrito por Cabina; nunca se deduce del stock.
+    const raw=order&&order.directPaintV1||{};
+    const total=Math.max(1,Math.round(Number(raw.quantity||order.quantity)||1));
+    const painted=Math.min(total,Math.max(0,Math.round(Number(raw.paintedUnitsV1)||0)));
+    const pending=total-painted;
+    const progress=`<span class="wo-phase-pills">${pending?`<span class="wo-phase-pill pint">PINT <strong>${pending}</strong></span>`:''}${painted?`<span class="wo-phase-pill alm">ALM <strong>${painted}</strong></span>`:''}</span>`;
+    return `<span class="wo-workflow-pill wo-painting"><span class="wo-workflow-dot"></span>EN PINTURA</span><span class="wo-direct-paint-pill">🎨 SOLO PINTURA</span>${progress}`;
   }
 
   function normalizeOrder(raw){
@@ -8976,7 +8984,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
             <td><div class="wo-actions">
               ${visibleNotice?`<button type="button" class="wo-small-btn wo-seen-new-btn" onclick="WorkOrders.acknowledgeOrderNotifications('${esc(o.id)}',this)">✓ VISTO</button>`:''}
               ${!directPending && !o.directPaintCalcV33 && ['','preparing'].includes(workflow.state)?`<button type="button" class="wo-small-btn wo-send-calc-btn" onclick="WorkOrders.sendToCalculation('${esc(o.id)}')">${workflow.state === 'preparing' ? '↗ ABRIR CÁLCULO' : '➡ MANDAR A CÁLCULO'}</button>`:''}
-              ${directEligible?`<button type="button" class="wo-small-btn wo-direct-paint-send-btn" onclick="WorkOrders.openEdit('${esc(o.id)}')">${o.directPaintCalcV33?.status==='calculated'?'🎨 ENVIAR CÁLCULO A PINTURA':o.directPaintCalcV33?.status==='pending'?'🧮 ABRIR CÁLCULO DE PINTURA':'🧮 PREPARAR SOLO PINTURA'}</button>`:''}
+              ${directEligible?`<button type="button" class="wo-small-btn wo-direct-paint-send-btn" onclick="WorkOrders.openDirectPaintConfiguratorForOrderV28('${esc(o.id)}')">🎨 ENVIAR SOLO A PINTURA</button>`:''}
               ${directPending?`<button type="button" class="wo-small-btn wo-direct-paint-active-btn" disabled>🎨 EN CABINA</button>`:''}
               <button type="button" class="wo-small-btn" onclick="WorkOrders.viewOrder('${esc(o.id)}')">Ver</button>
               <button type="button" class="wo-small-btn wo-notice-btn" onclick="WorkOrders.editOperationalNotice('${esc(o.id)}')">📝 AVISO</button>
@@ -9151,7 +9159,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
       document.getElementById('woRal').value = '';
       this.renderCompanyOptions();
       document.getElementById('woCompany').value = '';
-      const directBtn=document.getElementById('woDirectSaveSendBtn');if(directBtn)directBtn.hidden=true; // V33: primero guardar OT y después calcular en su ficha.
+      const directBtn=document.getElementById('woDirectSaveSendBtn');if(directBtn)directBtn.hidden=false;
       const calcBtn=document.getElementById('woCalcPaintOnlyV33');if(calcBtn)calcBtn.hidden=true;
       const sendBtn=document.getElementById('woSendPaintOnlyV33');if(sendBtn)sendBtn.hidden=true;
       this.openModal();
@@ -9226,8 +9234,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
     async prepareDirectPaintFromForm(){
       const row=this.collectForm(),validation=this.validate(row);if(validation)return alert(validation);
-      if(normText(document.getElementById('woEditId')?.value))return alert('Abre la ficha de esta OT y utiliza el cálculo V33 guardado.');
-      return alert('Primero guarda la OT. Después abre su ficha y pulsa MANDAR A CÁLCULO DE PINTURA. El configurador antiguo no se utilizará.');
+      if(normText(document.getElementById('woEditId')?.value))return alert('Para una OT ya guardada usa el botón 🎨 ENVIAR SOLO A PINTURA de la lista.');
       if(!normText(row.ral))return alert('Indica primero el Lacado RAL. Pintura directa necesita empresa + RAL para localizar el Stock en Cabina.');
       this.directPaintConfigTargetV28={source:'form',orderId:'',row};
       this.directPaintConfigGroupsV28=[this.directPaintBlankGroupV28(row.quantity)];
@@ -9235,8 +9242,6 @@ window.ejecutarDevolucion = function(matId, maxQty){
     },
 
     async openDirectPaintConfiguratorForOrderV28(id){
-      // V33: compatibilidad con llamadas antiguas; jamás abrir otro configurador.
-      return this.openEdit(id);
       const order=this.orders.find(o=>o.id===id&&o.status==='pending');if(!order)return;
       const currentState=normalizeWorkflowState(order),f=phaseFlow(order),flowTotal=f.fabricacion+f.pintura+f.almacen+f.entregado;
       if(order.directPaintV1?.active)return alert('Esta OT ya está en Pintura directa.');
@@ -12210,6 +12215,144 @@ Por seguridad no se tocará hasta limpiar primero esa evidencia.`);
   }
   const timer=setInterval(()=>{check();if(!sessionStorage.getItem('ldh_paint_calculation_result_v33'))clearInterval(timer);},1800);
   setTimeout(()=>clearInterval(timer),120000);
+})();
+</script>
+
+<!-- LDH_AGENDA_R48_NOU_NAVIGATION_20261020: solo navegacion, sin escrituras -->
+<script id="LDH_AGENDA_R48_SAFE_TABS">
+(function(){
+  'use strict';
+  window.LDH_agendaSwitchTabSafe = function(name){
+    var target = name === 'orders' || name === 'history' ? name : 'daily';
+    var panels = {daily:'woDailyPanel',orders:'woOrdersPanel',history:'woHistoryPanel'};
+    var tabs = {daily:'woTabDaily',orders:'woTabOrders',history:'woTabHistory'};
+    // Cambio visual independiente del render de nube: el boton siempre debe abrir.
+    Object.keys(panels).forEach(function(k){
+      var panel=document.getElementById(panels[k]);
+      var tab=document.getElementById(tabs[k]);
+      if(panel) panel.hidden = (k !== target);
+      if(tab){
+        tab.classList.toggle('active', k === target);
+        tab.setAttribute('aria-selected', String(k === target));
+      }
+    });
+    var wo=window.WorkOrders;
+    if(wo){
+      wo.activePanel=target;
+      if(target !== 'daily' && typeof wo.render === 'function'){
+        try{wo.render();}
+        catch(error){console.error('[Agenda NOU] Panel abierto; error al actualizar listado:',error);}
+      }
+    }
+    return false;
+  };
+})();
+</script>
+<!-- NOU R49: visor de solicitudes de Cabina. SOLO LECTURA; ninguna aprobacion insegura -->
+<style>
+#ldhCabinaRequestsR66{margin:14px 20px;padding:15px;border:1px solid #345c74;border-radius:14px;background:#0d2034;color:#e4f5ff;font:13px system-ui}
+#ldhCabinaRequestsR66 button{margin:4px;padding:8px 12px;border:1px solid #4d8aa4;background:#194362;color:white;border-radius:8px;cursor:pointer}
+#ldhCabinaRequestsR66 .req{border:1px solid #365a73;border-radius:9px;padding:10px;margin:9px 0}
+#ldhCabinaRequestsR66 small{color:#f3d18a}
+</style>
+<section id="ldhCabinaRequestsR66"><b>Confirmaciones de salida de Cabina · piloto Firestore</b><div id="ldhCStatusR66">Comprobando sesión existente de Fabricación…</div><button type="button" id="ldhCRefreshR66">Consultar solicitudes</button><div id="ldhCListR66"></div><small>Solo se aprovecha una sesión existente y autorizada de gestion-taller-v2. No se añade acceso con Google. Sin sesión o permisos, no se permite aprobar. No se archiva automáticamente ni se modifica Stock.</small></section>
+<script type="module" id="LDH_CABINA_REQUESTS_R68">
+(async()=>{
+ const conf={apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',authDomain:'gestion-taller-v2.firebaseapp.com',projectId:'gestion-taller-v2',storageBucket:'gestion-taller-v2.firebasestorage.app',messagingSenderId:'888590823508',appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'};
+ const status=document.getElementById('ldhCStatusR66'),list=document.getElementById('ldhCListR66');
+ const e=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const norm=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+ let fb,auth,db,ref;
+ async function connect(){
+  if(fb)return fb;
+  const [app,au,fs]=await Promise.all([import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')]);
+  const a=app.getApps().find(x=>x.name==='ldh-cabina-pc-r66')||app.initializeApp(conf,'ldh-cabina-pc-r66');
+  auth=au.getAuth(a);db=fs.getFirestore(a);ref=fs.doc(db,'taller_data','fabricacion');fb={au,fs};return fb;
+ }
+ const current=()=>auth?.currentUser;
+ async function refresh(){
+  list.replaceChildren();try{await connect();if(!current())throw Error('No hay sesión autorizada en gestion-taller-v2. No se ha añadido ningún acceso nuevo ni se permite confirmar.');
+   const snap=await fb.fs.getDoc(ref);if(!snap.exists())throw Error('No existe el documento de fabricación.');
+   const req=snap.data().cabinDeleteRequestsV1||{};
+   const actionable=Object.entries(req).filter(([,r])=>r&&(r.status==='pending'||r.status==='pending_agenda'));
+   status.textContent=actionable.length+' solicitudes pendientes o por conciliar · '+(current().email||current().uid);
+   for(const [key,r] of actionable){const el=document.createElement('div');el.className='req';const w=window.WorkOrders;
+    const ot=w?.orders?.find(o=>o.status!=='archived'&&norm(o.reference)===norm(r.ref||r.reference));
+    const inProgress=r.status==='pending_agenda';
+    el.innerHTML='<b>'+e(r.identification||r.concept||r.displayRef||r.ref)+'</b><div>'+e(r.displayRef||r.ref)+' · '+e(r.company)+' · '+e(r.total)+' uds.</div><div>Solicita: '+e(r.requestedBy)+'</div>'+(inProgress?'<small>Confirmación en curso: reanudar conciliación. Cabina aún NO la considera aprobada.</small>':'')+(ot?'<div>OT original localizada · '+e(ot.reference)+'</div>':'<small>OT original NO localizada en Agenda: aprobación bloqueada.</small>');
+    if(!inProgress){const reject=document.createElement('button');reject.textContent='Rechazar';reject.onclick=()=>decide(key,r,'rejected',ot);el.append(reject)}
+    if(ot){const approve=document.createElement('button');approve.textContent=inProgress?'Reanudar conciliación':'Confirmar salida de pintura';approve.onclick=()=>decide(key,r,'approved',ot);el.append(approve)}list.append(el);
+   }
+  }catch(err){status.textContent='No se ha podido consultar: '+(err.code||err.message||err)}
+ }
+ async function decide(key,r,decision,ot){
+  if(!current()){status.textContent='Sesión necesaria.';return}
+  if(decision==='approved'&&!ot){status.textContent='Falta la OT original en Agenda.';return}
+  if(!window.confirm((decision==='approved'?'¿Confirmar o reanudar salida de pintura y marcar TERMINADO?':'¿Rechazar confirmación?')+'\n'+(r.identification||r.ref)))return;
+  status.textContent='Conciliando...';try{
+   const uid=current().uid, email=current().email||'';
+   if(decision==='rejected'){
+    await fb.fs.runTransaction(db,async tx=>{
+     const snap=await tx.get(ref);if(!snap.exists())throw Error('Documento de fabricación inexistente');
+     const q=(snap.data().cabinDeleteRequestsV1||{})[key];
+     if(!q||q.status!=='pending')throw Error('La solicitud ya está siendo procesada o resuelta.');
+     if(norm(q.ref||q.reference)!==norm(r.ref||r.reference))throw Error('Referencia cambiada.');
+     tx.update(ref,{['cabinDeleteRequestsV1.'+key]:{...q,status:'rejected',decidedByUid:uid,decidedByEmail:email,decidedAtISO:new Date().toISOString()},cabinDeleteRequestsV1UpdatedAt:fb.fs.serverTimestamp()});
+    });
+   }else{
+    const W=window.WorkOrders;
+    if(!W?.cloudOrdersSnapshotReady||!W.cloud?.saveWorkflowState)throw Error('Agenda no tiene lectura de nube confirmada. No se aprueba.');
+    // Claim durable en Fabricacion: bloquea otras decisiones y mantiene Cabina sin aprobacion.
+    // Si Agenda falla, pending_agenda permite recuperar la operacion en la siguiente visita.
+    await fb.fs.runTransaction(db,async tx=>{
+     const snap=await tx.get(ref);if(!snap.exists())throw Error('Documento de fabricación inexistente');
+     const q=(snap.data().cabinDeleteRequestsV1||{})[key];
+     if(!q||!['pending','pending_agenda'].includes(q.status))throw Error('La solicitud ya fue resuelta.');
+     if(norm(q.ref||q.reference)!==norm(r.ref||r.reference))throw Error('Referencia cambiada; operación cancelada.');
+     if(q.status==='pending_agenda'){
+      if(q.claimedByUid!==uid)throw Error('Otro responsable tiene la conciliación en curso.');
+      return;
+     }
+     tx.update(ref,{['cabinDeleteRequestsV1.'+key]:{...q,status:'pending_agenda',claimedByUid:uid,claimedByEmail:email,claimedAtISO:new Date().toISOString()},cabinDeleteRequestsV1UpdatedAt:fb.fs.serverTimestamp()});
+    });
+    // Idempotente por estado de OT: no archiva ni inventa un segundo pedido.
+    const live=W.orders?.find(o=>o.status!=='archived'&&norm(o.reference)===norm(r.ref||r.reference));
+    if(!live)throw Error('La OT original ya no está disponible. Conciliación pendiente.');
+    // No confundir «terminado localmente» con escritura confirmada en la nube.
+    // Reintentar SIEMPRE el documento de Agenda antes de resolver Fabricacion.
+    // La OT archivada nunca puede aprobarse desde este circuito.
+    if(live.status!=='pending')throw Error('La OT no está entre las pendientes de Agenda. Conciliación detenida.');
+    const finished=live.workflowStateV2==='finished';
+    if(!finished){
+     const n=Number(live.quantity)||Number(r.total)||1;
+     const result=await W.saveWorkflowState(live,'finished',{fabricacion:0,pintura:0,almacen:n,entregado:0},'cabina_pc_confirmed_r70');
+     if(result!==true)throw Error('Agenda no confirmó el guardado. La solicitud sigue pendiente de conciliación.');
+    }
+    // Aunque el intento anterior dejase el estado en memoria, esta escritura
+    // es imprescindible y recuperable. Un fallo aquí impide status approved.
+    await W.cloud.saveWorkflowState(live);
+    // Solo despues de guardar Agenda se libera la OT de Cabina.
+    await fb.fs.runTransaction(db,async tx=>{
+     const snap=await tx.get(ref);if(!snap.exists())throw Error('Documento de fabricación inexistente');
+     const q=(snap.data().cabinDeleteRequestsV1||{})[key];
+     if(!q||q.status!=='pending_agenda'||q.claimedByUid!==uid)throw Error('La conciliación cambió; no se confirma.');
+     if(norm(q.ref||q.reference)!==norm(r.ref||r.reference))throw Error('Referencia cambiada; no se confirma.');
+     tx.update(ref,{['cabinDeleteRequestsV1.'+key]:{...q,status:'approved',decidedByUid:uid,decidedByEmail:email,decidedAtISO:new Date().toISOString()},cabinDeleteRequestsV1UpdatedAt:fb.fs.serverTimestamp()});
+    });
+   }
+   status.textContent='Decisión registrada. Archivado manual independiente.';await refresh();
+  }catch(err){status.textContent='No confirmado: '+(err.code||err.message||err)+'. Si está pendiente de conciliación, reanuda desde esta misma pantalla; NO repitas otras acciones.';}
+ }
+ // Reutilizar exclusivamente una sesión ya existente de ESTE proyecto.
+ // La sesión de gestion-taller-2a439 no concede identidad en gestion-taller-v2.
+ // No iniciar sesión automáticamente, no introducir proveedores nuevos ni aprobar anónimamente.
+ connect().then(()=>{
+   fb.au.onAuthStateChanged(auth,user=>{
+     if(user){refresh();}
+     else{list.replaceChildren();status.textContent='Sin sesión autorizada en gestion-taller-v2. Confirmaciones bloqueadas; consulta al administrador del acceso existente.';}
+   });
+ }).catch(err=>{status.textContent='No se pudo comprobar la sesión existente: '+(err.code||err.message||err)});
+ document.getElementById('ldhCRefreshR66').onclick=refresh;
 })();
 </script>
 </body></html>
