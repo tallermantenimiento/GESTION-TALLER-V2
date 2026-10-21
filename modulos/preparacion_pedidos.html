@@ -13,7 +13,7 @@
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
-<meta name="ldh-prep-advanced-list-build" content="PREPARACION-V189-FILTRO-FASE-AVANZADA-LECTURA-20261014" />
+<meta name="ldh-prep-advanced-list-build" content="PREPARACION-V191-PENDIENTES-LECTURA-CONSERVADORA-20261021" />
 <meta name="ldh-prep-nav-safe-build" content="PREPARACION-V177-NO-REHIDRATAR-FAB-20261014" />
 <meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
 <title>Preparación de pedidos</title>
@@ -3859,6 +3859,21 @@ function LDH_prepEntregadoConfirmadoV188(ref,meta){
     return true;
   }catch(_){return false;}
 }
+/* V190: pendiente real de recepcion; solo lectura y sin modificaciones a Stock. */
+function LDH_prepTieneRecepcionPendienteV190(ref, raw){
+  try{
+    const value=raw===undefined?getAny(KP(ref)):raw;
+    if(value===null||value===undefined)return false;
+    const lines=JSON.parse(value);
+    if(!Array.isArray(lines)||!lines.length)return false;
+    return lines.some(line=>{
+      if(!line||typeof line!=='object')return false;
+      const want=toNum(line.qty_pedida??line.pedida??line.qty??0);
+      const got=toNum(line.qty_recibida??line.recibida??0);
+      return want>0 && got+0.000001<want;
+    });
+  }catch(_){return false;}
+}
 /* V189 · Filtro visual de pedidos ya trasladados a Fabricacion o fases posteriores.
    Solo lectura: requiere 4 snapshots coincidentes y preserva cualquier deuda.
    No modifica recepciones, inventario, metas, ni Firestore. */
@@ -3866,6 +3881,8 @@ function LDH_prepAvanzadoConfirmadoV189(ref,meta){
   try{
     const key=LDH_extractTechnicalRefV143(ref).toUpperCase();
     if(!key)return false;
+    // Una fase avanzada no equivale a haber recibido todos los materiales.
+    if(LDH_prepTieneRecepcionPendienteV190(ref))return false;
     const db=JSON.parse(getAny('ldh_db')||'{}');
     const pools=['deliveries','fabricacion','fab','trabajos'];
     const stages=[];
@@ -3951,9 +3968,14 @@ function cargarLista() {
     // V139 · Una OT cerrada correctamente al entrar en Fabricación no puede
     // volver a aparecer en Preparación aunque una copia remota antigua conserve
     // temporalmente prep_recepcion_<REF>. La meta cerrada es autoritativa.
-    if(meta && (meta.closed_from_preparation === true || meta.deleted_from_preparation === true)){
-      try{ removeAny(k); }catch(_){ }
+    if(meta && meta.deleted_from_preparation === true){
+      // El borrado explícito sigue siendo autoritativo; no revivir OTs eliminadas.
       return;
+    }
+    if(meta && meta.closed_from_preparation === true){
+      // Si existen faltantes, el cierre prematuro no debe ocultarlos ni borrar
+      // prep_recepcion_. La ficha permanece disponible para recibir lo pendiente.
+      if(!LDH_prepTieneRecepcionPendienteV190(ref,getAny(k)))return;
     }
 
     // V188: ENTREGADO confirmado no vuelve a Pedidos en curso por recepcion parcial antigua.
@@ -24593,9 +24615,28 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     if(!groups.length){host.innerHTML=toolbar+'<div class="ldh-history-empty">Todavía no hay compras conjuntas archivadas.</div>';return;}
     host.innerHTML=toolbar+groups.map(group=>{const ph=phaseData(group),st=latestStatus(group),agendaIdent=agendaIdentificationV186(masterRef(group));return `<div class="ldh-group-card history" onclick="LDH_CompraConjuntaV1.open('${esc(group.id)}','history')"><div class="ldh-group-title">📦 ${esc(masterRef(group))}</div>${agendaIdent?`<div class="ldh-group-agenda-ident-v186"><b>ℹ IDENTIFICACIÓN</b> · ${esc(agendaIdent)}</div>`:''}<div class="ldh-group-meta">${esc(company(group))} · ${esc(ph.text)}${st?.purchaseId?` · ${esc(st.purchaseId)}`:''}</div><span class="ldh-group-state archived">ARCHIVADO · COMPRA CERRADA</span></div>`;}).join('');
   }
+  function LDH_isGenuineCompositeV190(group){
+    if(!group||!Array.isArray(group.members))return false;
+    const unique=new Set(group.members.map(m=>String(m.ref||'').trim().toUpperCase()).filter(Boolean));
+    if(unique.size>=2)return true;
+    const first=group.members[0];
+    if(!first)return false;
+    const oid=String(first.meta?.composite_master_order_id||first.meta?.agenda_order_id||'').trim();
+    const master=String(first.meta?.composite_master_reference||'').trim().toUpperCase();
+    for(const storage of [localStorage,sessionStorage]){
+      try{
+        const raw=storage.getItem('ldh_work_orders_v1');
+        if(!raw)continue;
+        const parsed=JSON.parse(raw);
+        const rows=Array.isArray(parsed)?parsed:(Array.isArray(parsed?.orders)?parsed.orders:[]);
+        if(rows.some(o=>o&&((oid&&String(o.id||'')===oid)||(master&&String(o.reference||'').toUpperCase()===master))&&Array.isArray(o.compositeV1?.parts)&&o.compositeV1.parts.length>=2))return true;
+      }catch(_){ }
+    }
+    return false;
+  }
   function renderGroups(){
     ensureUi();
-    const discovered=allGroups().filter(g=>!g.deleted);
+    const discovered=allGroups().filter(g=>!g.deleted&&LDH_isGenuineCompositeV190(g));
     /*
      * V80 · No convertir las metas de cierre de V80 en grupos fantasma.
      * - Con alguna prep_recepcion_ viva: grupo activo real.
@@ -24711,7 +24752,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
   function install(){
     ensureUi();
     if(typeof window.cargarLista==='function'&&!window.cargarLista.__ldhGroupV3Patched){originalCargarLista=window.cargarLista;const wrapped=function(){const r=originalCargarLista.apply(this,arguments);renderGroups();api.setTab(activeTab);return r;};wrapped.__ldhGroupV3Patched=true;window.cargarLista=wrapped;}
-    if(typeof window.copiarListaCompras==='function'&&!window.copiarListaCompras.__ldhGroupV3Patched){originalCopiarLista=window.copiarListaCompras;const wrapped=async function(){const gid=groupIdOf(metaActual);if(gid){show(gid,'active');return;}return originalCopiarLista.apply(this,arguments);};wrapped.__ldhGroupV3Patched=true;window.copiarListaCompras=wrapped;}
+    if(typeof window.copiarListaCompras==='function'&&!window.copiarListaCompras.__ldhGroupV3Patched){originalCopiarLista=window.copiarListaCompras;const wrapped=async function(){const gid=groupIdOf(metaActual);if(gid){const grp=allGroups().find(g=>g.id===gid);if(grp&&LDH_isGenuineCompositeV190(grp)){show(gid,'active');return;}}return originalCopiarLista.apply(this,arguments);};wrapped.__ldhGroupV3Patched=true;window.copiarListaCompras=wrapped;}
     renderGroups();api.setTab('individual');
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
@@ -32842,6 +32883,9 @@ document.documentElement.dataset.ldhPrepV178='true';
       });
       return {count:pending.length,orderId:txt(order.id)||masterId,masterRef:txt(order.reference)||masterRef,groupId:txt(order.compositeV1.groupId)||gid};
     }
+    // Los identificadores heredados en una OT simple no prueban que sea compuesta.
+    // Sin orden de Agenda con >=2 partidas, exigir al menos dos refs reales del grupo.
+    if(seen.size<2)return null;
     const expected=Math.max(2,Math.round(Number(meta&& (meta.composite_part_count||meta.partCount))||2));
     const processed=Math.max(1,seen.size||1);
     return {count:Math.max(0,expected-processed),orderId:masterId,masterRef,groupId:gid};
@@ -33473,4 +33517,73 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
 </script>
 <script src="../asistente_ia_global.js?v=20261008-27" data-ldh-ai-global-loader="preparacion"></script>
 <!-- /LDH_AI_GLOBAL_PREPARACION_OPERATIVA_R1_20261008 -->
+<!-- LDH_PREP_V191_PENDING_LIST_READONLY_20261021 -->
+<script id="LDH_PREP_V191_PENDING_LIST_READONLY_20261021">
+(function(){
+  'use strict';
+  // Diagnostico/visibilidad exclusivamente: nunca escribe recepciones, Stock o nube.
+  const BUILD='PREPARACION-V191-TARJETAS-PENDIENTES-SIN-REABRIR-FASES-20261021';
+  const prefix='prep_recepcion_';
+  const num=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0;};
+  const txt=v=>String(v??'').trim();
+  const esc=v=>txt(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const tech=v=>{const raw=txt(v).toUpperCase();const m=raw.match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):raw;};
+  function read(key){try{if(typeof getAny==='function')return getAny(key);}catch(_){}for(const st of [localStorage,sessionStorage])try{const x=st.getItem(key);if(x!==null)return x;}catch(_){}return null;}
+  function obj(key,fallback){try{return JSON.parse(read(key)||'null')??fallback;}catch(_){return fallback;}}
+  function pending(lines){
+    return Array.isArray(lines)&&lines.some(l=>{
+      if(!l||typeof l!=='object')return false;
+      const needed=num(l.qty_pedida??l.pedida??l.qty??l.cantidad??l.required??0);
+      const received=num(l.qty_recibida??l.recibida??l.received??0);
+      return needed>0 && received+1e-6<needed;
+    });
+  }
+  function scan(){
+    const refs=new Set();
+    for(const st of [localStorage,sessionStorage])try{for(let i=0;i<st.length;i++){const k=st.key(i)||'';if(k.startsWith(prefix)&&k.length>prefix.length)refs.add(k.slice(prefix.length));}}catch(_){}
+    return [...refs].map(ref=>({ref,meta:obj('prep_meta_'+ref,{}),lines:obj(prefix+ref,[])}))
+      .filter(r=>r.meta?.deleted_from_preparation!==true&&r.meta?.deleted!==true&&pending(r.lines));
+  }
+  let scheduled=false;
+  function addMissing(){
+    scheduled=false;
+    const host=document.getElementById('lista');
+    if(!host)return;
+    const known=new Set([...host.querySelectorAll('.item[data-ref]')].map(n=>tech(n.dataset.ref)));
+    let added=0;
+    for(const r of scan()){
+      const key=tech(r.ref);
+      if(!key||known.has(key))continue;
+      const count=r.lines.filter(l=>num(l.qty_pedida??l.pedida??l.qty??l.cantidad??0)>num(l.qty_recibida??l.recibida??0)+1e-6).length;
+      const id=txt(r.meta.identification||r.meta.workIdentification||r.meta.workLabel||r.meta.referenceLabel);
+      const card=document.createElement('div');
+      card.className='item ldh-v191-pending';card.dataset.ref=r.ref;card.dataset.refNorm=r.ref.toLowerCase();
+      card.innerHTML='<div class="ldh-card-head"><span class="ldh-tech-ref">'+esc(r.ref)+'</span><div class="ldh-card-status"><span class="badge b-pa">PARCIAL</span></div></div>'+
+        (id?'<div class="ldh-card-ident">'+esc(id)+'</div>':'')+
+        '<div class="ldh-card-meta">'+esc(r.meta.concepto||r.meta.concept||'Pedido con recepción pendiente')+' · '+esc(r.meta.unidades||1)+' uds · '+esc(r.meta.empresa||r.meta.company||'')+'</div>'+
+        '<div class="ldh-card-meta" style="color:#fde68a;font-weight:800;margin-top:7px">'+count+' línea(s) pendientes · La OT puede seguir en Fabricación</div>';
+      card.onclick=()=>{if(typeof window.abrirPedido==='function')window.abrirPedido(r.ref);};
+      host.appendChild(card);known.add(key);added++;
+    }
+    if(added)console.info('[Preparación V191] Tarjetas incompletas recuperadas solo en lista:',added);
+  }
+  function schedule(){if(scheduled)return;scheduled=true;setTimeout(addMissing,20);}
+  let tries=0;
+  function install(){
+    const old=window.cargarLista;
+    if(typeof old!=='function'){if(++tries<40)setTimeout(install,80);return;}
+    if(old.__ldhPrepV191)return;
+    const wrapped=function(){const out=old.apply(this,arguments);schedule();return out;};
+    wrapped.__ldhPrepV191=true;wrapped.__ldhPrepV191Base=old;
+    window.cargarLista=wrapped;
+    try{cargarLista=wrapped;}catch(_){}
+    schedule();
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install,{once:true});else install();
+  window.addEventListener('storage',ev=>{if(ev?.key?.startsWith(prefix)||ev?.key?.startsWith('prep_meta_'))schedule();});
+  window.LDH_PREP_V191_SCAN_PENDING=()=>scan().map(r=>({ref:r.ref,pending:r.lines.filter(l=>num(l.qty_pedida??l.pedida??l.qty??0)>num(l.qty_recibida??l.recibida??0)+1e-6).length}));
+  console.info('[Preparación V191] Recuperación visual de fichas incompletas activa; sin escrituras.');
+})();
+</script>
+
 </body></html>
