@@ -10352,6 +10352,7 @@ function LDH_backfillFabricacionMaterialSnapshots(){
 
 /* ========= MANDAR A FABRICACIÓN (MANUAL) ========= */
 function confirmarTodoRecepcion() {
+  if(window.LDH_PREP_R194_ALLOW_SEND && !window.LDH_PREP_R194_ALLOW_SEND(refActual,true)) return;
   const hayBarras = estadoMateriales.some(l => (String(l.unit||"").toLowerCase() === 'barra'));
   if (hayBarras && !metaActual.tipo_hierro) { metaActual.tipo_hierro = "Negro"; try{ setAny(KM(refActual), JSON.stringify(metaActual)); }catch(e){} }
 
@@ -10364,6 +10365,7 @@ function confirmarTodoRecepcion() {
 
 /* ========= MANDAR A FABRICACIÓN (CORE) ========= */
 function mandarAFabricacion(unidadesFinal, withAlert) {
+  if(window.LDH_PREP_R194_ALLOW_SEND && !window.LDH_PREP_R194_ALLOW_SEND(refActual,true)) return;
   if (!refActual) return;
 
   const rawDb = getAny("ldh_db");
@@ -13793,6 +13795,23 @@ init();
   }
   function getTrabajoStage(ref){
     try{
+      // R194: estado productivo autoritativo antes de metadatos de recepción.
+      const real = window.LDH_PREP_V193_LOOKUP?.(ref);
+      if(real?.ready && real?.found){
+        const row=real.row||{}, f=row.flow||{};
+        const n=x=>Math.max(0,Number(x)||0);
+        if(row.deleted===true||row.archived===true)return 'entregado';
+        if(n(f.entregado)>0 && n(f.fab||f.fabricacion)===0 && n(f.pintura)===0 && n(f.almacen||f.alm)===0)return 'entregado';
+        if(n(f.almacen||f.alm)>0 && n(f.fab||f.fabricacion)===0 && n(f.pintura)===0)return 'almacen';
+        if(n(f.pintura)>0)return 'pintura';
+        if(n(f.fab||f.fabricacion)>0)return 'fabricacion';
+        const current=String(row.fase||row.estado||'').toLowerCase();
+        if(current.includes('fabric'))return 'fabricacion';
+        if(current.includes('pint'))return 'pintura';
+        if(current.includes('almac'))return 'almacen';
+        if(current.includes('entreg'))return 'entregado';
+      }
+
       // Prioridad a Preparación:
       // si existe prep_recepcion_REF y la meta NO está marcada explícitamente como fabricación/pintura/almacén/entregado,
       // no debe heredar registros antiguos de Fabricación por reutilizar referencia.
@@ -33626,14 +33645,78 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
      if(!app){lastError='No se encontro Firebase gestion-taller-v2';return;}
      firebase.firestore(app).collection('taller_data').doc('fabricacion').onSnapshot(snap=>{
        if(!snap.exists){cloudLoaded=false;return;}
-       phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;lastError='';schedule();
+       phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;lastError='';schedule();try{window.LDH_PREP_R194_REFRESH?.();}catch(_){}
      },err=>{lastError=String(err?.message||err);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
    }catch(e){lastError=String(e?.message||e);console.warn('[Preparacion V193] Estado fase',e);}
  }
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{install();cloud();},{once:true});else{install();cloud();}
  window.addEventListener('storage',e=>{if(e.key==='ldh_db'||e.key?.startsWith(prefix)||e.key?.startsWith('prep_meta_'))schedule();});
+ window.LDH_PREP_V193_LOOKUP=(ref)=>({ready:cloudLoaded,found:phaseMap.has(refKey(ref)),row:phaseMap.get(refKey(ref))||null,status:phase(ref),error:lastError});
  window.LDH_PREP_V193_STATUS=()=>({cloudLoaded,refs:phaseMap.size,lastError,diagnostico:['OT-260902-002','OT-261013-002'].map(ref=>({ref,phase:phase(ref),nube:phaseMap.get(ref)?.flow||null}))});
  console.info('[Preparacion V193] Visibilidad por fase Firestore phaseFlowV19; solo lectura.');
+})();
+</script>
+
+
+<!-- LDH_PREP_R194_FASE_PRODUCTIVA_PROTEGIDA_20261022 -->
+<script id="LDH_PREP_R194_FASE_PRODUCTIVA_PROTEGIDA_20261022">
+(function(){
+'use strict';
+const n=x=>Math.max(0,Number(x)||0);
+function lookup(ref){try{return window.LDH_PREP_V193_LOOKUP?.(ref)||null;}catch(_){return null;}}
+function flow(row){const f=row?.flow||row||{};return {fab:n(f.fab??f.fabricacion),pint:n(f.pintura??f.paint),alm:n(f.almacen??f.alm),ent:n(f.entregado??f.delivered)};}
+function stage(ref){
+ const hit=lookup(ref);
+ if(hit?.ready && hit.found){
+   const row=hit.row||{},f=flow(row);
+   if(row.deleted||row.archived||row.eliminado)return 'entregado';
+   if(f.ent>0 && f.fab===0 && f.pint===0 && f.alm===0)return 'entregado';
+   if(f.alm>0 && f.fab===0 && f.pint===0)return 'almacen';
+   if(f.pint>0)return 'pintura';
+   if(f.fab>0)return 'fabricacion';
+   return hit.status==='closed'?'entregado':'preparacion';
+ }
+ return null;
+}
+const labels={fabricacion:'En fabricación',pintura:'En pintura',almacen:'En almacén',entregado:'Entregado'};
+const classes={fabricacion:'b-stage-fab',pintura:'b-stage-paint',almacen:'b-stage-store',entregado:'b-stage-done'};
+function refresh(){
+ try{
+   const ref=typeof refActual==='string'?refActual:'';
+   if(!ref)return;
+   const status=stage(ref),pill=document.getElementById('pillFab'),btn=document.getElementById('btnFaseTrabajo');
+   if(status && status!=='preparacion'){
+     if(pill){pill.className='badge '+classes[status];pill.classList.remove('hidden');pill.textContent=labels[status];}
+     if(btn){btn.textContent='✓ Ya enviada · '+labels[status];btn.onclick=null;btn.disabled=true;btn.className='btn btn-stage '+classes[status];btn.style.pointerEvents='none';}
+   }else if(btn){
+     // Si no existe evidencia productiva no habilitar un reenvío con la nube sin consultar.
+     btn.disabled=!lookup(ref)?.ready;
+     if(btn.disabled){btn.textContent='Comprobando estado en Fabricación…';btn.onclick=null;}
+     else {btn.textContent='💾 Mandar a fabricación';btn.onclick=typeof confirmarTodoRecepcion==='function'?confirmarTodoRecepcion:null;btn.style.pointerEvents='';btn.className='btn';}
+   }
+ }catch(e){console.warn('[Preparación R194] Cabecera',e);}
+}
+window.LDH_PREP_R194_REFRESH=refresh;
+window.LDH_PREP_R194_ALLOW_SEND=function(ref,show){
+ const hit=lookup(ref);
+ if(!hit?.ready){if(show)alert('No se pudo verificar el estado actual de Fabricación en la nube. Envío bloqueado para evitar duplicar unidades.');return false;}
+ if(hit.found){
+   const row=hit.row||{},f=flow(row);
+   if(row.deleted||row.archived||f.fab>0||f.pint>0||f.alm>0||f.ent>0 || ['fabricacion','pintura','almacen','entregado','closed'].includes(stage(ref))){
+     if(show)alert('Esta OT ya tiene actividad productiva registrada. No se volverá a enviar a Fabricación. La ficha de Preparación sigue disponible para recibir material pendiente.');
+     return false;
+   }
+ }
+ // Una referencia sin actividad en phaseFlowV19 puede enviarse por el flujo original.
+ return true;
+};
+// Cabecera: ejecutamos tras abrir ficha y cuando la capa R193 recibe Firestore.
+const oldOpen=window.abrirPedido;
+if(typeof oldOpen==='function')window.abrirPedido=function(){const x=oldOpen.apply(this,arguments);setTimeout(refresh,40);return x;};
+const oldRender=window.LDH_renderFlowHeader;
+if(typeof oldRender==='function')window.LDH_renderFlowHeader=function(){const x=oldRender.apply(this,arguments);refresh();return x;};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',refresh,{once:true});else refresh();
+console.info('[Preparación R194] Estado productivo prioritario y doble envío bloqueado.');
 })();
 </script>
 
