@@ -454,7 +454,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
   <div class="modal">
     <h2 id="paintLinkTitle">Vincular pintura</h2>
     <div id="paintLinkSub" class="subm"></div>
-    <div class="field"><label>Pintura existente en Stock de esta empresa</label>
+    <div class="field"><label>Pintura de la empresa o de Stock Común</label>
       <select id="paintLinkSelect"><option value="">Selecciona pintura...</option></select>
     </div>
     <div id="paintLinkInfo" class="sumline" style="margin-top:12px">Selecciona la ficha de pintura que corresponde a este trabajo. Esta operaci&oacute;n solo guarda el v&iacute;nculo; no modifica cantidades de Stock.</div>
@@ -3023,28 +3023,52 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
       const pkg={...(snap.data()||{})};
       const ldh=safeParse(pkg.ldh_db,'{}')||{};
       FLOW_POOLS.forEach(pool=>{if(!Array.isArray(ldh[pool]))ldh[pool]=[];});
-      let representative=null,found=false;
+      // V93: localizar la misma OT por identidad canonica en las tres fuentes
+      // usadas por Fabricacion/Cabina. Nunca fabricar una OT nueva para guardar calculos.
+      const identity=workIdentityKey(ref);
+      const sameWork=v=>!!identity&&workIdentityKey(refOf(v))===identity;
+      const phaseMap=pkg.phaseFlowV19&&typeof pkg.phaseFlowV19==='object'?{...pkg.phaseFlowV19}:{};
+      const phaseKey=Object.keys(phaseMap).find(k=>{
+        const entry=phaseMap[k];
+        return entry&&workIdentityKey(entry.workRef||entry.ref||entry.reference)===identity;
+      });
+      const overrides=safeParse(pkg.overrides,'{}')||{};
+      let inbox=safeParse(pkg.inbox,'[]');if(!Array.isArray(inbox))inbox=[];
+      const existingInboxIndex=inbox.findIndex(sameWork);
+      let poolMatches=0;
+      const historyEvent={id:uid('hist'),type:'terminal_pintura_calculo_manual',qty:totalBotes,unit:'botes_eq_4L',liters:totalLiters,date:at,operator:op,note:'Calculo total de pintura: '+fmt(totalBotes)+' botes de 4 L ('+fmt(totalLiters)+' L) para '+fmt(totalUnits)+' uds'+(text(note)?' · '+text(note):''),source:'terminal_cabina_pintura'};
       FLOW_POOLS.forEach(pool=>{
-        const arr=ldh[pool];
-        arr.forEach((item,i)=>{
-          if(!sameRef(refOf(item),ref))return;
-          found=true;
+        ldh[pool].forEach((item,i)=>{
+          if(!sameWork(item))return;
           const row={...item,...fields};
           row.history=Array.isArray(row.history)?row.history.slice():[];
-          row.history.push({id:uid('hist'),type:'terminal_pintura_calculo_manual',qty:totalBotes,unit:'botes_eq_4L',liters:totalLiters,date:at,operator:op,note:'Calculo total de pintura: '+fmt(totalBotes)+' botes de 4 L ('+fmt(totalLiters)+' L) para '+fmt(totalUnits)+' uds'+(text(note)?' · '+text(note):''),source:'terminal_cabina_pintura'});
+          row.history.push(historyEvent);
           row.updatedAt=at;
-          arr[i]=row;
-          representative=row;
+          ldh[pool][i]=row;
+          poolMatches++;
         });
       });
-      if(!found)throw new Error('La referencia no existe en Fabricacion.');
-      const overrides=safeParse(pkg.overrides,'{}')||{};
-      overrides[ref]={...(overrides[ref]||{}),...fields,updatedAt:at};
+      if(!poolMatches && phaseKey===undefined && existingInboxIndex<0){
+        throw new Error('La OT no aparece en las fuentes de Fabricacion (ldh_db, phaseFlowV19 o inbox). Actualiza Cabina y vuelve a comprobar la referencia.');
+      }
+      // No cambiar cantidades, fase ni estado: solo metadatos de pintura.
+      if(phaseKey!==undefined){
+        const existing=phaseMap[phaseKey];
+        phaseMap[phaseKey]={...existing,...fields,updatedAtISO:at,updatedAtMs:atMs};
+        pkg.phaseFlowV19=phaseMap;
+      }
+      const overrideKey=Object.keys(overrides).find(k=>workIdentityKey(k)===identity)||ref;
+      overrides[overrideKey]={...(overrides[overrideKey]||{}),...fields,updatedAt:at};
       pkg.overrides=JSON.stringify(overrides);
-      let inbox=safeParse(pkg.inbox,'[]'); if(!Array.isArray(inbox))inbox=[];
-      const inboxIndex=inbox.findIndex(x=>sameRef(refOf(x),ref));
-      if(representative){if(inboxIndex>=0)inbox[inboxIndex]=representative;else inbox.push(representative);}
-      pkg.inbox=JSON.stringify(inbox.slice(-200));
+      // Actualizar inbox solo si la OT ya estaba alli; no duplicar trabajos.
+      if(existingInboxIndex>=0){
+        const existing=inbox[existingInboxIndex];
+        const updated={...existing,...fields};
+        updated.history=Array.isArray(existing.history)?existing.history.slice():[];
+        updated.history.push(historyEvent);
+        inbox[existingInboxIndex]=updated;
+        pkg.inbox=JSON.stringify(inbox);
+      }
       ldh.updatedAt=at;
       pkg.ldh_db=JSON.stringify(ldh);
       pkg.counts={...(pkg.counts||{}),...countsForLdh(ldh),prepMeta:pkg.prepMeta&&typeof pkg.prepMeta==='object'?Object.keys(pkg.prepMeta).length:num(pkg.counts&&pkg.counts.prepMeta),prepRecepcion:pkg.prepRecepcion&&typeof pkg.prepRecepcion==='object'?Object.keys(pkg.prepRecepcion).length:num(pkg.counts&&pkg.counts.prepRecepcion)};
@@ -3400,6 +3424,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const meta=paintMetaForWork(work);
     const ral=workRal(work);
     const companyIds=stockCompanyIdsForWork(work,meta);
+    if(meta&&meta.paintStockCompanyId&&isCommonCompany(companyRecord(state.stock,text(meta.paintStockCompanyId)))&&!companyIds.includes(text(meta.paintStockCompanyId)))companyIds.push(text(meta.paintStockCompanyId));
     if(!companyIds.length)return {kind:'no_company',ral};
     const all=paintRows().filter(r=>companyIds.includes(r.companyId));
 
@@ -3488,8 +3513,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     }
     const companyIds=stockCompanyIdsForWork(w,paintMetaForWork(w));
     if(!companyIds.length){alert('No encuentro la empresa del trabajo en Stock.');return false;}
-    const row=paintRows().find(r=>companyIds.includes(text(r.companyId))&&text(r.mat.id)===text(materialId));
-    if(!row){alert('La pintura seleccionada ya no existe en el Stock de esta empresa.');return false;}
+    const selected=text(materialId).split('::');
+    const sourceCid=selected.length===2?selected[0]:'';
+    const sourceMid=selected.length===2?selected[1]:text(materialId);
+    const row=paintRows().find(r=>(companyIds.includes(text(r.companyId))||isCommonCompany(companyRecord(state.stock,r.companyId)))&&text(r.mat.id)===sourceMid&&(!sourceCid||text(r.companyId)===sourceCid));
+    if(!row){alert('La pintura seleccionada ya no existe en Stock.');return false;}
+    if(isCommonCompany(companyRecord(state.stock,row.companyId))&&!paintMatchesRal(row,workRal(w))){alert('Stock Común: el RAL debe coincidir con la OT.');return false;}
     const resolvedRal=ralFromPaintRow(row)||workRal(w);
     const name=text(row.mat.name||row.mat.nombre);
     const actionLabel=changing?'Cambiar el vínculo de '+ref+' a ':'Vincular '+ref+' a ';
@@ -3511,7 +3540,7 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const companyIds=stockCompanyIdsForWork(w,paintMetaForWork(w));
     const wantedRal=workRal(w);
     return paintRowsForUi()
-      .filter(r=>companyIds.includes(text(r.companyId)))
+      .filter(r=>companyIds.includes(text(r.companyId))||(isCommonCompany(companyRecord(state.stock,r.companyId))&&paintMatchesRal(r,wantedRal)))
       .filter(r=>!isSolventLike(text(r&&r.mat&&(r.mat.name||r.mat.nombre)),ralFromPaintRow(r)))
       .sort((a,b)=>{
         const am=paintMatchesRal(a,wantedRal)?0:1, bm=paintMatchesRal(b,wantedRal)?0:1;
@@ -3523,11 +3552,12 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     const ref=text(state.activePaintLinkRef);
     const w=state.works.find(x=>sameRef(x.ref,ref));
     const materialId=text($('paintLinkSelect')&&$('paintLinkSelect').value);
-    const row=paintLinkCandidatesForWork(w).find(r=>text(r&&r.mat&&r.mat.id)===materialId);
+    const row=paintLinkCandidatesForWork(w).find(r=>text(r.companyId)+'::'+text(r.mat.id)===materialId);
     if(!row){$('paintLinkInfo').innerHTML='Selecciona una ficha de pintura de Stock. <b>No se modificar&aacute; ninguna cantidad.</b>';return;}
     const name=text(row.mat.name||row.mat.nombre);
     const ral=ralFromPaintRow(row);
-    $('paintLinkInfo').innerHTML='<b>'+esc(name)+'</b>'+(ral?' &middot; RAL '+esc(ral):'')+' &middot; disponible en cabina: <b>'+esc(fmtBotesEq(Math.max(0,num(row.physical))))+'</b> ('+esc(fmtLiters(Math.max(0,num(row.physical))))+').<br>La vinculaci&oacute;n solo identifica qu&eacute; ficha debe usar esta OT; no entra ni sale pintura de Stock.';
+    const origin=isCommonCompany(companyRecord(state.stock,row.companyId))?'STOCK COMÚN':companyName(state.stock,row.companyId);
+    $('paintLinkInfo').innerHTML='<b>'+esc(origin)+'</b> · <b>'+esc(name)+'</b>'+(ral?' &middot; RAL '+esc(ral):'')+' &middot; disponible en cabina: <b>'+esc(fmtBotesEq(Math.max(0,num(row.physical))))+'</b> ('+esc(fmtLiters(Math.max(0,num(row.physical))))+').<br>La vinculaci&oacute;n solo identifica qu&eacute; ficha debe usar esta OT; no entra ni sale pintura de Stock.';
   }
   function openPaintLinkModal(ref){
     const w=state.works.find(x=>sameRef(x.ref,ref));
@@ -3549,14 +3579,14 @@ input,select{height:52px;padding:0 13px}textarea{min-height:92px;padding:12px;re
     $('paintLinkSelect').innerHTML='<option value="">Selecciona pintura...</option>'+rows.map(r=>{
       const name=text(r.mat.name||r.mat.nombre);
       const ral=ralFromPaintRow(r);
-      return '<option value="'+esc(text(r.mat.id))+'">'+esc(name)+(ral?' · RAL '+esc(ral):'')+' · '+esc(fmtBotesEq(Math.max(0,num(r.physical))))+' disponibles</option>';
+      return '<option value="'+esc(text(r.companyId)+'::'+text(r.mat.id))+'">'+esc(isCommonCompany(companyRecord(state.stock,r.companyId))?'STOCK COMÚN':companyName(state.stock,r.companyId))+' · '+esc(name)+(ral?' · RAL '+esc(ral):'')+' · '+esc(fmtBotesEq(Math.max(0,num(r.physical))))+' disponibles</option>';
     }).join('');
     const meta=paintMetaForWork(w)||{};
     const currentId=changing?text((currentLink&&currentLink.row&&currentLink.row.mat&&currentLink.row.mat.id)||meta.paintStockMaterialId||meta.paintMaterialId||meta.paintMatId):'';
-    if(currentId&&rows.some(r=>text(r.mat.id)===currentId))$('paintLinkSelect').value=currentId;
+    if(currentId&&rows.some(r=>text(r.mat.id)===currentId)) {const chosen=rows.find(r=>text(r.mat.id)===currentId&&(!meta.paintStockCompanyId||text(r.companyId)===text(meta.paintStockCompanyId)))||rows.find(r=>text(r.mat.id)===currentId);$('paintLinkSelect').value=text(chosen.companyId)+'::'+text(chosen.mat.id);}
     else{
       const exact=rows.filter(r=>paintMatchesRal(r,workRal(w)));
-      if(exact.length===1)$('paintLinkSelect').value=text(exact[0].mat.id);
+      if(exact.length===1)$('paintLinkSelect').value=text(exact[0].companyId)+'::'+text(exact[0].mat.id);
     }
     updatePaintLinkInfo();
     openModal('paintLinkModal');
