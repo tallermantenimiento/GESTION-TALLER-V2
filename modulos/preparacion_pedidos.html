@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
@@ -13,6 +13,7 @@
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
+<meta name="ldh-prep-visual-load-build" content="PREPARACION-R196-ESPERA-SNAPSHOT-SERVIDOR-20261027" />
 <meta name="ldh-prep-advanced-list-build" content="PREPARACION-V193-FASE-REAL-FIRESTORE-20261021" />
 <meta name="ldh-prep-nav-safe-build" content="PREPARACION-V177-NO-REHIDRATAR-FAB-20261014" />
 <meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
@@ -23,6 +24,19 @@
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <style>
+
+/* R195: La lista solo es visible tras reconciliarla con las fases de Firestore.
+   Nunca elimina ni modifica OTs, recepciones o Stock. */
+html:not(.ldh-prep-list-ready-v195) #vistaLista #lista { display:none !important; }
+html.ldh-prep-list-ready-v195 #ldhPrepSyncStatusV195 { display:none !important; }
+#ldhPrepSyncStatusV195 {
+  border:1px solid rgba(109,214,255,.28);border-radius:13px;
+  background:rgba(13,33,57,.75);color:#cde9f5;
+  padding:15px 17px;margin:10px 0 14px;font-size:14px;
+}
+#ldhPrepSyncStatusV195 button[hidden] {display:none !important;}
+#ldhPrepSyncStatusV195 .ldh-prep-sync-btn-v195 {margin-top:11px;display:block;}
+
   /* === ESTILOS BASE === */
   body { margin:0; font-family:Segoe UI,Arial; background:#0b1220; color:#e6edf7; padding:24px; }
   .top { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
@@ -585,6 +599,11 @@ body{padding:20px!important}
 
 <div id="vistaLista" class="card">
   <h3 style="margin:0 0 10px 0;">Pedidos en curso</h3>
+  <div id="ldhPrepSyncStatusV195" role="status" aria-live="polite">
+    <div id="ldhPrepSyncTextV195">Comprobando el estado actual de los pedidos antes de mostrarlos…</div>
+    <button type="button" class="btn ldh-prep-sync-btn-v195" id="ldhPrepShowLocalV195" hidden
+      onclick="window.LDH_PREP_V195_SHOW_LOCAL?.()">Mostrar pedidos locales sin verificar</button>
+  </div>
   <div id="lista" class="list"></div>
 </div>
 
@@ -6610,6 +6629,10 @@ function LDH_devolverDeudaStockDesdePrep(lineIndex){
   const newRec = Math.max(0, toNum(line.qty_recibida) - qty);
   line.qty_recibida = newRec;
   line.recibida = newRec;
+  // V90: saldo confirmado por la devolucion heredada. Los recalculos de
+  // render no deben volver a aplicar asignaciones anteriores a esta devolucion.
+  line._ldh_v90_return_ceiling = newRec;
+  line._ldh_v90_return_assignment = String(a.id || "");
   line.ok = false;
   line.completo = false;
   line.done = false;
@@ -6620,6 +6643,7 @@ function LDH_devolverDeudaStockDesdePrep(lineIndex){
     at:new Date().toISOString(),
     qty,
     source:"devolucion_deuda_realizada",
+    qtyReceivedAfter:newRec,
     toEmpresa:origenTxt,
     assignmentId:a.id || "",
     label:"Devolución de deuda a " + origenTxt
@@ -6946,14 +6970,57 @@ function LDH_cleanupAutoReceivedV83(){
 }
 
 function renderTabla() {
+  // V89 AISLADA: capturar el saldo confirmado por V49 antes de las
+  // reconciliaciones que se ejecutan al pintar la tabla. No guarda nada.
+  const __v89SaldosDevolucion = (Array.isArray(estadoMateriales) ? estadoMateriales : []).map(l => {
+    const ts = Array.isArray(l && l.trace) ? l.trace : [];
+    const n = ts.map((t,i) => ({t,i})).filter(x => String(x.t && x.t.source || '') === 'devolucion_deuda_realizada' && toNum(x.t.qty)>0);
+    if (!n.length) return null;
+    const last = n[n.length-1];
+    const hayRecepcionPosterior = ts.slice(last.i+1).some(t => {
+      const src = String(t && t.source || '').toLowerCase();
+      return toNum(t && t.qty)>0 && /^(entrada_|stock_recibido_ok|recibido_|recepcion_)/.test(src);
+    });
+    if (hayRecepcionPosterior) return null;
+    return {line:l, qty:toNum(l.qty_recibida), assignment:String(last.t.assignmentId || '')};
+  });
+  // V88 DIAGNOSTICO AISLADO: observacion sin cambiar ninguna cantidad.
+  // Solo registra referencias de pruebas con traza de devolucion V49.
+  const __v88snap = (step) => {
+    try {
+      const lines = Array.isArray(estadoMateriales) ? estadoMateriales : [];
+      const relevant = lines.filter(l => Array.isArray(l && l.trace) && l.trace.some(t => String(t && t.source || '') === 'devolucion_deuda_realizada'));
+      if (!relevant.length) return;
+      const entry = {
+        step, at: new Date().toISOString(), ref: String(typeof refActual !== 'undefined' ? refActual : ''),
+        lines: relevant.map(l => ({
+          material: String(l.mat || l.material || l.name || ''),
+          qty_recibida: Number(l.qty_recibida || 0), recibida: Number(l.recibida || 0),
+          aplicado_qty: Number(l.aplicado_qty || 0), stock_consumed_qty: Number(l.stock_consumed_qty || 0),
+          qty_recibida_base_before_lent: l.qty_recibida_base_before_lent,
+          trace: l.trace.map(t => ({source:t && t.source,qty:t && t.qty,assignmentId:t && t.assignmentId})),
+        }))
+      };
+      (window.__LDH_V88_TRACE ||= []).push(entry);
+      if(window.__LDH_V88_TRACE.length > 100) window.__LDH_V88_TRACE.shift();
+      console.info('[PREPARACION V88]', JSON.stringify(entry));
+    } catch (err) { console.warn('[PREPARACION V88] Diagnostico',err); }
+  };
+  __v88snap('00-inicio-render');
   const explicitReceiptPolicyV83 = LDH_receiptPolicyExplicitV83Active();
   try{ if(explicitReceiptPolicyV83) LDH_cleanupAutoReceivedV83(); }catch(e){}
+  __v88snap('01-politica-recepcion');
   // Blindaje final: ninguna recarga o sincronización debe volver a mostrar
   // dos filas para el mismo material/unidad.
   try{ LDH_consolidarEstadoActual(); }catch(e){}
+  __v88snap('02-consolidacion');
   try{ if(typeof LDH_limpiarTrazasDevolucionAntiguas === 'function') LDH_limpiarTrazasDevolucionAntiguas(); }catch(e){}
+  __v88snap('03-limpieza-trazas');
   try{ if(typeof LDH_syncDevolucionesStock === 'function') LDH_syncDevolucionesStock(); }catch(e){}
+  __v88snap('04-sync-v61');
   try{ if(typeof LDH_syncDevolucionesStockRobusto === 'function') LDH_syncDevolucionesStockRobusto(); }catch(e){}
+  __v88snap('05-sync-robusto');
+  LDH_v91ReconcileAllReturnedReceipts();
   const tbodyBarras = document.getElementById("tbodyBarras");
   const tbodyUnidades = document.getElementById("tbodyUnidades");
   tbodyBarras.innerHTML = "";
@@ -6979,6 +7046,7 @@ function renderTabla() {
       }catch(_){ return false; }
     })();
     let recibida = toNum(linea.qty_recibida);
+    __v88snap('06-inicio-linea-' + index);
 
     // V82 · PLETINA/MM: la cantidad recibida se expresa SIEMPRE en mm.
     // Las asignaciones/reservas del stock particular siguen expresadas en barras y
@@ -7007,12 +7075,25 @@ function renderTabla() {
       }
     }catch(e){}
 
+    // V87 AISLADA: las asignaciones y trazas previas a una devolución V49
+    // no pueden reponer automáticamente la unidad devuelta. Una recepción
+    // posterior sí permite que el ciclo vuelva a avanzar de forma normal.
+    const v87ReturnCutoff = (() => {
+      const tt = Array.isArray(linea.trace) ? linea.trace : [];
+      const lastReturn = tt.reduce((idx,t,i) => String(t && t.source || '') === 'devolucion_deuda_realizada' && toNum(t && t.qty)>0 ? i : idx, -1);
+      if(lastReturn < 0) return false;
+      return !tt.slice(lastReturn+1).some(t => {
+        const src = String(t && t.source || '').toLowerCase();
+        return toNum(t && t.qty)>0 && (src.indexOf('entrada_')===0 || src.indexOf('stock_recibido_ok')===0 || src.indexOf('recibido_')===0 || src.indexOf('recepcion_')===0);
+      });
+    })();
+
     // Si Stock ya tiene una asignación propia para esta referencia/material,
     // Preparación debe reflejarla como recibida. Esto corrige los casos en que
     // se asignan barras desde "Asignar libre" pero la columna Recibida queda a 0.
     try{
       const asigPropia = (typeof LDH_asignadoPropioStockParaLinea === "function") ? LDH_asignadoPropioStockParaLinea(linea) : 0;
-      if(!explicitReceiptPolicyV83 && !isPletinaMm && asigPropia > recibida){
+      if(!explicitReceiptPolicyV83 && !isPletinaMm && !v87ReturnCutoff && asigPropia > recibida){
         const targetRec = pedida > 0 ? Math.min(pedida, asigPropia) : asigPropia;
         linea.qty_recibida = targetRec;
         linea.recibida = targetRec;
@@ -7052,7 +7133,7 @@ function renderTabla() {
         recibida = netRec;
       }else if(!isPletinaMm && linea.qty_recibida_base_before_lent !== undefined && linea.qty_recibida_base_before_lent !== null && String(linea.qty_recibida_base_before_lent)!==""){
         const restoreRec = toNum(linea.qty_recibida_base_before_lent);
-        if(restoreRec > toNum(linea.qty_recibida)){
+        if(restoreRec > toNum(linea.qty_recibida) && !v87ReturnCutoff){
           linea.qty_recibida = restoreRec;
           linea.recibida = restoreRec;
           recibida = restoreRec;
@@ -7069,6 +7150,7 @@ function renderTabla() {
       }
     }catch(e){}
 
+    __v88snap('07-tras-asignaciones-prestamos-' + index);
     // Normalización anti-pruebas: no permitir que recibida/aplicado queden por encima de lo pedido.
     if(pedida > 0 && recibida > pedida){
       linea.qty_recibida = pedida;
@@ -7112,13 +7194,14 @@ function renderTabla() {
       // Devolver una deuda a otra empresa no hace que el trabajo vuelva a estar incompleto:
       // el material ya está en este trabajo; solo se ha regularizado la deuda.
       // EXCEPCIÓN: si esta línea es prestamista, NO reponemos lo prestado como recibido.
-      if(autoAplicada > recibida && prestadoActivo <= 0){
+      if(autoAplicada > recibida && prestadoActivo <= 0 && !v87ReturnCutoff){
         const _targetRec = pedida > 0 ? Math.min(pedida, autoAplicada) : autoAplicada;
         linea.qty_recibida = Math.max(toNum(linea.qty_recibida), _targetRec);
         recibida = toNum(linea.qty_recibida);
       }
     }catch(e){}
 
+    __v88snap('08-tras-trazas-positivas-' + index);
     // Refuerzo final de neto por PRÉSTAMO SALIENTE:
     // Si este trabajo ha prestado 1 barra a otro, su recibida útil baja.
     // Ejemplo: pedida 2, recibida 2, prestada 1 a WOODS => recibida útil 1.
@@ -7158,6 +7241,8 @@ function renderTabla() {
       }
     }catch(e){}
 
+    if(LDH_v91ReconcileReturnedReceipt(linea)) recibida=toNum(linea.qty_recibida);
+    __v88snap('09-tras-prestamo-saliente-' + index);
     // ====== COMPRAS: selección para copiar ======
     // Necesario para comprar = lo que falta por recibir (pedida - recibida) y lo comparamos con stock.
     try{
@@ -7174,6 +7259,58 @@ function renderTabla() {
       }
     }catch(e){}
 
+    // V89: evitar que conciliaciones anteriores a la devolución V49
+    // reintroduzcan material sin una nueva recepción documentada.
+    const __v89Guard = __v89SaldosDevolucion[index];
+    const __v89Aplicar = () => {
+      if(!__v89Guard || __v89Guard.line !== linea) return;
+      const traces = Array.isArray(linea.trace) ? linea.trace : [];
+      const asignacion = __v89Guard.assignment;
+      const corresponde = traces.some(t => String(t && t.source || '') === 'devolucion_deuda_realizada' &&
+        (!asignacion || String(t.assignmentId || '') === asignacion));
+      if(!corresponde) return;
+      if(toNum(linea.qty_recibida) > __v89Guard.qty + 0.000001){
+        linea.qty_recibida = __v89Guard.qty;
+        linea.recibida = __v89Guard.qty;
+        recibida = __v89Guard.qty;
+        linea.aplicado_qty = Math.min(toNum(linea.aplicado_qty), recibida);
+        linea.stock_consumed_qty = Math.min(toNum(linea.stock_consumed_qty), recibida);
+        linea.ok = pedida > 0 && recibida >= pedida;
+        linea.completo = linea.done = linea.isDone = linea.isCompleted = linea.ok;
+        try{ _dirtyOkByQty = true; }catch(e){}
+      }
+    };
+    __v89Aplicar();
+    // V90: la ruta heredada V49 registra el saldo confirmado antes del render.
+    // En el mismo ciclo pueden quedar asignaciones previas que reconstruyen
+    // qty_recibida. Aplicar el techo SOLO si sigue la misma devolucion y no
+    // consta una recepcion posterior; nunca incrementar ni simular stock.
+    try {
+      const limit = Number(linea._ldh_v90_return_ceiling);
+      const assignment = String(linea._ldh_v90_return_assignment || "");
+      const ts = Array.isArray(linea.trace) ? linea.trace : [];
+      const idx = ts.map((t,i)=>({t,i})).filter(x =>
+        String(x.t && x.t.source || "") === "devolucion_deuda_realizada" &&
+        (!assignment || String(x.t.assignmentId || "") === assignment)
+      ).map(x=>x.i).pop();
+      const subsequent = Number.isInteger(idx) && ts.slice(idx+1).some(t=>{
+        const s = String(t && t.source || "").toLowerCase();
+        return Number(t && t.qty || 0) > 0 && /^(entrada_|stock_recibido_ok|recibido_|recepcion_)/.test(s);
+      });
+      if (subsequent) {
+        delete linea._ldh_v90_return_ceiling;
+        delete linea._ldh_v90_return_assignment;
+      } else if (Number.isFinite(limit) && limit >= 0 && idx !== undefined && toNum(linea.qty_recibida)>limit) {
+        linea.qty_recibida = limit;
+        linea.recibida = limit;
+        recibida = limit;
+        linea.aplicado_qty = Math.min(toNum(linea.aplicado_qty),limit);
+        linea.stock_consumed_qty = Math.min(toNum(linea.stock_consumed_qty),limit);
+        linea.ok = pedida > 0 && limit >= pedida;
+        linea.completo = linea.done = linea.isDone = linea.isCompleted = linea.ok;
+        try { _dirtyOkByQty = true; } catch(_){ }
+      }
+    } catch (_) { }
     // OK efectivo: manda la cantidad recibida.
     // Evita que el check OK quede persistente cuando se devuelve/quita una barra.
     const isComplete = (pedida > 0) ? (recibida >= pedida) : !!linea.ok;
@@ -7317,6 +7454,8 @@ function renderTabla() {
       }
     }catch(e){}
 
+    __v89Aplicar();
+    yaAplicada = Math.min(yaAplicada, recibida);
     const diff = recibida - yaAplicada;
     const falta = Math.max(0, pedida - recibida);
     const _cabinaTextV122 = String(getLineText(linea) || linea.mat || linea.material || '').toLowerCase();
@@ -10153,7 +10292,51 @@ function marcarTodoOk() {
   renderTabla();
   cargarLista();
 }
-function guardarEstadoLocal() { setAny(KP(refActual), JSON.stringify(estadoMateriales)); }
+/* V91 AISLADA: conciliacion por evento de devolucion confirmado.
+ * V49 escribe el saldo resultante en la traza; las asignaciones previas NO
+ * pueden volver a elevarlo. Una recepcion explicita posterior libera el techo.
+ */
+function LDH_v91ReconcileReturnedReceipt(line){
+  if(!line || typeof line !== 'object') return false;
+  const traces=Array.isArray(line.trace)?line.trace:[];
+  let last=-1;
+  for(let i=0;i<traces.length;i++){
+    const t=traces[i];
+    if(t && (t.source==='devolucion_deuda_realizada' || t.source==='devolucion_interempresas_confirmada_v49') &&
+       Number.isFinite(Number(t.qtyReceivedAfter)) && Number(t.qtyReceivedAfter)>=0 && Number(t.qty)>0 &&
+       String(t.assignmentId||'').trim())last=i;
+  }
+  if(last<0)return false;
+  // Una recepcion posterior es una operacion nueva y debe poder aumentar recibida.
+  const subsequent=traces.slice(last+1).some(t=>{
+    if(!t || Number(t.qty)<=0)return false;
+    const s=String(t.source||'').toLowerCase();
+    return /^(entrada_|recepcion_|recibido_|stock_recibido_ok|stock_asignado_propio_confirmado_v83|manual_recibida_v83|manual_ok_v83)/.test(s);
+  });
+  if(subsequent)return false;
+  const ceiling=Number(traces[last].qtyReceivedAfter);
+  const current=Number(line.qty_recibida??line.recibida??0);
+  if(!Number.isFinite(current) || current<=ceiling+0.000001)return false;
+  line.qty_recibida=ceiling;line.recibida=ceiling;
+  if(Number(line.aplicado_qty)>ceiling)line.aplicado_qty=ceiling;
+  if(Number(line.stock_consumed_qty)>ceiling)line.stock_consumed_qty=ceiling;
+  const needed=Number(line.qty_pedida??line.pedida??0);
+  const complete=needed>0 && ceiling>=needed;
+  line.ok=complete;line.completo=complete;line.done=complete;
+  line.isDone=complete;line.isCompleted=complete;
+  return true;
+}
+function LDH_v91ReconcileAllReturnedReceipts(){
+  if(typeof estadoMateriales==='undefined'||!Array.isArray(estadoMateriales))return false;
+  let changed=false;
+  for(const line of estadoMateriales){if(LDH_v91ReconcileReturnedReceipt(line))changed=true;}
+  return changed;
+}
+function guardarEstadoLocal() {
+  // Ultima frontera antes de persistir: impedir resucitar unidades ya devueltas.
+  LDH_v91ReconcileAllReturnedReceipts();
+  setAny(KP(refActual), JSON.stringify(estadoMateriales));
+}
 
 
 function LDH_freeSmallSharedStorage(){
@@ -13241,6 +13424,16 @@ init();
       });
     }
 
+    // V86 AISLADA: una devolución V49 confirmada en esta línea ya ha
+    // reducido qty_recibida. Las trazas antiguas no pueden reponerla.
+    // Solo afecta al sincronizador heredado de devoluciones desde Stock.
+    if(line.trace.some(t =>
+      String(t && t.source || '') === 'devolucion_deuda_realizada' &&
+      n(t && t.qty) > 0
+    )) {
+      line.ok = n(line.qty_pedida) > 0 && n(line.qty_recibida) >= n(line.qty_pedida);
+      return true;
+    }
     // IMPORTANTE:
     // devolver a otra empresa cancela la deuda, pero NO quita material del trabajo.
     // Si antes se había restado por error, reponemos la recepción/aplicación según lo asignado.
@@ -20952,6 +21145,7 @@ window.LDH_devolverDeudaStockDesdePrep = async function (lineIndex) {
       source: action === "D"
         ? "devolucion_interempresas_confirmada_v49"
         : "compensacion_interempresas_confirmada_v49",
+      ...(action === "D" ? {qtyReceivedAfter:Math.max(0,received-qty)} : {}),
       toEmpresa: result.originName,
       assignmentId: result.assignmentId
     });
@@ -24173,6 +24367,23 @@ window.LDH_PREP_NEGATIVOS_HISTORICOS_V99=true;
 
           /* Solo se repone lo que siga respaldado por trazas positivas vivas.
              Una linea limpiada tiene trace vacio, por lo que nunca resucita. */
+          /* V85 AISLADA: una devolucion V49 confirmada es posterior a las trazas
+             de asignacion. V61 no debe reconstruir qty_recibida con esas trazas
+             anteriores. No modificamos stock ni importes de la devolucion. */
+          const returnedByV49 = target.trace.some(t =>
+            s(t && t.source) === 'devolucion_deuda_realizada' &&
+            n(t && t.qty) > 0 &&
+            // Las devoluciones V49 de la misma línea prevalecen sobre
+            // trazas de asignación antiguas. El identificador puede
+            // corresponder a una asignación original o a su derivada.
+            (!s(t && t.assignmentId) || s(t && t.assignmentId) === id ||
+             sameMaterial(target, a, db))
+          );
+          if(returnedByV49){
+            processed.push(id);
+            changed = true;
+            return;
+          }
           const requested = n(target.qty_pedida);
           const assigned = positiveAssignedQty(target);
           const targetQty = requested > 0 ? Math.min(requested,assigned) : assigned;
@@ -33566,6 +33777,37 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
    return 'unknown';
  }
  let phaseMap=new Map(), cloudLoaded=false, lastError='';
+ // R195: el render inicial local NO se expone hasta la primera reconciliacion
+ // con un snapshot remoto. En modo offline se requiere aceptar expresamente
+ // la vista provisional (no se bloquea el detalle ni se borra informacion).
+ let baseListRendered=false, localFallbackAccepted=false, cloudAttempts=0;
+ const initialStatus=()=>document.getElementById('ldhPrepSyncStatusV195');
+ function showLocalOption(reason){
+   if(cloudLoaded||localFallbackAccepted)return;
+   const status=initialStatus(), message=document.getElementById('ldhPrepSyncTextV195');
+   const button=document.getElementById('ldhPrepShowLocalV195');
+   if(message)message.textContent='No se pudo verificar el estado de las OTs en Firestore. '+
+     String(reason||'Puedes consultar provisionalmente los datos locales.');
+   if(button)button.hidden=false;
+   if(status)status.dataset.ldhPrepLocalOnly='true';
+ }
+ function revealIfVerified(){
+   if(!baseListRendered || !(cloudLoaded||localFallbackAccepted))return;
+   document.documentElement.classList.add('ldh-prep-list-ready-v195');
+   const host=document.getElementById('lista');if(host)host.style.visibility='';
+ }
+ window.LDH_PREP_V195_SHOW_LOCAL=()=>{
+   localFallbackAccepted=true;
+   if(!baseListRendered&&typeof window.cargarLista==='function'){
+     try{window.cargarLista();}catch(e){console.warn('[Preparacion R195] Lista local',e);}
+   }
+   schedule();
+ };
+ // Si Firestore tarda o no contesta, no mostramos OTs antiguas en un flash.
+ // Se ofrece acceso local explicito, sin mostrar pedidos provisionalmente sin avisar.
+ setTimeout(()=>{if(!cloudLoaded&&!localFallbackAccepted)
+   showLocalOption('La comprobacion sigue pendiente; se mostraran sin confirmar solo si lo eliges.');},9000);
+
  function interpretCloud(pkg){
    const out=new Map();const map=pkg?.phaseFlowV19;
    if(map&&typeof map==='object')for(const [key,row] of Object.entries(map)){
@@ -33627,27 +33869,51 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
        card.onclick=()=>{if(typeof window.abrirPedido==='function')window.abrirPedido(entry.ref);};
        host.appendChild(card);visible.add(key);
      }
-   }finally{busy=false;}
+   }finally{busy=false;revealIfVerified();}
  }
  function schedule(){if(scheduled)return;scheduled=true;setTimeout(reconcile,30);}
  function install(){
    const old=window.cargarLista;
    if(typeof old!=='function'){setTimeout(install,100);return;}
    if(old.__ldhPrepV193)return;
-   const wrapped=function(){const result=old.apply(this,arguments);schedule();return result;};
+   const wrapped=function(){
+     const host=document.getElementById('lista');
+     // Oculta incluso los renders posteriores durante la reconciliacion.
+     if(host&&document.documentElement.classList.contains('ldh-prep-list-ready-v195'))
+       host.style.visibility='hidden';
+     let result;
+     try{result=old.apply(this,arguments);}catch(e){if(host)host.style.visibility='';throw e;}
+     baseListRendered=true;schedule();return result;
+   };
    wrapped.__ldhPrepV193=true;window.cargarLista=wrapped;try{cargarLista=wrapped;}catch(_){}
    schedule();
  }
  function cloud(){
-   if(!window.firebase?.firestore){setTimeout(cloud,300);return;}
+   if(!window.firebase?.firestore){
+     if(++cloudAttempts<40)setTimeout(cloud,250);
+     else{lastError='Firebase no inicializado';showLocalOption(lastError);}
+     return;
+   }
    try{
      const app=(firebase.apps||[]).find(a=>a?.options?.projectId==='gestion-taller-v2');
-     if(!app){lastError='No se encontro Firebase gestion-taller-v2';return;}
-     firebase.firestore(app).collection('taller_data').doc('fabricacion').onSnapshot(snap=>{
-       if(!snap.exists){cloudLoaded=false;return;}
+     if(!app){
+       if(++cloudAttempts<40)setTimeout(cloud,250);
+       else{lastError='No se encontro Firebase gestion-taller-v2';showLocalOption(lastError);}
+       return;
+     }
+     firebase.firestore(app).collection('taller_data').doc('fabricacion').onSnapshot({includeMetadataChanges:true},snap=>{
+       // R196: Firestore can emit cached/obsolete orders BEFORE server validation.
+       // Keep the list hidden until the server confirms the snapshot. The option
+       // includeMetadataChanges is essential: confirmation can be metadata-only.
+       if(snap&&snap.metadata&&snap.metadata.fromCache===true){
+         if(!cloudLoaded){lastError='Datos de la caché local pendientes de confirmar en el servidor';
+           showLocalOption('Hay una copia local, pero aún no se ha confirmado el estado actual de las OTs.');}
+         return;
+       }
+       if(!snap.exists){cloudLoaded=false;lastError='No existe snapshot de fases';showLocalOption(lastError);return;}
        phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;lastError='';schedule();try{window.LDH_PREP_R194_REFRESH?.();}catch(_){}
-     },err=>{lastError=String(err?.message||err);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
-   }catch(e){lastError=String(e?.message||e);console.warn('[Preparacion V193] Estado fase',e);}
+     },err=>{lastError=String(err?.message||err);showLocalOption(lastError);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
+   }catch(e){lastError=String(e?.message||e);showLocalOption(lastError);console.warn('[Preparacion V193] Estado fase',e);}
  }
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{install();cloud();},{once:true});else{install();cloud();}
  window.addEventListener('storage',e=>{if(e.key==='ldh_db'||e.key?.startsWith(prefix)||e.key?.startsWith('prep_meta_'))schedule();});
