@@ -13,7 +13,7 @@
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
-<meta name="ldh-prep-visual-load-build" content="PREPARACION-R198-CACHE-GUARD-EPOCH-20261028" />
+<meta name="ldh-prep-visual-load-build" content="PREPARACION-R200-VISIBILIDAD-ESTABLE-IDENTIFICACION-20261028" />
 <meta name="ldh-prep-advanced-list-build" content="PREPARACION-V193-FASE-REAL-FIRESTORE-20261021" />
 <meta name="ldh-prep-nav-safe-build" content="PREPARACION-V177-NO-REHIDRATAR-FAB-20261014" />
 <meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
@@ -33525,9 +33525,13 @@ console.info('[Preparacion V182] físico maestro alineado con Stock; recepciones
         const ref=txt(item.dataset.ref);if(!ref)return;
         const note=agendaIdentification(readMeta(ref),ref,rows);if(!note)return;
         // R199: V142 places identification inside the reference stack already.
-        const original=item.querySelector('.ldh-work-ident');
+        // R200: hay dos representaciones de la identificacion en la tarjeta:
+        // la de cabecera V142 y el titulo amarillo V143 (.ldh-card-ident).
+        // Cualquiera de ellas evita repetir la nota V185.
         const clean=v=>String(v||'').trim().replace(/\s+/g,' ').toLocaleLowerCase();
-        if(original && clean(original.textContent)===clean(note))return;
+        const present=[...item.querySelectorAll('.ldh-work-ident,.ldh-card-ident')]
+          .some(el=>clean(el.textContent)===clean(note));
+        if(present)return;
         const div=document.createElement('div');
         div.className='ldh-agenda-ident-note-v185';
         const b=document.createElement('b');b.textContent='ℹ IDENTIFICACIÓN: ';
@@ -33793,6 +33797,10 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
  // la vista provisional (no se bloquea el detalle ni se borra informacion).
  let baseListRendered=false, localFallbackAccepted=false, cloudAttempts=0;
  let cacheHold=false, snapshotEpoch=0, verifiedEpoch=-1;
+ // R200: esperar a que el render y los cambios asincronos se estabilicen.
+ let stableFrom=0, revealTimer=null;
+ const stableDelay=1400;
+ function cancelReveal(){if(revealTimer!==null){clearTimeout(revealTimer);revealTimer=null;}}
  const initialStatus=()=>document.getElementById('ldhPrepSyncStatusV195');
  function showLocalOption(reason){
    if(cloudLoaded||localFallbackAccepted)return;
@@ -33805,19 +33813,27 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
  }
  function revealIfVerified(){
    if(!baseListRendered || cacheHold || !(cloudLoaded||localFallbackAccepted))return;
-   // R197: abrir la lista solo al terminar la reconciliacion del DOM.
-   const host=document.getElementById('lista');if(host)host.style.visibility='';
-   document.documentElement.classList.add('ldh-prep-list-ready-v195');
+   if(verifiedEpoch!==snapshotEpoch && !localFallbackAccepted)return;
+   cancelReveal();
+   const epoch=snapshotEpoch;
+   const ms=Math.max(0,stableDelay-(Date.now()-stableFrom));
+   revealTimer=setTimeout(()=>{
+     revealTimer=null;
+     if(cacheHold || !baseListRendered || !(cloudLoaded||localFallbackAccepted) ||
+       (verifiedEpoch!==snapshotEpoch && !localFallbackAccepted) || epoch!==snapshotEpoch)return;
+     const host=document.getElementById('lista');if(host)host.style.visibility='';
+     document.documentElement.classList.add('ldh-prep-list-ready-v195');
+   },ms);
  }
  function hideUntilVerified(){
    // R197: cualquier snapshot de cache (tambien posteriores) invalida la
    // visibilidad. No borrar el DOM ni tocar las recepciones almacenadas.
-   cloudLoaded=false;cacheHold=true;snapshotEpoch++;verifiedEpoch=-1;
+   cancelReveal();cloudLoaded=false;cacheHold=true;snapshotEpoch++;verifiedEpoch=-1;stableFrom=0;
    document.documentElement.classList.remove('ldh-prep-list-ready-v195');
    const host=document.getElementById('lista');if(host)host.style.visibility='hidden';
  }
  window.LDH_PREP_V195_SHOW_LOCAL=()=>{
-   localFallbackAccepted=true;cacheHold=false;verifiedEpoch=snapshotEpoch;
+   localFallbackAccepted=true;cacheHold=false;verifiedEpoch=snapshotEpoch;stableFrom=Date.now();
    if(!baseListRendered&&typeof window.cargarLista==='function'){
      try{window.cargarLista();}catch(e){console.warn('[Preparacion R195] Lista local',e);}
    }
@@ -33903,7 +33919,7 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
        host.style.visibility='hidden';
      let result;
      try{result=old.apply(this,arguments);}catch(e){if(host)host.style.visibility='';throw e;}
-     baseListRendered=true;schedule();return result;
+     baseListRendered=true;cancelReveal();stableFrom=Date.now();schedule();return result;
    };
    wrapped.__ldhPrepV193=true;window.cargarLista=wrapped;try{cargarLista=wrapped;}catch(_){}
    schedule();
@@ -33937,7 +33953,7 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
        // R197: se cierra la lista DURANTE toda la reconciliacion del snapshot.
        document.documentElement.classList.remove('ldh-prep-list-ready-v195');
        const host=document.getElementById('lista');if(host)host.style.visibility='hidden';
-       phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;cacheHold=false;verifiedEpoch=++snapshotEpoch;lastError='';schedule();try{window.LDH_PREP_R194_REFRESH?.();}catch(_){}
+       cancelReveal();phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;cacheHold=false;verifiedEpoch=++snapshotEpoch;stableFrom=Date.now();lastError='';schedule();try{window.LDH_PREP_R194_REFRESH?.();}catch(_){}
      },err=>{hideUntilVerified();lastError=String(err?.message||err);showLocalOption(lastError);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
    }catch(e){lastError=String(e?.message||e);showLocalOption(lastError);console.warn('[Preparacion V193] Estado fase',e);}
  }
