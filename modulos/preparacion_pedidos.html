@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
@@ -13,7 +13,7 @@
 <meta name="ldh-prep-nav-build" content="PREPARACION-V168-MENU-SIEMPRE-LISTA-NAVEGACION-LOCAL-20260908" />
 <meta name="ldh-prep-debt-reciprocal-build" content="PREPARACION-V169-DEUDA-PINTURA-RECIPROCA-CABINA-20260909" />
 <meta name="ldh-prep-composite-guard-build" content="PREPARACION-V170-COMPUESTO-GUARD-GRUPO-20260921" />
-<meta name="ldh-prep-visual-load-build" content="PREPARACION-R196-ESPERA-SNAPSHOT-SERVIDOR-20261027" />
+<meta name="ldh-prep-visual-load-build" content="PREPARACION-R198-CACHE-GUARD-EPOCH-20261028" />
 <meta name="ldh-prep-advanced-list-build" content="PREPARACION-V193-FASE-REAL-FIRESTORE-20261021" />
 <meta name="ldh-prep-nav-safe-build" content="PREPARACION-V177-NO-REHIDRATAR-FAB-20261014" />
 <meta name="ldh-prep-import-guard-build" content="PREPARACION-V176-GUARD-IMPORTACION-UNIVERSAL-20260921" />
@@ -33412,6 +33412,7 @@ console.info('[Preparacion V182] físico maestro alineado con Stock; recepciones
 </script>
 
 
+<!-- R199: Evitar identificacion duplicada V142 y V185; mantener los datos sin cambios -->
 <!-- LDH_PREP_V185_IDENTIFICACION_AGENDA_VISIBLE_20261006 -->
 <style id="LDH_PREP_V185_IDENTIFICACION_AGENDA_STYLE">
 #ldhAgendaIdentificationV185{display:none;margin:14px 0 4px;padding:11px 14px;border:1px solid rgba(250,204,21,.52);border-left:5px solid #facc15;border-radius:10px;background:rgba(113,63,18,.18);color:#fef3c7;font-size:13px;line-height:1.35;box-shadow:0 6px 18px rgba(0,0,0,.16)}
@@ -33505,6 +33506,12 @@ console.info('[Preparacion V182] físico maestro alineado con Stock; recepciones
     const el=ensureDetail();if(!el)return;
     const note=agendaIdentification(currentMeta(),currentRef(),orderRows());
     if(!note){el.classList.remove('show');el.textContent='';return;}
+    // R199: V142 already renders the same identification under the OT reference.
+    const original=document.getElementById('refIdent');
+    const clean=v=>String(v||'').trim().replace(/\s+/g,' ').toLocaleLowerCase();
+    if(original && clean(original.textContent)===clean(note)){
+      el.classList.remove('show');el.textContent='';return;
+    }
     el.innerHTML='<strong>ℹ IDENTIFICACIÓN · AGENDA</strong><span></span>';
     el.querySelector('span').textContent=note;
     el.classList.add('show');
@@ -33517,6 +33524,10 @@ console.info('[Preparacion V182] físico maestro alineado con Stock; recepciones
         item.querySelectorAll('.ldh-agenda-ident-note-v185').forEach(n=>n.remove());
         const ref=txt(item.dataset.ref);if(!ref)return;
         const note=agendaIdentification(readMeta(ref),ref,rows);if(!note)return;
+        // R199: V142 places identification inside the reference stack already.
+        const original=item.querySelector('.ldh-work-ident');
+        const clean=v=>String(v||'').trim().replace(/\s+/g,' ').toLocaleLowerCase();
+        if(original && clean(original.textContent)===clean(note))return;
         const div=document.createElement('div');
         div.className='ldh-agenda-ident-note-v185';
         const b=document.createElement('b');b.textContent='ℹ IDENTIFICACIÓN: ';
@@ -33781,6 +33792,7 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
  // con un snapshot remoto. En modo offline se requiere aceptar expresamente
  // la vista provisional (no se bloquea el detalle ni se borra informacion).
  let baseListRendered=false, localFallbackAccepted=false, cloudAttempts=0;
+ let cacheHold=false, snapshotEpoch=0, verifiedEpoch=-1;
  const initialStatus=()=>document.getElementById('ldhPrepSyncStatusV195');
  function showLocalOption(reason){
    if(cloudLoaded||localFallbackAccepted)return;
@@ -33792,12 +33804,20 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
    if(status)status.dataset.ldhPrepLocalOnly='true';
  }
  function revealIfVerified(){
-   if(!baseListRendered || !(cloudLoaded||localFallbackAccepted))return;
-   document.documentElement.classList.add('ldh-prep-list-ready-v195');
+   if(!baseListRendered || cacheHold || !(cloudLoaded||localFallbackAccepted))return;
+   // R197: abrir la lista solo al terminar la reconciliacion del DOM.
    const host=document.getElementById('lista');if(host)host.style.visibility='';
+   document.documentElement.classList.add('ldh-prep-list-ready-v195');
+ }
+ function hideUntilVerified(){
+   // R197: cualquier snapshot de cache (tambien posteriores) invalida la
+   // visibilidad. No borrar el DOM ni tocar las recepciones almacenadas.
+   cloudLoaded=false;cacheHold=true;snapshotEpoch++;verifiedEpoch=-1;
+   document.documentElement.classList.remove('ldh-prep-list-ready-v195');
+   const host=document.getElementById('lista');if(host)host.style.visibility='hidden';
  }
  window.LDH_PREP_V195_SHOW_LOCAL=()=>{
-   localFallbackAccepted=true;
+   localFallbackAccepted=true;cacheHold=false;verifiedEpoch=snapshotEpoch;
    if(!baseListRendered&&typeof window.cargarLista==='function'){
      try{window.cargarLista();}catch(e){console.warn('[Preparacion R195] Lista local',e);}
    }
@@ -33905,20 +33925,26 @@ console.info('[Preparacion V187] Recibir compra solo intercepta materiales con S
        // R196: Firestore can emit cached/obsolete orders BEFORE server validation.
        // Keep the list hidden until the server confirms the snapshot. The option
        // includeMetadataChanges is essential: confirmation can be metadata-only.
-       if(snap&&snap.metadata&&snap.metadata.fromCache===true){
-         if(!cloudLoaded){lastError='Datos de la caché local pendientes de confirmar en el servidor';
-           showLocalOption('Hay una copia local, pero aún no se ha confirmado el estado actual de las OTs.');}
+       if(!snap || !snap.metadata || snap.metadata.fromCache!==false){
+         // R197: nunca tomar un documento de cache ni uno sin metadatos
+         // como confirmacion del servidor, aunque antes hubiera estado listo.
+         hideUntilVerified();
+         lastError='Datos de la caché local pendientes de confirmar en el servidor';
+         showLocalOption('Hay una copia local, pero aún no se ha confirmado el estado actual de las OTs.');
          return;
        }
-       if(!snap.exists){cloudLoaded=false;lastError='No existe snapshot de fases';showLocalOption(lastError);return;}
-       phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;lastError='';schedule();try{window.LDH_PREP_R194_REFRESH?.();}catch(_){}
-     },err=>{lastError=String(err?.message||err);showLocalOption(lastError);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
+       if(!snap.exists){hideUntilVerified();lastError='No existe snapshot de fases';showLocalOption(lastError);return;}
+       // R197: se cierra la lista DURANTE toda la reconciliacion del snapshot.
+       document.documentElement.classList.remove('ldh-prep-list-ready-v195');
+       const host=document.getElementById('lista');if(host)host.style.visibility='hidden';
+       phaseMap=interpretCloud(snap.data()||{});cloudLoaded=true;cacheHold=false;verifiedEpoch=++snapshotEpoch;lastError='';schedule();try{window.LDH_PREP_R194_REFRESH?.();}catch(_){}
+     },err=>{hideUntilVerified();lastError=String(err?.message||err);showLocalOption(lastError);console.warn('[Preparacion V193] Sin consulta de fases en nube; se conserva lista sin borrar datos:',lastError);});
    }catch(e){lastError=String(e?.message||e);showLocalOption(lastError);console.warn('[Preparacion V193] Estado fase',e);}
  }
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{install();cloud();},{once:true});else{install();cloud();}
  window.addEventListener('storage',e=>{if(e.key==='ldh_db'||e.key?.startsWith(prefix)||e.key?.startsWith('prep_meta_'))schedule();});
  window.LDH_PREP_V193_LOOKUP=(ref)=>({ready:cloudLoaded,found:phaseMap.has(refKey(ref)),row:phaseMap.get(refKey(ref))||null,status:phase(ref),error:lastError});
- window.LDH_PREP_V193_STATUS=()=>({cloudLoaded,refs:phaseMap.size,lastError,diagnostico:['OT-260902-002','OT-261013-002'].map(ref=>({ref,phase:phase(ref),nube:phaseMap.get(ref)?.flow||null}))});
+ window.LDH_PREP_V193_STATUS=()=>({cloudLoaded,cacheHold,snapshotEpoch,verifiedEpoch,refs:phaseMap.size,lastError,diagnostico:['OT-260902-002','OT-261013-002'].map(ref=>({ref,phase:phase(ref),nube:phaseMap.get(ref)?.flow||null}))});
  console.info('[Preparacion V193] Visibilidad por fase Firestore phaseFlowV19; solo lectura.');
 })();
 </script>
