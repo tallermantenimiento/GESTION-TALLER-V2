@@ -511,7 +511,7 @@
 
 <main id="personalMain" hidden>
   <section class="card personal-shell" style="grid-column:1/-1">
-    <h2>🧰 Dotación personal de herramientas</h2>
+    <h2>🧰 Dotación personal de herramientas <button class="btn" type="button" onclick="ldhExportPersonalBackup()" style="float:right;font-size:11px;padding:5px 9px">⬇ Copia JSON</button></h2>
     <div class="content" id="personalPageBody"></div>
   </section>
 </main>
@@ -557,8 +557,118 @@ const IS_TOUCH = window.matchMedia("(hover: none) and (pointer: coarse)").matche
 const DB_KEY = "tool_loans_db_v14_lib"; 
 const CFG_KEY = "tool_loans_cfg_v14_lib";
 
+/* V2 ALMACENAMIENTO SIN PERDIDA: solo la clave de Herramientas; Firebase recibe JSON normal. */
+(function(){
+  const PREFIX = 'LDH-COMPACT-LZW16-V1:';
+  const TOOL_KEY = 'tool_loans_db_v14_lib';
+  function pack(plain){
+    const bytes = new TextEncoder().encode(plain);
+    if(!bytes.length) return '';
+    const dict=new Map();let next=256;
+    let w=String.fromCharCode(bytes[0]);
+    const codes=[];
+    for(let i=1;i<bytes.length;i++){
+      const c=String.fromCharCode(bytes[i]);
+      const wc=w+c;
+      if(dict.has(wc)){w=wc;}
+      else{
+        codes.push(w.length===1?w.charCodeAt(0):dict.get(w));
+        if(next<=65535)dict.set(wc,next++);
+        w=c;
+      }
+    }
+    codes.push(w.length===1?w.charCodeAt(0):dict.get(w));
+    const chars=[];let str='';
+    for(let i=0;i<codes.length;i++){
+      const v=codes[i];chars.push(String.fromCharCode(v>>>8,v&255));
+      if(chars.length>=8192){str+=chars.join('');chars.length=0;}
+    }
+    if(chars.length)str+=chars.join('');
+    return btoa(str);
+  }
+  function unpack(data){
+    if(!data)return '';
+    const binary=atob(data);
+    if(binary.length%2)throw new Error('Contenido comprimido incompleto');
+    const dict=new Array(65536);for(let i=0;i<256;i++)dict[i]=String.fromCharCode(i);
+    let next=256;
+    const first=(binary.charCodeAt(0)<<8)|binary.charCodeAt(1);
+    if(first>255)throw new Error('Cabecera de compresion no valida');
+    let w=dict[first],parts=[w];
+    for(let i=2;i<binary.length;i+=2){
+      const code=(binary.charCodeAt(i)<<8)|binary.charCodeAt(i+1);
+      const entry=dict[code]!==undefined?dict[code]:(code===next?w+w.charAt(0):null);
+      if(entry===null)throw new Error('Diccionario de compresion no valido');
+      parts.push(entry);
+      if(next<=65535)dict[next++]=w+entry.charAt(0);
+      w=entry;
+    }
+    const encoded=parts.join('');
+    const bytes=new Uint8Array(encoded.length);
+    for(let i=0;i<encoded.length;i++)bytes[i]=encoded.charCodeAt(i);
+    return new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+  }
+  function encode(raw){
+    if(typeof raw!=='string')raw=String(raw);
+    if(raw.startsWith(PREFIX))return raw;
+    if(raw.length<4096)return raw;
+    const compressed=PREFIX+pack(raw);
+    if(compressed.length>=raw.length*0.94)return raw;
+    if(unpack(compressed.slice(PREFIX.length))!==raw)throw new Error('La comprobacion de compresion no coincide');
+    return compressed;
+  }
+  function decode(raw){
+    if(typeof raw!=='string'||!raw.startsWith(PREFIX))return raw;
+    try{return unpack(raw.slice(PREFIX.length));}
+    catch(err){throw new Error('LDH_STORAGE_CORRUPTO: no se puede recuperar dotacion comprimida: '+String(err?.message||err));}
+  }
+  function install(){
+    if(typeof Storage==='undefined')return;
+    const p=Storage.prototype;
+    if(p.__ldhCompactToolsV1)return;
+    const nativeGet=p.getItem,nativeSet=p.setItem;
+    p.getItem=function(k){
+      const raw=nativeGet.apply(this,arguments);
+      if(this===localStorage && String(k)===TOOL_KEY)return decode(raw);
+      return raw;
+    };
+    p.setItem=function(k,v){
+      if(this===localStorage && String(k)===TOOL_KEY){
+        const encoded=encode(String(v));
+        return nativeSet.call(this,k,encoded);
+      }
+      return nativeSet.apply(this,arguments);
+    };
+    Object.defineProperty(p,'__ldhCompactToolsV1',{value:true,configurable:false});
+    window.__LDH_STORAGE_COMPACT={
+      version:1,
+      inspect(){ const raw=nativeGet.call(localStorage,TOOL_KEY)||'';return {stored:raw.length,decoded:decode(raw)?.length||0,compressed:raw.startsWith(PREFIX)}; },
+      optimize(){const raw=nativeGet.call(localStorage,TOOL_KEY);if(!raw||raw.startsWith(PREFIX))return this.inspect(); const encoded=encode(raw);nativeSet.call(localStorage,TOOL_KEY,encoded);return this.inspect();}
+    };
+  }
+  install();
+})();
+
+
+
 window.DB_KEY = DB_KEY;
 window.CFG_KEY = CFG_KEY;
+
+/* Exportacion no destructiva: copia completa de dotacion, historial y catalogo. */
+window.ldhExportPersonalBackup=function(){
+  try{
+    const raw=localStorage.getItem(DB_KEY);
+    if(!raw)throw new Error('No se ha encontrado ningun registro de dotacion local.');
+    const obj=JSON.parse(raw);
+    if(!obj || !Array.isArray(obj.personalAssignments))throw new Error('El formato de los datos no es valido.');
+    const fecha=new Date().toISOString().slice(0,19).replace(/:/g,'-');
+    const blob=new Blob([raw],{type:'application/json;charset=utf-8'});
+    const href=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=href;a.download='RESPALDO-DOTACION-HERRAMIENTAS-'+fecha+'.json';
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(href),2000);
+  }catch(err){alert('No se ha podido descargar la copia: '+String(err?.message||err));}
+};
 
 const nowIso = () => new Date().toISOString();
 const uid = () => Math.random().toString(36).slice(2,10)+Math.random().toString(36).slice(2,8);
@@ -905,7 +1015,13 @@ function historyTypeLabel(type){
 }
 
 function loadAll(){
-  try{ const raw = localStorage.getItem(DB_KEY); if(raw) db = JSON.parse(raw); }catch(_){ db = {schemaVersion:15,tools:[],history:[],library:null,familyOrder:[],operators:[]}; }
+  try{ const raw = localStorage.getItem(DB_KEY); if(raw) db = JSON.parse(raw); }catch(err){
+    console.error('[Herramientas] ERROR CRITICO de lectura local. Los datos existentes no se borran.',err);
+    const detail=String(err?.message||err);
+    window.__LDH_TOOLS_STORAGE_READ_ERROR=detail;
+    alert('NO SE HA PODIDO LEER LA DOTACION. Por seguridad no se modifica ningun dato. No borres la memoria local. Detalle: '+detail);
+    throw err;
+  }
   if(!db || !Array.isArray(db.tools)) db = {schemaVersion:15,tools:[],history:[],library:null,familyOrder:[],operators:[]};
   if(!Array.isArray(db.history)) db.history=[];
   if(!db.library) db.library = JSON.parse(JSON.stringify(DEFAULT_LIB));
@@ -3581,7 +3697,9 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
       persisted=true;
       closeAuxModal();
       try{openPersonalCenter();}catch(renderError){console.error('[Entrega segura] guardada pero fallo al actualizar pantalla',renderError);}
-      ldhPersonalDeliveryFeedback('ENTREGA GUARDADA EN ESTE EQUIPO. La sincronizacion con Firestore se realiza aparte; verifica el estado de nube antes de utilizarla en otro equipo.','success');
+      const st=window.__LDH_STORAGE_COMPACT?.inspect?.();
+      const savingNote=st?.compressed?' Almacenamiento local comprimido de forma reversible ('+Math.round(100*(1-st.stored/Math.max(1,st.decoded)))+'% menos espacio).':'';
+      ldhPersonalDeliveryFeedback('ENTREGA GUARDADA EN ESTE EQUIPO.'+savingNote+' La sincronizacion con Firestore se realiza aparte; verifica el estado de nube antes de utilizarla en otro equipo.','success');
       }catch(err){
         console.error('[Entrega segura] confirmacion fallida',err);
         let rollbackError=null;
