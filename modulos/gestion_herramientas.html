@@ -511,7 +511,7 @@
 
 <main id="personalMain" hidden>
   <section class="card personal-shell" style="grid-column:1/-1">
-    <h2>🧰 Dotación personal de herramientas <button class="btn" type="button" onclick="ldhExportPersonalBackup()" style="float:right;font-size:11px;padding:5px 9px">⬇ Copia JSON</button></h2>
+    <h2>🧰 Dotación personal de herramientas <button class="btn" type="button" onclick="ldhExportPersonalBackup()" style="float:right;font-size:11px;padding:5px 9px">⬇ Copia JSON</button><small style="font-size:10px;color:#86efac;margin-left:9px">Almacenamiento seguro IndexedDB V3</small></h2>
     <div class="content" id="personalPageBody"></div>
   </section>
 </main>
@@ -651,13 +651,104 @@ const CFG_KEY = "tool_loans_cfg_v14_lib";
 
 
 
+/* V3: almacen principal de dotacion en IndexedDB. La copia antigua localStorage
+   solo se elimina DESPUES de guardar y releer exactamente su contenido. */
+window.__LDH_TOOLS_IDB=(function(){
+  const DBNAME='LDH_HERRAMIENTAS_SEGURO_V3';
+  const STORE='records';
+  const ACTIVE='tool_loans_db_v14_lib';
+  let connection=null,cache=null,lastError='',writeTail=Promise.resolve(),readyPromise=null;
+  function open(){
+    return new Promise((resolve,reject)=>{
+      if(!window.indexedDB)return reject(new Error('IndexedDB no disponible en este navegador'));
+      const req=indexedDB.open(DBNAME,1);
+      req.onupgradeneeded=()=>{ const d=req.result;if(!d.objectStoreNames.contains(STORE))d.createObjectStore(STORE); };
+      req.onerror=()=>reject(req.error||new Error('No se pudo abrir IndexedDB'));
+      req.onblocked=()=>reject(new Error('IndexedDB bloqueado por otra pestana. Cierra otras pestanas del modulo.'));
+      req.onsuccess=()=>{connection=req.result;resolve(connection);};
+    });
+  }
+  function get(key){return new Promise((resolve,reject)=>{
+    const tx=connection.transaction(STORE,'readonly');
+    const req=tx.objectStore(STORE).get(key);
+    req.onsuccess=()=>resolve(req.result===undefined?null:req.result);
+    req.onerror=()=>reject(req.error);
+    tx.onabort=()=>reject(tx.error||new Error('Lectura IndexedDB abortada'));
+  });}
+  function put(key,val){return new Promise((resolve,reject)=>{
+    const tx=connection.transaction(STORE,'readwrite');
+    tx.objectStore(STORE).put(val,key);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error||new Error('Escritura IndexedDB fallida'));
+    tx.onabort=()=>reject(tx.error||new Error('Escritura IndexedDB abortada'));
+  });}
+  function dateOf(raw){ try {return Date.parse(JSON.parse(raw||'{}').updatedAt||'')||0;}catch(_){return 0;} }
+  function warn(err){
+    lastError=String(err?.message||err);
+    console.error('[Herramientas IndexedDB] '+lastError,err);
+    let el=document.getElementById('ldhToolsStorageFaultV3');
+    if(!el){el=document.createElement('div');el.id='ldhToolsStorageFaultV3';el.style.cssText='position:fixed;z-index:99999;top:0;left:0;right:0;background:#7f1d1d;color:white;padding:12px 18px;font-weight:bold;border-bottom:2px solid #fca5a5';document.body.appendChild(el);}
+    el.textContent='NO SE HAN CONFIRMADO TODOS LOS CAMBIOS LOCALES. Guarda una copia JSON. IndexedDB: '+lastError;
+  }
+  async function init(){
+    if(!connection)await open();
+    const legacy=localStorage.getItem(ACTIVE); // La version anterior puede estar comprimida.
+    const prior=await get(ACTIVE);
+    if(legacy){
+      JSON.parse(legacy); // Impide retirar una copia ilegible.
+      let chosen=legacy;
+      if(typeof prior==='string'&&prior!==legacy){
+        await put('respaldo_idb_antes_conflicto_'+Date.now(),prior);
+        await put('respaldo_local_conflicto_'+Date.now(),legacy);
+        if(dateOf(prior)>dateOf(legacy))chosen=prior;
+        console.warn('[Herramientas] Dos versiones locales distintas. Ambas preservadas en IndexedDB.');
+      }
+      await put(ACTIVE,chosen);
+      const checked=await get(ACTIVE);
+      if(checked!==chosen)throw new Error('No coincide la comprobacion de la migracion a IndexedDB');
+      cache=chosen;
+      // Solo elimina la COPIA del registro de Herramientas, nunca otros datos del sitio.
+      localStorage.removeItem(ACTIVE);
+    }else if(typeof prior==='string'){
+      JSON.parse(prior);cache=prior;
+    }else{
+      cache=null;
+    }
+    return {ok:true,stored:cache?cache.length:0,legacyMigrated:!!legacy};
+  }
+  function ready(){if(!readyPromise)readyPromise=init().catch(e=>{warn(e);throw e;});return readyPromise;}
+  function readSync(){return cache;}
+  function saveRaw(raw){
+    const value=String(raw);
+    // La cola serial evita que una escritura antigua reemplace otra nueva.
+    const job=writeTail.then(async()=>{
+      if(!connection)throw new Error('IndexedDB no inicializado');
+      JSON.parse(value);
+      await put(ACTIVE,value);
+      const verified=await get(ACTIVE);
+      if(verified!==value)throw new Error('La lectura de verificacion no coincide con el guardado');
+      cache=value;
+      return {bytes:value.length};
+    });
+    writeTail=job.catch(e=>{warn(e);});
+    return job;
+  }
+  async function snapshot(reason){
+    await writeTail;
+    if(cache!==null){const key='respaldo_'+String(reason||'automatico')+'_'+Date.now();await put(key,cache);return key;}
+    return null;
+  }
+  return {ready,readSync,saveRaw,snapshot,pending:()=>writeTail,error:()=>lastError,stats:()=>({bytes:cache?.length||0,version:'IndexedDB V3',error:lastError})};
+})();
+
+
 window.DB_KEY = DB_KEY;
 window.CFG_KEY = CFG_KEY;
 
 /* Exportacion no destructiva: copia completa de dotacion, historial y catalogo. */
 window.ldhExportPersonalBackup=function(){
   try{
-    const raw=localStorage.getItem(DB_KEY);
+    const raw=window.__LDH_TOOLS_IDB.readSync()||localStorage.getItem(DB_KEY);
     if(!raw)throw new Error('No se ha encontrado ningun registro de dotacion local.');
     const obj=JSON.parse(raw);
     if(!obj || !Array.isArray(obj.personalAssignments))throw new Error('El formato de los datos no es valido.');
@@ -1015,7 +1106,7 @@ function historyTypeLabel(type){
 }
 
 function loadAll(){
-  try{ const raw = localStorage.getItem(DB_KEY); if(raw) db = JSON.parse(raw); }catch(err){
+  try{ const raw = window.__LDH_TOOLS_IDB.readSync()||localStorage.getItem(DB_KEY); if(raw) db = JSON.parse(raw); }catch(err){
     console.error('[Herramientas] ERROR CRITICO de lectura local. Los datos existentes no se borran.',err);
     const detail=String(err?.message||err);
     window.__LDH_TOOLS_STORAGE_READ_ERROR=detail;
@@ -1128,8 +1219,12 @@ function saveAll(){
   syncProtectionOrder();
   db.schemaVersion=17;
   db.updatedAt=nowIso();
-  localStorage.setItem(DB_KEY,JSON.stringify(db));
-  localStorage.setItem(CFG_KEY,JSON.stringify(cfg));
+  const snapshot=JSON.stringify(db);
+  const saved=window.__LDH_TOOLS_IDB.saveRaw(snapshot);
+  // La configuracion es pequena; si falla, la dotacion se conserva en IndexedDB.
+  try{localStorage.setItem(CFG_KEY,JSON.stringify(cfg));}catch(e){console.warn('[Herramientas] Configuracion local no guardada',e);}
+  saved.then(()=>{window.dispatchEvent(new Event('LDH_HERRAMIENTAS_IDB_SAVED_V3'));}).catch(err=>console.error('[Herramientas] No se pudo guardar en IndexedDB',err));
+  return saved;
 }
 
 function toolsInUseCount(t){ return activeLoansOf(t).reduce((a,l)=>a+Number(l.qty||0),0); }
@@ -3656,7 +3751,7 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
       let persisted=false;
       try{
         beforeDb=JSON.stringify(db); beforeCfg=JSON.stringify(cfg);
-        beforeStoredDb=localStorage.getItem(DB_KEY);beforeStoredCfg=localStorage.getItem(CFG_KEY);
+        beforeStoredDb=window.__LDH_TOOLS_IDB.readSync();beforeStoredCfg=localStorage.getItem(CFG_KEY);
       }catch(err){console.error('[Entrega segura] No se puede crear punto de recuperacion',err);ldhPersonalDeliveryFeedback('No puedo preparar una copia de seguridad de la dotacion: '+String(err?.message||err),'error');return;}
       if(btn){btn.dataset.ldhSaving='1';btn.disabled=true;btn.textContent='Guardando…';}
       await new Promise(resolve=>requestAnimationFrame(resolve));
@@ -3689,16 +3784,15 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
       db.personalDeliveries.push({id:deliveryId,operatorId:op.id,operatorName:op.name,departmentId:dep?.id||'',departmentName:dep?.name||op.dept||'',deliveredBy,reason,notes:note,items:snapshots,status:'active',at,createdAt:at,updatedAt:at});
       for(const {catalog:c,qty} of managedDeposit){const row=personalDepositRecord(dep?.id||'',c.id);personalDepositMove(row,-qty,'DELIVERY',at);}
       cfg.lastPersonalDeliveredBy=deliveredBy;
-      saveAll();
-      // Verificar que la entrega EXISTE en el registro persistido, no solo en memoria.
-      const persistedRaw=localStorage.getItem(DB_KEY);
+      await saveAll();
+      // Verificar que la entrega EXISTE en IndexedDB antes de confirmar.
+      const persistedRaw=window.__LDH_TOOLS_IDB.readSync();
       const persistedData=persistedRaw&&JSON.parse(persistedRaw);
       if(!(persistedData?.personalDeliveries||[]).some(d=>String(d.id)===String(deliveryId)))throw new Error('Verificacion local fallida: la entrega no aparece en el almacenamiento guardado.');
       persisted=true;
       closeAuxModal();
       try{openPersonalCenter();}catch(renderError){console.error('[Entrega segura] guardada pero fallo al actualizar pantalla',renderError);}
-      const st=window.__LDH_STORAGE_COMPACT?.inspect?.();
-      const savingNote=st?.compressed?' Almacenamiento local comprimido de forma reversible ('+Math.round(100*(1-st.stored/Math.max(1,st.decoded)))+'% menos espacio).':'';
+      const savingNote=' Dotacion completa guardada y verificada en IndexedDB (sin el limite de localStorage).';
       ldhPersonalDeliveryFeedback('ENTREGA GUARDADA EN ESTE EQUIPO.'+savingNote+' La sincronizacion con Firestore se realiza aparte; verifica el estado de nube antes de utilizarla en otro equipo.','success');
       }catch(err){
         console.error('[Entrega segura] confirmacion fallida',err);
@@ -3706,8 +3800,9 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
         if(!persisted){
           try{
             db=JSON.parse(beforeDb);cfg=JSON.parse(beforeCfg);
-            const restore=(key,previous)=>{if(localStorage.getItem(key)!==previous){if(previous===null)localStorage.removeItem(key);else localStorage.setItem(key,previous);}};
-            restore(DB_KEY,beforeStoredDb);restore(CFG_KEY,beforeStoredCfg);
+            // Nunca escribimos de nuevo el documento grande en localStorage.
+            if(beforeStoredDb!==window.__LDH_TOOLS_IDB.readSync() && beforeStoredDb!==null)await window.__LDH_TOOLS_IDB.saveRaw(beforeStoredDb);
+            if(localStorage.getItem(CFG_KEY)!==beforeStoredCfg){if(beforeStoredCfg===null)localStorage.removeItem(CFG_KEY);else localStorage.setItem(CFG_KEY,beforeStoredCfg);}
           }catch(e){rollbackError=e;console.error('[Entrega segura] restauracion incompleta',e);}
         }
         const detail=persisted?'La entrega esta guardada, pero hubo un error al actualizar la pantalla: '+String(err?.message||err):ldhPersonalDeliveryErrorMessage(err);
@@ -4405,17 +4500,18 @@ if(__btnSectionLoans) __btnSectionLoans.onclick=()=>setMainSection('loans');
 if(__btnSectionPPE) __btnSectionPPE.onclick=()=>openProtectionCenter('stock');
 if(__btnSectionPersonal) __btnSectionPersonal.onclick=()=>openPersonalCenter();
 
-function boot(){
+async function boot(){
+  await window.__LDH_TOOLS_IDB.ready();
   loadAll();
   ensurePersonalData();
   selected.clear();
-  // V21: al entrar, todos los grupos comienzan cerrados. La búsqueda puede abrirlos temporalmente.
+  // V21: al entrar, todos los grupos comienzan cerrados.
   cfg.familyOpen = {};
-  saveAll(); render(); setupFloatingDrag(); enhanceOperatorPickers(document);
+  await saveAll(); render(); setupFloatingDrag(); enhanceOperatorPickers(document);
   setMainSection('loans');
   document.querySelectorAll('[data-kpi]').forEach(btn=>btn.addEventListener('click',()=>{ cfg.inventoryFilter=btn.dataset.kpi||"all"; saveAll(); render(); }));
 }
-boot();
+window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranque bloqueado por seguridad:',err);alert('No se puede cargar la dotacion con seguridad. No borres los datos existentes. '+String(err?.message||err));throw err;});
 </script>
 
 
@@ -4485,6 +4581,7 @@ boot();
 
   function hasUsefulLocalData(){
     try{
+      if((window.__LDH_TOOLS_IDB?.stats?.().bytes||0)>100)return true;
       const raw = getStoreItem("TallerFlowDB");
       if(raw && String(raw).length > 50){
         try{
@@ -4673,6 +4770,9 @@ boot();
       if(k === CLIENT_ID_KEY || k === LAST_REV_KEY) continue;
       all[k] = localStorage.getItem(k);
     }
+    // Herramientas se almacena en IndexedDB pero Firestore recibe JSON completo normal.
+    const tools=window.__LDH_TOOLS_IDB.readSync();
+    if(tools)all['tool_loans_db_v14_lib']=tools;
     return all;
   }
 
@@ -4695,6 +4795,8 @@ boot();
   window.__ldhMarkLocalDirty = markLocalDirty;
 
   async function liveBackupToFirestore(docId = DOC_ID, force = false){
+    await window.__LDH_TOOLS_READY;
+    await window.__LDH_TOOLS_IDB.pending();
     if(typeof docId === "boolean"){ force = docId; docId = DOC_ID; }
     if(restoring && !force) return { skipped:true, reason:"restoring" };
     if(!auth.currentUser) return { skipped:true, reason:"no_user" };
@@ -4761,11 +4863,17 @@ boot();
         json += cSnap.data().part || "";
       }
       let all = JSON.parse(json);
+      await window.__LDH_TOOLS_READY;
+      await window.__LDH_TOOLS_IDB.pending();
       try{
         const current = collectLocalStorage();
         all = mergeLocalIntoRemoteStorage(all, current);
       }catch(e){ console.warn("⚠️ LiveSync: no se pudo fusionar local al restaurar", e); }
-      localStorage.clear();
+      // Punto de recuperacion antes de cambiar datos locales.
+      await window.__LDH_TOOLS_IDB.snapshot('antes_restaura_nube');
+      if(all['tool_loans_db_v14_lib'])await window.__LDH_TOOLS_IDB.saveRaw(all['tool_loans_db_v14_lib']);
+      delete all['tool_loans_db_v14_lib'];
+      // Nunca limpiar otros modulos sin copia: conservar sus claves actuales.
       for(const [k,v] of Object.entries(all)) localStorage.setItem(k, v);
       try{ sessionStorage.setItem(LAST_REV_KEY, meta.revision || ""); }catch(e){}
       lastHash = fastHash(JSON.stringify(collectLocalStorage()));
@@ -4790,6 +4898,8 @@ boot();
     saveTimer = setTimeout(()=>liveBackupToFirestore(DOC_ID, true).catch(e=>console.warn("❌ LiveSync backup ERROR", e)), 650);
   }
 
+  // Los cambios de herramientas llegan desde IndexedDB, no desde localStorage.
+  window.addEventListener('LDH_HERRAMIENTAS_IDB_SAVED_V3',()=>scheduleLiveBackup('IndexedDB:Herramientas'));
   if(!window.__LDH_LIVE_STORAGE_PATCHED){
     window.__LDH_LIVE_STORAGE_PATCHED = true;
     const p = Storage.prototype;
@@ -4872,6 +4982,7 @@ boot();
   }
 
   async function startLiveSync(){
+    await window.__LDH_TOOLS_READY;
     if(started) return;
     started = true;
     window.__CLOUD_SYNC_DISABLE_LEGACY = true;
