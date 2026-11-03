@@ -3499,6 +3499,29 @@ function openPersonalTemplateManager(deptId){
 }
 window.openPersonalTemplateManager=openPersonalTemplateManager;
 
+/* LDH-ENTREGA-SEGURA-R1: diagnostico visible y confirmacion local sin tocar Firestore. */
+function ldhPersonalDeliveryFeedback(message,kind='error'){
+  const text=String(message||'');
+  if(kind==='error' && $('auxModal')?.classList.contains('show')){
+    let host=$('pdSaveFeedback');
+    if(!host){ host=document.createElement('div');host.id='pdSaveFeedback';host.setAttribute('role','alert');host.style.cssText='margin:10px 0;padding:11px 13px;border:1px solid #f87171;border-radius:10px;background:#471b28;color:#ffe4e6;font-size:13px;white-space:pre-wrap';$('aBody')?.prepend(host); }
+    host.textContent=text;
+    return;
+  }
+  let toast=$('ldhPersonalDeliveryToastR1');
+  if(!toast){ toast=document.createElement('div');toast.id='ldhPersonalDeliveryToastR1';toast.setAttribute('role','status');toast.style.cssText='position:fixed;left:16px;bottom:16px;z-index:100000;max-width:min(560px,90vw);padding:13px 17px;border-radius:12px;font-weight:700;font-size:13px;box-shadow:0 10px 30px #0009;white-space:pre-wrap';document.body.appendChild(toast); }
+  toast.style.border=kind==='error'?'1px solid #f87171':'1px solid #22c55e';
+  toast.style.background=kind==='error'?'#471b28':'#064e3b';
+  toast.style.color='#fff';toast.textContent=text;toast.style.display='block';
+  if(toast.__hide)clearTimeout(toast.__hide);
+  toast.__hide=setTimeout(()=>{toast.style.display='none';},9000);
+}
+function ldhPersonalDeliveryErrorMessage(e){
+  const name=String(e?.name||''); const msg=String(e?.message||e||'Error desconocido');
+  if(name==='QuotaExceededError'||/quota|espacio|storage full/i.test(msg))return 'ALMACENAMIENTO LOCAL LLENO. No se ha confirmado la entrega. El navegador no puede guardar mas datos en este origen. No borres datos ni historial. Conserva tu copia de seguridad y comunica este error para ampliar el almacenamiento sin perder informacion. Detalle: '+msg;
+  if(/permission-denied|resource-exhausted|maximum document size|firestore/i.test(msg))return 'ERROR DE SINCRONIZACION: '+msg+'. La entrega solo se considera registrada cuando aparece como guardada localmente; la nube se verifica por separado.';
+  return 'NO SE HA PODIDO CONFIRMAR LA ENTREGA. Los cambios de esta pulsacion se han revertido en memoria. Detalle: '+name+' '+msg;
+}
 function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
   const op=personalActiveOperators().find(o=>String(o.id)===String(operatorId)); if(!op)return alert('No se encuentra el operario.');
   const dep=personalDeptForOp(op), cats=personalCatalogActive(); if(!cats.length)return alert('Crea primero el catálogo de Dotación personal.');
@@ -3510,7 +3533,19 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
   }).join('');
   showAuxModal(`Entrega / reposición · ${esc(op.name)}`,`<div class="audit-note">Responsable de la dotación: <b>${esc(op.name)}</b> · Departamento: <b>${esc(dep?.name||op.dept||'Sin departamento')}</b>.<br><b>Importante:</b> una incidencia se registra desde el botón <b>Incidencia</b> aunque todavía no haya llegado el repuesto. Esta pantalla registra la entrega física cuando sí recibes la herramienta.</div><div class="form"><div><label>Motivo *</label><select id="pdReason"><option value="alta" ${reasonDefault==='alta'?'selected':''}>Alta / incorporación</option><option value="ampliacion" ${reasonDefault==='ampliacion'?'selected':''}>Ampliación de dotación</option><option value="reposicion" ${reasonDefault==='reposicion'?'selected':''}>Reposición de incidencia pendiente</option><option value="desgaste" ${reasonDefault==='desgaste'?'selected':''}>Reposición por desgaste</option><option value="rotura" ${reasonDefault==='rotura'?'selected':''}>Reposición por rotura</option><option value="perdida" ${reasonDefault==='perdida'?'selected':''}>Reposición por pérdida</option><option value="otro" ${reasonDefault==='otro'?'selected':''}>Otra reposición</option></select></div><div><label>Entrega realizada por</label><input id="pdBy" list="dlOps" value="${esc(cfg.lastPersonalDeliveredBy||'Roman Del Hierros')}"/></div><div style="grid-column:1/-1"><label>Observación</label><textarea id="pdNote"></textarea></div></div><div class="section-title">Herramientas a entregar</div><div class="audit-note" style="margin-top:0">Para <b>Alta / ampliación</b> aumenta la dotación. Para una <b>reposición</b>, la cantidad debe corresponder a una incidencia pendiente y al confirmar volverá a quedar disponible.</div><div style="max-height:42vh;overflow:auto"><table class="personal-delivery-table"><thead><tr><th>Herramienta</th><th>Dotación actual</th><th>Incidencia pendiente</th><th>Entregar / reponer</th></tr></thead><tbody>${rows}</tbody></table></div>`,[
     {text:'Cancelar',className:'btn',onClick:closeAuxModal},
-    {text:'Confirmar entrega',className:'btn primary',onClick:()=>{
+    {text:'Confirmar entrega',className:'btn primary',onClick:async (event)=>{
+      const btn=event?.currentTarget;
+      if(btn?.dataset.ldhSaving==='1')return;
+      let beforeDb, beforeCfg, beforeStoredDb, beforeStoredCfg;
+      let persisted=false;
+      try{
+        beforeDb=JSON.stringify(db); beforeCfg=JSON.stringify(cfg);
+        beforeStoredDb=localStorage.getItem(DB_KEY);beforeStoredCfg=localStorage.getItem(CFG_KEY);
+      }catch(err){console.error('[Entrega segura] No se puede crear punto de recuperacion',err);ldhPersonalDeliveryFeedback('No puedo preparar una copia de seguridad de la dotacion: '+String(err?.message||err),'error');return;}
+      if(btn){btn.dataset.ldhSaving='1';btn.disabled=true;btn.textContent='Guardando…';}
+      await new Promise(resolve=>requestAnimationFrame(resolve));
+      try{
+
       const reason=$('pdReason').value, deliveredBy=ensureOperatorName($('pdBy').value)||normName($('pdBy').value), note=normName($('pdNote').value), items=[];
       document.querySelectorAll('.pdQty').forEach(inp=>{const q=Math.max(0,parseInt(inp.value||'0',10)||0);if(q>0){const c=personalCatalogById(inp.dataset.toolId);if(c)items.push({catalog:c,qty:q});}});
       if(!items.length)return alert('Indica al menos una herramienta.');
@@ -3537,7 +3572,31 @@ function openPersonalDeliveryForm(operatorId,prefill=[],reasonDefault='alta'){
       }
       db.personalDeliveries.push({id:deliveryId,operatorId:op.id,operatorName:op.name,departmentId:dep?.id||'',departmentName:dep?.name||op.dept||'',deliveredBy,reason,notes:note,items:snapshots,status:'active',at,createdAt:at,updatedAt:at});
       for(const {catalog:c,qty} of managedDeposit){const row=personalDepositRecord(dep?.id||'',c.id);personalDepositMove(row,-qty,'DELIVERY',at);}
-      cfg.lastPersonalDeliveredBy=deliveredBy; saveAll(); closeAuxModal(); openPersonalCenter();
+      cfg.lastPersonalDeliveredBy=deliveredBy;
+      saveAll();
+      // Verificar que la entrega EXISTE en el registro persistido, no solo en memoria.
+      const persistedRaw=localStorage.getItem(DB_KEY);
+      const persistedData=persistedRaw&&JSON.parse(persistedRaw);
+      if(!(persistedData?.personalDeliveries||[]).some(d=>String(d.id)===String(deliveryId)))throw new Error('Verificacion local fallida: la entrega no aparece en el almacenamiento guardado.');
+      persisted=true;
+      closeAuxModal();
+      try{openPersonalCenter();}catch(renderError){console.error('[Entrega segura] guardada pero fallo al actualizar pantalla',renderError);}
+      ldhPersonalDeliveryFeedback('ENTREGA GUARDADA EN ESTE EQUIPO. La sincronizacion con Firestore se realiza aparte; verifica el estado de nube antes de utilizarla en otro equipo.','success');
+      }catch(err){
+        console.error('[Entrega segura] confirmacion fallida',err);
+        let rollbackError=null;
+        if(!persisted){
+          try{
+            db=JSON.parse(beforeDb);cfg=JSON.parse(beforeCfg);
+            const restore=(key,previous)=>{if(localStorage.getItem(key)!==previous){if(previous===null)localStorage.removeItem(key);else localStorage.setItem(key,previous);}};
+            restore(DB_KEY,beforeStoredDb);restore(CFG_KEY,beforeStoredCfg);
+          }catch(e){rollbackError=e;console.error('[Entrega segura] restauracion incompleta',e);}
+        }
+        const detail=persisted?'La entrega esta guardada, pero hubo un error al actualizar la pantalla: '+String(err?.message||err):ldhPersonalDeliveryErrorMessage(err);
+        ldhPersonalDeliveryFeedback(detail+(rollbackError?' ATENCION: la restauracion del almacenamiento tambien fallo: '+String(rollbackError?.message||rollbackError)+'. No cierres la pagina y guarda un respaldo.':''),'error');
+      }finally{
+        if(btn){btn.disabled=false;btn.dataset.ldhSaving='0';btn.textContent='Confirmar entrega';}
+      }
     }}
   ]);
 }
