@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="ldh-ai-module" content="fabricacion">
   <title>Fabricación · Gestión Taller</title>
+  <meta name="ldh-fabricacion-roles-operativa" content="FABRICACION-OPERATIVA-R2-BASE-V24-ETIQUETAS-PRESTAMOS-V25-SIN-V26-LISTA-20261106">
   <meta name="ldh-fabricacion-v24" content="FABRICACION-V24-NAVEGACION-PREPARACION-SIN-KEY-LEGACY-20261014">
   <meta name="ldh-fabricacion-v23" content="FABRICACION-V23-CABIN-DELETE-REGRESSION-HARDEN-20260930">
   <meta name="ldh-fabricacion-v22" content="FABRICACION-V22-CABIN-DELETE-APPROVAL-20260930">
@@ -94,6 +95,139 @@ tr:hover td{background:rgba(30,112,167,.12)!important}
 .btn{border-radius:12px!important}
 @media(max-width:780px){.wrap{padding:15px 10px 38px!important}.hero{padding:17px!important}.topbar{gap:6px!important}.btn.small{padding:8px!important}}
 </style>
+<style id="LDH_FAB_V25_ROLES_STYLE">
+    .ldh-fab25-relations{display:flex;flex-direction:column;align-items:stretch;gap:5px;margin-top:8px;max-width:480px;min-width:0}
+    .ldh-fab25-pill{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;max-width:100%;min-width:0;
+      border:1px solid;border-radius:8px;padding:6px 8px;font-size:11px;font-weight:850;line-height:1.33}
+    .ldh-fab25-pill .ldh-fab25-ident{flex:1 1 145px;min-width:0;overflow-wrap:anywhere;word-break:normal}
+    .ldh-fab25-pill .ldh-fab25-label{white-space:nowrap}
+    .ldh-fab25-pill .ldh-fab25-qty{margin-left:auto;flex:0 0 auto;white-space:nowrap;text-align:right}
+    .ldh-fab25-donor{background:#3b2a0f;border-color:#e9ad40;color:#ffe3a1}
+    .ldh-fab25-debtor{background:#471f28;border-color:#ed788b;color:#ffd8df}
+    .ldh-fab25-status{font-size:11px;opacity:.87}
+    @media(max-width:1000px){.ldh-fab25-relations{max-width:none}}
+  </style>
+<script id="LDH_FAB_V25_ROLE_VIEW_READONLY">
+(function(){
+ 'use strict';
+ if(window.LDH_FAB_V25)return;
+ const FIELD='internalOtLoansV55';
+ const str=v=>String(v==null?'':v).trim();
+ const number=v=>{const x=Number(String(v==null?0:v).replace(',','.'));return Number.isFinite(x)?Math.max(0,x):0;};
+ const canonical=v=>{const t=str(v),m=t.toUpperCase().match(/\bOT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):t.toUpperCase();};
+ const esc=v=>str(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const fmt=v=>Number.isInteger(v)?String(v):String(Math.round(v*1000)/1000).replace('.',',');
+ const parse=v=>{try{return typeof v==='string'?JSON.parse(v):v&&typeof v==='object'?v:null;}catch(_){return null;}};
+ let stock=null, origin='sin conectar', byRef=new Map(), lastMarker='',cachedItems=[],cachedItemsAt=0;
+ function itemsNow(){const now=Date.now();if(now-cachedItemsAt>850){cachedItemsAt=now;cachedItems=window.App&&typeof window.App.allItems==='function'?window.App.allItems():[];}return cachedItems;}
+ function openLocal(){
+  for(const store of [localStorage,sessionStorage]){
+   try{const db=parse(store.getItem('ldh_v2_company_stock_v1'));if(db&&typeof db==='object'&&Array.isArray(db.assignments))return db;}catch(_){}
+  }
+  return null;
+ }
+ function pendingAssignment(a){
+  const raw=a.pendingQty??a.qtyPending??a.pendiente;
+  return raw!==undefined&&raw!==null&&str(raw)!==''?number(raw):Math.max(0,number(a.qty??a.cantidad)-number(a.returnedQty??a.qtyReturned??a.devuelto));
+ }
+ function relations(db){
+  const all=[],seen=new Set(),names=new Map((Array.isArray(db?.materials)?db.materials:[]).map(m=>[str(m.id),str(m.name||m.nombre)]));
+  function add(type,originRef,destRef,qty,material,id){
+   const a=canonical(originRef),b=canonical(destRef);if(!a||!b||a===b||qty<=0)return;
+   const key=type+'|'+str(id||a+'|'+b+'|'+str(material));if(seen.has(key))return;seen.add(key);
+   all.push({type,source:a,target:b,qty,material:str(material)||'Material'});
+  }
+  for(const loan of (Array.isArray(db?.[FIELD])?db[FIELD]:[])){
+   if(!loan||['cancelada','anulada','devuelto','cerrada'].includes(str(loan.status).toLowerCase()))continue;
+   add('Interno',loan.fromRef,loan.toRef,Math.max(0,number(loan.qty)-number(loan.returnedQty)),loan.materialName,loan.id);
+  }
+  for(const a of (Array.isArray(db?.assignments)?db.assignments:[])){
+   if(!a||['devuelta','liberada','cancelada','cerrada','anulada'].includes(str(a.status||a.estado).toLowerCase()))continue;
+   const typ=str(a.assignmentType||a.reason||'').toLowerCase();
+   if(!/otra.?empresa|prestamo|préstamo/.test(typ)&&!a.toCompanyId)continue;
+   if(a.debtExempt===true||a.returnRequired===false||/donacion|donación/.test(typ))continue;
+   const from=a.fromAssignedRef||a.originalAssignedRef||a.fromReservationRef||a.originalReservationRef||a.sourceRef||a.originRef;
+   const to=a.ref||a.jobRef||a.toRef;
+   const materialId=a.toMaterialId||a.materialId||a.matId;
+   add('Interempresa',from,to,pendingAssignment(a),names.get(str(materialId))||str(materialId),a.id);
+  }
+  return all;
+ }
+ function index(db){
+  const map=new Map();
+  for(const r of relations(db)){
+   const donor=map.get(r.source)||[];
+   donor.push({role:'donor',other:r.target,...r});map.set(r.source,donor);
+   const debtor=map.get(r.target)||[];
+   debtor.push({role:'debtor',other:r.source,...r});map.set(r.target,debtor);
+  }
+  // Aggregate only truly comparable records: same relationship AND material.
+  const result=new Map();
+  for(const [k,rows] of map){
+   const groups=new Map();
+   for(const r of rows){
+    const groupKey=[r.role,r.type,r.other,r.material].join('|');
+    if(!groups.has(groupKey))groups.set(groupKey,{...r,qty:0});
+    groups.get(groupKey).qty+=r.qty;
+   }
+   result.set(k,[...groups.values()]);
+  }
+  return result;
+ }
+ function meta(reference){
+  const r=canonical(reference);
+  for(const store of [localStorage,sessionStorage]){
+   try{
+    const value=parse(store.getItem('prep_meta_'+r));if(value&&typeof value==='object')return value;
+   }catch(_){}
+  }
+  return null;
+ }
+ function identification(reference){
+  const key=canonical(reference);
+  const item=itemsNow().find(x=>canonical(x?.technical_ref||x?.ref||x?.referencia)===key);
+  const m=meta(key);
+  const fields=['identification','workIdentification','workLabel','referenceLabel','composite_part_description','partDescription','partLabel','shortDescription'];
+  for(const obj of [m,item]){
+   if(!obj)continue;
+   for(const name of fields){const val=str(obj[name]);if(val&&val!==key)return val;}
+  }
+  try{
+   const map=window.__LDH_FAB_AGENDA_IDENT_BY_REF||{},v=str(map[key]);if(v&&v!==key)return v;
+  }catch(_){}
+  return '';
+ }
+ function label(reference){const key=canonical(reference),id=identification(key);return key+(id?' ('+id+')':'');}
+ function rowHTML(item){
+  const ref=canonical(item?.technical_ref||item?.ref||item?.referencia);
+  if(!stock||!ref)return '';
+  const rows=byRef.get(ref)||[];
+  if(!rows.length)return '';
+  return '<div class="ldh-fab25-relations" aria-label="Préstamos de material pendientes">'+rows.map(r=>{
+   const isDonor=r.role==='donor',role=isDonor?'DONANTE A:':'DEUDOR DE:',kind=isDonor?'ldh-fab25-donor':'ldh-fab25-debtor';
+   const title=esc(r.type+' · '+r.material+' · '+fmt(r.qty)+' pendientes'+(origin==='local'?' · copia local sin verificar':''));
+   return '<div class="ldh-fab25-pill '+kind+'" title="'+title+'"><span class="ldh-fab25-ident"><strong class="ldh-fab25-label">'+role+'</strong> '+esc(label(r.other))+'</span><span class="ldh-fab25-qty"><b>'+fmt(r.qty)+'</b> pendientes</span></div>';
+  }).join('')+'</div>';
+ }
+ function status(message){const host=document.getElementById('ldhFabLoansStatusV25');if(host)host.textContent=message;}
+ function setStock(db,where){
+  if(!db||typeof db!=='object'||(!Array.isArray(db.assignments)&&!Array.isArray(db[FIELD])))return false;
+  if(origin==='nube'&&where!=='nube')return false;
+  const rows=relations(db),marker=JSON.stringify(rows),previousOrigin=origin;
+  stock=db;origin=where;byRef=index(db);
+  status(where==='nube'?'Préstamos: Stock actualizado':'Préstamos: copia local sin verificar');
+  if(marker===lastMarker&&previousOrigin===where)return true;
+  lastMarker=marker;
+  try{window.App?.render?.()}catch(e){console.warn('[Fabricación V25] No se pudo refrescar los indicadores',e)}
+  return true;
+ }
+ function fallback(){if(origin==='nube')return;const local=openLocal();if(local)setStock(local,'local');else status('Préstamos: esperando Stock');}
+ window.LDH_FAB_V25={setStock,rowHTML,relations,origin:()=>origin,status,fallback,read:()=>[...byRef.entries()].map(([k,v])=>({ref:k,rows:v.map(x=>({...x}))}))};
+ window.addEventListener('storage',e=>{if(e.key==='ldh_v2_company_stock_v1')fallback()});
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(fallback,250),{once:true});else setTimeout(fallback,250);
+ console.info('[Fabricación V25] Indicadores de préstamo derivados de Stock; visualización de solo lectura.');
+})();
+</script>
 </head>
 <body>
   <div class="topbar">
@@ -120,7 +254,7 @@ tr:hover td{background:rgba(30,112,167,.12)!important}
         <option value="pintura">Solo pintura</option>
         <option value="almacen">También almacén</option>
       </select>
-      <span id="status" class="status">Cargando...</span><span id="cloudStatus" class="status">Nube: esperando...</span>
+      <span id="status" class="status">Cargando...</span><span id="cloudStatus" class="status">Nube: esperando...</span><span id="ldhFabLoansStatusV25" class="status ldh-fab25-status">Préstamos: esperando Stock</span>
     </div>
 
     <section class="summary">
@@ -864,6 +998,7 @@ tr:hover td{background:rgba(30,112,167,.12)!important}
             <div class="ref">${workRefVisualHTML(item)}</div>
             <div class="concept">${esc(item.concept || item.concepto || "Sin concepto")}</div>
             <div class="muted">${esc(item.company || item.empresa || "Sin empresa")} ${uaPill}</div>
+            ${window.LDH_FAB_V25?.rowHTML?.(item) || ""}
           </td>
           <td>
             <div class="muted">Pedido: ${esc(fmtDate(item.datePed || item.fechaPedido || ""))}</div>
@@ -3115,5 +3250,90 @@ console.info('[Fabricacion V20] phaseFlowV19 se aplica al final de la reconcilia
 <script src="../asistente_ia_global.js?v=20261007-10" data-ldh-ai-global-loader="fabricacion"></script>
 <!-- /LDH_AI_GLOBAL_FABRICACION_R1_20261007 -->
 
+<script type="module" id="LDH_FAB_V25_STOCK_READONLY_20261106">
+(async()=>{
+ 'use strict';
+ const view=window.LDH_FAB_V25;if(!view)return;
+ const CONFIG={apiKey:'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',authDomain:'gestion-taller-stock.firebaseapp.com',projectId:'gestion-taller-stock',storageBucket:'gestion-taller-stock.firebasestorage.app',messagingSenderId:'164944519480',appId:'1:164944519480:web:bfa9173d22f88a3b56e1cd'};
+ const KEY='ldh_v2_company_stock_v1';
+ try{
+  const [{initializeApp,getApps},{getAuth,onAuthStateChanged,signInAnonymously},{getFirestore,doc,getDocFromServer,onSnapshot}]=await Promise.all([
+   import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+   import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),
+   import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')
+  ]);
+  const name='ldh-fabricacion-stock-solo-lectura-v25';
+  const app=getApps().find(a=>a.name===name)||initializeApp(CONFIG,name);
+  const auth=getAuth(app),db=getFirestore(app),metaRef=doc(db,'taller_data','stock');
+  let latest=null,reading=false,needsAgain=false,signature='',listening=false;
+  const revision=m=>String(m.updatedAtISO||m.updatedAt?.toMillis?.()||'')+'|'+String(m.totalChunks||0);
+  async function readPackage(snapshot){
+   const meta=snapshot.data()||{},total=Number(meta.totalChunks||0);
+   if(!Number.isInteger(total)||total<0||total>100)throw Error('Número de bloques de Stock no válido');
+   let packed='';
+   if(total){
+    for(let i=0;i<total;i++){
+     const part=await getDocFromServer(doc(db,'taller_data','stock','chunks',String(i)));
+     if(!part.exists())throw Error('Falta bloque de Stock '+i);
+     const data=part.data()||{};
+     packed+=String(data.part??data.data??data.payload??data.content??'');
+    }
+   }else{
+    const raw=meta[KEY]??meta.payload??meta.data??meta.stock;
+    packed=typeof raw==='string'?raw:JSON.stringify({[KEY]:raw});
+   }
+   if(!packed||packed==='{}')throw Error('El paquete de Stock está vacío');
+   const verify=await getDocFromServer(metaRef);
+   if(!verify.exists()||revision(verify.data()||{})!==revision(meta))throw Error('Stock cambió durante la lectura; esperando revisión consolidada');
+   const outer=JSON.parse(packed),raw=outer?.[KEY]??outer?.payload??outer?.data??outer?.stock??outer;
+   const unpacked=typeof raw==='string'?JSON.parse(raw):raw;
+   if(!unpacked||typeof unpacked!=='object'||!Array.isArray(unpacked.assignments))throw Error('Formato de Stock no reconocido');
+   return unpacked;
+  }
+  async function consume(){
+   if(reading){needsAgain=true;return;}
+   reading=true;
+   do{
+    needsAgain=false;
+    const snap=latest;
+    try{
+     if(snap?.exists()&&snap.metadata?.fromCache===false){
+      const meta=snap.data()||{},next=revision(meta);
+      if(signature!==next){
+       const remote=await readPackage(snap);
+       // Solo se publica en memoria para las etiquetas; NUNCA se escribe en Stock.
+       view.setStock(remote,'nube');signature=next;
+      }
+     }
+    }catch(e){
+     console.warn('[Fabricación V25] Lectura Stock fallida',e);
+     view.status('Préstamos: lectura Stock pendiente');view.fallback();
+    }
+   }while(needsAgain);
+   reading=false;
+  }
+  function listen(){
+   if(listening)return;listening=true;
+   onSnapshot(metaRef,{includeMetadataChanges:true},snap=>{
+    if(!snap?.exists()||snap.metadata?.fromCache!==false)return;
+    latest=snap;void consume();
+   },error=>{
+    console.warn('[Fabricación V25] Stock nube no disponible',error);
+    view.status('Préstamos: Stock sin conexión');view.fallback();
+   });
+  }
+  onAuthStateChanged(auth,user=>{
+   if(user){listen();return;}
+   signInAnonymously(auth).catch(error=>{
+    console.warn('[Fabricación V25] Autenticación de lectura de Stock fallida',error);
+    view.status('Préstamos: solo datos locales');view.fallback();
+   });
+  });
+ }catch(error){
+  console.warn('[Fabricación V25] No se ha podido iniciar la lectura de Stock',error);
+  view.status('Préstamos: solo datos locales');view.fallback();
+ }
+})();
+</script>
 </body>
 </html>
