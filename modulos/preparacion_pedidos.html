@@ -16591,7 +16591,10 @@ init();
 
   function cleanCard(card){
     try{
+      // V61: los indicadores DONANTE A / DEUDOR DE son elementos completos
+      // de V58. No descomponerlos al limpiar las pildoras legacy duplicadas.
       const debts = Array.from(card.querySelectorAll(".badge,.pill,span"))
+        .filter(el => !el.closest('.ldh-v58-relations'))
         .filter(el => text(el).includes("DEUDOR"));
 
       if(debts.length <= 1) return;
@@ -34405,6 +34408,139 @@ function wrap(){const prev=window.renderTabla;if(typeof prev==='function'&&!prev
 ui();wrap();setTimeout(inject,500);window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(inject,100));
 window.LDH_V55_INTERNAL_OPEN=open;window.LDH_V55_INTERNAL_RETURN=openReturn;
 console.info('[Preparacion V55] Asignar desde otras OTs de la misma empresa: activo; valida fase y confirmacion Fabricacion.');
+})();
+</script>
+
+<!-- LDH_V58_DONANTE_DEUDOR_IDENTIFICADO · SOLO LECTURA · 20261106 -->
+<style id="LDH_V58_DONANTE_DEUDOR_IDENTIFICADO_STYLE">
+.ldh-v58-relations{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin:7px 0 3px}
+.ldh-v58-role{display:flex;align-items:center;justify-content:space-between;gap:10px;box-sizing:border-box;width:100%;min-width:0;border:1px solid;border-radius:8px;padding:6px 8px;font-weight:850;font-size:11px;line-height:1.35;white-space:normal}
+.ldh-v58-role .ldh-v58-ident{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;word-break:normal}
+.ldh-v58-role .ldh-v58-ident strong{white-space:nowrap;margin-right:5px}
+.ldh-v58-role .ldh-v58-qty{flex:0 0 auto;margin-left:auto;text-align:right;white-space:nowrap}
+.ldh-v58-donor{background:#3b2a0f;border-color:#e9ad40;color:#ffe3a1}
+.ldh-v58-debtor{background:#471f28;border-color:#ed788b;color:#ffd8df}
+@media(max-width:480px){.ldh-v58-role{flex-wrap:wrap}.ldh-v58-role .ldh-v58-qty{margin-left:auto}}
+#ldhV58Detail{padding:10px 12px;border:1px solid #41617d;background:rgba(12,29,50,.92);border-radius:10px;margin:12px 0 4px}
+#ldhV58Detail .ldh-v58-detail-title{font-weight:850;color:#c5e7fc;margin-bottom:7px;font-size:12px}
+#ldhV58Detail .ldh-v58-row{font-size:12px;padding:5px 2px;border-bottom:1px solid rgba(255,255,255,.08)}
+#ldhV58Detail .ldh-v58-row:last-child{border-bottom:0}
+</style>
+<script id="LDH_V58_DONANTE_DEUDOR_IDENTIFICADO">
+(function(){
+'use strict';
+if(window.__LDH_PREP_V58_RELATIONS__)return;
+window.__LDH_PREP_V58_RELATIONS__=true;
+const FIELD='internalOtLoansV55';
+const s=v=>String(v==null?'':v).trim();
+const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?Math.max(0,x):0};
+const ref=v=>{const m=s(v).toUpperCase().match(/OT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):s(v).toUpperCase()};
+const esc=v=>s(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function stock(){
+ try{
+  if(window.__LDH_PREP_STOCK_CLOUD_DB)return window.__LDH_PREP_STOCK_CLOUD_DB;
+  if(window.__LDH_STOCK_MEMORY_DB)return window.__LDH_STOCK_MEMORY_DB;
+  const raw=localStorage.getItem('ldh_v2_company_stock_v1')||sessionStorage.getItem('ldh_v2_company_stock_v1');
+  return raw?JSON.parse(raw):{};
+ }catch(_){return {}}
+}
+function pendingAssignment(a){
+ try{if(typeof LDH_assignmentPendingPrep==='function')return n(LDH_assignmentPendingPrep(a));}catch(_){}
+ const pending=a.pendingQty??a.qtyPending??a.pendiente;
+ return pending!==undefined&&pending!==null&&s(pending)!==''?n(pending):Math.max(0,n(a.qty??a.cantidad)-n(a.returnedQty??a.qtyReturned??a.devuelto));
+}
+function relations(){
+ const db=stock(),out=[],seen=new Set();
+ const add=(type,origin,dest,qty,material,id)=>{
+  if(!origin||!dest||qty<=0||ref(origin)===ref(dest))return;
+  const key=type+'|'+s(id||ref(origin)+'|'+ref(dest)+'|'+material);
+  if(seen.has(key))return;seen.add(key);
+  out.push({type,origin:ref(origin),dest:ref(dest),qty,material:s(material)||'Material',id:s(id)});
+ };
+ for(const x of (Array.isArray(db[FIELD])?db[FIELD]:[])){
+  if(!x||['cancelada','anulada'].includes(s(x.status).toLowerCase()))continue;
+  add('Interno',x.fromRef,x.toRef,Math.max(0,n(x.qty)-n(x.returnedQty)),x.materialName,x.id);
+ }
+ const names=new Map((db.materials||[]).map(m=>[s(m.id),s(m.name||m.nombre)]));
+ for(const a of (Array.isArray(db.assignments)?db.assignments:[])){
+  if(!a||['devuelta','liberada','cancelada','cerrada','anulada'].includes(s(a.status||a.estado).toLowerCase()))continue;
+  const typ=s(a.assignmentType||a.reason||'').toLowerCase();
+  if(!/otra.?empresa|prestamo|préstamo/.test(typ)&&!a.toCompanyId)continue;
+  if(a.debtExempt===true||a.returnRequired===false||/donacion|donación/.test(typ))continue;
+  const origin=a.fromAssignedRef||a.originalAssignedRef||a.fromReservationRef||a.originalReservationRef||a.sourceRef||a.originRef;
+  const dest=a.ref||a.jobRef||a.toRef;
+  const mat=a.toMaterialId||a.materialId||a.matId;
+  add('Interempresa',origin,dest,pendingAssignment(a),names.get(s(mat))||s(mat),a.id);
+ }
+ return out;
+}
+// Identificacion en lectura: aclaratoria de la OT exacta (no confundir con la principal).
+function identification(reference){
+ const r=ref(reference);
+ const sources=[];
+ for(const st of [localStorage,sessionStorage]){
+  try{const raw=st.getItem('prep_meta_'+r);if(raw)sources.push(JSON.parse(raw))}catch(_){}
+ }
+ const obj=(()=>{try{return window.__LDH_PREP_CLOUD_PREP_DATA||null}catch(_){return null}})();
+ if(obj&&typeof obj==='object'){
+  for(const field of ['prepMeta','meta','metas']){const meta=obj[field];if(meta&&meta[r])sources.push(meta[r])}
+ }
+ for(const m of sources){
+  if(!m||typeof m!=='object')continue;
+  for(const key of ['identification','workIdentification','workLabel','referenceLabel','composite_part_description','partDescription','partLabel','shortDescription']){
+   const v=s(m[key]);if(v&&v!==r)return v;
+  }
+ }
+ try{if(typeof LDH_agendaIdentificationV143==='function'){
+  const v=s(LDH_agendaIdentificationV143(r));if(v&&v!==r)return v;
+ }}catch(_){}
+ return '';
+}
+function displayOT(reference){const r=ref(reference),id=identification(r);return r+(id?' ('+id+')':'')}
+function aggregate(rows,role){
+ const grouped=new Map();
+ for(const r of rows){const k=r.type+'|'+role+'|'+(role==='donor'?r.dest:r.origin);const old=grouped.get(k)||{...r,qty:0};old.qty+=r.qty;grouped.set(k,old)}
+ return [...grouped.values()];
+}
+function rolesFor(reference,rows){const rr=ref(reference);return {
+ donor:aggregate(rows.filter(x=>x.origin===rr),'donor'),
+ debtor:aggregate(rows.filter(x=>x.dest===rr),'debtor')
+}}
+function paintCard(item,rows){
+ const reference=item.dataset?.ref;if(!reference)return;
+ const p=rolesFor(reference,rows),old=item.querySelector('.ldh-v58-relations');
+ const content=[
+  ...p.donor.map(x=>'<span class="ldh-v58-role ldh-v58-donor" title="'+esc(x.type+' · '+x.material+' · '+x.qty+' pendientes')+'"><span class="ldh-v58-ident"><strong>DONANTE A:</strong> '+esc(displayOT(x.dest))+'</span><span class="ldh-v58-qty"><b>'+x.qty+'</b> pendientes</span></span>'),
+  ...p.debtor.map(x=>'<span class="ldh-v58-role ldh-v58-debtor" title="'+esc(x.type+' · '+x.material+' · '+x.qty+' pendientes')+'"><span class="ldh-v58-ident"><strong>DEUDOR DE:</strong> '+esc(displayOT(x.origin))+'</span><span class="ldh-v58-qty"><b>'+x.qty+'</b> pendientes</span></span>')
+ ].join('');
+ if(!content){if(old)old.remove();return;}
+ if(old&&old.innerHTML===content)return;
+ let wrap=old;if(!wrap){wrap=document.createElement('div');wrap.className='ldh-v58-relations';item.appendChild(wrap)}wrap.innerHTML=content;
+}
+function current(){try{return s(refActual)}catch(_){return s(document.getElementById('ref')?.textContent)}}
+function paintDetail(rows){
+ const host=document.getElementById('vistaDetalle');if(!host||host.classList.contains('hidden'))return;
+ const reference=current(),old=document.getElementById('ldhV58Detail');if(!reference){old?.remove();return}
+ const p=rolesFor(reference,rows),lines=[...p.donor.map(x=>({role:'DONANTE A:',other:x.dest,...x})),...p.debtor.map(x=>({role:'DEUDOR DE:',other:x.origin,...x}))];
+ if(!lines.length){old?.remove();return}
+ const html='<div class="ldh-v58-detail-title">Préstamos pendientes hasta regularización · '+lines.length+' relaciones</div>'+lines.map(x=>'<div class="ldh-v58-row"><strong>'+x.role+'</strong> '+esc(displayOT(x.other))+' · '+esc(x.type)+' · '+esc(x.material)+' · <b>'+x.qty+'</b> pendientes</div>').join('');
+ if(old&&old.innerHTML===html)return;
+ let el=old;if(!el){el=document.createElement('div');el.id='ldhV58Detail';const anchor=host.querySelector('#panelHierro')||host.querySelector('#bloqueBarras');if(anchor)anchor.insertAdjacentElement('beforebegin',el);else host.prepend(el)}el.innerHTML=html;
+}
+let running=false;
+function render(){if(running)return;running=true;try{const rows=relations();document.querySelectorAll('#lista .item[data-ref]').forEach(item=>paintCard(item,rows));paintDetail(rows)}catch(e){console.warn('[V57] Indicadores de prestamos',e)}finally{running=false}}
+let scheduled=false;function queue(){if(scheduled)return;scheduled=true;setTimeout(()=>{scheduled=false;render()},80)}
+function init(){
+ const list=document.getElementById('lista'),detail=document.getElementById('vistaDetalle');
+ if(list)new MutationObserver(queue).observe(list,{childList:true,subtree:false});
+ if(detail)new MutationObserver(queue).observe(detail,{attributes:true,attributeFilter:['class']});
+ window.addEventListener('ldh:stock-cloud-updated',queue);
+ window.addEventListener('storage',e=>{if(!e.key||/stock|prep_recepcion|prep_meta/i.test(e.key))queue()});
+ setInterval(queue,2500);queue();
+}
+window.LDH_V58_RELATIONS=()=>relations().map(x=>({...x}));
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+console.info('[Preparacion V58] Indicadores DONANTE/DEUDOR derivados de Stock, sin escrituras adicionales.');
 })();
 </script>
 
