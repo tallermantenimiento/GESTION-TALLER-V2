@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V142-IDENTIFICACION-VISUAL-UNIFICADA-20260902" />
+<meta name="ldh-build" content="PREPARACION-V55-PRESTAMOS-INTERNOS-MULTIORIGEN-20261106" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
 <meta name="ldh-prep-reimport-build" content="PREPARACION-V164-OPENREF-CALCULO-NO-ACTIVA-V120-FABRICACION-20260907" />
@@ -12420,6 +12420,54 @@ init();
     function assignmentConcept(a){
       return first(a.concept,a.concepto,a.jobConcept,a.nombre,"");
     }
+    // V54: nombre visible real de la OT, sin modificar referencias ni Stock.
+    function originIdentityV54(ref, concept){
+      let identification="";
+      try{
+        const k="prep_meta_"+String(ref||"").trim();
+        const raw=typeof getAny==="function"?getAny(k):localStorage.getItem(k);
+        const meta=raw?JSON.parse(raw):{};
+        identification=String(first(meta.identification,meta.workIdentification,meta.workLabel,meta.referenceLabel,meta.composite_part_description,meta.partDescription,"")||"").trim();
+        concept=String(concept||first(meta.concepto,meta.concept,meta.descripcion,"")||"").trim();
+      }catch(_){}
+      if(!identification){
+        try{const v=LDH_refVisualParts(ref,{});identification=String(v.identification||"").trim();}catch(_){}
+      }
+      return [String(ref||"").trim(),identification,concept].filter((v,i,a)=>v&&a.indexOf(v)===i).join(" · ");
+    }
+    function realOriginStageV54(ref){
+      try{const hit=window.LDH_PREP_V193_LOOKUP?.(ref);if(hit?.ready&&hit?.found)return String(hit.status||"unknown");}catch(_){}
+      return "sin verificar";
+    }
+    /* V52 - La fase real de Fabricacion tiene prioridad sobre la fase
+       residual en Stock. SOLO LECTURA; nunca repara asignaciones aqui. */
+    function LDH_origenPrestamoFaseV52(ref){
+      ref=String(ref||'').trim();
+      if(!ref || ref==='Trabajo asignado' || ref==='Reserva') return {ok:false,reason:'Referencia de origen ausente'};
+      let result=null;
+      try{ result=window.LDH_PREP_V193_LOOKUP?.(ref)||null; }catch(_){}
+      // No confiar en snapshots locales o de cache cuando la fase real
+      // no ha sido confirmada por el servidor.
+      if(!result || result.ready!==true) return {ok:false,reason:'Fases de Fabricacion aun sin confirmar en nube'};
+      if(result.found){
+        if(result.status==='closed')return {ok:false,reason:'OT de origen cerrada/entregada'};
+        if(result.status==='active')return {ok:true,reason:'OT productiva activa'};
+        const row=result.row||{},f=row.flow||{};
+        const stage=String(row.fase||row.estado||'').toLowerCase();
+        if(['entregado','almacen','pintura','archivado','terminado'].includes(stage)||Number(f.entregado||0)>0||Number(f.almacen||0)>0||Number(f.pintura||0)>0)
+          return {ok:false,reason:'OT de origen avanzada'};
+      }
+      // Preparacion sin registro productivo: solo permitir una linea con
+      // recepcion confirmada y sin señales de cierre en la ficha local.
+      let meta=null,lines=null;
+      try{meta=JSON.parse(prepStoreGet('prep_meta_'+ref)||'null');}catch(_){}
+      try{lines=JSON.parse(prepStoreGet('prep_recepcion_'+ref)||'null');}catch(_){}
+      if(!meta || !Array.isArray(lines) || !lines.length)return {ok:false,reason:'Sin ficha de origen verificable'};
+      const phase=String(meta.fase||meta.estado||'').toLowerCase();
+      if(meta.entregado || meta.en_almacen || meta.en_pintura || ['entregado','almacen','pintura','archivado','terminado'].includes(phase))
+        return {ok:false,reason:'Ficha origen avanzada/cerrada'};
+      return {ok:true,reason:'Origen en Preparacion con recepcion local'};
+    }
     function isBorrowableAssignment(a){
       const st = norm(first(a.status,a.estado,""));
       const ph = norm(first(a.phase,a.fase,"preparacion"));
@@ -12433,6 +12481,7 @@ init();
 
       const rr = String(assignmentRef(a)||"").trim();
       if(rr && typeof LDH_pinturaIniciadaRef === "function" && LDH_pinturaIniciadaRef(rr)) return false;
+      if(!LDH_origenPrestamoFaseV52(rr).ok) return false;
 
       return assignmentQty(a) > 0;
     }
@@ -12685,6 +12734,7 @@ init();
           .filter(r=>String(first(r.companyId,r.empresaId,r.empresa,r.company))===String(cid))
           .filter(r=>String(first(r.materialId,r.matId,r.material,r.material_id))===String(mid))
           .filter(isActiveReservation)
+          .filter(r=>{const ref=String(reservationRef(r)||"").trim();return !ref||ref==="Reserva"||LDH_origenPrestamoFaseV52(ref).ok;})
           .filter(r=>!LDH_stockEsReservaAutoRecibida(r))
           .filter(r=>reservationQty(r)>0)
           .forEach(r=>{
@@ -12698,7 +12748,7 @@ init();
               reservationConcept:reservationConcept(r),
               qtyAvailable:reservationQty(r),
               fisico, res, asig, libre,
-              label:`RESERVA · ${compLabel(c)} · ${reservationRef(r)} · ${reservationQty(r)} · ${matLabel(m)}`
+              label:`RESERVA · ${compLabel(c)} · ${originIdentityV54(reservationRef(r),reservationConcept(r))} · ${reservationQty(r)} barras · ${matLabel(m)}`
             });
           });
 
@@ -12722,7 +12772,7 @@ init();
               assignmentConcept:assignmentConcept(a),
               qtyAvailable:assignmentQty(a),
               fisico, res, asig, libre,
-              label:`ASIGNADO PRESTABLE · ${compLabel(c)} · ${assignmentRef(a)} · ${assignmentQty(a)} · ${matLabel(m)}`
+              label:`ASIGNADO PRESTABLE · ${compLabel(c)} · ${originIdentityV54(assignmentRef(a),assignmentConcept(a))} · ${assignmentQty(a)} barras · ${matLabel(m)}`
             });
           });
       });
@@ -12804,10 +12854,20 @@ init();
         });
       });
 
-    const options = rows.concat(reserveRows).concat(assignedRows);
+    // V54: evitar la repetición exacta de filas de stock libre, sin
+    // fusionar reservas ni asignaciones (cada una tiene su deuda propia).
+    const uniqueFreeV54=[];
+    const seenFreeV54=new Set();
+    for(const item of rows){
+      const key=[String(item.companyId||""),String(item.materialId||""),
+        String(item.label||""),String(item.libre),String(item.fisico),String(item.res),String(item.asig)].join("|");
+      if(seenFreeV54.has(key))continue;
+      seenFreeV54.add(key);uniqueFreeV54.push(item);
+    }
+    const options = uniqueFreeV54.concat(reserveRows).concat(assignedRows);
 
     if(!options.length){
-      alert("No hay otras empresas con stock libre ni reservas activas de este material.");
+      alert("No hay orígenes con saldo prestable y fase verificada. Los trabajos entregados no se ofrecen.");
       return;
     }
 
@@ -12818,7 +12878,8 @@ init();
       <div style="background:#172336;border-left:4px solid #ef4444;border-radius:12px;padding:12px;margin-bottom:14px">
         <b>Destino:</b> ${esc(compLabel(ctx.company))}<br>
         <b>Material pedido:</b> ${esc(target)}<br>
-        Elige <b>préstamo</b> si debe devolverse o compensarse. Elige <b>donación definitiva</b> para transferir stock sin generar deuda.
+        <div style="margin-bottom:7px;color:#fde68a"><b>Solo otras empresas:</b> los trabajos de ${esc(compLabel(ctx.company))} no aparecen aquí. Para ceder entre OTs de la misma empresa se utiliza el préstamo interno, sin deuda interempresa.</div>
+        Puedes completar la cantidad con <b>varios préstamos sucesivos</b>: confirma una cantidad parcial, vuelve a abrir «Asignar de otra empresa» y elige otro trabajo. Cada deuda conserva su origen y su devolución independiente. Elige <b>préstamo</b> si debe devolverse o compensarse. Elige <b>donación definitiva</b> para transferir stock sin generar deuda.
       </div>
 
       <div style="display:grid;grid-template-columns:1.4fr .6fr;gap:12px">
@@ -12839,6 +12900,10 @@ init();
       </label>
 
       <div id="ldhOtraEmpresaInfo" style="margin-top:12px;padding:12px;border-radius:12px;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.22);font-size:13px;line-height:1.5"></div>
+      <label id="ldhOtraEmpresaFabCheckWrapV54" style="display:none;margin-top:12px;padding:12px;border-radius:10px;background:rgba(245,158,11,.13);border:1px solid #f59e0b;font-size:13px;line-height:1.5;align-items:flex-start;gap:10px">
+        <input id="ldhOtraEmpresaFabCheckV54" type="checkbox" style="width:20px;height:20px;flex:none;margin-top:1px">
+        <span><b>Confirmación obligatoria de Fabricación.</b> He comprobado físicamente que la cantidad elegida no está cortada, consumida, utilizada ni prestada y permanece disponible para ceder.</span>
+      </label>
     `,`
       <button onclick="document.getElementById('ldhModalOtraEmpresaSeguro').remove()" style="background:#334155;border:0;color:#fff;border-radius:10px;padding:10px 13px;font-weight:900;cursor:pointer">Cancelar</button>
       <button id="ldhOtraEmpresaOk" style="background:#991b1b;border:1px solid rgba(255,255,255,.18);color:#fff;border-radius:10px;padding:10px 13px;font-weight:900;cursor:pointer">Confirmar préstamo</button>
@@ -12857,6 +12922,12 @@ init();
       confirmButton.textContent = isDonation ? "Confirmar donación definitiva" : "Confirmar préstamo";
       confirmButton.style.background = isDonation ? "#166534" : "#991b1b";
       document.getElementById("ldhOtraEmpresaQty").max = max;
+      const fabStageV54=(x.mode==="asignado"||x.mode==="reserva")&&realOriginStageV54(x.mode==="asignado"?x.assignmentRef:x.reservationRef)==="active";
+      const fabWrapV54=document.getElementById("ldhOtraEmpresaFabCheckWrapV54");
+      const fabCheckV54=document.getElementById("ldhOtraEmpresaFabCheckV54");
+      // `active` incluye fabricación y casos parciales: confirmación conservadora.
+      fabWrapV54.style.display=fabStageV54?"flex":"none";
+      if(fabCheckV54)fabCheckV54.checked=false;
       if(x.mode==="libre"){
         info.innerHTML = `
           <b>Origen libre:</b> ${esc(compLabel(x.company))}<br>
@@ -12868,14 +12939,15 @@ init();
       }else if(x.mode==="reserva"){
         info.innerHTML = `
           <b>Origen reserva:</b> ${esc(compLabel(x.company))}<br>
-          <b>Reserva:</b> ${esc(x.reservationRef)}${x.reservationConcept?` · ${esc(x.reservationConcept)}`:""}<br>
+          <b>Reserva:</b> ${esc(originIdentityV54(x.reservationRef,x.reservationConcept))}<br>
           Disponible en reserva: <b>${x.qtyAvailable}</b><br>
           <span style="color:#fecaca;font-weight:900">Aviso:</span> vas a usar material reservado para otro trabajo. Quedará deuda trazable contra esa reserva.
         `;
       }else{
         info.innerHTML = `
           <b>Origen asignado prestable:</b> ${esc(compLabel(x.company))}<br>
-          <b>Trabajo origen:</b> ${esc(x.assignmentRef)}${x.assignmentConcept?` · ${esc(x.assignmentConcept)}`:""}<br>
+          <b>Trabajo origen:</b> ${esc(originIdentityV54(x.assignmentRef,x.assignmentConcept))}<br>
+          <b>Fase verificada:</b> ${esc(realOriginStageV54(x.assignmentRef))}<br>
           Disponible asignado: <b>${x.qtyAvailable}</b><br>
           <span style="color:#fecaca;font-weight:900">Aviso:</span> vas a usar material ya recibido/asignado para otro trabajo. Quedará deuda trazable contra ese trabajo.
         `;
@@ -12908,7 +12980,18 @@ init();
         alert("La donación definitiva solo puede hacerse desde stock libre.\n\nLas reservas y el material de otro trabajo únicamente pueden prestarse.");
         return;
       }
+      if((x.mode==="asignado"||x.mode==="reserva")&&realOriginStageV54(x.mode==="asignado"?x.assignmentRef:x.reservationRef)==="active"&&
+        !document.getElementById("ldhOtraEmpresaFabCheckV54")?.checked){
+        alert("Confirma antes que las barras siguen físicamente disponibles y no se han utilizado en Fabricación. No se ha realizado ningún préstamo.");
+        return;
+      }
 
+      if(x.mode==="asignado" || (x.mode==="reserva" && x.reservationRef)){
+        const currentPhase=LDH_origenPrestamoFaseV52(x.mode==="asignado"?x.assignmentRef:x.reservationRef);
+        if(!currentPhase.ok){
+          alert('Préstamo bloqueado: '+currentPhase.reason+'\n\nActualiza las fases antes de volver a intentarlo.');return;
+        }
+      }
       if(x.mode==="asignado" && typeof LDH_pinturaIniciadaRef === "function" && LDH_pinturaIniciadaRef(x.assignmentRef)){
         alert("No se puede usar este material: el trabajo origen ya tiene material en Pintura.");
         return;
@@ -20885,6 +20968,10 @@ function LDH_prepReduceRelatedDebtsV49(remoteDB, loan, qty, now, cancelled) {
     ) && [
       debt?.materialId, debt?.matId, debt?.toMaterialId
     ].filter(Boolean).map(String).includes(materialId);
+    // V53: si hay referencia exacta a prestamo, nunca reducir una
+    // deuda de otro origen que comparte OT y material.
+    const debtLinkedId = String(debt?.assignmentId ?? debt?.loanAssignmentId ?? "");
+    if (debtLinkedId && loanId && debtLinkedId !== loanId) return;
     if (!sameAssignment && !sameFallback) return;
     const pending = Math.max(0, LDH_prepNumCloudV30(
       debt?.pendingQty ?? debt?.qtyPending ?? debt?.qty ?? debt?.cantidad ?? 0
@@ -20964,7 +21051,7 @@ function LDH_prepAdoptRemoteDBV49(remoteDB) {
   };
 }
 
-async function LDH_prepCloseIntercompanyCloudV49(line, requestedQty, cancelled) {
+async function LDH_prepCloseIntercompanyCloudV49(line, requestedQty, cancelled, selectedAssignmentIdV53) {
   const reference = String(window.refActual ?? refActual ?? "").trim();
   if (!reference) throw new Error("El trabajo no tiene referencia.");
   if (!LDH_PREP_STOCK_AUTH_V28.currentUser) {
@@ -20973,7 +21060,7 @@ async function LDH_prepCloseIntercompanyCloudV49(line, requestedQty, cancelled) 
   const localDebt = typeof window.LDH_debtForCurrentLine === "function"
     ? window.LDH_debtForCurrentLine(line)
     : null;
-  const wantedId = String(localDebt?.item?.assignmentId ?? "");
+  const wantedId = String(selectedAssignmentIdV53 || localDebt?.item?.assignmentId || "");
 
   const result = await runTransaction(LDH_PREP_STOCK_DB_V28, async (transaction) => {
     const metaRef = doc(LDH_PREP_STOCK_DB_V28, "taller_data", "stock");
@@ -21040,6 +21127,8 @@ function LDH_prepReduceLocalDebtV49(line, assignmentId, qty, clearLine) {
       const sameMaterial = [
         item?.v2MaterialId, item?.matId, item?.materialId
       ].filter(Boolean).map(String).some((id) => ids.has(id));
+      // V53: no tocar el saldo de otra deuda con assignmentId distinto.
+      if (item?.assignmentId && assignmentId && !sameAssignment) return;
       if (!sameAssignment && !sameMaterial) return;
       const pending = Math.max(0, Number(
         item?.qtyPending ?? item?.pendingQty ?? item?.pending ?? 0
@@ -21072,15 +21161,49 @@ function LDH_prepResetLineV49(line) {
   line._cleaned_test_consumption_at = new Date().toISOString();
 }
 
+/* V53: cada deuda de un prestamo multiple se identifica por assignmentId.
+   Consulta informativa de Stock nube, sin escritura ni mezcla de orígenes. */
+function LDH_prepDeudasPorOrigenV53(line, reference) {
+  const db = window.__LDH_PREP_STOCK_CLOUD_DB || window.__LDH_STOCK_MEMORY_DB;
+  if (!db || !Array.isArray(db.assignments)) return [];
+  const result = db.assignments.filter(a =>
+    LDH_prepIsLoanV45(a) && !LDH_prepClosedV49(a) &&
+    LDH_prepAssignmentMatchesLineV49(a, line, db, reference) &&
+    LDH_prepAssignmentPendingV49(a) > 0
+  );
+  const ids = new Set();
+  return result.filter(a=>{
+    const id=String(a?.id??a?.assignmentId??"");
+    if (!id || ids.has(id)) return false;
+    ids.add(id); return true;
+  });
+}
+window.LDH_prepDeudasPorOrigenV53=LDH_prepDeudasPorOrigenV53;
+
 window.LDH_devolverDeudaStockDesdePrep = async function (lineIndex) {
   const line = (window.estadoMateriales ?? estadoMateriales)?.[lineIndex];
   if (!line) return;
-  const debt = window.LDH_debtForCurrentLine?.(line);
-  const pending = Math.max(0, Number(debt?.pending || 0) || 0);
-  if (!pending) {
-    alert("No existe una devolución pendiente para esta línea.");
+  const reference=String(window.refActual ?? refActual ?? "").trim();
+  const candidates=LDH_prepDeudasPorOrigenV53(line,reference);
+  if (!candidates.length) {
+    alert("No existen deudas pendientes confirmadas en la copia de Stock nube. Actualiza Stock y vuelve a intentarlo.");
     return;
   }
+  let selected=candidates[0];
+  if (candidates.length>1) {
+    const detail=candidates.map((a,i)=>{
+      const origin=String(a.fromAssignedRef||a.originalAssignedRef||a.fromReservationRef||a.originalReservationRef||"STOCK LIBRE");
+      return `${i+1}. ${a.fromEmpresa||a.fromCompanyId||a.companyId||"Empresa origen"} · ${origin} · pendiente ${LDH_prepAssignmentPendingV49(a)}`;
+    }).join("\n");
+    const ask=prompt("La OT tiene varios PRESTAMOS de este material.\n\nElige exactamente la deuda que quieres devolver o compensar:\n\n"+detail+"\n\nIndica el numero del origen:","1");
+    if (ask===null) return;
+    const pos=Number(ask);
+    if (!Number.isInteger(pos)||pos<1||pos>candidates.length){alert("Origen no valido. No se ha realizado ninguna operacion.");return;}
+    selected=candidates[pos-1];
+  }
+  const selectedId=String(selected.id||selected.assignmentId||"");
+  const pending=LDH_prepAssignmentPendingV49(selected);
+  if (!pending || !selectedId) {alert("El prestamo seleccionado no tiene deuda pendiente identificable.");return;}
   const action = String(prompt(
     "¿Qué quieres hacer?\n\n" +
     "D = DEVOLVER el material (reduce la cantidad recibida de esta línea)\n" +
@@ -21123,7 +21246,8 @@ window.LDH_devolverDeudaStockDesdePrep = async function (lineIndex) {
     button.textContent = "Confirmando…";
   }
   try {
-    const result = await LDH_prepCloseIntercompanyCloudV49(line, qty, false);
+    const result = await LDH_prepCloseIntercompanyCloudV49(line, qty, false, selectedId);
+    if (String(result.assignmentId)!==selectedId) throw new Error("La nube no devolvio la deuda seleccionada.");
     LDH_prepReduceLocalDebtV49(line, result.assignmentId, qty, false);
     if (action === "D") {
       const left = Math.max(0, received - qty);
@@ -21182,6 +21306,12 @@ window.devolverNoAsignadoLinea = window.LDH_devolverDeudaStockDesdePrep;
 window.limpiarConsumoLinea = async function (lineIndex) {
   const line = (window.estadoMateriales ?? estadoMateriales)?.[lineIndex];
   if (!line) return;
+  const reference=String(window.refActual ?? refActual ?? "").trim();
+  const debts=LDH_prepDeudasPorOrigenV53(line,reference);
+  if (debts.length>1) {
+    alert("Esta línea tiene "+debts.length+" préstamos con orígenes diferentes. Regularízalos individualmente con DEVOLVER antes de limpiar la prueba; no se borrará ninguna deuda.");
+    return;
+  }
   const material = String(line.mat ?? line.material ?? "esta línea");
   if (!confirm(
     `Limpiar la prueba de "${material}"?\n\n` +
@@ -34025,6 +34155,256 @@ const oldRender=window.LDH_renderFlowHeader;
 if(typeof oldRender==='function')window.LDH_renderFlowHeader=function(){const x=oldRender.apply(this,arguments);refresh();return x;};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',refresh,{once:true});else refresh();
 console.info('[Preparación R194] Estado productivo prioritario y doble envío bloqueado.');
+})();
+</script>
+
+
+<!-- LDH_V55_PRESTAMOS_INTERNOS_20261106 -->
+<script id="LDH_V55_PRESTAMOS_INTERNOS">
+(function(){
+'use strict';
+if(window.__LDH_PREP_V55__)return;
+window.__LDH_PREP_V55__=true;
+const FIELD='internalOtLoansV55', SOURCE='preparacion_interno_v55';
+let active=null, pending=false;
+const str=v=>String(v==null?'':v).trim();
+const num=v=>{const n=Number(String(v??0).replace(',','.'));return Number.isFinite(n)?Math.max(0,n):0;};
+const norm=v=>str(v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+const esc=v=>str(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const first=(...v)=>v.find(x=>x!==undefined&&x!==null&&str(x)!=='')||'';
+const refKey=v=>{const m=str(v).toUpperCase().match(/OT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):str(v).toUpperCase();};
+const get=(k)=>{try{if(typeof getAny==='function')return getAny(k);}catch(_){}try{return localStorage.getItem(k)||sessionStorage.getItem(k);}catch(_){return null;}};
+const put=(k,v)=>{if(typeof setAny==='function')return setAny(k,v);localStorage.setItem(k,v);};
+const parse=(s,def)=>{try{return s?JSON.parse(s):def;}catch(_){return def;}};
+const linesFor=ref=>{const a=parse(get('prep_recepcion_'+ref),[]);return Array.isArray(a)?a:[];};
+const metaFor=ref=>parse(get('prep_meta_'+ref),{})||{};
+const currentRef=()=>{try{return str(refActual);}catch(_){return str(window.refActual);}};
+const currentLines=()=>{try{return estadoMateriales;}catch(_){return window.estadoMateriales||[];}};
+const currentMeta=()=>{try{return metaActual;}catch(_){return window.metaActual||{};}};
+const stockDb=()=>window.__LDH_PREP_STOCK_CLOUD_DB||window.__LDH_STOCK_MEMORY_DB||parse(get('ldh_v2_company_stock_v1'),{});
+const company=(db,v)=>(db.companies||[]).find(x=>[x.id,x.name,x.code,x.nombre].some(k=>norm(k)===norm(v)));
+const midOf=x=>str(first(x?.linked_matId,x?.stockLinkId,x?.stockMatId,x?.matId,x?.materialId));
+const matName=x=>str(first(x?.mat,x?.material,x?.name));
+const mat=(db,l)=>{const mid=midOf(l);return (db.materials||[]).find(x=>str(x.id)===mid)||(db.materials||[]).find(x=>norm(x.name)===norm(matName(l)));};
+const isBar=x=>norm(x?.unit||x?.unidad).includes('barra')&&!norm(matName(x)).includes('pletina');
+const qtyOf=x=>num(first(x?.qty,x?.cantidad,x?.asignado,x?.reservado));
+const rowRef=x=>refKey(first(x?.ref,x?.jobRef,x?.trabajoRef,x?.workRef));
+const recordActive=x=>['','activa','activo'].includes(norm(first(x?.status,x?.estado)))&&['','preparacion','fabricacion'].includes(norm(first(x?.phase,x?.fase)));
+const isOtherDebt=x=>x?.toCompanyId||x?.sharedStock===true||/otra.?empresa|prestamo|donacion|stock.?comun/i.test(str(first(x?.assignmentType,x?.reason)));
+const allocationRows=(db,cid,mid,ref)=>[...(db.assignments||[]).filter(x=>recordActive(x)&&!isOtherDebt(x)&&str(x.companyId)===cid&&str(first(x.materialId,x.matId))===mid&&rowRef(x)===refKey(ref)),...(db.reservations||[]).filter(x=>recordActive(x)&&str(x.companyId)===cid&&str(first(x.materialId,x.matId))===mid&&rowRef(x)===refKey(ref))];
+const assigned=(db,cid,mid,ref)=>allocationRows(db,cid,mid,ref).reduce((a,x)=>a+qtyOf(x),0);
+const outstanding=r=>Math.max(0,num(r?.qty)-num(r?.returnedQty));
+const ledger=db=>Array.isArray(db[FIELD])?db[FIELD]:[];
+const phase=ref=>{
+ let lookup=null;try{lookup=window.LDH_PREP_V193_LOOKUP?.(ref);}catch(_){}
+ if(!lookup||!lookup.ready)return {ok:false,reason:'No se ha confirmado la fase en la nube'};
+ if(lookup.found){if(lookup.status==='closed')return {ok:false,reason:'OT cerrada, en Almacen o entregada'};if(lookup.status==='active'){
+    const r=lookup.row||{},f=r.flow||{};
+    if(num(f.pintura||f.pint)>0||num(f.almacen||f.alm)>0||num(f.entregado||f.ent)>0)return {ok:false,reason:'OT con actividad avanzada'};
+    return {ok:true,fabricacion:true,label:'Fabricacion'};
+  }}
+ const m=metaFor(ref),ph=norm(first(m.fase,m.estado));
+ if(!Object.keys(m).length)return {ok:false,reason:'Sin ficha de Preparacion verificable'};
+ if(m.entregado||m.en_pintura||m.en_almacen||/pintura|almacen|entregado|terminado|archivado/.test(ph))return {ok:false,reason:'OT avanzada o cerrada'};
+ return {ok:true,fabricacion:!!m.en_fabricacion||ph.includes('fabricacion'),label:m.en_fabricacion?'Fabricacion':'Preparacion'};
+};
+const keys=()=>{const out=new Set();for(const store of [localStorage,sessionStorage]){try{for(let i=0;i<store.length;i++){const k=store.key(i);if(k?.startsWith('prep_recepcion_'))out.add(k.slice('prep_recepcion_'.length));}}catch(_){}}return [...out];};
+const uniqueLine=(lines,mid,name)=>{const matches=lines.map((l,i)=>({l,i})).filter(({l})=>isBar(l)&&(midOf(l)===mid||(midOf(l)===''&&norm(matName(l))===norm(name))));return matches.length===1?matches[0]:null;};
+const pref=(l,ref,db)=>{const m=mat(db,l);if(!m)return null;return {ref,mat:m,mid:str(m.id),name:str(m.name)};};
+function donors(ctx){
+ const db=stockDb(),co=company(db,ctx.company),cid=str(co?.id);if(!cid)return [];
+ const out=[];
+ for(const ref of keys()){
+   if(refKey(ref)===refKey(ctx.ref))continue;
+   const meta=metaFor(ref);if(norm(first(meta.empresa,meta.company))!==norm(ctx.company))continue;
+   const f=phase(ref);if(!f.ok)continue;
+   const lines=linesFor(ref),found=uniqueLine(lines,ctx.mid,ctx.name);if(!found)continue;
+   const {l}=found;
+   const rec=num(first(l.qty_recibida,l.recibida)),held=assigned(db,cid,ctx.mid,ref);
+   const max=Math.floor(Math.min(rec,held));if(max<1)continue;
+   out.push({ref,idx:found.i,max,phase:f.label,needsCheck:f.fabricacion,
+    identification:str(first(meta.identification,meta.workIdentification,meta.workLabel,meta.referenceLabel,meta.composite_part_description,meta.partDescription)),concept:str(first(meta.concepto,meta.concept)),received:rec});
+ }
+ return out.sort((a,b)=>a.ref.localeCompare(b.ref));
+}
+function getInput(id){return document.getElementById(id);}
+function ui(){
+ if(getInput('ldhV55Panel'))return;
+ const style=document.createElement('style');style.textContent=`#ldhV55Panel{position:fixed;inset:0;z-index:1000020;background:rgba(0,0,0,.76);display:none;align-items:center;justify-content:center;padding:12px}#ldhV55Panel.show{display:flex}#ldhV55Panel .panel{background:#0e223a;color:#e9f6ff;border:1px solid #3989af;border-radius:16px;padding:20px;max-width:740px;width:100%;max-height:90vh;overflow:auto;box-shadow:0 20px 80px #000a}#ldhV55Panel select,#ldhV55Panel input{background:#061427;color:#fff;border:1px solid #508eaf;border-radius:8px;padding:10px;max-width:100%;box-sizing:border-box}#ldhV55Panel .field{margin:12px 0;display:grid;gap:5px}#ldhV55Panel button{padding:10px 13px;border-radius:9px;border:1px solid #397d9f;background:#174566;color:white;cursor:pointer}#ldhV55Panel .primary{background:#166534;border-color:#38a169}#ldhV55Panel .warn{background:#422e14;border:1px solid #f59e0b;padding:12px;border-radius:10px;margin:12px 0}#ldhV55Panel .small{font-size:12px;color:#bbd9ec}#ldhV55Panel .actions{display:flex;justify-content:end;gap:8px;flex-wrap:wrap}`;document.head.appendChild(style);
+ document.body.insertAdjacentHTML('beforeend',`<div id="ldhV55Panel"><div class="panel"><h3 id="ldhV55Title">Prestamo entre trabajos de la misma empresa</h3><p id="ldhV55Intro"></p><div class="field"><label>OT de origen · referencia y aclaratoria</label><select id="ldhV55Origin"></select></div><div class="field"><label>Barras a prestar</label><input type="number" id="ldhV55Qty" min="1" step="1" value="1"></div><div id="ldhV55Info" class="small"></div><label id="ldhV55FabWrap" class="warn" style="display:none"><input type="checkbox" id="ldhV55Fab"> Confirmo que estas barras no se han cortado, consumido ni incorporado al trabajo, y estan fisicamente disponibles.</label><div class="actions"><button type="button" id="ldhV55Cancel">Cancelar</button><button type="button" class="primary" id="ldhV55Confirm">Registrar prestamo</button></div><hr style="opacity:.25;margin:18px 0"><div class="small" id="ldhV55Existing"></div></div></div>`);
+ getInput('ldhV55Cancel').onclick=()=>{if(!pending)getInput('ldhV55Panel').classList.remove('show');};
+ getInput('ldhV55Origin').onchange=showSelection;
+ getInput('ldhV55Confirm').onclick=execute;
+}
+function open(index){
+ ui();getInput('ldhV55Confirm').onclick=execute;getInput('ldhV55Confirm').textContent='Registrar prestamo';getInput('ldhV55Origin').onchange=showSelection;const ref=currentRef(),l=currentLines()[index],meta=currentMeta(),db=stockDb();if(!l||!ref||!isBar(l))return;
+ const c=company(db,first(meta.empresa,meta.company)),p=pref(l,ref,db);
+ if(!c||!p)return alert('No se reconoce la empresa o el material vinculado.');
+ const rec=num(first(l.qty_recibida,l.recibida)),ped=num(first(l.qty_pedida,l.pedida,l.qty)),missing=Math.floor(Math.max(0,ped-rec));
+ if(missing<1)return alert('Este trabajo ya tiene toda la cantidad recibida. No necesita otro prestamo interno.');
+ if(phase(ref).fabricacion)return alert('El destino ya esta en Fabricacion: no se permite alterar sus recepciones desde este selector.');
+ active={index,ref,company:str(first(c.name,c.nombre)),cid:str(c.id),...p,missing};active.donors=donors(active);
+ if(!active.donors.length)return alert('No hay ninguna OT de esta empresa con barras propias disponibles y fase verificada. Comprueba la conexion con Firestore.');
+ getInput('ldhV55Title').textContent='Prestamo entre OTs · '+active.company;
+ getInput('ldhV55Intro').textContent='Destino: '+ref+' · '+active.name+' · faltan '+missing+' barras. Puedes repetir con distintos trabajos; cada prestamo queda registrado por separado.';
+ getInput('ldhV55Origin').innerHTML=active.donors.map((d,i)=>`<option value="${i}">${esc(d.ref+' · '+(d.identification||d.concept||'Sin aclaratoria')+' · '+d.phase+' · disponibles '+d.max)}</option>`).join('');
+ showSelection();getInput('ldhV55Panel').classList.add('show');
+ const rows=ledger(db).filter(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===active.mid&&outstanding(x)>0);
+ getInput('ldhV55Existing').textContent=rows.length?'Prestamos internos pendientes: '+rows.map(x=>x.fromRef+' ('+outstanding(x)+')').join(' · '):'No constan prestamos internos pendientes registrados por V55.';
+}
+function showSelection(){if(!active)return;const d=active.donors[Number(getInput('ldhV55Origin').value)||0];if(!d)return;
+ getInput('ldhV55Qty').max=str(Math.min(d.max,active.missing));getInput('ldhV55Qty').value=str(Math.min(d.max,active.missing));
+ getInput('ldhV55Info').textContent='Origen '+d.ref+' · '+d.phase+' · '+d.max+' barras asignadas disponibles · maximo destino '+active.missing;
+ getInput('ldhV55FabWrap').style.display=d.needsCheck?'block':'none';getInput('ldhV55Fab').checked=false;
+}
+function modifyReceived(l,delta,ref,other,loanId){
+ const ped=num(first(l.qty_pedida,l.pedida,l.qty)),old=num(first(l.qty_recibida,l.recibida)),rec=old+delta;
+ if(rec<0||rec>ped+0.000001)throw new Error('La cantidad recibida de '+ref+' cambiaria fuera de los limites.');
+ l.qty_recibida=rec;l.recibida=rec;
+ const ap=num(first(l.aplicado_qty,l.aplicado));l.aplicado_qty=Math.max(0,Math.min(rec,ap+delta));l.aplicado=l.aplicado_qty;
+ l.ok=ped>0&&rec>=ped;l.completo=l.ok;l.done=l.ok;l.isDone=l.ok;l.isCompleted=l.ok;
+ if(!Array.isArray(l.trace))l.trace=[];
+ l.trace.push({at:new Date().toISOString(),qty:delta,source:'prestamo_interno_ot_v55',internalLoanId:loanId,otherRef:other});
+ return l;
+}
+function reduceAssigned(db,cid,mid,ref,qty){
+ let left=qty;
+ for(const row of allocationRows(db,cid,mid,ref).sort((a,b)=>(a.assignmentType?0:1)-(b.assignmentType?0:1))){
+   if(left<=0)break;const take=Math.min(qtyOf(row),left),remain=qtyOf(row)-take;
+   row.qty=remain;row.cantidad=remain;
+   if(row.pendingQty!==undefined)row.pendingQty=remain;if(row.qtyPending!==undefined)row.qtyPending=remain;
+   row.updatedAt=new Date().toISOString();if(remain===0){row.status='liberada';row.estado='liberada';}left-=take;
+ }
+ if(left>0.000001)throw new Error('La OT de origen ya no tiene suficientes barras asignadas.');
+}
+function increaseAssigned(db,cid,mid,ref,qty,name){
+ // Una asignacion interna NO es deuda interempresa: no crea movimientos fisicos.
+ let row=allocationRows(db,cid,mid,ref).find(x=>(db.assignments||[]).includes(x));
+ if(!row){row={id:'asg_int_v55_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7),companyId:cid,materialId:mid,ref,jobRef:ref,assignmentType:'libre',reason:'traspaso_interno_entre_ot_v55',source:SOURCE,phase:'preparacion',status:'activa',qty:0,cantidad:0};(db.assignments||(db.assignments=[])).push(row);}
+ row.qty=qtyOf(row)+qty;row.cantidad=row.qty;row.status='activa';row.estado='activa';row.updatedAt=new Date().toISOString();
+}
+async function prepSync(entries){
+ // Usar el mismo documento de Preparacion que V151. No hacer cambios en Firestore si no existe conexion.
+ if(!window.firebase?.firestore)throw new Error('No se puede sincronizar Preparacion: Firebase compat no disponible.');
+ const app=(firebase.apps||[]).find(a=>(a.options||{}).projectId==='gestion-taller-v2');
+ if(!app)throw new Error('No esta disponible el proyecto Firestore de Preparacion.');
+ const db=firebase.firestore(app),dr=db.collection('taller_data').doc('preparacion');
+ await db.runTransaction(async tx=>{const snap=await tx.get(dr);if(!snap.exists)throw new Error('No existe el documento Preparacion.');const old=snap.data()||{},data={...(old.data||{})};for(const e of entries){data['prep_recepcion_'+e.ref]=JSON.stringify(e.lines);data['prep_meta_'+e.ref]=JSON.stringify(e.meta);}const newKeys=entries.flatMap(e=>['prep_recepcion_'+e.ref,'prep_meta_'+e.ref]);tx.set(dr,{schema:old.schema||'prep_live_sync_v6_authoritative',data,keys:[...new Set([...(old.keys||Object.keys(old.data||{})),...newKeys])].sort(),updatedAt:Date.now(),reason:SOURCE},{merge:true});});
+ for(const e of entries){put('prep_recepcion_'+e.ref,JSON.stringify(e.lines));put('prep_meta_'+e.ref,JSON.stringify(e.meta));}
+}
+function stateMeta(meta,ls){const m={...meta},complete=ls.every(x=>num(first(x.qty_recibida,x.recibida))>=num(first(x.qty_pedida,x.pedida,x.qty)));m.recepcion_completa=complete;if(!complete)m._notified_complete=false;m.lastUpdate=new Date().toISOString();return m;}
+async function execute(){
+ if(pending||!active)return;
+ const d=active.donors[Number(getInput('ldhV55Origin').value)||0],qty=Number(getInput('ldhV55Qty').value);
+ if(!d||!Number.isInteger(qty)||qty<1||qty>Math.min(d.max,active.missing))return alert('Cantidad invalida.');
+ if(d.needsCheck&&!getInput('ldhV55Fab').checked)return alert('Debes confirmar que el material de Fabricacion sigue sin utilizar.');
+ if(location.protocol==='file:'&&!confirm('ATENCION: estas abriendo el HTML local, pero los prestamos pueden escribirse en FIRESTORE REAL.\n\nPara revisar el selector pulsa CANCELAR. Solo continua si quieres registrar un prestamo REAL.'))return;
+ if(!confirm('PRESTAMO INTERNO · SIN CAMBIO DE STOCK FISICO\nOrigen: '+d.ref+'\nDestino: '+active.ref+'\nCantidad: '+qty+' barras\n\nSe registrara una deuda interna individual. ¿Confirmar?'))return;
+ pending=true;getInput('ldhV55Confirm').disabled=true;getInput('ldhV55Confirm').textContent='Registrando...';
+ const now=new Date().toISOString(),id='iot55_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,10);
+ try{
+   if(typeof window.LDH_prepRunStockMutationV129!=='function')throw new Error('No esta listo el conector transaccional de Stock.');
+   const originLine=uniqueLine(linesFor(d.ref),active.mid,active.name),targetLine=uniqueLine(linesFor(active.ref),active.mid,active.name);
+   if(!originLine||!targetLine)throw new Error('No se identifican de forma unica las lineas de origen y destino.');
+   if(num(first(originLine.l.qty_recibida,originLine.l.recibida))<qty)throw new Error('La recepcion de origen ha cambiado.');
+   if(num(first(targetLine.l.qty_pedida,targetLine.l.pedida,targetLine.l.qty))-num(first(targetLine.l.qty_recibida,targetLine.l.recibida))<qty)throw new Error('El destino ya no necesita esa cantidad.');
+   const checked=phase(d.ref);if(!checked.ok)throw new Error('La fase de origen ha cambiado: '+checked.reason);
+   const originalEntry={ref:d.ref,lines:linesFor(d.ref),meta:metaFor(d.ref)};
+   const targetEntry={ref:active.ref,lines:linesFor(active.ref),meta:metaFor(active.ref)};
+   modifyReceived(originalEntry.lines[originLine.i],-qty,d.ref,active.ref,id);
+   modifyReceived(targetEntry.lines[targetLine.i],qty,active.ref,d.ref,id);
+   originalEntry.meta=stateMeta(originalEntry.meta,originalEntry.lines);targetEntry.meta=stateMeta(targetEntry.meta,targetEntry.lines);
+   await window.LDH_prepRunStockMutationV129(SOURCE+'_prestamo',async db=>{
+     if(ledger(db).some(x=>x.id===id))return;
+     const donorPhase=phase(d.ref);if(!donorPhase.ok)throw new Error('Origen ya no prestable: '+donorPhase.reason);
+     if(assigned(db,active.cid,active.mid,d.ref)+0.000001<qty)throw new Error('No hay suficientes barras realmente asignadas a la OT de origen.');
+     reduceAssigned(db,active.cid,active.mid,d.ref,qty);
+     increaseAssigned(db,active.cid,active.mid,active.ref,qty,active.name);
+     if(!Array.isArray(db[FIELD]))db[FIELD]=[];
+     db[FIELD].push({id,fromRef:d.ref,toRef:active.ref,companyId:active.cid,materialId:active.mid,materialName:active.name,qty,returnedQty:0,status:'pendiente',syncState:'pendiente_prep',createdAt:now,confirmedUnused:!!d.needsCheck,history:[{type:'prestamo',qty,at:now}]});
+     return {id};
+   });
+   await prepSync([originalEntry,targetEntry]);
+   // Declarar la preparacion sincronizada; si falla, el ledger sigue trazable.
+   try{await window.LDH_prepRunStockMutationV129(SOURCE+'_sync_ok',async db=>{const rec=ledger(db).find(x=>x.id===id);if(rec)rec.syncState='sincronizado';return {id};});}catch(e){console.warn('[V55] No se pudo marcar syncState',e);}
+   getInput('ldhV55Panel').classList.remove('show');
+   try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:SOURCE}}));if(typeof abrirPedido==='function')abrirPedido(active.ref);else if(typeof cargarLista==='function')cargarLista();}catch(_){ }
+   alert('Prestamo interno registrado: '+qty+' barras.\nOrigen: '+d.ref+'\nDestino: '+active.ref+'\nStock fisico: SIN CAMBIOS.\nDeuda registrada individualmente.');
+ }catch(e){console.error('[V55] Prestamo',e);alert('Operacion no completada o sincronizacion pendiente.\n\n'+(e?.message||e)+'\n\nNO repitas el prestamo sin verificar antes las asignaciones en Stock.');}
+ finally{pending=false;getInput('ldhV55Confirm').disabled=false;getInput('ldhV55Confirm').textContent='Registrar prestamo';}
+}
+function openReturn(index){
+ ui();const ref=currentRef(),line=currentLines()[index],meta=currentMeta(),db=stockDb(),p=pref(line,ref,db);
+ if(!p)return alert('No se ha podido identificar el material de esta OT.');
+ const loans=ledger(db).filter(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===p.mid&&outstanding(x)>0);
+ if(!loans.length)return alert('No constan prestamos internos pendientes de este material.');
+ const st=phase(ref);if(!st.ok||st.fabricacion)return alert('Para devolver barras, la OT receptora debe seguir en Preparacion sin consumo confirmado.');
+ active={kind:'return',index,ref,company:str(first(meta.empresa,meta.company)),mid:p.mid,name:p.name,loans};
+ getInput('ldhV55Title').textContent='Devolucion de prestamo interno';
+ getInput('ldhV55Intro').textContent='Receptor actual: '+ref+' · '+p.name+'. Selecciona exactamente el origen al que devolver las barras.';
+ getInput('ldhV55Origin').innerHTML=loans.map((x,i)=>'<option value="'+i+'">'+esc(x.fromRef+' · pendiente '+outstanding(x)+' barras · prestamo '+x.id)+'</option>').join('');
+ getInput('ldhV55Confirm').textContent='Registrar devolucion';
+ getInput('ldhV55Confirm').onclick=executeReturn;
+ getInput('ldhV55FabWrap').style.display='none';
+ getInput('ldhV55Origin').onchange=()=>{const x=loans[Number(getInput('ldhV55Origin').value)||0];getInput('ldhV55Qty').max=str(outstanding(x));getInput('ldhV55Qty').value=str(outstanding(x));getInput('ldhV55Info').textContent='Devolver exclusivamente a '+x.fromRef+' · sin modificar Stock fisico';};
+ getInput('ldhV55Origin').onchange();getInput('ldhV55Existing').textContent='La devolucion restaura la asignacion de origen y reduce la recibida del receptor. No modifica movimientos fisicos.';
+ getInput('ldhV55Panel').classList.add('show');
+}
+async function executeReturn(){
+ if(pending||active?.kind!=='return')return;
+ const loan=active.loans[Number(getInput('ldhV55Origin').value)||0],qty=Number(getInput('ldhV55Qty').value);
+ if(!loan||!Number.isInteger(qty)||qty<1||qty>outstanding(loan))return alert('Cantidad de devolucion no valida.');
+ if(location.protocol==='file:'&&!confirm('ATENCION: esta devolucion puede modificar FIRESTORE REAL incluso desde el archivo local.\n\nCancelar permite inspeccionar sin guardar.'))return;
+ if(!confirm('DEVOLVER '+qty+' BARRAS\nOrigen: '+loan.fromRef+'\nReceptor: '+loan.toRef+'\n\nStock fisico sin cambios. ¿Confirmar?'))return;
+ pending=true;getInput('ldhV55Confirm').disabled=true;getInput('ldhV55Confirm').textContent='Registrando...';
+ try{
+  const sourceEntry={ref:loan.fromRef,lines:linesFor(loan.fromRef),meta:metaFor(loan.fromRef)};
+  const targetEntry={ref:loan.toRef,lines:linesFor(loan.toRef),meta:metaFor(loan.toRef)};
+  const s=uniqueLine(sourceEntry.lines,active.mid,active.name),t=uniqueLine(targetEntry.lines,active.mid,active.name);
+  if(!s||!t)throw new Error('Faltan las lineas exactas de origen o receptor.');
+  if(num(first(t.l.qty_recibida,t.l.recibida))<qty)throw new Error('El receptor ya no tiene esa cantidad de barras recibidas.');
+  if(num(first(s.l.qty_recibida,s.l.recibida))+qty>num(first(s.l.qty_pedida,s.l.pedida,s.l.qty)))throw new Error('La devolucion excederia las barras del origen.');
+  modifyReceived(sourceEntry.lines[s.i],qty,sourceEntry.ref,targetEntry.ref,loan.id);
+  modifyReceived(targetEntry.lines[t.i],-qty,targetEntry.ref,sourceEntry.ref,loan.id);
+  sourceEntry.meta=stateMeta(sourceEntry.meta,sourceEntry.lines);targetEntry.meta=stateMeta(targetEntry.meta,targetEntry.lines);
+  const stamp=new Date().toISOString();
+  await window.LDH_prepRunStockMutationV129(SOURCE+'_devolucion',async db=>{
+   const remote=ledger(db).find(x=>x.id===loan.id);if(!remote||outstanding(remote)<qty)throw new Error('El prestamo pendiente ha cambiado.');
+   if(!phase(loan.toRef).ok||phase(loan.toRef).fabricacion)throw new Error('La OT receptora ya no permite devolver desde Preparacion.');
+   const held=assigned(db,str(remote.companyId),str(remote.materialId),remote.toRef);
+   if(held+0.000001<qty)throw new Error('El receptor no tiene las barras disponibles para devolverlas.');
+   reduceAssigned(db,str(remote.companyId),str(remote.materialId),remote.toRef,qty);
+   increaseAssigned(db,str(remote.companyId),str(remote.materialId),remote.fromRef,qty,remote.materialName);
+   remote.returnedQty=num(remote.returnedQty)+qty;remote.status=outstanding(remote)<=0?'devuelto':'pendiente';remote.syncState='pendiente_prep';remote.updatedAt=stamp;remote.history=Array.isArray(remote.history)?remote.history:[];remote.history.push({type:'devolucion',qty,at:stamp});
+   return {loanId:remote.id};
+  });
+  await prepSync([sourceEntry,targetEntry]);
+  try{await window.LDH_prepRunStockMutationV129(SOURCE+'_devolucion_sync_ok',async db=>{const x=ledger(db).find(r=>r.id===loan.id);if(x)x.syncState='sincronizado';return {loanId:loan.id};});}catch(e){console.warn('[V55] Marca sync devolucion',e);}
+  getInput('ldhV55Panel').classList.remove('show');
+  try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:SOURCE}}));if(typeof abrirPedido==='function')abrirPedido(active.ref);}catch(_){}
+  alert('Devolucion registrada: '+qty+' barras a '+loan.fromRef+'.\nStock fisico sin cambios.');
+ }catch(e){console.error('[V55] Devolucion',e);alert('Devolucion fallida o sincronizacion pendiente: '+(e?.message||e)+'\nNO repitas hasta verificar Stock.');}
+ finally{pending=false;getInput('ldhV55Confirm').disabled=false;getInput('ldhV55Confirm').textContent='Registrar devolucion';}
+}
+function inject(){
+ const tbody=getInput('tbodyBarras'),ls=currentLines(),ref=currentRef(),db=stockDb();if(!tbody||!ref||!Array.isArray(ls))return;
+ let pos=0;
+ ls.forEach((l,i)=>{
+  const isRelevant=isBar(l)||norm(l?.unit||l?.unidad)==='mm'||norm(matName(l)).includes('pletina');
+  if(!isRelevant)return;
+  const tr=tbody.children[pos++],action=tr?.children[4];if(!action||!isBar(l))return;
+  action.querySelectorAll('.ldh-v55-internal,.ldh-v55-return').forEach(x=>x.remove());
+  const pendingLoans=ledger(db).filter(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===midOf(l)&&outstanding(x)>0);
+  if(pendingLoans.length){const ret=document.createElement('button');ret.type='button';ret.className='btn-mini ldh-v55-return';ret.textContent='Devolver a OT origen ('+pendingLoans.length+')';ret.onclick=()=>openReturn(i);action.appendChild(ret);}
+  const ped=num(first(l.qty_pedida,l.pedida,l.qty)),rec=num(first(l.qty_recibida,l.recibida)),ctx=phase(ref);
+  if(ped<=rec||!ctx.ok||ctx.fabricacion)return;
+  const b=document.createElement('button');b.type='button';b.className='btn-mini ldh-v55-internal';b.textContent='Asignar desde otra OT propia';b.title='Transferir barras entre trabajos de la misma empresa, incluso desde Fabricacion';b.onclick=()=>open(i);action.appendChild(b);
+ });
+}
+function wrap(){const prev=window.renderTabla;if(typeof prev==='function'&&!prev.__v55){const fn=function(){const r=prev.apply(this,arguments);setTimeout(inject,25);return r;};fn.__v55=true;window.renderTabla=fn;try{renderTabla=fn;}catch(_){}}}
+ui();wrap();setTimeout(inject,500);window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(inject,100));
+window.LDH_V55_INTERNAL_OPEN=open;window.LDH_V55_INTERNAL_RETURN=openReturn;
+console.info('[Preparacion V55] Asignar desde otras OTs de la misma empresa: activo; valida fase y confirmacion Fabricacion.');
 })();
 </script>
 
