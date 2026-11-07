@@ -9183,6 +9183,16 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
 .ldh-vc-paintbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 4px}.ldh-vc-paint-btn{border-color:rgba(217,70,239,.48)!important;background:linear-gradient(180deg,rgba(168,85,247,.26),rgba(88,28,135,.22))!important;color:#f5d0fe!important}.ldh-vc-paint-info{font-size:11px;color:#94a3b8;font-weight:850}.ldh-vc-paint-info.ok{color:#86efac}.ldh-vc-paintcell{text-align:center}.ldh-vc-paintcell input{width:18px!important;height:18px!important;accent-color:#d946ef}
 @media(max-width:760px){.ldh-vc-grid,.ldh-vc-toolbar{grid-template-columns:1fr}.ldh-vc-toolbar select{grid-column:auto}}
 </style>
+<style id="LDH_VARIABLE_DESIGN_V3_STYLE">
+.ldh-vc-design-badge{display:inline-flex;align-items:center;border:1px solid;border-radius:999px;padding:6px 11px;font-size:11px;font-weight:850}
+.ldh-vc-design-badge.pending{color:#fde68a;border-color:#b45309;background:rgba(180,83,9,.19)}
+.ldh-vc-design-badge.complete{color:#86efac;border-color:#15803d;background:rgba(22,101,52,.2)}
+.ldh-vc-design-badge.archived{color:#cbd5e1;border-color:#64748b;background:rgba(100,116,139,.16)}
+.ldh-vc-part-state{display:inline-block;margin-left:6px;font-size:10px;font-weight:750;letter-spacing:0;white-space:nowrap}
+.ldh-vc-part-state.ready{color:#86efac}.ldh-vc-part-state.pending{color:#fbbf24}
+.ldh-vc-finish-btn{background:linear-gradient(180deg,#064e3b,#065f46)!important;border:1px solid #10b981!important;color:#ecfdf5!important}
+#ldhVcArchive:disabled{opacity:.45;cursor:not-allowed}
+</style>
 <script id="LDH_VARIABLE_CONCEPT_CONFIG_V2_20261002">
 (function(){
   'use strict';
@@ -9204,13 +9214,36 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
     return true;
   }
   function all(){return ensureState()?App.state.variableConceptsV1:[];}
-  function newDraft(){return {version:2,id:uid('vc_'),name:'',type:'simple',archived:false,createdAtMs:now(),updatedAtMs:now(),_ldhUpdatedAtMs:now(),recipe:DEFAULT_RECIPE(''),parts:[]};}
+  function newDraft(){return {version:2,id:uid('vc_'),name:'',type:'simple',archived:false,designStatus:'pending',designArchivedByUserV1:false,createdAtMs:now(),updatedAtMs:now(),_ldhUpdatedAtMs:now(),recipe:DEFAULT_RECIPE(''),parts:[]};}
   function ensureParts(d){
     if(!Array.isArray(d.parts))d.parts=[];
     while(d.parts.length<2){const i=d.parts.length;d.parts.push({id:uid('vp_'),name:`Partida ${String.fromCharCode(65+i)}`,recipe:DEFAULT_RECIPE('')});}
     d.parts.forEach(p=>{if(!p.recipe)p.recipe=DEFAULT_RECIPE('');});
   }
   function parseVars(value){const a=String(value||'').split(',').map(x=>x.trim()).filter(Boolean);if(!a.some(x=>norm(x)==='cantidad'))a.unshift('cantidad');return [...new Set(a)];}
+  // R2: las partidas con cantidades cero o filas sin datos no cuentan como listas
+  // para crear una OT. Guardar disenos incompletos es valido, publicarlos no.
+  function recipeReady(recipe){
+    const rows=[...(Array.isArray(recipe?.lines)?recipe.lines:[]),...(Array.isArray(recipe?.units)?recipe.units:[])].filter(x=>String(x??'').trim());
+    return rows.length>0 && rows.every(raw=>{
+      const p=parseFormula(raw),qty=Number(String(p.qty??'').replace(',','.'));
+      return !!String(p.name||'').trim() && Number.isFinite(qty) && qty>0 && !!String(p.varName||'').trim();
+    });
+  }
+  function missingPartIndices(d){
+    if(!d||d.type!=='compound')return [];
+    const parts=Array.isArray(d.parts)?d.parts:[];
+    return parts.map((p,i)=>!recipeReady(p.recipe)?i:-1).filter(i=>i>=0);
+  }
+  function manuallyArchived(d){
+    return d?.designArchivedByUserV1===true || (d?.designArchivedByUserV1===undefined && d?.archived===true && d?.designStatus!=='pending');
+  }
+  function designState(d){
+    if(!d)return 'pending';
+    if(d.type==='compound' && (d.designStatus==='pending' || !Array.isArray(d.parts) || d.parts.length<2 || missingPartIndices(d).length))return 'pending';
+    if(d.type==='simple' && !recipeReady(d.recipe))return 'pending';
+    return manuallyArchived(d)?'archived':'complete';
+  }
   function variableNameExists(name,skipId){const k=norm(name);return all().some(v=>v&&v.id!==skipId&&norm(v.name)===k);}
   function standardNameExists(name){const k=norm(name);return (App.state.concepts||[]).some(c=>norm(c&&c.name)===k);}
   function recipeForCurrent(){if(!draft)return DEFAULT_RECIPE('');if(draft.type==='compound'){ensureParts(draft);return draft.parts[currentPart]?.recipe||DEFAULT_RECIPE('');}return draft.recipe||DEFAULT_RECIPE('');}
@@ -9270,25 +9303,31 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
   function renderList(selectId){
     const sel=document.getElementById(selectId||'ldhVcSaved');if(!sel)return;
     const rows=all().slice().sort((a,b)=>(!!a.archived-!!b.archived)||String(a.name||'').localeCompare(String(b.name||''),'es',{sensitivity:'base'}));
-    sel.innerHTML='<option value="">— Nuevo concepto variable —</option>'+rows.map(v=>`<option value="${esc(v.id)}">${v.archived?'[ARCHIVADO] ':''}${esc(v.name||'Sin nombre')} · ${v.type==='compound'?'COMPUESTO':'SIMPLE'}</option>`).join('');
+    sel.innerHTML='<option value="">— Nuevo concepto variable —</option>'+rows.map(v=>`<option value="${esc(v.id)}">${designState(v)==='pending'?'[DISEÑO PENDIENTE] ':designState(v)==='archived'?'[ARCHIVADO] ':'[DISEÑO COMPLETO] '}${esc(v.name||'Sin nombre')} · ${v.type==='compound'?'COMPUESTO':'SIMPLE'}</option>`).join('');
     if(draft&&rows.some(v=>v.id===draft.id))sel.value=draft.id;
   }
   function renderParts(){
     const host=document.getElementById('ldhVcParts');if(!host)return;ensureParts(draft);
-    host.innerHTML=draft.parts.map((p,i)=>`<button type="button" class="ldh-vc-part ${i===currentPart?'active':''}" onclick="LDH_VariableConceptConfigV2.selectPart(${i})">${String.fromCharCode(65+i)} · ${esc(p.name||'Partida')}</button>`).join('')+`<button type="button" class="ldh-vc-part" onclick="LDH_VariableConceptConfigV2.addPart()">＋ Partida</button>`;
+    host.innerHTML=draft.parts.map((p,i)=>`<button type="button" class="ldh-vc-part ${i===currentPart?'active':''}" onclick="LDH_VariableConceptConfigV2.selectPart(${i})">${String.fromCharCode(65+i)} · ${esc(p.name||'Partida')} <span class="ldh-vc-part-state ${recipeReady(p.recipe)?'ready':'pending'}">${recipeReady(p.recipe)?'✓ Configurada':'◷ Pendiente'}</span></button>`).join('')+`<button type="button" class="ldh-vc-part" onclick="LDH_VariableConceptConfigV2.addPart()">＋ Partida</button>`;
   }
   function renderDraft(){
     if(!draft)draft=newDraft();
     document.getElementById('ldhVcName').value=draft.name||'';
     document.getElementById('ldhVcType').value=draft.type==='compound'?'compound':'simple';
-    document.getElementById('ldhVcArchivedBadge').style.display=draft.archived?'inline-flex':'none';
+    const state=designState(draft),badge=document.getElementById('ldhVcDesignBadge');
+    if(badge){badge.textContent=state==='pending'?'Diseño pendiente':state==='archived'?'Archivado':'Diseño completo';badge.className='ldh-vc-design-badge '+state;}
+    const archivedBadge=document.getElementById('ldhVcArchivedBadge');if(archivedBadge)archivedBadge.style.display='none';
+    const finish=document.getElementById('ldhVcFinalize');if(finish)finish.style.display=draft.type==='compound'?'inline-flex':'none';
+    const archive=document.getElementById('ldhVcArchive');const isSaved=all().some(v=>v.id===draft.id);
+    if(archive){archive.disabled=!isSaved||state==='pending';archive.title=state==='pending'?'Finaliza el diseño antes de activarlo o archivarlo.':(!isSaved?'Guarda antes el concepto':'Archivar o activar este concepto');archive.textContent=state==='archived'?'Activar':'Archivar / activar';}
     document.getElementById('ldhVcSimpleBox').style.display=draft.type==='compound'?'none':'block';
     document.getElementById('ldhVcCompoundBox').style.display=draft.type==='compound'?'block':'none';
     if(draft.type==='compound'){
       ensureParts(draft);currentPart=Math.max(0,Math.min(currentPart,draft.parts.length-1));renderParts();const p=draft.parts[currentPart];document.getElementById('ldhVcPartName').value=p.name||'';renderRecipe('ldhVcPart',p.recipe);
     }else renderRecipe('ldhVcSimple',draft.recipe);
     renderList();
-    status(draft.archived?'Concepto archivado: conserva el historial pero no aparecerá para nuevas OTs.':'Edición preparada. En pedidos compuestos, las unidades y el RAL se decidirán después en Agenda para cada OT.',draft.archived?'warn':'');
+    const phase=designState(draft),missing=missingPartIndices(draft);
+    status(phase==='pending'?(draft.type==='compound'?`Diseño pendiente: ${missing.length} partida(s) sin materiales válidos o aún sin finalizar. Guardar diseño no lo enviará a Agenda.`:'Diseño pendiente: añade materiales y guarda el diseño.'):phase==='archived'?'Diseño archivado: conserva el historial y no se ofrece para nuevas OT.':'Diseño completo: disponible para nuevas OT. Las cantidades y RAL se decidirán en Agenda.',phase==='pending'||phase==='archived'?'warn':'ok');
   }
   function status(msg,kind){const el=document.getElementById('ldhVcStatus');if(!el)return;el.textContent=msg||'';el.className='ldh-vc-status'+(kind?' '+kind:'');}
   function addRow(kind,prefix){const tb=document.querySelector(`#${prefix}${kind==='line'?'Lines':'Units'} tbody`);if(!tb)return;tb.insertAdjacentHTML('beforeend',rowHtml(kind,{name:'',qty:'',varName:'cantidad'},false));const tr=tb.lastElementChild;tr?.querySelector('[data-role="name"]')?.focus();}
@@ -9346,7 +9385,7 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
         let idx=draft.parts.findIndex(p=>String(p.id||'')===String(payload.returnContext?.variablePartId||''));if(idx<0)idx=currentPart;currentPart=Math.max(0,Math.min(idx,draft.parts.length-1));draft.parts[currentPart].recipe=applyFactorToRecipe(draft.parts[currentPart].recipe,payload);
       }else draft.recipe=applyFactorToRecipe(draft.recipe,payload);
       window.name='';localStorage.removeItem(OUT_PENDING_KEY);localStorage.removeItem(VARIABLE_DRAFT_KEY);
-      renderDraft();showMode('variable');location.hash='variable';status('Cálculo de pintura recibido y aplicado a esta receta. Pulsa Guardar concepto variable para confirmarlo.','ok');
+      renderDraft();showMode('variable');location.hash='variable';status('Cálculo de pintura recibido y aplicado a esta receta. Pulsa Guardar diseño para conservarlo.','ok');
       return true;
     }catch(e){console.error('[Variable] retorno pintura',e);return false;}
   }
@@ -9356,15 +9395,15 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
     const mode=document.createElement('div');mode.className='ldh-concept-modebar';mode.innerHTML='<button id="ldhModeStandard" class="active" type="button">Conceptos estándar</button><button id="ldhModeVariable" type="button">◆ Conceptos variables / a medida</button>';header?.insertAdjacentElement('afterend',mode);
     const panel=document.createElement('div');panel.id='ldhVariableConceptPanel';panel.className='card';panel.style.display='none';panel.innerHTML=`<div class="ldh-vc-toolbar"><select id="ldhVcSaved"></select><button type="button" class="btn" id="ldhVcNew">＋ Nuevo</button><button type="button" class="btn" id="ldhVcDuplicate">Duplicar</button><button type="button" class="btn btn-danger" id="ldhVcArchive">Archivar / activar</button></div>
       <div class="ldh-vc-grid"><div class="ldh-vc-field"><label>Nombre del concepto variable</label><input id="ldhVcName" placeholder="Ej.: Puerta especial almacén 3"></div><div class="ldh-vc-field"><label>Tipo de pedido</label><select id="ldhVcType"><option value="simple">Simple</option><option value="compound">Compuesto</option></select></div></div>
-      <div style="display:flex;gap:8px;align-items:center;margin:10px 0"><span id="ldhVcArchivedBadge" class="ldh-vc-status warn" style="display:none">ARCHIVADO</span></div>
+      <div style="display:flex;gap:8px;align-items:center;margin:10px 0"><span id="ldhVcDesignBadge" class="ldh-vc-design-badge pending">Diseño pendiente</span><span id="ldhVcArchivedBadge" class="ldh-vc-status warn" style="display:none">ARCHIVADO</span></div>
       <div id="ldhVcSimpleBox" class="ldh-vc-section"><div class="ldh-vc-section-title"><b>Receta del concepto simple</b><span class="muted">Materiales, accesorios y pintura</span></div><div class="ldh-vc-field"><label>Variables</label><input id="ldhVcSimpleVars" value="cantidad" placeholder="cantidad, largo, color..."></div>${recipeHtml('ldhVcSimple')}</div>
       <div id="ldhVcCompoundBox" class="ldh-vc-section" style="display:none"><div class="ldh-vc-section-title"><b>Partidas del concepto compuesto</b><span class="muted">La receta se congela; las unidades y el RAL se eligen individualmente en Agenda para cada OT</span></div><div id="ldhVcParts" class="ldh-vc-parts"></div><div class="ldh-vc-field"><label>Nombre / identificación de la partida</label><input id="ldhVcPartName" placeholder="Ej.: Hoja principal"></div><div class="ldh-vc-field" style="margin-top:10px"><label>Variables de esta partida</label><input id="ldhVcPartVars" value="cantidad" placeholder="cantidad, largo, color..."></div>${recipeHtml('ldhVcPart')}</div>
-      <div class="toolbar" style="border-top:1px solid rgba(148,163,184,.16);padding-top:14px;margin-top:16px"><button type="button" class="btn btn-primary" id="ldhVcSave">Guardar concepto variable</button><span id="ldhVcStatus" class="ldh-vc-status"></span></div>`;
+      <div class="toolbar" style="border-top:1px solid rgba(148,163,184,.16);padding-top:14px;margin-top:16px"><button type="button" class="btn btn-primary" id="ldhVcSave">Guardar diseño</button><button type="button" class="btn ldh-vc-finish-btn" id="ldhVcFinalize">✓ Finalizar diseño</button><span id="ldhVcStatus" class="ldh-vc-status"></span></div>`;
     mode.insertAdjacentElement('afterend',panel);
     document.getElementById('ldhModeStandard').onclick=()=>showMode('standard');document.getElementById('ldhModeVariable').onclick=()=>showMode('variable');
     document.getElementById('ldhVcSaved').onchange=e=>load(e.target.value);
     document.getElementById('ldhVcNew').onclick=()=>{captureCurrent();draft=newDraft();currentPart=0;renderDraft();};
-    document.getElementById('ldhVcDuplicate').onclick=duplicate;document.getElementById('ldhVcArchive').onclick=toggleArchive;document.getElementById('ldhVcSave').onclick=save;
+    document.getElementById('ldhVcDuplicate').onclick=duplicate;document.getElementById('ldhVcArchive').onclick=toggleArchive;document.getElementById('ldhVcSave').onclick=()=>save(false);document.getElementById('ldhVcFinalize').onclick=()=>save(true);
     document.getElementById('ldhVcType').onchange=()=>{captureCurrent();draft.type=document.getElementById('ldhVcType').value==='compound'?'compound':'simple';if(draft.type==='compound')ensureParts(draft);currentPart=0;renderDraft();};
     document.getElementById('ldhVcName').oninput=e=>{if(draft)draft.name=e.target.value;};
   }
@@ -9374,14 +9413,60 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
   function selectPart(i){captureCurrent();ensureParts(draft);currentPart=Math.max(0,Math.min(Number(i)||0,draft.parts.length-1));renderDraft();}
   function addPart(){captureCurrent();ensureParts(draft);draft.parts.push({id:uid('vp_'),name:`Partida ${String.fromCharCode(65+draft.parts.length)}`,recipe:DEFAULT_RECIPE('')});currentPart=draft.parts.length-1;renderDraft();}
   function removeRow(btn){btn?.closest('tr')?.remove();}
-  function duplicate(){captureCurrent();if(!draft)return;const copy=clone(draft);copy.id=uid('vc_');copy.name=(copy.name||'Concepto variable')+' · copia';copy.archived=false;copy.createdAtMs=now();copy.updatedAtMs=now();copy._ldhUpdatedAtMs=now();(copy.parts||[]).forEach(p=>{p.id=uid('vp_');delete p.quantity;});draft=copy;currentPart=0;renderDraft();status('Copia preparada. Modifica el nombre y pulsa Guardar.','ok');}
-  function toggleArchive(){captureCurrent();const stored=all().find(v=>v.id===draft?.id);if(!stored){alert('Guarda primero el concepto variable.');return;}stored.archived=!stored.archived;stored.updatedAtMs=stored._ldhUpdatedAtMs=now();App.saveData();draft=clone(stored);renderDraft();status(stored.archived?'Concepto archivado. Ya no se ofrecerá para nuevas OTs.':'Concepto activado de nuevo. Ya está disponible en Agenda.','ok');}
-  function save(){
-    captureCurrent();if(!draft)return;const name=String(draft.name||'').trim();if(!name)return alert('Indica un nombre para el concepto variable.');if(variableNameExists(name,draft.id))return alert('Ya existe otro concepto variable con ese nombre.');if(standardNameExists(name))return alert('Ese nombre ya lo usa un concepto estándar. Usa un nombre distinto para evitar confusiones.');
-    draft.version=2;draft.name=name;draft.updatedAtMs=draft._ldhUpdatedAtMs=now();
-    if(draft.type==='simple'){draft.recipe=cleanRecipe(draft.recipe,name);if(!(draft.recipe.lines.length||draft.recipe.units.length))return alert('Añade al menos un material, accesorio o pintura a la receta.');draft.parts=[];}
-    else{ensureParts(draft);const names=new Set();for(let i=0;i<draft.parts.length;i++){const p=draft.parts[i];p.name=String(p.name||'').trim();if(!p.name)return alert(`La partida ${i+1} necesita un nombre.`);const k=norm(p.name);if(names.has(k))return alert('No puede haber dos partidas con el mismo nombre.');names.add(k);delete p.quantity;p.recipe=cleanRecipe(p.recipe,`${name} · ${p.name}`);if(!(p.recipe.lines.length||p.recipe.units.length))return alert(`La partida “${p.name}” necesita al menos un material, accesorio o pintura.`);}draft.recipe=null;}
-    const arr=all(),idx=arr.findIndex(v=>v.id===draft.id),saved=clone(draft);if(idx>=0)arr[idx]=saved;else arr.push(saved);App.saveData();draft=clone(saved);renderList();status('Concepto variable guardado. Las cantidades y RAL de cada partida se definirán en Agenda para cada OT.','ok');try{window.dispatchEvent(new CustomEvent('ldh:variable-concept-saved',{detail:{id:saved.id,name:saved.name,type:saved.type}}));}catch(_){ }
+  function duplicate(){captureCurrent();if(!draft)return;const copy=clone(draft);copy.id=uid('vc_');copy.name=(copy.name||'Concepto variable')+' · copia';copy.archived=true;copy.designStatus='pending';copy.designArchivedByUserV1=false;copy.createdAtMs=now();copy.updatedAtMs=now();copy._ldhUpdatedAtMs=now();(copy.parts||[]).forEach(p=>{p.id=uid('vp_');delete p.quantity;});draft=copy;currentPart=0;renderDraft();status('Copia en diseño pendiente: guardar diseño o finalizarlo después de revisarlo.','warn');}
+  function toggleArchive(){
+    captureCurrent();const stored=all().find(v=>v.id===draft?.id);
+    if(!stored){alert('Guarda primero el concepto variable.');return;}
+    if(designState(stored)==='pending'){
+      alert('Este concepto tiene el diseño pendiente. Termina las partidas y pulsa Finalizar diseño antes de activarlo.');return;
+    }
+    const manual=!manuallyArchived(stored);
+    stored.designArchivedByUserV1=manual;stored.archived=manual;
+    stored.updatedAtMs=stored._ldhUpdatedAtMs=now();App.saveData();draft=clone(stored);renderDraft();
+    status(manual?'Diseño archivado. No se ofrecerá para nuevas OT.':'Diseño completo y activado. Disponible para nuevas OT.','ok');
+  }
+  function save(finalize){
+    captureCurrent();if(!draft)return;
+    const name=String(draft.name||'').trim();
+    if(!name)return alert('Indica un nombre para el concepto variable.');
+    if(variableNameExists(name,draft.id))return alert('Ya existe otro concepto variable con ese nombre.');
+    if(standardNameExists(name))return alert('Ese nombre ya lo usa un concepto estándar. Usa un nombre distinto para evitar confusiones.');
+    draft.version=2;draft.name=name;
+    const originalManualArchive=manuallyArchived(draft);
+    if(draft.type==='simple'){
+      draft.recipe=cleanRecipe(draft.recipe,name);
+      if(!(draft.recipe.lines.length||draft.recipe.units.length))return alert('Añade al menos un material, accesorio o pintura a la receta.');
+      draft.parts=[];draft.designStatus='complete';
+    }else{
+      ensureParts(draft);const names=new Set();
+      for(let i=0;i<draft.parts.length;i++){
+        const p=draft.parts[i];p.name=String(p.name||'').trim();
+        if(!p.name)return alert(`La partida ${i+1} necesita un nombre.`);
+        const k=norm(p.name);
+        if(names.has(k))return alert('No puede haber dos partidas con el mismo nombre.');
+        names.add(k);delete p.quantity;
+        p.recipe=cleanRecipe(p.recipe,`${name} · ${p.name}`);
+      }
+      const missing=missingPartIndices(draft);
+      if(finalize&&missing.length){
+        return alert('No se puede finalizar todavía. Revisa materiales y cantidades mayores que cero de: '+missing.map(i=>draft.parts[i].name||'Partida '+String.fromCharCode(65+i)).join(', ')+'. Usa Guardar diseño para conservar las partidas configuradas.');
+      }
+      // Un diseño pendiente solo se publica mediante Finalizar diseño; los
+      // guardados intermedios JAMAS lo activan por completar una fila.
+      draft.designStatus=finalize||((draft.designStatus==='complete')&&!missing.length)?'complete':'pending';
+      draft.recipe=null;
+    }
+    draft.designArchivedByUserV1=originalManualArchive;
+    // Agenda existente descarta archived=true. Protege las OT sin tocar Agenda.
+    draft.archived=draft.designStatus==='pending'||originalManualArchive;
+    draft.updatedAtMs=draft._ldhUpdatedAtMs=now();
+    const arr=all(),idx=arr.findIndex(v=>v.id===draft.id),saved=clone(draft);
+    if(idx>=0)arr[idx]=saved;else arr.push(saved);
+    App.saveData();draft=clone(saved);renderDraft();
+    if(draft.designStatus==='pending')status('Diseño pendiente guardado. Podrás continuar después; NO aparece para nuevas OT en Agenda.','warn');
+    else if(draft.archived)status('Diseño completo guardado y archivado. Actívalo para ofrecerlo en Agenda.','ok');
+    else status('Diseño completo guardado. Ya puede utilizarse en nuevas OT de Agenda.','ok');
+    try{window.dispatchEvent(new CustomEvent('ldh:variable-concept-saved',{detail:{id:saved.id,name:saved.name,type:saved.type,designStatus:saved.designStatus,archived:saved.archived}}));}catch(_){ }
   }
   function wrapExportImport(){
     if(App.__ldhVariableExportImportV1)return;App.__ldhVariableExportImportV1=true;
@@ -9389,9 +9474,10 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
     App.importConceptsJson=function(ev){try{const file=ev?.target?.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const parsed=JSON.parse(String(reader.result||'{}'));let standard=Array.isArray(parsed)?parsed:(Array.isArray(parsed?.concepts)?parsed.concepts:(Array.isArray(parsed?.state?.concepts)?parsed.state.concepts:(Array.isArray(parsed?.ldh_db?.concepts)?parsed.ldh_db.concepts:[])));let vars=Array.isArray(parsed?.variableConceptsV1)?parsed.variableConceptsV1:(Array.isArray(parsed?.state?.variableConceptsV1)?parsed.state.variableConceptsV1:(Array.isArray(parsed?.ldh_db?.variableConceptsV1)?parsed.ldh_db.variableConceptsV1:[]));if(!standard.length&&!vars.length)return alert('❌ El JSON no contiene conceptos estándar ni variables.');if(!Array.isArray(this.state.concepts))this.state.concepts=[];const byName=new Map(this.state.concepts.map(c=>[norm(c?.name),c]));standard.filter(c=>c&&String(c.name||'').trim()).forEach(c=>byName.set(norm(c.name),c));this.state.concepts=Array.from(byName.values());if(!Array.isArray(this.state.variableConceptsV1))this.state.variableConceptsV1=[];const byId=new Map(this.state.variableConceptsV1.map(v=>[String(v.id||'name:'+norm(v.name)),v]));vars.filter(v=>v&&String(v.name||'').trim()).forEach(v=>{const k=String(v.id||'name:'+norm(v.name));byId.set(k,v);});this.state.variableConceptsV1=Array.from(byId.values());this.saveData();this.refreshConceptSelects();renderList();alert(`✅ Importación OK. Estándar: ${standard.length}. Variables: ${vars.length}.`);}catch(e){console.error(e);alert('❌ Error leyendo JSON: '+(e?.message||e));}finally{try{ev.target.value='';}catch(_){}}};reader.readAsText(file,'UTF-8');}catch(e){console.error(e);alert('❌ Error importando: '+(e?.message||e));}};
   }
   function boot(){if(!window.App||!App.state){setTimeout(boot,80);return;}ensureState();buildPanel();wrapExportImport();draft=newDraft();renderDraft();if(location.hash==='#variable')showMode('variable');consumeVariablePaintReturn();const slot=document.createElement('div');slot.className='ldh-ai-reserved-slot';slot.setAttribute('aria-hidden','true');document.body.appendChild(slot);}
-  window.LDH_VariableConceptConfigV2={addRow,addPaint,removeRow,selectPart,addPart,showMode,sendPaint};
+  window.LDH_VariableConceptConfigV2={addRow,addPaint,removeRow,selectPart,addPart,showMode,sendPaint,designState,recipeReady};
   window.LDH_VariableConceptConfigV1=window.LDH_VariableConceptConfigV2;
   window.LDH_VARIABLE_CONCEPT_CONFIG_V2='PARTIDAS-SIN-CANTIDAD-FIJA-Y-CALCULO-PINTURA-20261002';
+  window.LDH_VARIABLE_DESIGN_V3='GUARDAR-DISENO-PENDIENTE-Y-FINALIZAR-PARA-OT-20261107';
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,0),{once:true});else setTimeout(boot,0);
 })();
 </script>
