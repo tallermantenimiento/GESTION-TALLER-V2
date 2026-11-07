@@ -1457,6 +1457,7 @@ tbody td,td{border-color:rgba(148,163,184,.12)!important}
 @media print{body{padding-right:0!important;background:#fff!important}.ldh-ai-reserved-slot{display:none!important}}
 </style>
 
+<script id="LDH_CFG_CATALOG_R1_BOOT_FLAG">window.__LDH_CFG_CATALOG_R1_VERIFIED=false;</script>
 </head>
 <body>
 
@@ -4731,7 +4732,8 @@ async cloudBackupNow(){
     try{
         const u = window.__FIREBASE__?.auth?.currentUser;
         if(!u) return alert("Primero inicia sesión (usuario no autenticado).");
-        await backupToFirestore("backup_main");
+        const resultado = await backupToFirestore("backup_main");
+        if(resultado?.skipped) return alert("⚠ Guardado NO realizado. Motivo: " + resultado.reason + ". Verifica el catálogo protegido antes de publicar.");
         alert("✅ Guardado en nube OK (backup_main)");
     }catch(e){
         console.error("cloudBackupNow ERROR:", e);
@@ -8034,6 +8036,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
   window.__ldhMarkLocalDirty = markLocalDirty;
 
   async function liveBackupToFirestore(docId = DOC_ID, force = false){
+    // Catalogo protegido R1: el backup completo no se publica con un catalogo viejo al arrancar.
+    if(!window.__LDH_CFG_CATALOG_R1_VERIFIED) return {skipped:true,reason:'catalogo_protegido_pendiente'};
     if(typeof docId === "boolean"){ force = docId; docId = DOC_ID; }
     if(restoring && !force) return { skipped:true, reason:"restoring" };
     if(!auth.currentUser) return { skipped:true, reason:"no_user" };
@@ -9519,5 +9523,363 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
 </script>
 <!-- /LDH_AI_GLOBAL_CONFIGURACION_R1_20261007 -->
 
+
+<!-- ===== LDH CONFIG CATALOGO PROTEGIDO R1 / 07-11-2026 ===== -->
+<script id="LDH_CFG_CATALOG_CORE_V1">
+/* LDH CATALOGO CONCEPTOS PROTEGIDO R1 - funciones puras, sin escritura de red */
+(function (root) {
+  'use strict';
+  const norm = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().replace(/\s+/g,' ').toLowerCase();
+  const copy = value => JSON.parse(JSON.stringify(value));
+  function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
+  function cat(raw) {
+    let src = raw;
+    if (typeof src === 'string') { try { src = JSON.parse(src); } catch (_) {src = null;} }
+    src = asObject(src);
+    return {concepts:Array.isArray(src.concepts) ? src.concepts.filter(x=>x&&typeof x === 'object'&&norm(x.name)) : [], conceptTombstones:asObject(src.conceptTombstones)};
+  }
+  function time(c) {
+    const v=c&& (c._ldhUpdatedAtMs ?? c.updatedAtMs ?? c.updatedAt ?? c.modifiedAt);
+    if (typeof v==='number' && Number.isFinite(v)) return v;
+    const n=Number(v); if(Number.isFinite(n)&&n>0)return n;
+    const d=Date.parse(String(v||'')); return Number.isFinite(d)?d:0;
+  }
+  function richness(c){
+    if(!c) return 0;
+    const links=asObject(c.stockLinks);
+    return (Array.isArray(c.lines)?c.lines.length:0)*1000+
+      (Array.isArray(c.units)?c.units.length:0)*1000+
+      (Array.isArray(c.vars)?c.vars.length:0)+
+      (Object.keys(asObject(links.lines)).length+Object.keys(asObject(links.units)).length)*100;
+  }
+  function merge(a,b){
+    const A=cat(a), B=cat(b), tomb={};
+    for(const [k,v] of Object.entries(A.conceptTombstones)) { const nk=norm(k),ts=Number(v)||0;if(nk) tomb[nk]=Math.max(tomb[nk]||0,ts); }
+    for(const [k,v] of Object.entries(B.conceptTombstones)) { const nk=norm(k),ts=Number(v)||0;if(nk) tomb[nk]=Math.max(tomb[nk]||0,ts); }
+    const selected=new Map();
+    function take(c){
+      const k=norm(c.name), prev=selected.get(k);
+      if(!prev || time(c)>time(prev) || (time(c)===time(prev)&&richness(c)>richness(prev))) selected.set(k,copy(c));
+    }
+    A.concepts.forEach(take); B.concepts.forEach(take);
+    const concepts=[];
+    for(const [key,value] of selected){if(!(tomb[key]>0 && tomb[key]>=time(value)))concepts.push(value);}
+    return {concepts,conceptTombstones:tomb};
+  }
+  function same(a,b) { return JSON.stringify(a)===JSON.stringify(b); }
+  function pick(c,name){return cat(c).concepts.find(x=>norm(x.name)===norm(name))||null;}
+  function draftRecovery(raw, paintRaw, now){
+    const d=asObject(raw), p=asObject(paintRaw);
+    const name='mesa reuniones (3100x800)';
+    if(norm(d.name)!==norm(name))return null;
+    const lines=String(d.txtLines||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    const originals=String(d.txtUnits||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    if(lines.length!==3 || !lines.some(s=>/40x40x1[.,]5/i.test(s)) || !lines.some(s=>/40x20x1[.,]5/i.test(s)) || !lines.some(s=>/[øØ] ?30x1[.,]5/i.test(s)))return null;
+    const paint=Number(p.factorPintura),diss=Number(p.factorDisolvente);
+    // No inventar factores: solamente los dos devueltos por el calculo de pintura, en el mismo respaldo.
+    if(!Number.isFinite(paint)||paint<=0||!Number.isFinite(diss)||diss<=0)return null;
+    const units=originals.map(x=> /^pintura base solvente ral 9003\s*=\s*\*\s*cantidad\s*$/i.test(x)
+      ? 'pintura base solvente ral 9003='+paint+'*cantidad' : x);
+    if(!units.some(x=>/pintura base solvente ral 9003\s*=\s*\d/i.test(x))) return null;
+    if(!units.some(x=>/disolvente universal \(mezcla\)/i.test(x)))units.push('disolvente universal (mezcla)='+diss+'*cantidad');
+    return {name,vars:['cantidad'],lines,units,stockLinks:{lines:{},units:{}},_ldhUpdatedAtMs:Math.max(1,Number(now)||Date.now()),_ldhRecoveredFromBackup:'2026-11-07',_ldhRecoveredPaintFactors:true};
+  }
+  function edits(before,after,expectedRemote){
+    const b=cat(before),a=cat(after),r=cat(expectedRemote);
+    const bmap=new Map(b.concepts.map(c=>[norm(c.name),c]));
+    const rmap=new Map(r.concepts.map(c=>[norm(c.name),c]));
+    const ops=[];
+    for(const c of a.concepts){
+      const k=norm(c.name),prev=bmap.get(k);
+      if(prev&&same(prev,c))continue;
+      if(prev && time(c)<=time(prev))continue; // una copia vieja no autoriza sobreescribir
+      if(!prev && time(c)<=0)continue; // importar legado sin fecha no sustituye la nube
+      ops.push({type:'upsert',key:k,value:copy(c),expected:rmap.has(k)?copy(rmap.get(k)):null,expectedTomb:Number(r.conceptTombstones[k]||0)});
+    }
+    for(const [key,value] of Object.entries(a.conceptTombstones)){
+      const ts=Number(value)||0;
+      if(ts>0 && ts>Number(b.conceptTombstones[key]||0)){
+        ops.push({type:'delete',key:norm(key),at:ts,expected:rmap.has(norm(key))?copy(rmap.get(norm(key))):null});
+      }
+    }
+    return ops;
+  }
+  function applyOps(remote,ops){
+    const doc=cat(remote), map=new Map(doc.concepts.map(c=>[norm(c.name),copy(c)]));
+    const tomb={...doc.conceptTombstones};
+    for(const op of ops){
+      const actual=map.get(op.key)||null;
+      if(op.type==='upsert'){
+        if(actual && !same(actual,op.expected) && !same(actual,op.value))throw new Error('CONFLICTO: '+op.key+' ha cambiado en otro ordenador');
+        if(!actual && op.expected)throw new Error('CONFLICTO: '+op.key+' fue eliminado en otro ordenador');
+        const recentTomb=Number(tomb[op.key]||0);
+        if(recentTomb>Number(op.expectedTomb||0) && recentTomb>=time(op.value))throw new Error('CONFLICTO: '+op.key+' fue eliminado recientemente');
+        if(actual && same(actual,op.value))continue;
+        map.set(op.key,copy(op.value));
+        if(recentTomb && time(op.value)>recentTomb)delete tomb[op.key];
+      }else if(op.type==='delete'){
+        if(actual && !same(actual,op.expected))throw new Error('CONFLICTO: '+op.key+' fue editado en otro ordenador');
+        tomb[op.key]=Math.max(Number(tomb[op.key]||0),Number(op.at)||0);
+        if(!actual || tomb[op.key]>=time(actual))map.delete(op.key);
+      }
+    }
+    return merge({concepts:Array.from(map.values()),conceptTombstones:tomb},{concepts:[],conceptTombstones:{}});
+  }
+  root.LDH_CFG_CATALOG_CORE_V1={norm,cat,time,merge,copy,pick,draftRecovery,edits,applyOps};
+})(window);
+
+</script>
+<script type="module" id="LDH_CFG_CATALOG_CLOUD_R1">
+/* LDH CONFIG: catalogo de conceptos independiente de backup_main; transacciones por concepto. */
+const C=window.LDH_CFG_CATALOG_CORE_V1;
+// Los scripts Firebase anteriores importan el SDK de forma asincrona.
+// Esperar a la instancia ya creada: no crear otra app ni dar por fallido un arranque lento.
+let FB=window.__FIREBASE__;
+for(let n=0;n<100 && (!FB?.auth || !FB?.db || !FB?.onAuthStateChanged);n++){
+  await new Promise(resolve=>setTimeout(resolve,150));
+  FB=window.__FIREBASE__;
+}
+if(!C || !window.App || !FB?.auth || !FB?.db || !FB?.onAuthStateChanged){
+  console.error('[Catalogo protegido R1] Firebase o Configuracion no esta disponible. No se escribe nada.');
+}else{
+  let catalogSDK=null;
+  try { catalogSDK=await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js'); }
+  catch(error){
+    console.error('[Catalogo protegido R1] No se pudo cargar el SDK de Firestore:',error);
+    const anchor=document.getElementById('btnSaveCfg')?.closest('.toolbar');
+    if(anchor){
+      const notice=document.createElement('div');
+      notice.style.cssText='margin:10px 0;padding:12px;border:1px solid #ca8a04;border-radius:10px;background:#3f2810;color:#fde68a;font-weight:800;font-size:12px';
+      notice.textContent='Protección de conceptos NO verificada (sin conexión al SDK de Firestore). Se conserva el catálogo local. No publiques ni restaures el respaldo general.';
+      anchor.insertAdjacentElement('afterend',notice);
+    }
+  }
+  if(catalogSDK){
+  const {doc,getDocFromServer,onSnapshot,runTransaction,serverTimestamp}=catalogSDK;
+  const REF=doc(FB.db,'backups','catalogo_conceptos_v1');
+  const BACKUP=doc(FB.db,'backups','backup_main');
+  const RECOVERY_DRAFT={name:'mesa reuniones (3100x800)', txtLines:'40x40x1.5=14000*cantidad\n40x20x1.5=8600*cantidad\nØ 30x1.5=6400*cantidad', txtUnits:'pintura base solvente ral 9003=*cantidad\ncontera 40x20 blanca=4*cantidad'};
+  const RECOVERY_PAINT={factorPintura:0.291,factorDisolvente:0.007};
+  let active=false, applying=false, busy=false, latest=null, unsubscribe=null;
+  let opsChain=Promise.resolve(),user=null, lastError='', lastCloudCount=0;
+  const ownWrites=new Map();
+  const originalSave=App.saveData;
+  const SKEY='ldh_db';
+  const readJson=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')}catch(_){return null}};
+  const localDB=()=>readJson(SKEY)||{};
+  const currentCatalog=()=>C.cat(window.App?.state||localDB());
+  const recovered=()=>{
+    const saved=readJson('LDH_CONCEPT_DRAFT_V1');
+    const paint=readJson('LDH_PINTURA_OUT_LAST_V2');
+    // El respaldo verificado del 07/11 tiene la misma receta; no dependemos de que una restauracion borre el borrador.
+    const draft=C.norm(saved?.name)===C.norm(RECOVERY_DRAFT.name) ? saved : RECOVERY_DRAFT;
+    const factors=paint && Number(paint.factorPintura)>0 && Number(paint.factorDisolvente)>0 ? paint : RECOVERY_PAINT;
+    return C.draftRecovery(draft,factors,Date.now());
+  };
+
+  function ensurePanel(){
+    let panel=document.getElementById('ldhCatalogGuardR1');
+    if(panel)return panel;
+    panel=document.createElement('div'); panel.id='ldhCatalogGuardR1';
+    panel.style.cssText='display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:9px 0 18px;padding:9px 12px;border:1px solid rgba(56,189,248,.25);border-radius:11px;background:#0b1930;color:#dbeafe;font-size:12px;font-weight:700';
+    panel.innerHTML='<span id="ldhCatalogGuardStatus" role="status" aria-live="polite">Comprobando catálogo protegido…</span>'+
+      '<button id="ldhCatalogActivate" type="button" class="btn btn-primary" style="display:none;font-size:12px;padding:6px 10px">Proteger catálogo y recuperar mesa reuniones</button>'+
+      '<button id="ldhCatalogRecover" type="button" class="btn btn-primary" style="display:none;font-size:12px;padding:6px 10px">Recuperar mesa reuniones</button>'+
+      '<button id="ldhCatalogRetry" type="button" class="btn btn-ghost" style="display:none;font-size:12px;padding:6px 10px;color:#fff">Reintentar verificación</button>';
+    const anchor=document.getElementById('btnSaveCfg')?.closest('.toolbar');
+    if(anchor?.parentNode) anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+    else document.getElementById('view-config')?.prepend(panel);
+    panel.querySelector('#ldhCatalogActivate')?.addEventListener('click',activate);
+    panel.querySelector('#ldhCatalogRecover')?.addEventListener('click',recoverMissing);
+    panel.querySelector('#ldhCatalogRetry')?.addEventListener('click',verify);
+    return panel;
+  }
+  function status(message,kind='info'){
+    const panel=ensurePanel(),txt=panel?.querySelector('#ldhCatalogGuardStatus');
+    if(txt){txt.textContent=message;txt.style.color=kind==='ok'?'#86efac':kind==='bad'?'#fca5a5':kind==='warn'?'#fde68a':'#dbeafe';}
+    const show=(id,yes)=>{const e=panel?.querySelector(id);if(e){e.style.display=yes?'inline-flex':'none';e.disabled=busy;}};
+    const absent=!active && !!user && !lastError;
+    const needRecovery=active && !C.pick(latest,'mesa reuniones (3100x800)') && !!recovered() && !(Number(C.cat(latest).conceptTombstones[C.norm('mesa reuniones (3100x800)')]||0)>0);
+    show('#ldhCatalogActivate',absent);
+    show('#ldhCatalogRecover',needRecovery);
+    show('#ldhCatalogRetry',!!lastError && !!user);
+    try{document.documentElement.dataset.ldhCatalogGuard=active?'verified':lastError?'error':'pending';}catch(_){}
+  }
+  async function readCanonical(){
+    const snap=await getDocFromServer(REF);
+    return snap.exists()?C.cat(snap.data()):null;
+  }
+  function updateLocal(catalog){
+    const before=localDB();
+    const appState=(App.state && typeof App.state==='object')?App.state:before;
+    const merged=C.merge(C.merge(catalog,before),appState);
+    const old=JSON.stringify(C.cat(before));
+    const next=JSON.stringify(merged);
+    if(old===next && JSON.stringify(C.cat(appState))===next)return merged;
+    applying=true;
+    try{
+      const selected=document.getElementById('cfgListSel')?.value||'';
+      App.state={...appState, concepts:merged.concepts,conceptTombstones:merged.conceptTombstones};
+      // SOLO ldh_db: sin tocar Ordenes, Stock, Fabricacion ni las otras claves del navegador.
+      const db={...before,concepts:merged.concepts,conceptTombstones:merged.conceptTombstones};
+      localStorage.setItem(SKEY,JSON.stringify(db));
+      App.refreshConceptSelects?.();
+      if(selected && C.pick(merged,selected)){const el=document.getElementById('cfgListSel');if(el)el.value=selected;}
+      window.dispatchEvent(new CustomEvent('ldh:catalog-verified',{detail:{count:merged.concepts.length}}));
+    }finally{applying=false;}
+    return merged;
+  }
+  function applyRemote(catalog){
+    latest=C.cat(catalog); active=true; window.__LDH_CFG_CATALOG_R1_VERIFIED=true; lastError='';lastCloudCount=latest.concepts.length;
+    const all=updateLocal(latest);
+    const isThere=!!C.pick(latest,'mesa reuniones (3100x800)');
+    const pending=all.concepts.length-lastCloudCount;
+    status('Nube verificada · '+lastCloudCount+' conceptos protegidos'+(isThere?' · mesa reuniones recuperada':'')+
+      (pending>0?' · '+pending+' solo locales (pendientes de conciliar)':''),'ok');
+  }
+  async function verify(){
+    if(busy||!user)return;
+    busy=true;lastError='';status('Consultando Firestore…');
+    try{
+      const found=await readCanonical();
+      if(found){applyRemote(found);}
+      else{active=false;window.__LDH_CFG_CATALOG_R1_VERIFIED=false;latest=null;status('Todavía no existe el catálogo protegido. Publícalo una sola vez desde el PC principal.','warn');}
+      if(unsubscribe){unsubscribe();unsubscribe=null;}
+      if(active){
+        unsubscribe=onSnapshot(REF,{includeMetadataChanges:true},snap=>{
+          if(!snap.exists() || snap.metadata.fromCache || snap.metadata.hasPendingWrites)return;
+          const incoming=C.cat(snap.data());
+          if(JSON.stringify(incoming)!==JSON.stringify(latest))applyRemote(incoming);
+        },e=>{lastError=String(e?.message||e);status('Aviso: lectura en directo interrumpida. Reintenta.','bad');});
+      }
+    }catch(err){active=false;window.__LDH_CFG_CATALOG_R1_VERIFIED=false;lastError=String(err?.message||err);console.error('[Catalogo protegido R1] Verificacion',err);status('No se ha podido verificar Firestore. Catálogo local conservado. '+lastError,'bad');}
+    finally{busy=false;statusRefreshButtons();}
+  }
+  function statusRefreshButtons(){
+    ensurePanel()?.querySelectorAll('button').forEach(b=>b.disabled=busy);
+    const p=ensurePanel(); if(p) {
+      const a=p.querySelector('#ldhCatalogActivate'),r=p.querySelector('#ldhCatalogRecover'),retry=p.querySelector('#ldhCatalogRetry');
+      if(a)a.style.display=!busy&&!active&&user&&!lastError?'inline-flex':'none';
+      if(r)r.style.display=!busy&&active&&!C.pick(latest,'mesa reuniones (3100x800)')&&!!recovered()&&!C.cat(latest).conceptTombstones[C.norm('mesa reuniones (3100x800)')]?'inline-flex':'none';
+      if(retry)retry.style.display=!busy&&!!lastError&&user?'inline-flex':'none';
+    }
+  }
+  async function readMainCatalog(){
+    const initial=await getDocFromServer(BACKUP);
+    if(!initial.exists()) return C.cat(null);
+    const m=initial.data()||{},count=Number(m.totalChunks)||0;
+    if(count<1||count>40)throw new Error('backups/backup_main: numero de fragmentos no verificable');
+    const chunks=await Promise.all(Array.from({length:count},(_,i)=>getDocFromServer(doc(FB.db,'backups','backup_main','chunks',String(i)))));
+    if(chunks.some(s=>!s.exists()))throw new Error('backups/backup_main: faltan fragmentos; publicacion bloqueada');
+    const text=chunks.map(s=>s.data().part||'').join('');
+    const data=JSON.parse(text), latestMeta=await getDocFromServer(BACKUP);
+    if(!latestMeta.exists()||latestMeta.data()?.revision!==m.revision)throw new Error('backup_main cambio mientras se leia; repite la comprobacion');
+    if(!data.ldh_db)throw new Error('backup_main no contiene ldh_db; publicacion bloqueada');
+    return C.cat(data.ldh_db);
+  }
+  function docShape(catalog,source){return {schema:1,version:'LDH-CATALOG-PROTEGIDO-R1',source,concepts:catalog.concepts,conceptTombstones:catalog.conceptTombstones,updatedAt:serverTimestamp()};}
+  async function activate(){
+    if(busy||!user)return;
+    busy=true;status('Conciliando los conceptos locales con backup_main (solo lectura)…');
+    try{
+      const remote=await readMainCatalog();
+      let candidate=C.merge(remote,currentCatalog());
+      const draft=recovered(),key=C.norm('mesa reuniones (3100x800)');
+      if(draft&&!C.pick(candidate,draft.name)&&!candidate.conceptTombstones[key]) candidate=C.merge(candidate,{concepts:[draft],conceptTombstones:{}});
+      if(candidate.concepts.length<Math.max(remote.concepts.length,currentCatalog().concepts.length) || !candidate.concepts.length)throw new Error('El catalogo resultante no pasa la verificacion de integridad');
+      if(!window.confirm('Se protegeran '+candidate.concepts.length+' conceptos en un documento independiente de Firestore.\n\nNo se restaurara ningun JSON completo ni se borrara backup_main. ¿Confirmar?')){status('Sin cambios. Publicación inicial cancelada.','warn');return;}
+      status('Publicando únicamente catálogo de conceptos…');
+      const t=await runTransaction(FB.db,async tx=>{
+        const old=await tx.get(REF);
+        if(old.exists())return 'already';
+        tx.set(REF,docShape(candidate,'alta_confirmada_pc_principal'));
+        return 'created';
+      });
+      const verified=await readCanonical();
+      if(!verified || verified.concepts.length<Math.min(remote.concepts.length,candidate.concepts.length))throw new Error('El servidor no ha confirmado la integridad del catalogo');
+      applyRemote(verified);
+      console.info('[Catalogo protegido R1] Alta',t,'conceptos',verified.concepts.length);
+    }catch(err){lastError=String(err?.message||err);console.error('[Catalogo protegido R1] Alta bloqueada',err);status('Publicacion NO verificada. Sin restauraciones. '+lastError,'bad');}
+    finally{busy=false;statusRefreshButtons();}
+  }
+  async function writeOps(ops){
+    if(!active||!user||!ops.length)return;
+    status('Guardando cambios del catálogo protegido en Firestore…');
+    try{
+      await runTransaction(FB.db,async tx=>{
+        const snap=await tx.get(REF);
+        if(!snap.exists())throw new Error('Falta el catálogo remoto. No se publica.');
+        const remote=C.cat(snap.data());
+        // Si hay dos guardados consecutivos del mismo concepto, se acepta el anterior
+        // confirmado por este equipo, pero nunca se pisa un cambio ajeno.
+        const rebased=ops.map(op=>{
+          const actual=C.pick(remote,op.key),own=ownWrites.get(op.key);
+          if(op.type==='upsert' && actual && own && JSON.stringify(actual)===JSON.stringify(own)
+             && C.time(op.value)>=C.time(actual))return {...op,expected:actual};
+          return op;
+        });
+        const updated=C.applyOps(remote,rebased);
+        if(updated.concepts.length<1)throw new Error('Catálogo vacío: escritura bloqueada.');
+        tx.set(REF,docShape(updated,'guardado_concepto_individual'));
+      });
+      const confirmed=await readCanonical();
+      if(!confirmed)throw new Error('No se ha podido releer lo guardado');
+      for(const op of ops){
+        const entry=C.pick(confirmed,op.key);
+        if(op.type==='upsert' && (!entry||JSON.stringify(entry)!==JSON.stringify(op.value)))throw new Error('El concepto no está confirmado en el servidor: '+op.key);
+        if(op.type==='delete' && entry)throw new Error('El borrado no está confirmado: '+op.key);
+      }
+      for(const op of ops){if(op.type==='upsert')ownWrites.set(op.key,C.copy(op.value));else ownWrites.delete(op.key);}
+      applyRemote(confirmed);
+    }catch(err){
+      lastError=String(err?.message||err);
+      console.error('[Catalogo protegido R1] Cambio no confirmado',err);
+      status('Guardado local conservado, nube NO confirmada: '+lastError,'bad');
+    }finally{statusRefreshButtons();}
+  }
+  function queue(ops){
+    if(!active||!ops.length)return;
+    opsChain=opsChain.then(()=>writeOps(ops)).catch(e=>console.error('[Catalogo protegido R1] Cola',e));
+  }
+  // Se parchea solo saveData de Configuracion: 33/34 conceptos se fusionan antes de guardar;
+  // no puede borrar un concepto sin un tombstone creado por la accion Eliminar.
+  App.saveData=function(){
+    const previous=C.cat(localDB());
+    if(active && !applying && latest){
+      const safe=C.merge(latest,C.cat(this.state));
+      this.state.concepts=safe.concepts;
+      this.state.conceptTombstones=safe.conceptTombstones;
+    }
+    const result=originalSave.apply(this,arguments);
+    if(active && !applying && result!==false){
+      const next=C.cat(localDB());
+      const ops=C.edits(previous,next,latest);
+      if(ops.length)queue(ops);
+    }
+    return result;
+  };
+  async function recoverMissing(){
+    if(busy||!active||!user)return;
+    const entry=recovered();
+    if(!entry){lastError='No hay una receta validada disponible';status(lastError,'bad');return;}
+    const key=C.norm(entry.name);
+    if(C.pick(latest,entry.name) || Number(latest?.conceptTombstones?.[key]||0)>0){status('Recuperación cancelada: ya existe o fue eliminado expresamente.','warn');return;}
+    if(!window.confirm('Recuperar «mesa reuniones (3100x800)» usando las fórmulas y factores del respaldo del 7/11, sin alterar otros conceptos. ¿Confirmar?'))return;
+    await writeOps([{type:'upsert',key,value:entry,expected:null,expectedTomb:0}]);
+  }
+  FB.onAuthStateChanged(FB.auth,next=>{
+    user=next;
+    if(unsubscribe){unsubscribe();unsubscribe=null;}
+    active=false;window.__LDH_CFG_CATALOG_R1_VERIFIED=false;latest=null;lastError='';
+    if(user){status('Sesión confirmada. Comprobando catálogo protegido…');verify();}
+    else status('Inicia sesión para verificar el catálogo. Los datos locales no se modifican.','warn');
+  });
+  window.LDH_CFG_CATALOG_PROTECTED_R1={verify,activate,recoverMissing,isVerified:()=>active,count:()=>lastCloudCount,cloudCopy:()=>latest?C.copy(latest):null};
+  ensurePanel();
+  }
+}
+
+</script>
+<!-- ===== /LDH CONFIG CATALOGO PROTEGIDO R1 ===== -->
 </body></html>
 
