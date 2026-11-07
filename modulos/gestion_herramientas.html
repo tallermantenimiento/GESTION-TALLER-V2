@@ -479,7 +479,7 @@
       <button class="btn" id="btnOps">👥 Operarios</button>
       <button class="btn" id="btnCatalogo">📦 Catálogo</button>
       <button class="btn" id="btnHistorial">📜 Historial</button>
-      <button class="btn" type="button" id="ldhLegacyLoansReviewV7" title="Revisar solo los prestamos generales antiguos; no modifica dotacion ni EPIs">🧾 Revisar préstamos antiguos</button>
+      
       <button class="btn" id="btnArchivadas">🗄️ Archivadas</button>
       <button class="btn" id="btnConfig">⚙️ Config</button>
     </div>
@@ -500,6 +500,7 @@
     <button class="kpi-card" data-kpi="repair"><small>En reparación</small><b id="kpiRepair">0</b></button>
     <button class="kpi-card" data-kpi="empty"><small>Sin unidades libres</small><b id="kpiEmpty">0</b></button>
   </div>
+  <div id="ldhGeneralLoansAutoV8" role="status" aria-live="polite" style="border:1px solid #355170;background:#14243d;padding:9px 12px;margin:-3px 0 12px;border-radius:9px;font-size:12px;color:#fde68a">Préstamos generales: verificando la nube antes de regularizar los históricos.</div>
   <div class="grid">
     <section class="card">
       <h2>Inventario</h2>
@@ -4865,6 +4866,9 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
     cloudReady=true;initialState='ready';
     const guard=document.getElementById('ldhToolsCloudGuardV6');if(guard)guard.hidden=true;
     setStatus(message,'ok');
+    // V8: los préstamos generales históricos se regularizan una sola vez,
+    // únicamente tras verificar la nube. La dotación personal y EPIs no intervienen.
+    scheduleAutoGeneralLoansV8();
   }
   async function fingerprint(str){
     if(globalThis.crypto?.subtle){
@@ -5374,6 +5378,128 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
   window.__LDH_TOOLS_LOANS_V7={inspect:()=>({historicos:findLegacyGeneralLoansV7(validateTools(window.__LDH_TOOLS_IDB.readSync())).length,verified:cloudReady}),review:reviewGeneralLegacyLoansV7};
   // ===== FIN V7 =====
 
+  // ===== V8: regularizacion AUTOMATICA de los 36 prestamos GENERALES reintroducidos =====
+  // El usuario ha confirmado que no debe quedar NINGUNO de esos prestamos activo.
+  // No realiza devoluciones fisicas ni toca Dotacion personal, EPIs o reparaciones.
+  let autoGeneralTimerV8=null,autoGeneralRunningV8=false,autoGeneralAttemptedV8=false;
+  function generalLoansStateV8(message,tone='warn'){
+    const target=document.getElementById('ldhGeneralLoansAutoV8');if(!target)return;
+    const colors={ok:['#86efac','#244a39'],warn:['#fde68a','#614a23'],bad:['#fecaca','#813b48']};
+    const [fg,border]=colors[tone]||colors.warn;
+    target.textContent=message;target.style.color=fg;target.style.borderColor=border;
+  }
+  function scheduleAutoGeneralLoansV8(){
+    if(autoGeneralTimerV8||autoGeneralRunningV8||autoGeneralAttemptedV8||!cloudReady)return;
+    // En el primer arranque V6 puede recargar para recibir la nube: al recargar
+    // se reprograma sin escribir ni duplicar nada.
+    autoGeneralTimerV8=setTimeout(()=>{
+      autoGeneralTimerV8=null;
+      autoRegularizeGeneralLoansV8().catch(e=>{
+        console.error('[Herramientas V8] Regularizacion automatica',e);
+        generalLoansStateV8('Préstamos generales: comprobación pendiente; no se han borrado datos.','bad');
+      });
+    },1200);
+  }
+  function generalActiveLoansV8(dbValue){
+    const result=[];
+    for(const t of (dbValue.tools||[]))for(const loan of (t.loans||[])){
+      if(generalIsActiveV7(loan))result.push({toolId:String(t.id||''),loanId:String(loan.id||''),qty:Number(loan.qty)});
+    }
+    return result;
+  }
+  async function autoRegularizeGeneralLoansV8(){
+    if(autoGeneralRunningV8||autoGeneralAttemptedV8||!cloudReady||!started||saving||restoring||localDirty||hasPendingLocalSave||getStoreItem(DIRTY_KEY))return;
+    autoGeneralRunningV8=true;autoGeneralAttemptedV8=true;
+    let committed=false,overlayShown=false;
+    try{
+      await window.__LDH_TOOLS_READY;await window.__LDH_TOOLS_IDB.pending();
+      if(!cloudReady||saving||restoring||localDirty||hasPendingLocalSave||getStoreItem(DIRTY_KEY))throw new Error('Hay cambios locales pendientes; no se realiza el cierre automático');
+      const local=window.__LDH_TOOLS_IDB.readSync();
+      const current=validateTools(local);
+      const active=generalActiveLoansV8(current);
+      if(!active.length){generalLoansStateV8('Préstamos generales: 0 activos · nube verificada','ok');return;}
+      const candidates=findLegacyGeneralLoansV7(current);
+      const legacyIds=new Set(candidates.map(x=>x.id));
+      const unknown=active.filter(x=>!legacyIds.has(x.loanId));
+      if(unknown.length){
+        generalLoansStateV8('Se detectaron '+unknown.length+' préstamos generales distintos de los históricos. No se modifica ninguno automáticamente.','bad');
+        console.warn('[Herramientas V8] Prestamos fuera de los 36 historicos; no se borran',unknown);
+        return;
+      }
+      if(candidates.length!==active.length||new Set(candidates.map(x=>x.id)).size!==candidates.length){
+        throw new Error('Los préstamos activos no coinciden con los 36 históricos verificados');
+      }
+      // Cerrar la interfaz antes de las lecturas y de la instantanea: ningun
+      // operario puede registrar prestamos durante la conciliacion automatica.
+      saving=true;
+      const guard=document.getElementById('ldhToolsCloudGuardV6');
+      if(guard){guard.hidden=false;overlayShown=true;}
+      const guardTxt=document.getElementById('ldhToolsCloudGuardTextV6');
+      if(guardTxt)guardTxt.textContent='Comprobando y regularizando préstamos generales históricos. No cierres esta ventana hasta verificar la nube. Dotación y EPIs no se modifican.';
+      const guardActions=document.querySelector('#ldhToolsCloudGuardV6 .ldh-v6-actions');
+      if(guardActions)guardActions.style.pointerEvents='none';
+      generalLoansStateV8('Regularizando '+candidates.length+' préstamos generales históricos · comprobando Firestore…');
+      const remote=await readRemoteStorage();
+      if(!remote||remote.meta.revision!==lastCloudRevision||remote.raw!==local){
+        throw new Error('La nube ha cambiado o difiere de este equipo. No se ha publicado nada');
+      }
+      const remoteValue=validateTools(remote.raw);
+      const remoteActive=generalActiveLoansV8(remoteValue);
+      if(remoteActive.length!==active.length||remoteActive.some(x=>!legacyIds.has(x.loanId))){
+        throw new Error('La nube contiene préstamos diferentes; no se han modificado');
+      }
+      const now=new Date().toISOString();
+      const updated=reconcileGeneralLoansInRawV7(remote.raw,candidates.map(x=>x.id),now);
+      const after=validateTools(updated);
+      if(generalActiveLoansV8(after).length!==0){
+        throw new Error('El resultado conserva préstamos generales abiertos; operación cancelada');
+      }
+      // Comprobar aislamiento de todos los dominios, incluso en la misma base JSON.
+      for(const key of Object.keys(remoteValue)){
+        if(['tools','history','generalLoanReconciliationsV7','updatedAt'].includes(key))continue;
+        if(JSON.stringify(remoteValue[key])!==JSON.stringify(after[key]))throw new Error('Se intentó modificar un apartado ajeno: '+key);
+      }
+      await window.__LDH_TOOLS_IDB.snapshot('antes_cierre_automatico_prestamos_generales_v8');
+      // La interfaz ya esta bloqueada desde antes de la lectura remota.
+      if(window.__LDH_TOOLS_IDB.readSync()!==local||localDirty||hasPendingLocalSave||getStoreItem(DIRTY_KEY)){
+        throw new Error('La copia local cambió durante la verificación; no se ha publicado nada');
+      }
+      generalLoansStateV8('Publicando cierre administrativo y verificando el servidor…');
+      let check;
+      try{check=await publishWithCheck(updated,remote.meta.revision,false);committed=true;}
+      catch(e){
+        // Puede fallar la primera lectura aunque el servidor sí haya aceptado
+        // la transacción. Releer antes de cualquier nueva escritura.
+        const verified=await readRemoteStorage().catch(()=>null);
+        if(verified&&verified.raw===updated){check=verified;committed=true;}
+        else throw e;
+      }
+      restoring=true;
+      try{await window.__LDH_TOOLS_IDB.saveRaw(updated);}finally{restoring=false;}
+      lastCloudRevision=check.meta.revision;
+      localDirty=false;hasPendingLocalSave=false;
+      try{localStorage.removeItem(DIRTY_KEY);}catch(_){}
+      generalLoansStateV8('Préstamos generales: 0 activos · regularización verificada en nube','ok');
+      console.info('[Herramientas V8] Cierre historico verificado: '+candidates.length+' registros / '+candidates.reduce((n,x)=>n+x.qty,0)+' unidades. Historial conservado.');
+      unlock('Nube verificada · préstamos generales 0 activos');
+      setTimeout(()=>location.reload(),450);
+    }catch(e){
+      generalLoansStateV8('No se completó la regularización: '+String(e?.message||e),'bad');
+      console.error('[Herramientas V8] Regularizacion detenida. No repetir sin verificar servidor.',e);
+      // Si la escritura se confirmó pero falló IndexedDB, el siguiente arranque
+      // recuperará la nube; no se vuelve a publicar la misma operación.
+      lock((committed?'El cierre se confirmó en Firestore pero falló la copia local. ':'No se puede confirmar el cierre en Firestore. ')+String(e?.message||e));
+    }finally{
+      autoGeneralRunningV8=false;saving=false;
+      const guardActions=document.querySelector('#ldhToolsCloudGuardV6 .ldh-v6-actions');
+      if(guardActions)guardActions.style.pointerEvents='';
+      if(overlayShown&&cloudReady){const guard=document.getElementById('ldhToolsCloudGuardV6');if(guard)guard.hidden=true;}
+    }
+  }
+  window.__LDH_TOOLS_GENERAL_V8={state:()=>({running:autoGeneralRunningV8,attempted:autoGeneralAttemptedV8,ready:cloudReady}),
+    inspect:()=>{const raw=window.__LDH_TOOLS_IDB.readSync(),v=validateTools(raw);return {active:generalActiveLoansV8(v).length,legacy:findLegacyGeneralLoansV7(v).length}}};
+  // ===== FIN V8 =====
+
   function stopLiveSync(){
     started=false;cloudReady=false;
     clearTimeout(saveTimer);clearTimeout(pendingRemoteTimer);
@@ -5398,7 +5524,7 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
 })();
 </script>
 <!-- ===== /LDH HERRAMIENTAS V6 ===== -->
-<!-- LDH_HERRAMIENTAS_PRESTAMOS_GENERALES_V7_AUDITORIA_Y_ANTIRRESURRECCION_20261107 -->
+<!-- LDH_HERRAMIENTAS_PRESTAMOS_GENERALES_V8_CIERRE_AUTOMATICO_VERIFICADO_Y_ANTIRRESURRECCION_20261107 -->
 
 
 <script>
