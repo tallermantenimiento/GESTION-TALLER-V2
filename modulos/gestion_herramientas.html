@@ -433,6 +433,14 @@
 </style>
 </head>
 <body>
+<style id="LDH_LOANS_V7_REVIEW_STYLE">
+#ldhGeneralLoansAuditV7 input[type="checkbox"]{width:17px!important;height:17px!important;min-width:17px!important;display:inline-block!important;padding:0!important;margin:0 6px 0 0!important;vertical-align:middle;accent-color:#38bdf8;cursor:pointer}
+#ldhGeneralLoansAuditV7 label{color:#e2e8f0;line-height:1.5}
+#ldhGeneralLoansAuditV7 th,#ldhGeneralLoansAuditV7 td{padding:7px 9px;vertical-align:middle}
+#ldhGeneralLoansAuditV7 tr:hover td{background:#1d324f}
+#ldhGeneralLoansAuditV7 button:disabled{opacity:.5;cursor:not-allowed!important}
+#ldhGeneralLoansAuditV7 button:not(:disabled):hover{filter:brightness(1.15)}
+</style>
 <style id="LDH_TOOLS_V6_SYNC_STYLE">
 #ldhToolsCloudGuardV6{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(2,6,23,.89);padding:18px;font-family:inherit;color:#f8fafc}
 #ldhToolsCloudGuardV6[hidden]{display:none!important}
@@ -471,6 +479,7 @@
       <button class="btn" id="btnOps">👥 Operarios</button>
       <button class="btn" id="btnCatalogo">📦 Catálogo</button>
       <button class="btn" id="btnHistorial">📜 Historial</button>
+      <button class="btn" type="button" id="ldhLegacyLoansReviewV7" title="Revisar solo los prestamos generales antiguos; no modifica dotacion ni EPIs">🧾 Revisar préstamos antiguos</button>
       <button class="btn" id="btnArchivadas">🗄️ Archivadas</button>
       <button class="btn" id="btnConfig">⚙️ Config</button>
     </div>
@@ -1095,7 +1104,7 @@ const DEFAULT_LIB = {
 };
 
 function dateMs(v){ const n=Date.parse(v||""); return Number.isFinite(n)?n:0; }
-function activeLoansOf(t){ return (t.loans||[]).filter(l=>String(l.status||"active")!=="closed" && Number(l.qty||0)>0); }
+function activeLoansOf(t){ return (t.loans||[]).filter(l=>String(l.status||"active")=="active" && Number(l.qty||0)>0); }
 function isLoanOverdue(l){
   if(!l) return false;
   if(l.dueAt){ const due=new Date(String(l.dueAt).slice(0,10)+"T23:59:59"); return Date.now()>due.getTime(); }
@@ -1128,7 +1137,7 @@ function familyOptionsHtml(selected){
 }
 function eventAt(h){ return h?.inAt||h?.at||h?.outAt||h?.createdAt||""; }
 function historyTypeLabel(type){
-  return ({OUT:"Préstamo",IN:"Devolución",XFER:"Traspaso",REPAIR_IN:"A reparación",REPAIR_OUT:"Reparada",WRITE_OFF:"Baja / no reparable",STOCK_IN:"Entrada Compras",STOCK_ADJUST:"Ajuste stock",CREATE:"Alta",ARCHIVE:"Archivada",RESTORE:"Restaurada"})[type]||type||"Movimiento";
+  return ({OUT:"Préstamo",IN:"Devolución",XFER:"Traspaso",REPAIR_IN:"A reparación",REPAIR_OUT:"Reparada",WRITE_OFF:"Baja / no reparable",STOCK_IN:"Entrada Compras",STOCK_ADJUST:"Ajuste stock",CREATE:"Alta",ARCHIVE:"Archivada",RESTORE:"Restaurada",LOAN_RECONCILED_V7:"Regularización histórica (sin devolución)"})[type]||type||"Movimiento";
 }
 
 function loadAll(){
@@ -4680,6 +4689,32 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
     const ta=Math.max(...fields.map(f=>Date.parse(a[f]||"")||0)); const tb=Math.max(...fields.map(f=>Date.parse(b[f]||"")||0));
     return tb>=ta?Object.assign({},a,b):Object.assign({},b,a);
   }
+  // V7: Un prestamo general NO puede volver a activo si alguna copia lo cerro.
+  // Las devoluciones parciales tampoco pueden crecer por mezclar copias viejas.
+  // No afecta a personalLoans, protecciones ni EPIs.
+  function mergeGeneralLoanV7(a,b){
+    if(!a)return b;if(!b)return a;
+    const endStatus=x=>{
+      const s=String(x.status||'active').toLowerCase();
+      return s==='regularized'||s==='closed';
+    };
+    const ae=endStatus(a),be=endStatus(b);
+    if(ae||be){
+      const c=ae&&be?chooseNewer(a,b,['regularizedAt','closedAt','updatedAt']):(ae?a:b);
+      const other=c===a?b:a;
+      return {...other,...c,status:c.status,qty:0,serials:[],returnedQty:Math.max(Number(a.returnedQty||0),Number(b.returnedQty||0))};
+    }
+    const picked=chooseNewer(a,b,['updatedAt','outAt']);
+    const out={...picked};
+    const qa=Number(a.qty),qb=Number(b.qty);
+    if(Number.isFinite(qa)&&Number.isFinite(qb))out.qty=Math.max(0,Math.min(qa,qb));
+    if(out.mode==='serial'&&Array.isArray(a.serials)&&Array.isArray(b.serials)){
+      const bs=new Set(b.serials.map(String));out.serials=a.serials.filter(x=>bs.has(String(x)));
+      out.qty=Math.min(Number(out.qty||0),out.serials.length);
+    }
+    out.returnedQty=Math.max(Number(a.returnedQty||0),Number(b.returnedQty||0));
+    return out;
+  }
   function mergeToolRecord(r,l){
     if(!r) return l; if(!l) return r;
     const base=chooseNewer(r,l,["updatedAt","metaUpdatedAt","stockUpdatedAt","archiveUpdatedAt","createdAt"]);
@@ -4689,8 +4724,7 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
     const stock=chooseNewer(r,l,["stockUpdatedAt","updatedAt","createdAt"]);
     if(stock){ out.stock=stock.stock; out.serials=Array.isArray(stock.serials)?stock.serials.slice():[]; out.stockUpdatedAt=stock.stockUpdatedAt||stock.updatedAt||stock.createdAt; }
     const arch=chooseNewer(r,l,["archiveUpdatedAt","archivedAt","restoredAt","updatedAt"]); if(arch){ out.archived=!!arch.archived; out.archivedAt=arch.archivedAt||""; out.restoredAt=arch.restoredAt||""; }
-    out.loans=mergeArrayByIdentity(r.loans,l.loans,x=>x.id).map(x=>x);
-    const loanMap=new Map(); [...(r.loans||[]),...(l.loans||[])].forEach(x=>{ if(!x||!x.id)return; const prev=loanMap.get(x.id); loanMap.set(x.id,chooseNewer(prev,x,["updatedAt","closedAt","outAt"])); }); out.loans=[...loanMap.values()];
+    const loanMap=new Map(); [...(r.loans||[]),...(l.loans||[])].forEach(x=>{if(!x||!x.id)return;loanMap.set(String(x.id),mergeGeneralLoanV7(loanMap.get(String(x.id)),x));});out.loans=[...loanMap.values()];
     const repMap=new Map(); [...(r.repairCases||[]),...(l.repairCases||[])].forEach(x=>{ if(!x||!x.id)return; const prev=repMap.get(x.id); repMap.set(x.id,chooseNewer(prev,x,["updatedAt","closedAt","openedAt"])); }); out.repairCases=[...repMap.values()];
     const open=out.repairCases.filter(c=>String(c.status||"open")!=="closed"&&Number(c.qty||((c.serials||[]).length)||0)>0);
     if(out.mode==="serial"){ const ss=new Set(); open.forEach(c=>(c.serials||[]).forEach(v=>ss.add(v))); out.maintSerials=[...ss]; out.maintQty=0; } else { out.maintQty=open.reduce((a,c)=>a+Number(c.qty||0),0); out.maintSerials=[]; }
@@ -4710,6 +4744,31 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
     const r=parseSafeJSON(remoteRaw,null), l=parseSafeJSON(localRaw,null); if(!r&&!l) return localRaw||remoteRaw||null; if(!r) return localRaw; if(!l) return remoteRaw;
     const m=Object.assign({},r,l); const map=new Map(); [...(r.tools||[]),...(l.tools||[])].forEach(t=>{ if(!t||!t.id)return; map.set(t.id,mergeToolRecord(map.get(t.id),t)); }); m.tools=[...map.values()];
     m.history=mergeArrayByIdentity(r.history,l.history,x=>x.id||[x.type,x.toolId,x.at,x.inAt,x.outAt,x.qty].join("|"));
+    // Registro monotono y especifico de PRESTAMOS GENERALES. La copia antigua
+    // puede traer una salida abierta, pero nunca reactivara una referencia regularizada.
+    const reconciled=new Map();
+    for(const entry of [...(r.generalLoanReconciliationsV7||[]),...(l.generalLoanReconciliationsV7||[])]){
+      if(!entry?.loanId)continue;
+      const key=String(entry.loanId),prev=reconciled.get(key);
+      if(!prev||String(entry.at||'')>String(prev.at||''))reconciled.set(key,entry);
+    }
+    // Soporta incluso una copia antigua que tiene el cierre pero no su indice.
+    for(const record of [...(r.tools||[]),...(l.tools||[])])for(const loan of (record.loans||[])){
+      if(String(loan?.status||'')!=='regularized'||!loan.id)continue;
+      const key=String(loan.id);
+      if(!reconciled.has(key))reconciled.set(key,{loanId:key,toolId:String(record.id||''),at:loan.regularizedAt||loan.updatedAt||'',kind:'regularizacion_recuperada'});
+    }
+    m.generalLoanReconciliationsV7=[...reconciled.values()];
+    for(const tool of m.tools){for(const loan of (tool.loans||[])){
+      const mark=reconciled.get(String(loan.id||''));if(!mark)continue;
+      if(String(loan.status||'')!=='regularized'){
+        loan.regularizedPriorQty=Number(loan.qty||0);
+        loan.regularizedPriorSerials=Array.isArray(loan.serials)?loan.serials.slice():[];
+      }
+      loan.status='regularized';loan.qty=0;loan.serials=[];
+      loan.regularizedAt=mark.at||loan.regularizedAt||loan.updatedAt||'';
+      loan.updatedAt=String(loan.updatedAt||'')>String(loan.regularizedAt||'')?loan.updatedAt:loan.regularizedAt;
+    }}
     { const opMap=new Map(); [...(r.operators||[]),...(l.operators||[])].forEach(x=>{ if(!x)return; const k=String(x.id||normKey(x.name)); const prev=opMap.get(k); opMap.set(k,chooseNewer(prev,x,["updatedAt","archivedAt","restoredAt"])); }); m.operators=[...opMap.values()]; }
     const ppeMap=new Map(); [...(r.protections||[]),...(l.protections||[])].forEach(x=>{ if(!x||!x.id)return; ppeMap.set(x.id,mergeProtectionRecord(ppeMap.get(x.id),x)); }); m.protections=[...ppeMap.values()];
     {
@@ -5175,6 +5234,146 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
     finally{saving=false;if(b){b.disabled=false;b.textContent='Conciliar copia local con nube';}}
   }
 
+
+  // ===== V7 · PRESTAMOS GENERALES HISTORICOS (SIN DOTACION PERSONAL NI EPIs) =====
+  const GENERAL_LEGACY_IDS_V7=new Set(["h6skllr0jinave","kq77f60hldbtfd","8isoji6yun93h4","uvqfrpnuoer4j8","m44cstb113xwl7","3jj5ql3m3w5hfb","rlol0m8l0t0n5r","nq0cxllaeb7dz2","rh9gxywdor8n05","8p4fiqw2sybyf0","qo210k21nlm3od","gzsnmntuzufnxy","5wbp998igyctgx","7t6pmmfm2ol2yg","kcb3m33jjaitsm","w5u9c9i5ruzt9s","spqret3j8hod0w","7lpxjmyuyzuj29","gy8d60pn7viwko","dfrc9lp013qonr","421h4yjz7q8ppc","t48pvbjflg97cg","brbwdk55jo6ef2","c8tsdv8ixr5f9e","vminsc9c5hap1k","tpu23ej7ia7fju","gyvpc5fwg5bpxc","ridonr35b0cmum","pqds67ytbnzm54","jnwf793ui7w8nr","85tsflxtwgvzbn","v61d62yxyahclp","drscxd4k88gfbz","61wk041jz9w6j9","us8gck26c9na2q","qxbrp5noczqucx"]);
+  const GENERAL_LEGACY_CUTOFF_V7=Date.parse('2026-10-16T23:59:59Z');
+  const GENERAL_LOAN_REASON_V7='Regularizacion administrativa: figuraba 0 prestamos generales activos en el respaldo 16/10/2026; registros antiguos reintroducidos por fusion posterior. NO es devolucion fisica.';
+  const generalHtmlEscapeV7=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const generalIsActiveV7=l=>String(l?.status||'active')==='active'&&Number(l?.qty||0)>0;
+  function findLegacyGeneralLoansV7(dbValue){
+    const found=[];
+    for(const tool of (dbValue.tools||[]))for(const loan of (tool.loans||[])){
+      if(!GENERAL_LEGACY_IDS_V7.has(String(loan.id||'')))continue;
+      if(!generalIsActiveV7(loan))continue;
+      const outAt=Date.parse(loan.outAt||'');
+      if(!Number.isFinite(outAt)||outAt>GENERAL_LEGACY_CUTOFF_V7)continue;
+      found.push({toolId:String(tool.id||''),toolName:String(tool.name||''),id:String(loan.id),operator:String(loan.operator||''),qty:Number(loan.qty),outAt:String(loan.outAt||''),zone:String(loan.zone||'')});
+    }
+    return found.sort((a,b)=>a.operator.localeCompare(b.operator,'es')||a.toolName.localeCompare(b.toolName,'es'));
+  }
+  function reconcileGeneralLoansInRawV7(raw,ids,at){
+    const d=validateTools(raw),selected=new Set([...ids].map(String));
+    if(!selected.size)throw new Error('No hay prestamos seleccionados');
+    if([...selected].some(x=>!GENERAL_LEGACY_IDS_V7.has(x)))throw new Error('La seleccion contiene prestamos fuera de la lista historica validada');
+    const list=findLegacyGeneralLoansV7(d);
+    if(list.filter(x=>selected.has(x.id)).length!==selected.size)throw new Error('Los prestamos han cambiado. Cierra y vuelve a revisar.');
+    const originalProtected={};
+    for(const k of Object.keys(d)){
+      if(k!=='tools'&&k!=='history'&&k!=='generalLoanReconciliationsV7'&&k!=='updatedAt')originalProtected[k]=JSON.stringify(d[k]);
+    }
+    const priorTools=d.tools.map(t=>{const x={...t};delete x.loans;return JSON.stringify(x)});
+    d.generalLoanReconciliationsV7=Array.isArray(d.generalLoanReconciliationsV7)?d.generalLoanReconciliationsV7:[];
+    const ledger=new Set(d.generalLoanReconciliationsV7.map(x=>String(x.loanId||'')));
+    const events=new Set((d.history||[]).map(h=>String(h.id||'')));
+    let changed=0;
+    for(const tool of d.tools)for(const loan of (tool.loans||[])){
+      if(!selected.has(String(loan.id||'')))continue;
+      const oldQty=Number(loan.qty||0), oldSerials=Array.isArray(loan.serials)?loan.serials.slice():[];
+      loan.regularizedPriorQty=oldQty;
+      loan.regularizedPriorSerials=oldSerials;
+      loan.regularizedAt=at;
+      loan.regularizedReason=GENERAL_LOAN_REASON_V7;
+      loan.status='regularized';loan.qty=0;loan.serials=[];loan.updatedAt=at;
+      if(!ledger.has(String(loan.id))){
+        d.generalLoanReconciliationsV7.push({loanId:String(loan.id),toolId:String(tool.id),at,kind:'historial_16oct_v7',priorQty:oldQty,outAt:loan.outAt||'',operator:loan.operator||''});
+        ledger.add(String(loan.id));
+      }
+      const eventId='LDH_LOAN_V7_'+String(loan.id);
+      if(!events.has(eventId)){
+        d.history.push({id:eventId,type:'LOAN_RECONCILED_V7',toolId:tool.id,toolName:tool.name,loanId:loan.id,operator:loan.operator||'',qty:oldQty,outAt:loan.outAt||'',at,notes:GENERAL_LOAN_REASON_V7,source:'prestamos_generales_v7'});
+        events.add(eventId);
+      }
+      changed++;
+    }
+    if(changed!==selected.size)throw new Error('El numero de prestamos regularizados no coincide');
+    d.updatedAt=at;
+    for(const [k,v] of Object.entries(originalProtected))if(JSON.stringify(d[k])!==v)throw new Error('Se detecto un cambio fuera de prestamos: '+k);
+    if(d.tools.some((t,i)=>{const x={...t};delete x.loans;return JSON.stringify(x)!==priorTools[i]}))throw new Error('Se modifico una herramienta fuera de sus prestamos');
+    return JSON.stringify(d);
+  }
+  function closeGeneralAuditV7(){document.getElementById('ldhGeneralLoansAuditV7')?.remove();}
+  function showGeneralAuditV7(items,raw,revision){
+    closeGeneralAuditV7();
+    const wrapper=document.createElement('div');wrapper.id='ldhGeneralLoansAuditV7';
+    wrapper.style.cssText='position:fixed;inset:0;z-index:100020;background:rgba(2,6,23,.94);display:flex;align-items:center;justify-content:center;padding:15px;color:#f8fafc;font-family:inherit';
+    const qTotal=items.reduce((n,x)=>n+x.qty,0);
+    wrapper.innerHTML=`<div style="max-width:930px;width:100%;max-height:94vh;overflow:auto;background:#101f36;border:1px solid #4d6986;border-radius:14px;padding:19px;box-shadow:0 20px 80px #000a">
+      <h2 style="margin:0 0 8px;font-size:20px">Revisar prestamos generales historicos</h2>
+      <p style="font-size:13px;margin:8px 0">Se han localizado <b>${items.length} préstamos · ${qTotal} unidades</b> identificados en el respaldo del 06/11/2026. En el respaldo del 16/10/2026 aparecían <b>0 préstamos generales activos</b>.</p>
+      <p style="font-size:13px;color:#fbd38d">Operación administrativa: desactiva SOLO los préstamos que marques, conserva el historial y crea un asiento de auditoría. <b>NO registra devoluciones físicas</b>; el stock físico no cambia, aunque aumenta el saldo disponible al dejar de contarlos «en uso». No toca Dotación personal ni EPIs.</p>
+      <div style="margin:10px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><label style="cursor:pointer"><input id="ldhGeneralLoansSelectAllV7" type="checkbox"> Seleccionar todos los identificados</label><b id="ldhGeneralLoansSelectedV7">0 seleccionados</b></div>
+      <div style="max-height:42vh;overflow:auto;border:1px solid #334c6b;border-radius:8px"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead style="position:sticky;top:0;background:#132740"><tr><th>✓</th><th>Herramienta</th><th>Operario</th><th>Fecha prestamo</th><th>Uds.</th><th>Zona</th></tr></thead><tbody>${items.map(x=>`<tr style="border-top:1px solid #344861"><td><input type="checkbox" class="ldhGeneralLoanRowV7" value="${generalHtmlEscapeV7(x.id)}"></td><td>${generalHtmlEscapeV7(x.toolName)}</td><td>${generalHtmlEscapeV7(x.operator)}</td><td>${generalHtmlEscapeV7(String(x.outAt).slice(0,10))}</td><td>${x.qty}</td><td>${generalHtmlEscapeV7(x.zone)}</td></tr>`).join('')}</tbody></table></div>
+      <label style="display:block;margin-top:12px;font-size:13px"><input id="ldhGeneralLoansConfirmV7" type="checkbox"> Confirmo que he revisado los registros seleccionados y no deben seguir figurando como préstamos activos.</label>
+      <p id="ldhGeneralLoansResultV7" style="font-size:12px;color:#fbd38d;min-height:20px"></p>
+      <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap"><button id="ldhGeneralLoansCancelV7" type="button" style="padding:10px;background:#203b59;color:white;border:1px solid #42719b;border-radius:8px;cursor:pointer">Cancelar</button><button id="ldhGeneralLoansApplyV7" type="button" disabled style="padding:10px;background:#8b5122;color:white;border:1px solid #dea348;border-radius:8px;cursor:pointer">Regularizar seleccionados</button></div>
+    </div>`;
+    document.body.appendChild(wrapper);
+    const all=wrapper.querySelector('#ldhGeneralLoansSelectAllV7'),tick=wrapper.querySelector('#ldhGeneralLoansConfirmV7'),apply=wrapper.querySelector('#ldhGeneralLoansApplyV7'),status=wrapper.querySelector('#ldhGeneralLoansResultV7');
+    const rows=()=>[...wrapper.querySelectorAll('.ldhGeneralLoanRowV7')];
+    const selected=()=>rows().filter(el=>el.checked).map(el=>el.value);
+    function update(){const chosen=selected();wrapper.querySelector('#ldhGeneralLoansSelectedV7').textContent=chosen.length+' seleccionados';apply.disabled=!chosen.length||!tick.checked;all.checked=!!rows().length&&chosen.length===rows().length;}
+    all.addEventListener('change',()=>{rows().forEach(x=>x.checked=all.checked);update()});
+    rows().forEach(el=>el.addEventListener('change',update));tick.addEventListener('change',update);
+    wrapper.querySelector('#ldhGeneralLoansCancelV7').addEventListener('click',closeGeneralAuditV7);
+    apply.addEventListener('click',async()=>{
+      const chosen=selected();if(!chosen.length||!tick.checked)return;
+      if(!confirm('REGULARIZACION ADMINISTRATIVA DE PRESTAMOS GENERALES\n\n'+chosen.length+' registros. NO supone devolucion fisica y no modificara dotacion personal ni EPIs.\n\n¿Confirmas que los seleccionados ya no deben figurar como prestados?'))return;
+      apply.disabled=true;wrapper.querySelector('#ldhGeneralLoansCancelV7').disabled=true;status.textContent='Verificando la revision de la nube...';
+      let cloudCommitted=false;
+      try{
+        if(!cloudReady||saving||restoring||localDirty||getStoreItem(DIRTY_KEY))throw new Error('Hay cambios pendientes o la nube no esta verificada. No se publica nada.');
+        await window.__LDH_TOOLS_IDB.pending();
+        if(window.__LDH_TOOLS_IDB.readSync()!==raw)throw new Error('La copia local ha cambiado durante la revision. Reabre esta pantalla.');
+        const now=await readRemoteStorage();
+        if(!now||now.meta.revision!==revision||now.raw!==raw)throw new Error('La nube ha cambiado. Reabre la revision para conciliar.');
+        const at=new Date().toISOString(),next=reconcileGeneralLoansInRawV7(now.raw,chosen,at);
+        await window.__LDH_TOOLS_IDB.snapshot('antes_regularizacion_prestamos_generales_v7');
+        saving=true;status.textContent='Publicando registros administrativos y verificando Firestore...';
+        let committed;
+        try{committed=await publishWithCheck(next,now.meta.revision,false);cloudCommitted=true;}
+        catch(e){
+          // Si la escritura termino pero fallo la primera relectura, no repetir.
+          const checked=await readRemoteStorage().catch(()=>null);
+          if(checked&&checked.raw===next){committed=checked;cloudCommitted=true;}
+          else throw e;
+        }
+        restoring=true;
+        try{await window.__LDH_TOOLS_IDB.saveRaw(next);}finally{restoring=false;}
+        lastCloudRevision=committed.meta.revision;localDirty=false;hasPendingLocalSave=false;
+        try{localStorage.removeItem(DIRTY_KEY);}catch(_){ }
+        unlock('Prestamos generales regularizados y verificados');
+        status.textContent='OK: regularizacion confirmada. Actualizando listado...';
+        setTimeout(()=>location.reload(),450);
+      }catch(e){
+        status.textContent=(cloudCommitted?'CAMBIO EN NUBE CONFIRMADO, FALLO AL ACTUALIZAR LOCAL: ':'Publicación no confirmada (no repitas; actualiza y revisa la nube): ')+String(e?.message||e);
+        status.style.color='#fecaca';
+        console.error('[Herramientas V7] Regularizacion general',e);
+        // Nunca volver a pulsar hasta releer y confirmar el estado remoto.
+      }finally{saving=false;}
+    });
+    update();
+  }
+  async function reviewGeneralLegacyLoansV7(){
+    const button=document.getElementById('ldhLegacyLoansReviewV7');
+    if(button?.disabled)return;
+    const title=button?.textContent||'Revisar préstamos antiguos';
+    if(button){button.disabled=true;button.textContent='Consultando nube…';}
+    try{
+      await window.__LDH_TOOLS_READY;await window.__LDH_TOOLS_IDB.pending();
+      if(!cloudReady||saving||restoring||localDirty||getStoreItem(DIRTY_KEY))return alert('Primero debe aparecer Nube verificada y no haber cambios pendientes. No se ha modificado nada.');
+      const current=window.__LDH_TOOLS_IDB.readSync(),remote=await readRemoteStorage();
+      if(!remote||remote.meta.revision!==lastCloudRevision||remote.raw!==current)return alert('Los datos locales y la nube no coinciden o han cambiado. Pulsa Reintentar comprobacion antes de revisar.');
+      const items=findLegacyGeneralLoansV7(validateTools(remote.raw));
+      if(!items.length)return alert('No quedan prestamos generales antiguos pendientes de revision en esta lista. No se ha modificado nada.');
+      showGeneralAuditV7(items,remote.raw,remote.meta.revision);
+    }catch(e){console.error('[Herramientas V7] Revision de prestamos',e);alert('No se ha podido leer de forma segura la nube: '+String(e?.message||e));}
+    finally{if(button){button.disabled=false;button.textContent=title;}}
+  }
+  document.getElementById('ldhLegacyLoansReviewV7')?.addEventListener('click',reviewGeneralLegacyLoansV7);
+  window.__LDH_TOOLS_LOANS_V7={inspect:()=>({historicos:findLegacyGeneralLoansV7(validateTools(window.__LDH_TOOLS_IDB.readSync())).length,verified:cloudReady}),review:reviewGeneralLegacyLoansV7};
+  // ===== FIN V7 =====
+
   function stopLiveSync(){
     started=false;cloudReady=false;
     clearTimeout(saveTimer);clearTimeout(pendingRemoteTimer);
@@ -5199,6 +5398,7 @@ window.__LDH_TOOLS_READY=boot().catch(err=>{console.error('[Herramientas] Arranq
 })();
 </script>
 <!-- ===== /LDH HERRAMIENTAS V6 ===== -->
+<!-- LDH_HERRAMIENTAS_PRESTAMOS_GENERALES_V7_AUDITORIA_Y_ANTIRRESURRECCION_20261107 -->
 
 
 <script>
