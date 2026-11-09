@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
+<meta name="ldh-prep-v61-fix" content="V61-RECONCILIACION-RECIBO-DUPLICADO-WOODS-20261109" />
 <meta name="ldh-build" content="PREPARACION-V60-SEGUIMIENTO-DEUDOR-REPOSICION-SOLO-DONANTE-20261109" />
 <meta name="ldh-prep-v60-build" content="PREPARACION-V60-CONSULTA-DEUDA-OT-CERRADA-20261109" />
 <meta name="ldh-prep-v59-build" content="PREPARACION-V59-REPOSICION-FISICA-Y-DEUDA-PERSISTENTE-20261109" />
@@ -22888,6 +22889,17 @@ async function LDH_prepReceivePhysicalCloudV66(line, index) {
       const unit = String(
         material.unit ?? material.unidad ?? LDH_prepLineUnitV66(line)
       );
+      // V61: un prestamo entre OT ya repuesto no puede volver a entrar
+      // como RECIBIDO normal: la reposicion V59 ya sumo la entrada fisica.
+      const donorReplacementV61=(Array.isArray(remoteDB.internalOtLoansV55)?remoteDB.internalOtLoansV55:[]).find((loan)=>
+        String(loan.fromRef||'').trim().toUpperCase()===reference.toUpperCase() &&
+        String(loan.companyId||'')===companyId &&
+        String(loan.materialId||'')===materialId &&
+        Array.isArray(loan.replacementsV59) && loan.replacementsV59.some((op)=>Number(op?.qty||0)>0)
+      );
+      if(donorReplacementV61){
+        throw new Error('Esta OT ya tiene una reposicion de prestamo contabilizada. No uses RECIBIDO normal: volveria a sumar barras. Consulta el seguimiento del prestamo.');
+      }
       const receiptCycleV74 = LDH_prepSafeIdV66(
         purchaseReceiptOverrideV180
           ? (line?.compra_qty_pedido_id_v180 || line?.pedido_compras_id || "compra_v180")
@@ -34959,4 +34971,141 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 })();
 
 </script>
+
+<script id="LDH_PREP_V61_RECONCILIACION_5_BARRAS_20261109">
+/* V61: correccion EXCLUSIVA del duplicado 5 barras WOODS del 09/11/2026.
+ * No escribe ni en Stock ni en Preparacion al arrancar.
+ * La transaccion verifica el historial y el saldo exactos antes de ajustar.
+ * Los historiales se conservan; ajuste_neg no es consumo de materiales. */
+(function(){
+'use strict';
+if(window.__LDH_PREP_V61__)return;
+window.__LDH_PREP_V61__=true;
+const SRC='preparacion_reconciliacion_duplicado_v61';
+const C='emp_g3pgbthcsq',M='mat_f2i1l7io1e',DONOR='OT-260817-001-C',DEBTOR='OT-261106-001';
+const LOAN='iot55_mw4uclix_wpdqxhgr',OP='iot59_mw8z7x6j_jz8ykw1';
+const VALID='mov_iot59_iot59_mw8z7x6j_jz8ykw1';
+const DUP='mov_prep_received_v74_OT-260817-001-C_emp_g3pgbthcsq_mat_f2i1l7io1e_0_base';
+const ADJUST='mov_v61_compensacion_'+DUP;
+const SIX=['qty','cantidad','stock','real','fisico','physicalQty'];
+const SEVEN=['qtyPhysical','realQty','stockFisico','stockReal','stockActual','existencias','actualQty'];
+const allFields=[...SIX,...SEVEN];
+const s=x=>String(x==null?'':x).trim();
+const nr=x=>{const a=Number(x);return Number.isFinite(a)?a:NaN;};
+const id=x=>s(x?.id||x?.movementId);
+const company=x=>s(x?.companyId||x?.empresaId);
+const material=x=>s(x?.materialId||x?.matId);
+const has=(x,k)=>Object.prototype.hasOwnProperty.call(x||{},k);
+const when=x=>Date.parse(s(x?.date||x?.createdAt||x?.updatedAt));
+function check(db){
+  const no=msg=>({ok:false,message:msg});
+  if(!db||!Array.isArray(db.stock)||!Array.isArray(db.movements))return no('Stock remoto no disponible o incompleto.');
+  const rows=db.stock.filter(x=>company(x)===C&&material(x)===M);
+  if(rows.length!==1)return no('No existe una unica ficha WOODS / 40x40x1.5; revision manual necesaria.');
+  const row=rows[0];
+  if((db.movements||[]).some(x=>id(x)===ADJUST)||row.correctionV61?.adjustmentId===ADJUST){
+    if(allFields.every(k=>has(row,k)&&nr(row[k])===121))return {ok:false,already:true,physical:121,message:'La correccion V61 ya consta en Stock. No se repetira.'};
+    return no('La conciliacion ya figura, pero el saldo ha cambiado; no se modificara.');
+  }
+  const lm=(db.internalOtLoansV55||[]).filter(l=>s(l.id)===LOAN);
+  if(lm.length!==1)return no('No se encuentra exactamente el prestamo original.');
+  const loan=lm[0];
+  const repl=(loan.replacementsV59||[]).filter(o=>s(o.id)===OP);
+  if(s(loan.fromRef)!==DONOR||s(loan.toRef)!==DEBTOR||s(loan.companyId)!==C||s(loan.materialId)!==M||nr(loan.qty)!==5||nr(loan.returnedQty)!==5||s(loan.status)!=='repuesto'||repl.length!==1||nr(repl[0].qty)!==5||repl[0].donorPrepSynced!==true)return no('El historial de reposicion no coincide con el respaldo verificado.');
+  const m1=db.movements.filter(x=>id(x)===VALID),m2=db.movements.filter(x=>id(x)===DUP);
+  if(m1.length!==1||m2.length!==1)return no('No estan los dos movimientos originales con sus IDs exactos.');
+  const valid=m1[0],dup=m2[0];
+  if([valid,dup].some(x=>company(x)!==C||material(x)!==M||s(x.ref||x.jobRef)!==DONOR||nr(x.qty)!==5||s(x.type||x.tipo)!=='entrada'))return no('Los movimientos no coinciden en empresa, OT, material, tipo o cantidad.');
+  if(s(valid.replacementOperationId)!==OP||s(valid.reason)!=='reposicion_ot_donante_v59'||s(dup.reason)!=='recibido_fisico_v66'||s(dup.source)!=='preparacion_pedidos_recepcion_fisica_v66')return no('El origen de la duplicacion no coincide.');
+  if(s(valid.date)!=='2026-11-09T08:05:30.427Z'||s(dup.date)!=='2026-11-09T08:05:50.744Z')return no('Han cambiado las fechas verificadas de los movimientos.');
+  const newer=db.movements.filter(x=>company(x)===C&&material(x)===M&&when(x)>when(dup)&&id(x)!==ADJUST);
+  if(newer.length)return no('Hay otros movimientos posteriores de este material. No es seguro aplicar la correccion automatica.');
+  if(!allFields.every(k=>has(row,k)&&Number.isFinite(nr(row[k]))))return no('Faltan campos de stock para verificar la conciliacion.');
+  if(!SIX.every(k=>nr(row[k])===126)||!SEVEN.every(k=>nr(row[k])===121))return no('Las existencias han cambiado respecto al respaldo; no se modifica Stock.');
+  if(row.physicalManualMaster!==true||s(row.physicalSource)!=='preparacion_reposicion_ot_donante_v59')return no('El origen del saldo fisico no coincide con la reposicion registrada.');
+  return {ok:true,before:126,after:121,qty:5,row,valid,duplicate:dup,loan};
+}
+function apply(db){
+  const audit=check(db);
+  if(!audit.ok)throw Error(audit.message||'La validacion de Stock ha fallado.');
+  const stamp=new Date().toISOString();
+  for(const key of allFields)audit.row[key]=121;
+  audit.row.updatedAt=stamp;
+  audit.row.physicalUpdatedAt=stamp;
+  audit.row.physicalSource=SRC;
+  audit.row.correctionV61={adjustmentId:ADJUST,duplicateMovementId:DUP,originalReplacementMovementId:VALID,quantity:5,correctedAt:stamp,reason:'Anulacion contable de la segunda entrada de 5 barras; no hubo salida fisica.'};
+  audit.duplicate.reconciledBy=ADJUST;
+  audit.duplicate.reconciledAt=stamp;
+  audit.duplicate.reconciliationNote='Entrada duplicada de reposicion V59; compensada por ajuste negativo V61 sin salida fisica.';
+  db.movements.push({id:ADJUST,movementId:ADJUST,companyId:C,empresaId:C,company:'WOODS',empresa:'WOODS',materialId:M,matId:M,material:'40x40x1.5',materialName:'40x40x1.5',type:'ajuste_neg',tipo:'ajuste_neg',qty:5,cantidad:5,date:stamp,createdAt:stamp,updatedAt:stamp,ref:DONOR,jobRef:DONOR,source:SRC,reason:'ajuste_contable_entrada_duplicada_sin_salida_fisica',reconciliationOnly:true,notMaterialConsumption:true,debtExempt:true,returnRequired:false,compensatesMovementId:DUP,keepsMovementId:VALID,internalLoanId:LOAN,replacementOperationId:OP,note:'Saldo WOODS 40x40x1.5 126 -> 121; conserva deuda saldada y consumo original.'});
+  return {before:126,after:121,adjustmentId:ADJUST};
+}
+function currentDb(){return window.__LDH_PREP_STOCK_CLOUD_DB||window.__LDH_STOCK_MEMORY_DB||null;}
+function currentRef(){try{return s(window.refActual||refActual).toUpperCase();}catch(_){return s(window.refActual).toUpperCase();}}
+function lineId(line){return s(line?.linked_matId||line?.stockMatId||line?.matId||line?.stockLinkId);}
+function protectedLine(line){const db=currentDb();if(!line||currentRef()!==DONOR||lineId(line)!==M)return false;return (db?.internalOtLoansV55||[]).some(l=>s(l.fromRef)===DONOR&&s(l.materialId)===M&&s(l.companyId)===C&&(l.replacementsV59||[]).some(x=>nr(x?.qty)>0));}
+function lineArray(){try{return Array.isArray(window.estadoMateriales)?window.estadoMateriales:(Array.isArray(estadoMateriales)?estadoMateriales:[]);}catch(_){return [];}}
+function lockReceived(){
+  if(currentRef()!==DONOR)return;
+  const lines=lineArray(),bars=lines.filter(l=>String(l?.unit||l?.unidad||'').toLowerCase().includes('barra'));
+  const trs=Array.from(document.querySelectorAll('#tbodyBarras tr'));
+  trs.forEach((tr,i)=>{
+    if(!protectedLine(bars[i]))return;
+    const b=tr.querySelector('.ldh-recibido-btn');
+    if(b){b.disabled=true;b.classList.add('disabled');b.textContent='Reposicion ya registrada';b.title='No volver a recibir: la reposicion ya entro en Stock.';}
+    const input=tr.querySelector('.ldh-recibida-cell input[type="number"]');
+    if(input){input.readOnly=true;input.title='Recepcion protegida: material repuesto mediante prestamo OT.';}
+  });
+}
+let running=false;
+async function reconcile(){
+  if(running)return;
+  const state=window.__LDH_PREP_STOCK_FIREBASE_STATE;
+  if(!state||state.connected!==true){alert('Primero verifica que Stock nube este conectado y sincronizado.');return;}
+  const audit=check(currentDb());
+  if(!audit.ok){alert(audit.message);updateButton();return;}
+  const answer=prompt('CONCILIACION DE STOCK - SOLO WOODS 40x40x1.5\n\nHay dos entradas de 5 barras, pero solo llegaron 5.\n\nSe compensara la segunda entrada, sin consumir ni alterar el prestamo.\n\nEscribe CORREGIR 5 para continuar:','');
+  if(answer!== 'CORREGIR 5')return;
+  if(!confirm('Confirmar ajuste contable de -5 barras en WOODS 40x40x1.5?\n\nEl saldo pasara de 126 a 121. Se guardara el historial completo.'))return;
+  running=true;
+  const button=document.getElementById('ldhV61CheckButton');if(button){button.disabled=true;button.textContent='Verificando y corrigiendo...';}
+  try{
+    if(typeof window.LDH_prepRunStockMutationV129!=='function')throw Error('No esta disponible la transaccion de Stock V129.');
+    const result=await window.LDH_prepRunStockMutationV129(SRC,async remote=>apply(remote));
+    if(result?.after!==121)throw Error('La operacion no ha devuelto el saldo esperado. Comprueba el JSON antes de repetir.');
+    window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:SRC,materialId:M,companyId:C}}));
+    try{window.renderTabla?.();}catch(_){ }
+    try{window.cargarLista?.();}catch(_){ }
+    alert('CORRECCION CONFIRMADA EN FIRESTORE\n\nWOODS - 40x40x1.5: 121 barras fisicas.\nEntrada duplicada: compensada -5.\nDeuda: sigue saldada; consumo original intacto.\n\nGenera ahora un nuevo JSON para comprobarlo.');
+  }catch(error){console.error('[Preparacion V61] Reconciliacion cancelada',error);alert('NO SE HA CONFIRMADO LA CORRECCION.\n'+s(error?.message||error)+'\n\nNo repitas otras recepciones.');}
+  finally{running=false;updateButton();}
+}
+function updateButton(){
+  const header=document.querySelector('#vistaLista h3');if(!header)return;
+  let button=document.getElementById('ldhV61CheckButton');
+  if(!button){button=document.createElement('button');button.id='ldhV61CheckButton';button.type='button';button.className='btn';button.style.cssText='margin:8px 0 0 12px;border-color:#f59e0b;color:#fde68a;font-size:12px;';button.onclick=reconcile;header.appendChild(button);}
+  const audit=check(currentDb());
+  if(audit.ok){button.style.display='inline-block';button.disabled=running;button.textContent=running?'Corrigiendo...':'Revisar duplicado WOODS 40x40 (+5)';button.title='Requiere confirmacion expresa. No modifica nada al abrir.';}
+  else if(audit.already){button.style.display='inline-block';button.disabled=true;button.textContent='Stock conciliado - 121 barras';}
+  else{button.style.display='none';}
+  lockReceived();
+}
+function init(){
+  // Solo controles visuales: no escritura, no transaccion en el arranque.
+  const previousRender=window.renderTabla;
+  if(typeof previousRender==='function')window.renderTabla=function(){const v=previousRender.apply(this,arguments);lockReceived();return v;};
+  const previousUpdate=window.updateQty;
+  if(typeof previousUpdate==='function')window.updateQty=function(index,input){if(protectedLine(lineArray()[index])){if(input)input.value=String(lineArray()[index]?.qty_recibida||0);alert('La reposicion de esta OT ya esta registrada. No modifiques la cantidad recibida con el control normal.');return;}return previousUpdate.apply(this,arguments);};
+  const previousReceived=window.LDH_marcarRecibidoCompleto;
+  if(typeof previousReceived==='function')window.LDH_marcarRecibidoCompleto=function(index){if(protectedLine(lineArray()[index])){alert('La reposicion ya esta contabilizada. RECIBIDO duplicaria las barras de Stock.');return;}return previousReceived.apply(this,arguments);};
+  window.addEventListener('ldh:stock-cloud-updated',updateButton);
+  document.addEventListener('visibilitychange',updateButton);
+  setInterval(updateButton,3500);
+  updateButton();
+  console.info('[Preparacion V61] Guardia anti-duplicados y conciliacion de +5 WOODS lista. No hubo escritura en el arranque.');
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+})();
+</script>
+
 </body></html>
