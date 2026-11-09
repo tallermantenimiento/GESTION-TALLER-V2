@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
-<meta name="ldh-build" content="PREPARACION-V59-REPOSICION-OT-DEUDA-VISIBLE-20261109" />
+<meta name="ldh-build" content="PREPARACION-V60-SEGUIMIENTO-DEUDOR-REPOSICION-SOLO-DONANTE-20261109" />
+<meta name="ldh-prep-v60-build" content="PREPARACION-V60-CONSULTA-DEUDA-OT-CERRADA-20261109" />
 <meta name="ldh-prep-v59-build" content="PREPARACION-V59-REPOSICION-FISICA-Y-DEUDA-PERSISTENTE-20261109" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
 <meta name="ldh-prep-delete-build" content="PREPARACION-V159-BORRADO-PERSISTENTE-SIN-RESURRECCION-20260907" />
@@ -34736,6 +34737,20 @@ function setup(){
 #ldhV59Dialog .ldh-v59-controls{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:10px;margin-top:18px}
 #ldhV59Dialog button{padding:9px 13px;background:#154760;color:white;border:1px solid #4a92b2;border-radius:8px;cursor:pointer}
 #ldhV59Dialog button.primary{background:#11612e;border-color:#35bf77;font-weight:850}
+#ldhV60DebtDialog{position:fixed;inset:0;background:rgba(0,0,0,.78);display:none;align-items:center;justify-content:center;z-index:1100001;padding:15px}
+#ldhV60DebtDialog.open{display:flex}
+#ldhV60DebtDialog .ldh-v60-panel{max-width:700px;width:100%;max-height:90vh;overflow:auto;border:1px solid #56a0be;border-radius:17px;background:#0b2037;color:#e6f6ff;padding:23px;box-shadow:0 18px 70px #000a}
+#ldhV60DebtDialog .ldh-v60-loan{border:1px solid rgba(99,173,225,.35);background:#0a192e;border-radius:11px;padding:14px;margin:10px 0}
+#ldhV60DebtDialog .ldh-v60-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:9px;margin-top:12px}
+#ldhV60DebtDialog .ldh-v60-kpi{background:#102946;border:1px solid rgba(100,166,216,.2);padding:9px 10px;border-radius:9px}
+#ldhV60DebtDialog .ldh-v60-kpi strong{display:block;color:#e9f7ff;font-size:18px;margin-top:4px}
+#ldhV60DebtDialog .ldh-v60-muted{color:#a9c6d8;font-size:12px;line-height:1.5}
+#ldhV60DebtDialog .ldh-v60-note{border:1px solid rgba(245,158,11,.4);background:rgba(245,158,11,.10);color:#ffe6b0;border-radius:10px;padding:11px;margin:13px 0;font-size:13px}
+#ldhV60DebtDialog button{background:#174a67;color:#fff;border:1px solid #58a5ca;padding:10px 18px;border-radius:9px;cursor:pointer}
+.ldh-v59-card .ldh-v59-label{cursor:pointer!important;text-align:left}
+.ldh-v59-card .ldh-v59-label:hover{filter:brightness(1.18)}
+.ldh-v59-card:focus-visible{outline:3px solid #38bdf8;outline-offset:3px}
+.ldh-v59-button.ldh-v60-read{background:linear-gradient(160deg,#123c5c,#092b49);border-color:#38bdf8;color:#c6efff}
 #ldhV59Dialog button:disabled{opacity:.45;cursor:wait}`;
   document.head.appendChild(css);
   const wrap=document.createElement('div');wrap.id='ldhV59Dialog';wrap.innerHTML=`<div class="ldh-v59-dialog-body" role="dialog" aria-modal="true" aria-labelledby="ldhV59Heading"><h3 id="ldhV59Heading" style="margin:0">Recibir reposición de préstamo entre OT</h3><p id="ldhV59Summary"></p><div id="ldhV59Pending" class="ldh-v59-info" style="display:none"></div><div id="ldhV59New"><label>Barras nuevas que han llegado <input id="ldhV59Amount" type="number" step="1" min="1" value="1"></label><div class="ldh-v59-info">Esta operación registra una ENTRADA física en Stock y asigna las barras a la OT donante. El consumo de las barras originales en Fabricación NO se modifica. No vuelvas a registrar estas barras mediante «Recibido» ni como entrada manual de Stock.</div><label><input id="ldhV59ConfirmPhysical" type="checkbox"> Confirmo que las barras nuevas han llegado físicamente y NO han sido contabilizadas todavía en Stock ni en la OT donante.</label></div><div class="ldh-v59-controls"><button type="button" id="ldhV59Cancel">Cancelar</button><button type="button" id="ldhV59Submit" class="primary">Registrar reposición</button></div></div>`;
@@ -34786,15 +34801,80 @@ async function submit(){
 function ident(r){const m=parse(get(MK+ref(r)),{})||{};return s(m.identification||m.workIdentification||m.workLabel||m.referenceLabel||m.composite_part_description||'');}
 function displayRef(r){return ref(r)+(ident(r)?' ('+ident(r)+')':'');}
 function normalMeta(r){return parse(get(MK+ref(r)),{})||{};}
-function addAction(host,loan){
+/* V60 · La OT deudora ya consumio su material y su ficha productiva esta cerrada.
+ * Consultar su deuda nunca debe registrar entradas, ni reabrir la recepcion. */
+function formatDate(v){
+  const d=new Date(s(v));
+  if(!Number.isFinite(d.getTime()))return s(v)||'Sin fecha';
+  return d.toLocaleString('es-ES',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+function debtInfoOpen(r,focusLoanId){
+  const currentRef=ref(r);
+  const related=relativeLoans(currentRef);
+  if(!related.length)return alert('No hay deudas de prestamo pendientes para esta OT. Actualiza Preparacion.');
+  let host=document.getElementById('ldhV60DebtDialog');
+  if(!host){
+    setup();
+    host=document.createElement('div');host.id='ldhV60DebtDialog';
+    host.innerHTML='<section class="ldh-v60-panel" role="dialog" aria-modal="true" aria-labelledby="ldhV60Title"><h3 id="ldhV60Title" style="margin:0 0 12px">Ficha de seguimiento del préstamo</h3><div id="ldhV60DebtBody"></div><div style="display:flex;justify-content:flex-end;margin-top:16px"><button id="ldhV60CloseDebt" type="button">Cerrar seguimiento</button></div></section>';
+    document.body.appendChild(host);
+    host.querySelector('#ldhV60CloseDebt').onclick=()=>host.classList.remove('open');
+    host.addEventListener('click',e=>{if(e.target===host)host.classList.remove('open');});
+  }
+  const m=normalMeta(currentRef);
+  const isClosed=m.closed_from_preparation===true||m.deleted_from_preparation===true||!get(PK+currentRef);
+  const isDebtor=related.some(l=>ref(l.toRef)===currentRef);
+  const role=isDebtor?'OT DEUDORA':'OT DONANTE';
+  const head='<div class="ldh-v60-loan"><strong>'+esc(currentRef)+'</strong> · '+esc(role)+
+    (ident(currentRef)?'<div style="color:#ffe6ad;font-weight:800;margin:4px 0">'+esc(ident(currentRef))+'</div>':'')+
+    '<div class="ldh-v60-muted">'+esc(s(m.concepto||''))+(m.empresa||m.company?' · '+esc(m.empresa||m.company):'')+'</div></div>';
+  const sorted=[...related].sort((a,b)=>Number(s(a.id)===s(focusLoanId))*-1-Number(s(b.id)===s(focusLoanId))*-1);
+  const cards=sorted.map(l=>{
+    const donor=ref(l.fromRef),debtor=ref(l.toRef),pending=outstanding(l);
+    const histories=Array.isArray(l.history)?l.history:[];
+    const hist=histories.map(h=>{
+      const type=s(h.type),descr=type==='prestamo'?'Préstamo realizado':type==='reposicion_material_nuevo'?'Material nuevo recibido para reponer al donante':type==='devolucion'?'Devolución sin consumir':type.replaceAll('_',' ');
+      return '<div class="ldh-v60-muted" style="padding:5px 0;border-top:1px solid rgba(255,255,255,.07)">'+esc(formatDate(h.at||h.date))+' · '+esc(descr)+' · '+esc(n(h.qty))+' barras</div>';
+    }).join('');
+    const ongoing=pendingOps(l);
+    return '<section class="ldh-v60-loan"><strong>'+esc(s(l.materialName||'Material prestado'))+'</strong>'+ 
+      '<div class="ldh-v60-muted" style="margin-top:6px">Donante: <b>'+esc(donor)+'</b><br>Deudora: <b>'+esc(debtor)+'</b><br>Fecha de préstamo: '+esc(formatDate(l.createdAt))+'</div>'+
+      '<div class="ldh-v60-grid"><div class="ldh-v60-kpi">Prestadas<strong>'+esc(n(l.qty))+'</strong></div><div class="ldh-v60-kpi">Repuestas/devueltas<strong>'+esc(n(l.returnedQty))+'</strong></div><div class="ldh-v60-kpi">Deuda pendiente<strong>'+esc(pending)+'</strong></div></div>'+
+      (ongoing.length?'<div class="ldh-v60-note">Hay una reposición contabilizada en Stock pendiente de completar su sincronización con Preparación. La finalización se realiza desde la ficha de la OT donante, sin duplicar entradas.</div>':'')+
+      '<h4 style="margin:15px 0 8px">Historial del préstamo</h4>'+(hist||'<div class="ldh-v60-muted">Sin movimientos adicionales.</div>')+'</section>';
+  }).join('');
+  const note=isClosed?'<div class="ldh-v60-note">Esta OT ya cerró su recepción en Preparación. La ficha es de <b>consulta únicamente</b>: no se reabre la OT, no se registra material recibido y no se altera el consumo anterior.</div>':'<div class="ldh-v60-note">Este seguimiento es informativo. La reposición física se registra exclusivamente en la OT donante.</div>';
+  const stock=dbStock();
+  const movements=(stock.movements||[]).filter(m=>itemRef(m)===currentRef &&
+    ['salida','out'].includes(norm(m.type||m.tipo)) &&
+    /consumo_stock_propio_al_entrar_fabricacion/i.test(s(m.reason)));
+  const consumed=movements.length?'<section class="ldh-v60-loan"><h4 style="margin:0 0 10px">Materiales consumidos registrados en Stock</h4>'+movements.map(m=>{
+    const mat=(stock.materials||[]).find(x=>s(x.id)===s(m.materialId||m.matId));
+    return '<div class="ldh-v60-muted" style="padding:5px 0;border-top:1px solid rgba(255,255,255,.08)">'+
+      esc(s(m.materialName||m.material||mat?.name||m.materialId||'Material'))+' · <b>'+esc(n(m.qty??m.cantidad))+' '+esc(s(mat?.unit||m.unit||'unidades'))+'</b> · '+esc(formatDate(m.date||m.createdAt))+'</div>';
+  }).join('')+'<div class="ldh-v60-muted" style="margin-top:9px">Consulta del historial: no genera movimientos ni modifica consumos.</div></section>':'';
+  host.querySelector('#ldhV60DebtBody').innerHTML=head+cards+consumed+note;
+  host.classList.add('open');
+}
+function addAction(host,loan,cardRef){
+  const current=ref(cardRef),isDonor=current===ref(loan.fromRef);
   const cls='ldh-v59-repo-'+s(loan.id).replace(/[^a-zA-Z0-9_-]/g,'_');
-  if(host.querySelector('.'+cls))return;
-  const button=document.createElement('button');button.type='button';button.className='ldh-v59-button '+cls;
-  const pend=pendingOps(loan).length>0;
-  button.textContent=pend?'Finalizar sincronización '+n(pendingOps(loan)[0]?.qty)+' barras':'Recibir reposición ('+outstanding(loan)+' pendientes)';
-  button.title='Registrar la entrada de barras nuevas para la OT donante sin devolver barras ya consumidas';
-  button.onclick=e=>{e.stopPropagation();open(loan.id);};
-  host.appendChild(button);
+  let button=host.querySelector('.'+cls);
+  if(!button){button=document.createElement('button');button.type='button';button.className='ldh-v59-button '+cls;host.appendChild(button);}
+  button.dataset.loanId=s(loan.id);
+  button.dataset.role=isDonor?'donor':'debtor';
+  if(isDonor){
+    button.classList.remove('ldh-v60-read');
+    button.textContent=pendingOps(loan).length?'Finalizar sincronización '+n(pendingOps(loan)[0]?.qty)+' barras':'Recibir reposición ('+outstanding(loan)+' pendientes)';
+    button.title='Registrar la recepción de barras nuevas en la OT donante';
+    button.onclick=e=>{e.stopPropagation();open(loan.id);};
+  }else{
+    button.classList.add('ldh-v60-read');
+    button.textContent='Ver seguimiento de deuda ('+outstanding(loan)+' pendientes)';
+    button.title='Consultar la ficha de deuda sin modificar existencias ni recepciones';
+    button.onclick=e=>{e.stopPropagation();debtInfoOpen(current,loan.id);};
+  }
+  return button;
 }
 function paint(){
   const list=document.getElementById('lista');if(!list)return;
@@ -34820,16 +34900,21 @@ function paint(){
       const m=normalMeta(r),hasLines=!!get(PK+r),closed=m.closed_from_preparation===true||m.deleted_from_preparation===true;
       item=document.createElement('div');item.className='item ldh-v59-card';item.dataset.ref=r;item.dataset.refNorm=norm(r);
       item.innerHTML='<div class="ldh-card-head"><span class="ldh-tech-ref">'+esc(r)+'</span><span class="badge b-stage-fab">'+esc(s(m.workflow_stage_label||m.fase||m.estado||'En Fabricación'))+'</span></div>'+ (ident(r)?'<div class="ldh-card-ident">'+esc(ident(r))+'</div>':'')+'<div class="ldh-card-meta">'+esc(s(m.concepto||'Trabajo con préstamo pendiente'))+' · '+esc(s(m.empresa||m.company||''))+'</div><div class="ldh-v59-label">SEGUIMIENTO DE PRÉSTAMO PENDIENTE</div><div class="ldh-v59-caption">'+(closed||!hasLines?'La ficha de recepción ya estaba cerrada. Se conserva aquí solo el seguimiento de deuda; no se reabre la OT ni se vuelven a consumir materiales.':'La ficha sigue en Preparación por la deuda pendiente aunque esté en Fabricación.')+'</div>';
-      if(hasLines&&!closed)item.onclick=()=>{if(typeof abrirPedido==='function')abrirPedido(r);};
+      if(hasLines&&!closed){
+        item.onclick=()=>{if(typeof abrirPedido==='function')abrirPedido(r);};
+      }else{
+        item.tabIndex=0;item.setAttribute('role','button');
+        item.setAttribute('aria-label','Abrir seguimiento de deuda de '+r);
+        item.onclick=()=>debtInfoOpen(r);
+        item.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();debtInfoOpen(r);}};
+      }
+      const pill=item.querySelector('.ldh-v59-label');
+      if(pill)pill.onclick=e=>{e.stopPropagation();debtInfoOpen(r);};
       list.appendChild(item);
     }
     let actions=item.querySelector('.ldh-v59-actions');if(!actions){actions=document.createElement('div');actions.className='ldh-v59-actions';item.appendChild(actions);}
     for(const button of [...actions.querySelectorAll('.ldh-v59-button')]){const id=button.dataset.loanId;if(id&&!related.some(l=>s(l.id)===id))button.remove();}
-    for(const l of related){
-      let button=[...actions.querySelectorAll('button[data-loan-id]')].find(b=>s(b.dataset.loanId)===s(l.id));
-      if(!button){addAction(actions,l);button=actions.lastElementChild;if(button)button.dataset.loanId=s(l.id);}
-      if(button)button.textContent=pendingOps(l).length?'Finalizar sincronización '+n(pendingOps(l)[0]?.qty)+' barras':'Recibir reposición ('+outstanding(l)+' pendientes)';
-    }
+    for(const l of related)addAction(actions,l,r);
   }
   const detail=document.getElementById('vistaDetalle');
   if(detail&&!detail.classList.contains('hidden')){
@@ -34839,7 +34924,7 @@ function paint(){
     if(!rel.length){bar?.remove();return;}
     if(!bar){bar=document.createElement('div');bar.id='ldhV59DetailActions';bar.className='ldh-v59-actions';bar.style.margin='12px 0';const anchor=detail.querySelector('.actions');if(anchor)anchor.parentNode.insertBefore(bar,anchor);else detail.appendChild(bar);}
     bar.querySelectorAll('button').forEach(b=>{if(!rel.some(l=>s(l.id)===s(b.dataset.loanId)))b.remove();});
-    for(const l of rel){if(![...bar.querySelectorAll('button')].some(b=>s(b.dataset.loanId)===s(l.id))){addAction(bar,l);bar.lastElementChild.dataset.loanId=s(l.id);}}
+    for(const l of rel)addAction(bar,l,r);
   }
 }
 let timer=null;
@@ -34867,7 +34952,8 @@ function init(){
   setInterval(schedulePaint,2600);schedulePaint();
   window.LDH_V59_PENDING=()=>loans(dbStock()).filter(isRelevant).map(l=>({id:l.id,fromRef:ref(l.fromRef),toRef:ref(l.toRef),pending:outstanding(l),pendingPrepSync:pendingOps(l).length}));
   window.LDH_V59_OPEN_REPLENISHMENT=open;
-  console.info('[Preparacion V59] Deudas V55 protegidas frente al cierre; reposicion fisica en dos fases sin doble entrada.');
+  window.LDH_V60_OPEN_DEBT_INFO=debtInfoOpen;
+  console.info('[Preparacion V60] Seguimiento consultable en OT deudora; reposicion fisica solo en donante; consumo intacto.');
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
