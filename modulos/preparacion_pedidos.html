@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
 <meta name="ldh-prep-v61-fix" content="V61-RECONCILIACION-RECIBO-DUPLICADO-WOODS-20261109" />
-<meta name="ldh-build" content="PREPARACION-V60-SEGUIMIENTO-DEUDOR-REPOSICION-SOLO-DONANTE-20261109" />
+<meta name="ldh-build" content="PREPARACION-V63-MULTIDONANTE-FAB-CODIGOS-20261109" />
 <meta name="ldh-prep-v60-build" content="PREPARACION-V60-CONSULTA-DEUDA-OT-CERRADA-20261109" />
 <meta name="ldh-prep-v59-build" content="PREPARACION-V59-REPOSICION-FISICA-Y-DEUDA-PERSISTENTE-20261109" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
@@ -34207,6 +34207,20 @@ const isBar=x=>norm(x?.unit||x?.unidad).includes('barra')&&!norm(matName(x)).inc
 const qtyOf=x=>num(first(x?.qty,x?.cantidad,x?.asignado,x?.reservado));
 const rowRef=x=>refKey(first(x?.ref,x?.jobRef,x?.trabajoRef,x?.workRef));
 const recordActive=x=>['','activa','activo'].includes(norm(first(x?.status,x?.estado)))&&['','preparacion','fabricacion'].includes(norm(first(x?.phase,x?.fase)));
+// V63: Stock marca como 'consumida' una asignacion al pasar a Fabricacion.
+// Esto NO prueba que las barras esten cortadas. Exigimos confirmacion fisica
+// y NUNCA reactivamos ni borramos el consumo antiguo del Stock.
+const stockCountedFromFabrication=(db,cid,mid,ref)=>
+ (db.assignments||[]).filter(x=>
+  ['consumida','consumido'].includes(norm(first(x?.status,x?.estado)))&&
+  ['fabricacion',''].includes(norm(first(x?.phase,x?.fase)))&&
+  !isOtherDebt(x)&&str(x.companyId)===cid&&
+  str(first(x.materialId,x.matId))===mid&&rowRef(x)===refKey(ref));
+const priorLegacyTransfers=(db,cid,mid,ref)=>ledger(db)
+ .filter(x=>str(x.companyId)===cid&&str(x.materialId)===mid&&refKey(x.fromRef)===refKey(ref))
+ .reduce((sum,x)=>sum+Math.max(0,num(x?.sourceAlreadyCountedQtyV63)-num(x?.returnedQty)),0);
+const confirmedFabPool=(db,cid,mid,ref)=>Math.max(0,
+ stockCountedFromFabrication(db,cid,mid,ref).reduce((sum,x)=>sum+qtyOf(x),0)-priorLegacyTransfers(db,cid,mid,ref));
 const isOtherDebt=x=>x?.toCompanyId||x?.sharedStock===true||/otra.?empresa|prestamo|donacion|stock.?comun/i.test(str(first(x?.assignmentType,x?.reason)));
 const allocationRows=(db,cid,mid,ref)=>[...(db.assignments||[]).filter(x=>recordActive(x)&&!isOtherDebt(x)&&str(x.companyId)===cid&&str(first(x.materialId,x.matId))===mid&&rowRef(x)===refKey(ref)),...(db.reservations||[]).filter(x=>recordActive(x)&&str(x.companyId)===cid&&str(first(x.materialId,x.matId))===mid&&rowRef(x)===refKey(ref))];
 const assigned=(db,cid,mid,ref)=>allocationRows(db,cid,mid,ref).reduce((a,x)=>a+qtyOf(x),0);
@@ -34238,8 +34252,12 @@ function donors(ctx){
    const lines=linesFor(ref),found=uniqueLine(lines,ctx.mid,ctx.name);if(!found)continue;
    const {l}=found;
    const rec=num(first(l.qty_recibida,l.recibida)),held=assigned(db,cid,ctx.mid,ref);
-   const max=Math.floor(Math.min(rec,held));if(max<1)continue;
+   const alreadyCounted=f.fabricacion?confirmedFabPool(db,cid,ctx.mid,ref):0;
+   // Se usa SOLO la recepcion de la OT y su saldo transferible.
+   // Nunca se consulta el 'libre' global del Stock, aun si indica 121.
+   const max=Math.floor(Math.min(rec,held>0?held:alreadyCounted));if(max<1)continue;
    out.push({ref,idx:found.i,max,phase:f.label,needsCheck:f.fabricacion,
+    held:Math.floor(held),alreadyCounted:Math.floor(alreadyCounted),
     identification:str(first(meta.identification,meta.workIdentification,meta.workLabel,meta.referenceLabel,meta.composite_part_description,meta.partDescription)),concept:str(first(meta.concepto,meta.concept)),received:rec});
  }
  return out.sort((a,b)=>a.ref.localeCompare(b.ref));
@@ -34260,8 +34278,11 @@ function open(index){
  const rec=num(first(l.qty_recibida,l.recibida)),ped=num(first(l.qty_pedida,l.pedida,l.qty)),missing=Math.floor(Math.max(0,ped-rec));
  if(missing<1)return alert('Este trabajo ya tiene toda la cantidad recibida. No necesita otro prestamo interno.');
  if(phase(ref).fabricacion)return alert('El destino ya esta en Fabricacion: no se permite alterar sus recepciones desde este selector.');
- active={index,ref,company:str(first(c.name,c.nombre)),cid:str(c.id),...p,missing};active.donors=donors(active);
- if(!active.donors.length)return alert('No hay ninguna OT de esta empresa con barras propias disponibles y fase verificada. Comprueba la conexion con Firestore.');
+ active={index,ref,company:str(first(c.name,c.nombre)),cid:str(c.id),...p,missing};
+ if(ledger(db).some(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===active.mid&&x.syncState==='pendiente_prep'))
+   return alert('Hay un prestamo pendiente de sincronizar con Preparacion. No se permite crear otro hasta verificar el anterior.');
+ active.donors=donors(active);
+ if(!active.donors.length)return alert('No se encontraron OTs donantes en Preparacion o Fabricacion con barras recibidas y fase verificada. Las barras ya utilizadas no pueden prestarse. No se utilizara Stock libre general.');
  getInput('ldhV55Title').textContent='Prestamo entre OTs · '+active.company;
  getInput('ldhV55Intro').textContent='Destino: '+ref+' · '+active.name+' · faltan '+missing+' barras. Puedes repetir con distintos trabajos; cada prestamo queda registrado por separado.';
  getInput('ldhV55Origin').innerHTML=active.donors.map((d,i)=>`<option value="${i}">${esc(d.ref+' · '+(d.identification||d.concept||'Sin aclaratoria')+' · '+d.phase+' · disponibles '+d.max)}</option>`).join('');
@@ -34271,7 +34292,7 @@ function open(index){
 }
 function showSelection(){if(!active)return;const d=active.donors[Number(getInput('ldhV55Origin').value)||0];if(!d)return;
  getInput('ldhV55Qty').max=str(Math.min(d.max,active.missing));getInput('ldhV55Qty').value=str(Math.min(d.max,active.missing));
- getInput('ldhV55Info').textContent='Origen '+d.ref+' · '+d.phase+' · '+d.max+' barras asignadas disponibles · maximo destino '+active.missing;
+ getInput('ldhV55Info').textContent='Origen '+d.ref+' · '+d.phase+' · hasta '+d.max+' barras por recepcion de OT (activa '+d.held+', imputada en Fabricacion '+d.alreadyCounted+'). Confirma solo las barras fisicamente enteras. Faltan '+active.missing+' en destino.';
  getInput('ldhV55FabWrap').style.display=d.needsCheck?'block':'none';getInput('ldhV55Fab').checked=false;
 }
 function modifyReceived(l,delta,ref,other,loanId){
@@ -34279,6 +34300,8 @@ function modifyReceived(l,delta,ref,other,loanId){
  if(rec<0||rec>ped+0.000001)throw new Error('La cantidad recibida de '+ref+' cambiaria fuera de los limites.');
  l.qty_recibida=rec;l.recibida=rec;
  const ap=num(first(l.aplicado_qty,l.aplicado));l.aplicado_qty=Math.max(0,Math.min(rec,ap+delta));l.aplicado=l.aplicado_qty;
+ // Nunca dejar consumo contable mayor que la recepcion tras un prestamo saliente.
+ if(delta<0&&l.stock_consumed_qty!==undefined)l.stock_consumed_qty=Math.min(rec,num(l.stock_consumed_qty));
  l.ok=ped>0&&rec>=ped;l.completo=l.ok;l.done=l.ok;l.isDone=l.ok;l.isCompleted=l.ok;
  if(!Array.isArray(l.trace))l.trace=[];
  l.trace.push({at:new Date().toISOString(),qty:delta,source:'prestamo_interno_ot_v55',internalLoanId:loanId,otherRef:other});
@@ -34293,6 +34316,32 @@ function reduceAssigned(db,cid,mid,ref,qty){
    row.updatedAt=new Date().toISOString();if(remain===0){row.status='liberada';row.estado='liberada';}left-=take;
  }
  if(left>0.000001)throw new Error('La OT de origen ya no tiene suficientes barras asignadas.');
+}
+function carryAlreadyCountedV63(db,cid,mid,ref,qty,name,loanId,sourceRef,now){
+ // Caso Fabricacion: las barras originales ya tuvieron salida contable.
+ // No crear una SEGUNDA salida fisica cuando el receptor pase a Fabricacion.
+ // El movimiento de control a cero sirve de marca idempotente para V115.
+ const controlId='mov_iot63_transferencia_ya_contada_'+loanId;
+ if((db.movements||[]).some(m=>str(first(m.id,m.movementId))===controlId))
+   throw new Error('Existe ya una marca de traspaso para este prestamo. Verificar sincronizacion.');
+ (db.movements||(db.movements=[])).push({
+   id:controlId,movementId:controlId,companyId:cid,materialId:mid,
+   ref,jobRef:ref,fromRef:sourceRef,internalLoanId:loanId,
+   type:'traspaso_contable_ot',tipo:'traspaso_contable_ot',qty:0,cantidad:0,
+   at:now,date:now,createdAt:now,
+   source:'preparacion_prestamo_interno_v63',reason:'barras_ya_descontadas_al_entrar_donante_en_fabricacion',
+   physicalMovement:false,notMaterialConsumption:true,debtExempt:true,returnRequired:false
+ });
+ (db.assignments||(db.assignments=[])).push({
+   id:'asg_iot63_'+loanId,companyId:cid,materialId:mid,ref,jobRef:ref,
+   qty,cantidad:qty,assignmentType:'libre',
+   status:'activa',estado:'activa',phase:'preparacion',fase:'preparacion',
+   source:'preparacion_prestamo_interno_v63',reason:'traspaso_interno_ya_descontado_v63',
+   movementId:controlId,sourceRef,internalLoanId:loanId,
+   sourceAlreadyCountedQtyV63:qty,createdAt:now,updatedAt:now,
+   debtExempt:true,returnRequired:false
+ });
+ return controlId;
 }
 function increaseAssigned(db,cid,mid,ref,qty,name){
  // Una asignacion interna NO es deuda interempresa: no crea movimientos fisicos.
@@ -34334,11 +34383,22 @@ async function execute(){
    await window.LDH_prepRunStockMutationV129(SOURCE+'_prestamo',async db=>{
      if(ledger(db).some(x=>x.id===id))return;
      const donorPhase=phase(d.ref);if(!donorPhase.ok)throw new Error('Origen ya no prestable: '+donorPhase.reason);
-     if(assigned(db,active.cid,active.mid,d.ref)+0.000001<qty)throw new Error('No hay suficientes barras realmente asignadas a la OT de origen.');
-     reduceAssigned(db,active.cid,active.mid,d.ref,qty);
-     increaseAssigned(db,active.cid,active.mid,active.ref,qty,active.name);
+     const hasPending=ledger(db).some(x=>x.syncState==='pendiente_prep'&&str(x.materialId)===active.mid&&refKey(x.toRef)===refKey(active.ref));
+     if(hasPending)throw new Error('Hay una cesion anterior pendiente de sincronizar; no repetir.');
+     const phaseNow=phase(d.ref);
+     const held=assigned(db,active.cid,active.mid,d.ref);
+     const legacy=phaseNow.fabricacion?confirmedFabPool(db,active.cid,active.mid,d.ref):0;
+     const transferable=Math.floor(held>0?held:legacy);
+     if(transferable<qty)throw new Error('Otra operacion ha reducido el saldo prestable de esta OT. Vuelve a revisar donantes.');
+     const fromActive=held>0?qty:0,alreadyCounted=held>0?0:qty;
+     if(alreadyCounted>0&&!phaseNow.fabricacion)throw new Error('Las barras ya imputadas solo se pueden prestar desde Fabricacion.');
+     if(alreadyCounted>legacy)throw new Error('Barras antiguas sin disponibilidad contable comprobable.');
+     if(fromActive>0){reduceAssigned(db,active.cid,active.mid,d.ref,fromActive);increaseAssigned(db,active.cid,active.mid,active.ref,fromActive,active.name);}
+     const marker=alreadyCounted>0?carryAlreadyCountedV63(db,active.cid,active.mid,active.ref,alreadyCounted,active.name,id,d.ref,now):'';
      if(!Array.isArray(db[FIELD]))db[FIELD]=[];
-     db[FIELD].push({id,fromRef:d.ref,toRef:active.ref,companyId:active.cid,materialId:active.mid,materialName:active.name,qty,returnedQty:0,status:'pendiente',syncState:'pendiente_prep',createdAt:now,confirmedUnused:!!d.needsCheck,history:[{type:'prestamo',qty,at:now}]});
+     db[FIELD].push({id,fromRef:d.ref,toRef:active.ref,companyId:active.cid,materialId:active.mid,materialName:active.name,qty,returnedQty:0,status:'pendiente',syncState:'pendiente_prep',createdAt:now,confirmedUnused:!!d.needsCheck,
+       sourceAlreadyCountedQtyV63:alreadyCounted,sourceActiveQtyV63:fromActive,accountingMarkerV63:marker,
+       history:[{type:'prestamo',qty,at:now,sourceAlreadyCountedQtyV63:alreadyCounted,physicalStockChange:0}]});
      return {id};
    });
    await prepSync([originalEntry,targetEntry]);
@@ -34385,6 +34445,34 @@ async function executeReturn(){
   modifyReceived(targetEntry.lines[t.i],-qty,targetEntry.ref,sourceEntry.ref,loan.id);
   sourceEntry.meta=stateMeta(sourceEntry.meta,sourceEntry.lines);targetEntry.meta=stateMeta(targetEntry.meta,targetEntry.lines);
   const stamp=new Date().toISOString();
+  // V63: cesion desde Fabricacion ya imputada contablemente. Si el receptor
+  // todavia tiene las barras enteras, puede devolverlas SIN una salida/entrada
+  // fisica adicional. La reserva contable de origen se recupera en el ledger.
+  if(num(loan.sourceAlreadyCountedQtyV63)>0){
+    if(num(loan.sourceAlreadyCountedQtyV63)!==num(loan.qty))throw new Error('Prestamo mixto no compatible con devolucion automatica.');
+    await window.LDH_prepRunStockMutationV129(SOURCE+'_devolucion_v63',async db=>{
+      const remote=ledger(db).find(x=>x.id===loan.id);
+      if(!remote||outstanding(remote)<qty)throw new Error('El prestamo pendiente ha cambiado.');
+      if(!phase(loan.toRef).ok||phase(loan.toRef).fabricacion)throw new Error('El receptor ya no permite devolucion sin uso.');
+      const donorStage=phase(loan.fromRef);
+      if(!donorStage.ok)throw new Error('La OT de origen ya esta en una fase avanzada; revisar devolucion.');
+      const row=(db.assignments||[]).find(x=>str(x.id)==='asg_iot63_'+loan.id&&str(x.companyId)===str(remote.companyId)&&str(x.materialId)===str(remote.materialId));
+      if(!row||!recordActive(row)||qtyOf(row)+0.000001<qty)throw new Error('No se encuentra la asignacion contable exacta de estas barras.');
+      const rest=qtyOf(row)-qty;row.qty=rest;row.cantidad=rest;row.updatedAt=stamp;
+      if(rest<=0){row.status='devuelta';row.estado='devuelta';}
+      remote.returnedQty=num(remote.returnedQty)+qty;remote.status=outstanding(remote)<=0?'devuelto':'pendiente';
+      remote.syncState='pendiente_prep';remote.updatedAt=stamp;
+      remote.history=Array.isArray(remote.history)?remote.history:[];
+      remote.history.push({type:'devolucion_sin_uso_v63',qty,at:stamp,physicalStockChange:0});
+      return {loanId:remote.id};
+    });
+    await prepSync([sourceEntry,targetEntry]);
+    try{await window.LDH_prepRunStockMutationV129(SOURCE+'_devolucion_v63_sync_ok',async db=>{const x=ledger(db).find(r=>r.id===loan.id);if(x)x.syncState='sincronizado';return {loanId:loan.id};});}catch(e){console.warn('[V63] Marca de sync devolucion',e);}
+    getInput('ldhV55Panel').classList.remove('show');
+    try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:SOURCE}}));if(typeof abrirPedido==='function')abrirPedido(active.ref);}catch(_){}
+    alert('Devolucion SIN CONSUMIR: '+qty+' barras a '+loan.fromRef+'.\nStock fisico sin cambios.');
+    return;
+  }
   await window.LDH_prepRunStockMutationV129(SOURCE+'_devolucion',async db=>{
    const remote=ledger(db).find(x=>x.id===loan.id);if(!remote||outstanding(remote)<qty)throw new Error('El prestamo pendiente ha cambiado.');
    if(!phase(loan.toRef).ok||phase(loan.toRef).fabricacion)throw new Error('La OT receptora ya no permite devolver desde Preparacion.');
@@ -34425,6 +34513,11 @@ console.info('[Preparacion V55] Asignar desde otras OTs de la misma empresa: act
 })();
 </script>
 
+
+<style id="LDH_PREP_V63_VISUAL_CODES">
+.ldh-v63-loan-code{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:45px;padding:3px 6px;border-radius:5px;font-size:10px;line-height:1.2;font-weight:950;letter-spacing:.025em;white-space:nowrap;margin-right:5px}
+</style>
+
 <!-- LDH_V58_DONANTE_DEUDOR_IDENTIFICADO · SOLO LECTURA · 20261106 -->
 <style id="LDH_V58_DONANTE_DEUDOR_IDENTIFICADO_STYLE">
 .ldh-v58-relations{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin:7px 0 3px}
@@ -34446,6 +34539,20 @@ console.info('[Preparacion V55] Asignar desde otras OTs de la misma empresa: act
 if(window.__LDH_PREP_V58_RELATIONS__)return;
 window.__LDH_PREP_V58_RELATIONS__=true;
 const FIELD='internalOtLoansV55';
+// Colores estables ligados al ID del prestamo, no a la OT ni al rol.
+// El codigo P-XXXX evita depender solo del color y se repite en ambos extremos.
+const colors=[
+ ['#38214e','#c084fc','#f6e8ff'],['#123947','#22d3ee','#e0fbff'],
+ ['#493019','#fb923c','#fff0d7'],['#193d31','#34d399','#d8ffec'],
+ ['#49223f','#f472d0','#ffe3fa'],['#203451','#60a5fa','#e2efff'],
+ ['#374018','#bef264','#f4ffd8'],['#43252a','#fb7185','#ffe6eb'],
+ ['#193e42','#5eead4','#e4fff8'],['#423716','#facc15','#fff7cc'],
+ ['#29254b','#a5b4fc','#ebeaff'],['#443045','#e879f9','#ffe4fe']
+];
+function visual(id){let hash=2166136261;const raw=s(id);for(let i=0;i<raw.length;i++){hash^=raw.charCodeAt(i);hash=Math.imul(hash,16777619);}hash>>>=0;return {code:'P-'+hash.toString(16).toUpperCase().padStart(8,'0').slice(-4),colors:colors[hash%colors.length]};}
+function visualStyle(v){return 'background:'+v.colors[0]+';border-color:'+v.colors[1]+';color:'+v.colors[2]+';border-left-width:5px';}
+function codeHtml(x){const v=visual(x.id||x.origin+'|'+x.dest+'|'+x.material);return '<span class="ldh-v63-loan-code" style="background:'+v.colors[1]+';color:#071326" title="Codigo de prestamo">'+esc(v.code)+'</span>';}
+function styleFor(x){return visualStyle(visual(x.id||x.origin+'|'+x.dest+'|'+x.material));}
 const s=v=>String(v==null?'':v).trim();
 const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?Math.max(0,x):0};
 const ref=v=>{const m=s(v).toUpperCase().match(/OT[-_\s]*(\d{6})[-_\s]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):s(v).toUpperCase()};
@@ -34513,7 +34620,7 @@ function identification(reference){
 function displayOT(reference){const r=ref(reference),id=identification(r);return r+(id?' ('+id+')':'')}
 function aggregate(rows,role){
  const grouped=new Map();
- for(const r of rows){const k=r.type+'|'+role+'|'+(role==='donor'?r.dest:r.origin);const old=grouped.get(k)||{...r,qty:0};old.qty+=r.qty;grouped.set(k,old)}
+ for(const r of rows){const k=r.type+'|'+role+'|'+(r.id||r.origin+'|'+r.dest+'|'+r.material);const old=grouped.get(k)||{...r,qty:0};old.qty+=r.qty;grouped.set(k,old)}
  return [...grouped.values()];
 }
 function rolesFor(reference,rows){const rr=ref(reference);return {
@@ -34524,8 +34631,8 @@ function paintCard(item,rows){
  const reference=item.dataset?.ref;if(!reference)return;
  const p=rolesFor(reference,rows),old=item.querySelector('.ldh-v58-relations');
  const content=[
-  ...p.donor.map(x=>'<span class="ldh-v58-role ldh-v58-donor" title="'+esc(x.type+' · '+x.material+' · '+x.qty+' pendientes')+'"><span class="ldh-v58-ident"><strong>DONANTE A:</strong> '+esc(displayOT(x.dest))+'</span><span class="ldh-v58-qty"><b>'+x.qty+'</b> pendientes</span></span>'),
-  ...p.debtor.map(x=>'<span class="ldh-v58-role ldh-v58-debtor" title="'+esc(x.type+' · '+x.material+' · '+x.qty+' pendientes')+'"><span class="ldh-v58-ident"><strong>DEUDOR DE:</strong> '+esc(displayOT(x.origin))+'</span><span class="ldh-v58-qty"><b>'+x.qty+'</b> pendientes</span></span>')
+  ...p.donor.map(x=>'<span class="ldh-v58-role ldh-v58-donor" style="'+styleFor(x)+'" title="'+esc(x.type+' · '+x.material+' · '+x.qty+' pendientes')+'">'+codeHtml(x)+'<span class="ldh-v58-ident"><strong>DONANTE A:</strong> '+esc(displayOT(x.dest))+'</span><span class="ldh-v58-qty"><b>'+x.qty+'</b> pendientes</span></span>'),
+  ...p.debtor.map(x=>'<span class="ldh-v58-role ldh-v58-debtor" style="'+styleFor(x)+'" title="'+esc(x.type+' · '+x.material+' · '+x.qty+' pendientes')+'">'+codeHtml(x)+'<span class="ldh-v58-ident"><strong>DEUDOR DE:</strong> '+esc(displayOT(x.origin))+'</span><span class="ldh-v58-qty"><b>'+x.qty+'</b> pendientes</span></span>')
  ].join('');
  if(!content){if(old)old.remove();return;}
  if(old&&old.innerHTML===content)return;
@@ -34537,7 +34644,7 @@ function paintDetail(rows){
  const reference=current(),old=document.getElementById('ldhV58Detail');if(!reference){old?.remove();return}
  const p=rolesFor(reference,rows),lines=[...p.donor.map(x=>({role:'DONANTE A:',other:x.dest,...x})),...p.debtor.map(x=>({role:'DEUDOR DE:',other:x.origin,...x}))];
  if(!lines.length){old?.remove();return}
- const html='<div class="ldh-v58-detail-title">Préstamos pendientes hasta regularización · '+lines.length+' relaciones</div>'+lines.map(x=>'<div class="ldh-v58-row"><strong>'+x.role+'</strong> '+esc(displayOT(x.other))+' · '+esc(x.type)+' · '+esc(x.material)+' · <b>'+x.qty+'</b> pendientes</div>').join('');
+ const html='<div class="ldh-v58-detail-title">Préstamos pendientes hasta regularización · '+lines.length+' relaciones</div>'+lines.map(x=>'<div class="ldh-v58-row" style="border-left:4px solid '+visual(x.id||x.origin+'|'+x.dest+'|'+x.material).colors[1]+';padding-left:8px;margin-bottom:5px">'+codeHtml(x)+' <strong>'+x.role+'</strong> '+esc(displayOT(x.other))+' · '+esc(x.type)+' · '+esc(x.material)+' · <b>'+x.qty+'</b> pendientes</div>').join('');
  if(old&&old.innerHTML===html)return;
  let el=old;if(!el){el=document.createElement('div');el.id='ldhV58Detail';const anchor=host.querySelector('#panelHierro')||host.querySelector('#bloqueBarras');if(anchor)anchor.insertAdjacentElement('beforebegin',el);else host.prepend(el)}el.innerHTML=html;
 }
