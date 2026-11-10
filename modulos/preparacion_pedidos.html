@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
 <meta name="ldh-prep-v61-fix" content="V61-RECONCILIACION-RECIBO-DUPLICADO-WOODS-20261109" />
-<meta name="ldh-build" content="PREPARACION-V63-MULTIDONANTE-FAB-CODIGOS-20261109" />
+<meta name="ldh-build" content="PREPARACION-V64-RECEPCION-TRANSACCIONAL-20261109" />
 <meta name="ldh-prep-v60-build" content="PREPARACION-V60-CONSULTA-DEUDA-OT-CERRADA-20261109" />
 <meta name="ldh-prep-v59-build" content="PREPARACION-V59-REPOSICION-FISICA-Y-DEUDA-PERSISTENTE-20261109" />
 <meta name="ldh-prep-intercompany-build" content="PREPARACION-V158-PRESTAMO-PINTURA-ID-POR-EMPRESA-20260907" />
@@ -16883,6 +16883,8 @@ function LDH_prepVolverMenu(){
   }
 
   async function pushNow(reason){
+    // V64: no publicar una copia incompleta mientras se sincroniza un préstamo.
+    if(window.__LDH_PREP_V64_BUSY){ schedulePush('v64_transaccion_pendiente',1000); return; }
     if(applyingRemote || !booted || !ensureFirebase()) return;
     try{
       const data = collectData();
@@ -17014,6 +17016,8 @@ function LDH_prepVolverMenu(){
   }
 
   function applyRemote(remote){
+    // V64: un snapshot anterior no puede interrumpir una transacción de préstamo.
+    if(window.__LDH_PREP_V64_BUSY) return false;
     if(!remote || !remote.data) return false;
     const rdata = remote.data || {};
     const remoteHash = stableHash(rdata);
@@ -17344,6 +17348,7 @@ function LDH_prepVolverMenu(){
     try{ sessionStorage.setItem(MARK, String(remoteAt || Date.now())); }catch(e){}
     show("Cambios nuevos en Preparación. Actualizando...");
     const run = function(){
+      if(window.__LDH_PREP_V64_BUSY){ reloadTimer=setTimeout(run,1200); return; }
       if(isTyping()){
         show("Cambios nuevos en Preparación. Se actualizará al soltar el campo...");
         reloadTimer = setTimeout(run, 1200);
@@ -34226,6 +34231,13 @@ const allocationRows=(db,cid,mid,ref)=>[...(db.assignments||[]).filter(x=>record
 const assigned=(db,cid,mid,ref)=>allocationRows(db,cid,mid,ref).reduce((a,x)=>a+qtyOf(x),0);
 const outstanding=r=>Math.max(0,num(r?.qty)-num(r?.returnedQty));
 const ledger=db=>Array.isArray(db[FIELD])?db[FIELD]:[];
+const loanStamped=(l,id)=>Array.isArray(l?.trace)&&l.trace.some(x=>str(x.internalLoanId)===str(id)&&/prestamo_interno_ot_v(55|64)/.test(str(x.source)));
+const targetMismatch=(ref,mid)=>{
+ const match=ledger(stockDb()).filter(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===str(mid)&&outstanding(x)>0&&(num(x.sourceAlreadyCountedQtyV63)>0||str(x.syncState)==='pendiente_prep'));
+ const lines=linesFor(ref),target=lines.map((l,i)=>({l,i})).filter(({l})=>isBar(l)&&midOf(l)===str(mid));
+ if(target.length!==1)return [];
+ return match.filter(x=>!loanStamped(target[0].l,x.id)||num(first(target[0].l.qty_recibida,target[0].l.recibida))<num(x.qty));
+};
 const phase=ref=>{
  let lookup=null;try{lookup=window.LDH_PREP_V193_LOOKUP?.(ref);}catch(_){}
  if(!lookup||!lookup.ready)return {ok:false,reason:'No se ha confirmado la fase en la nube'};
@@ -34278,6 +34290,8 @@ function open(index){
  const rec=num(first(l.qty_recibida,l.recibida)),ped=num(first(l.qty_pedida,l.pedida,l.qty)),missing=Math.floor(Math.max(0,ped-rec));
  if(missing<1)return alert('Este trabajo ya tiene toda la cantidad recibida. No necesita otro prestamo interno.');
  if(phase(ref).fabricacion)return alert('El destino ya esta en Fabricacion: no se permite alterar sus recepciones desde este selector.');
+ const inconsistent=targetMismatch(ref,p.mid);
+ if(inconsistent.length)return alert('Existe un préstamo ya registrado cuya recepción no figura correctamente en esta OT ('+inconsistent.map(x=>x.qty+' barras desde '+x.fromRef).join(', ')+').\n\nPulsa SINCRONIZAR RECEPCIÓN DEL PRÉSTAMO antes de realizar otra cesión. No se moverá Stock.');
  active={index,ref,company:str(first(c.name,c.nombre)),cid:str(c.id),...p,missing};
  if(ledger(db).some(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===active.mid&&x.syncState==='pendiente_prep'))
    return alert('Hay un prestamo pendiente de sincronizar con Preparacion. No se permite crear otro hasta verificar el anterior.');
@@ -34359,6 +34373,94 @@ async function prepSync(entries){
  for(const e of entries){put('prep_recepcion_'+e.ref,JSON.stringify(e.lines));put('prep_meta_'+e.ref,JSON.stringify(e.meta));}
 }
 function stateMeta(meta,ls){const m={...meta},complete=ls.every(x=>num(first(x.qty_recibida,x.recibida))>=num(first(x.qty_pedida,x.pedida,x.qty)));m.recepcion_completa=complete;if(!complete)m._notified_complete=false;m.lastUpdate=new Date().toISOString();return m;}
+function prepCloud(){
+ if(!window.firebase?.firestore)throw new Error('Preparación Firestore no está disponible.');
+ const app=(firebase.apps||[]).find(x=>x.options?.projectId==='gestion-taller-v2');
+ if(!app)throw new Error('No está conectado el proyecto Firestore de Preparación.');
+ return firebase.firestore(app).collection('taller_data').doc('preparacion');
+}
+function loanLine(lines,mid,name){
+ const matches=(Array.isArray(lines)?lines:[]).map((l,i)=>({l,i})).filter(({l})=>isBar(l)&&(midOf(l)===str(mid)||(midOf(l)===''&&norm(matName(l))===norm(name))));
+ if(matches.length!==1)throw new Error('La partida de barras vinculada no es única. Operación cancelada.');
+ return matches[0];
+}
+async function loanPrepState(ref,mid,name){
+ const snap=await prepCloud().get({source:'server'});
+ if(!snap.exists||snap.metadata?.fromCache)throw new Error('No se ha obtenido Preparación desde el servidor.');
+ const data=snap.data()?.data||{};
+ const lines=parse(data['prep_recepcion_'+ref],[]);
+ const {l}=loanLine(lines,mid,name);
+ return {l,meta:parse(data['prep_meta_'+ref],{})};
+}
+async function reconcileLoanPrep(loan,repair){
+ // SOLO Preparación. Stock ya conserva el préstamo y nunca se aumenta/disminuye aquí.
+ const sourceRef=str(loan.fromRef),destRef=str(loan.toRef),q=num(loan.qty),id=str(loan.id);
+ if(!sourceRef||!destRef||!id||!Number.isInteger(q)||q<1)throw new Error('Préstamo no válido para sincronizar.');
+ const dr=prepCloud(),db=dr.firestore;
+ const result=await db.runTransaction(async tx=>{
+  const snap=await tx.get(dr);
+  if(!snap.exists)throw new Error('Documento Preparación no localizado.');
+  const old=snap.data()||{},data={...(old.data||{})};
+  const fk='prep_recepcion_'+sourceRef,tk='prep_recepcion_'+destRef;
+  const fm='prep_meta_'+sourceRef,tm='prep_meta_'+destRef;
+  const from=parse(data[fk],[]),to=parse(data[tk],[]);
+  const {l:fl}=loanLine(from,loan.materialId,loan.materialName),{l:tl}=loanLine(to,loan.materialId,loan.materialName);
+  const doneFrom=loanStamped(fl,id),doneTo=loanStamped(tl,id);
+  const fNow=num(first(fl.qty_recibida,fl.recibida)),tNow=num(first(tl.qty_recibida,tl.recibida));
+  const tMax=num(first(tl.qty_pedida,tl.pedida,tl.qty));
+  let changed=false;
+  if(!doneFrom){
+    if(fNow>=q){modifyReceived(fl,-q,sourceRef,destRef,id);changed=true;}
+    else if(repair&&fNow===0&&num(first(fl.qty_pedida,fl.pedida,fl.qty))===q){
+      // V63 legacy: la donante se descontó, pero perdió su marca. No descontar otra vez.
+      if(!Array.isArray(fl.trace))fl.trace=[];
+      fl.trace.push({at:new Date().toISOString(),qty:-q,source:'prestamo_interno_ot_v64_marca_origen',internalLoanId:id,otherRef:destRef,physicalStockChange:0});changed=true;
+    }else throw new Error('La donante no tiene saldo verificable para conciliar: '+fNow+' barras. No se ha modificado nada.');
+  }
+  if(!doneTo){
+    if(repair&&tNow!==0)throw new Error('La receptora ya indica '+tNow+' barras sin marca de préstamo. Es necesario comprobar el JSON para no duplicarlas.');
+    if(tNow+q>tMax)throw new Error('La recepción superaría las '+tMax+' barras pedidas. No se ha modificado nada.');
+    modifyReceived(tl,q,destRef,sourceRef,id);changed=true;
+  }else if(tNow<q){
+    // La marca sobrevivió pero un sincronizador antiguo degradó la cantidad.
+    if(!repair||tNow!==0||q>tMax)throw new Error('La recepción ya tiene la marca del préstamo, pero su cantidad es incompatible. Requiere revisión manual.');
+    modifyReceived(tl,q,destRef,sourceRef,id);changed=true;
+  }
+  const fromMeta=stateMeta(parse(data[fm],{}),from),toMeta=stateMeta(parse(data[tm],{}),to);
+  if(changed){
+   const patch={[fk]:JSON.stringify(from),[tk]:JSON.stringify(to),[fm]:JSON.stringify(fromMeta),[tm]:JSON.stringify(toMeta)};
+   tx.set(dr,{schema:old.schema||'prep_live_sync_v6_authoritative',data:{...data,...patch},keys:[...new Set([...(old.keys||Object.keys(data)),...Object.keys(patch)])].sort(),updatedAt:Date.now(),reason:'PREPARACION_V64_LOAN_RECEIPT_'+id},{merge:true});
+  }
+  return {from,to,fromMeta,toMeta,changed,expected:tNow+(doneTo?0:q)};
+ });
+ for(const x of [{ref:sourceRef,lines:result.from,meta:result.fromMeta},{ref:destRef,lines:result.to,meta:result.toMeta}]){
+   put('prep_recepcion_'+x.ref,JSON.stringify(x.lines));put('prep_meta_'+x.ref,JSON.stringify(x.meta));
+ }
+ // Verificación por servidor: no marcar Stock como sincronizado si otro escritor anuló la recepción.
+ const check=await loanPrepState(destRef,loan.materialId,loan.materialName);
+ if(!loanStamped(check.l,id)||num(first(check.l.qty_recibida,check.l.recibida))<q)
+  throw new Error('Preparación no confirmó las barras prestadas. No repitas el préstamo; utiliza SINCRONIZAR RECEPCIÓN.');
+ return {qty:q,received:num(first(check.l.qty_recibida,check.l.recibida)),ordered:num(first(check.l.qty_pedida,check.l.pedida,check.l.qty)),changed:result.changed};
+}
+async function repairExistingLoan(id){
+ if(pending)return;
+ const loan=ledger(stockDb()).find(x=>str(x.id)===str(id));
+ if(!loan||num(loan.qty)<1||!(num(loan.sourceAlreadyCountedQtyV63)>0||str(loan.syncState)==='pendiente_prep'))return alert('No se identifica un préstamo pendiente de sincronización. Actualiza Preparación.');
+ if(outstanding(loan)<=0)return alert('Este préstamo ya está saldado. Revisar el historial antes de cambiar la recepción.');
+ if(!window.__LDH_PREP_STOCK_FIREBASE_STATE?.connected)return alert('Stock aún no está verificado desde la nube. Recarga la página.');
+ const last=Date.parse(window.__LDH_PREP_STOCK_FIREBASE_STATE.lastReadAt||0)||0;
+ if(!last||Date.now()-last>5*60*1000)return alert('La lectura de Stock tiene más de 5 minutos. Actualiza la página antes de sincronizar.');
+ if(!confirm('SINCRONIZAR RECEPCIÓN EXISTENTE\n\nDonante: '+loan.fromRef+'\nDeudora: '+loan.toRef+'\nCantidad: '+loan.qty+' barras\n\nSolo se comprobarán y corregirán las fichas de Preparación. NO se creará un préstamo nuevo ni habrá entrada/salida de Stock. ¿Confirmar?'))return;
+ pending=true;window.__LDH_PREP_V64_BUSY=true;
+ try{
+  const result=await reconcileLoanPrep(loan,true);
+  getInput('ldhV55Panel')?.classList.remove('show');
+  if(currentRef()===loan.toRef&&typeof abrirPedido==='function')abrirPedido(loan.toRef);else if(typeof cargarLista==='function')cargarLista();
+  alert('Recepción sincronizada: '+result.received+' de '+result.ordered+' barras recibidas.\nPendientes: '+Math.max(0,result.ordered-result.received)+'.\nStock físico SIN CAMBIOS. Préstamo ya registrado, sin duplicar.');
+ }catch(e){console.error('[V64] Reconciliar recepción',e);alert('No se ha completado la sincronización: '+(e?.message||e)+'\n\nNO registres otro préstamo hasta resolverlo.');}
+ finally{pending=false;window.__LDH_PREP_V64_BUSY=false;}
+}
+window.LDH_V64_REPAIR_LOAN_RECEIPT=repairExistingLoan;
 async function execute(){
  if(pending||!active)return;
  const d=active.donors[Number(getInput('ldhV55Origin').value)||0],qty=Number(getInput('ldhV55Qty').value);
@@ -34366,7 +34468,7 @@ async function execute(){
  if(d.needsCheck&&!getInput('ldhV55Fab').checked)return alert('Debes confirmar que el material de Fabricacion sigue sin utilizar.');
  if(location.protocol==='file:'&&!confirm('ATENCION: estas abriendo el HTML local, pero los prestamos pueden escribirse en FIRESTORE REAL.\n\nPara revisar el selector pulsa CANCELAR. Solo continua si quieres registrar un prestamo REAL.'))return;
  if(!confirm('PRESTAMO INTERNO · SIN CAMBIO DE STOCK FISICO\nOrigen: '+d.ref+'\nDestino: '+active.ref+'\nCantidad: '+qty+' barras\n\nSe registrara una deuda interna individual. ¿Confirmar?'))return;
- pending=true;getInput('ldhV55Confirm').disabled=true;getInput('ldhV55Confirm').textContent='Registrando...';
+ pending=true;window.__LDH_PREP_V64_BUSY=true;getInput('ldhV55Confirm').disabled=true;getInput('ldhV55Confirm').textContent='Registrando...';
  const now=new Date().toISOString(),id='iot55_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,10);
  try{
    if(typeof window.LDH_prepRunStockMutationV129!=='function')throw new Error('No esta listo el conector transaccional de Stock.');
@@ -34401,14 +34503,16 @@ async function execute(){
        history:[{type:'prestamo',qty,at:now,sourceAlreadyCountedQtyV63:alreadyCounted,physicalStockChange:0}]});
      return {id};
    });
-   await prepSync([originalEntry,targetEntry]);
-   // Declarar la preparacion sincronizada; si falla, el ledger sigue trazable.
+   const registered=ledger(stockDb()).find(x=>x.id===id);
+   if(!registered)throw new Error('Stock registró la cesión pero no devuelve su identificador. No repitas.');
+   await reconcileLoanPrep(registered,false);
+   // Declarar la preparación sincronizada SOLO después de verificar su recepción en nube.
    try{await window.LDH_prepRunStockMutationV129(SOURCE+'_sync_ok',async db=>{const rec=ledger(db).find(x=>x.id===id);if(rec)rec.syncState='sincronizado';return {id};});}catch(e){console.warn('[V55] No se pudo marcar syncState',e);}
    getInput('ldhV55Panel').classList.remove('show');
    try{window.dispatchEvent(new CustomEvent('ldh:stock-cloud-updated',{detail:{source:SOURCE}}));if(typeof abrirPedido==='function')abrirPedido(active.ref);else if(typeof cargarLista==='function')cargarLista();}catch(_){ }
    alert('Prestamo interno registrado: '+qty+' barras.\nOrigen: '+d.ref+'\nDestino: '+active.ref+'\nStock fisico: SIN CAMBIOS.\nDeuda registrada individualmente.');
  }catch(e){console.error('[V55] Prestamo',e);alert('Operacion no completada o sincronizacion pendiente.\n\n'+(e?.message||e)+'\n\nNO repitas el prestamo sin verificar antes las asignaciones en Stock.');}
- finally{pending=false;getInput('ldhV55Confirm').disabled=false;getInput('ldhV55Confirm').textContent='Registrar prestamo';}
+ finally{pending=false;window.__LDH_PREP_V64_BUSY=false;getInput('ldhV55Confirm').disabled=false;getInput('ldhV55Confirm').textContent='Registrar prestamo';}
 }
 function openReturn(index){
  ui();const ref=currentRef(),line=currentLines()[index],meta=currentMeta(),db=stockDb(),p=pref(line,ref,db);
@@ -34498,11 +34602,19 @@ function inject(){
   const isRelevant=isBar(l)||norm(l?.unit||l?.unidad)==='mm'||norm(matName(l)).includes('pletina');
   if(!isRelevant)return;
   const tr=tbody.children[pos++],action=tr?.children[4];if(!action||!isBar(l))return;
-  action.querySelectorAll('.ldh-v55-internal,.ldh-v55-return').forEach(x=>x.remove());
+  action.querySelectorAll('.ldh-v55-internal,.ldh-v55-return,.ldh-v64-sync-receipt').forEach(x=>x.remove());
+  const mismatched=targetMismatch(ref,midOf(l));
+  if(mismatched.length){
+    const btn=document.createElement('button');btn.type='button';btn.className='btn-mini ldh-v64-sync-receipt';
+    btn.style.cssText='border-color:#facc15;background:#3c2e0f;color:#ffe9aa;font-weight:800';
+    btn.textContent='Sincronizar recepción ('+mismatched.reduce((sum,x)=>sum+num(x.qty),0)+' ya prestadas)';
+    btn.title='Las deudas existen en Stock pero faltan sus recibidas en Preparación. No crea otro préstamo ni mueve Stock.';
+    btn.onclick=()=>repairExistingLoan(mismatched[0].id);action.appendChild(btn);
+  }
   const pendingLoans=ledger(db).filter(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===midOf(l)&&outstanding(x)>0);
   if(pendingLoans.length){const ret=document.createElement('button');ret.type='button';ret.className='btn-mini ldh-v55-return';ret.textContent='Devolver SIN CONSUMIR ('+pendingLoans.length+')';ret.title='Solo barras intactas, disponibles y sin consumo en Fabricacion';ret.onclick=()=>openReturn(i);action.appendChild(ret);}
   const ped=num(first(l.qty_pedida,l.pedida,l.qty)),rec=num(first(l.qty_recibida,l.recibida)),ctx=phase(ref);
-  if(ped<=rec||!ctx.ok||ctx.fabricacion)return;
+  if(mismatched.length||ped<=rec||!ctx.ok||ctx.fabricacion)return;
   const b=document.createElement('button');b.type='button';b.className='btn-mini ldh-v55-internal';b.textContent='Asignar desde otra OT propia';b.title='Transferir barras entre trabajos de la misma empresa, incluso desde Fabricacion';b.onclick=()=>open(i);action.appendChild(b);
  });
 }
