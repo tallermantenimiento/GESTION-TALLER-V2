@@ -34236,7 +34236,9 @@ const targetMismatch=(ref,mid)=>{
  const match=ledger(stockDb()).filter(x=>refKey(x.toRef)===refKey(ref)&&str(x.materialId)===str(mid)&&outstanding(x)>0&&(num(x.sourceAlreadyCountedQtyV63)>0||str(x.syncState)==='pendiente_prep'));
  const lines=linesFor(ref),target=lines.map((l,i)=>({l,i})).filter(({l})=>isBar(l)&&midOf(l)===str(mid));
  if(target.length!==1)return [];
- return match.filter(x=>!loanStamped(target[0].l,x.id)||num(first(target[0].l.qty_recibida,target[0].l.recibida))<num(x.qty));
+ const credited=match.filter(x=>loanStamped(target[0].l,x.id)).reduce((sum,x)=>sum+num(x.qty),0);
+ const rec=num(first(target[0].l.qty_recibida,target[0].l.recibida));
+ return match.filter(x=>!loanStamped(target[0].l,x.id)||(rec+0.000001<credited));
 };
 const phase=ref=>{
  let lookup=null;try{lookup=window.LDH_PREP_V193_LOOKUP?.(ref);}catch(_){}
@@ -34392,6 +34394,25 @@ async function loanPrepState(ref,mid,name){
  const {l}=loanLine(lines,mid,name);
  return {l,meta:parse(data['prep_meta_'+ref],{})};
 }
+// V65: acreditacion acumulada por PRESTAMO, no por el total de la linea.
+// No inferir entradas fisicas del libre general ni de la simple cifra recibida.
+function verifiedPreviousLoanReceipts(line,loan){
+ const debts=ledger(stockDb()).filter(x=>
+   refKey(x.toRef)===refKey(loan.toRef)&&str(x.materialId)===str(loan.materialId)&&
+   str(x.id)!==str(loan.id));
+ const byId=new Map(debts.map(x=>[str(x.id),x]));
+ const trace=(Array.isArray(line.trace)?line.trace:[]).filter(x=>
+   num(x.qty)>0 && str(x.internalLoanId)!==str(loan.id) &&
+   /prestamo_interno_ot_v(55|64|65)$/.test(str(x.source)));
+ const seen=new Set();let total=0;
+ for(const t of trace){
+   const id=str(t.internalLoanId),prior=byId.get(id);
+   if(!prior||seen.has(id)||num(prior.qty)!==num(t.qty))
+     throw new Error('Las recepciones antiguas no cuadran con el historial de préstamos. Revisión con JSON requerida; sin cambios.');
+   seen.add(id);total+=num(t.qty);
+ }
+ return total;
+}
 async function reconcileLoanPrep(loan,repair){
  // SOLO Preparación. Stock ya conserva el préstamo y nunca se aumenta/disminuye aquí.
  const sourceRef=str(loan.fromRef),destRef=str(loan.toRef),q=num(loan.qty),id=str(loan.id);
@@ -34410,36 +34431,63 @@ async function reconcileLoanPrep(loan,repair){
   const tMax=num(first(tl.qty_pedida,tl.pedida,tl.qty));
   let changed=false;
   if(!doneFrom){
-    if(fNow>=q){modifyReceived(fl,-q,sourceRef,destRef,id);changed=true;}
-    else if(repair&&fNow===0&&num(first(fl.qty_pedida,fl.pedida,fl.qty))===q){
-      // V63 legacy: la donante se descontó, pero perdió su marca. No descontar otra vez.
-      if(!Array.isArray(fl.trace))fl.trace=[];
-      fl.trace.push({at:new Date().toISOString(),qty:-q,source:'prestamo_interno_ot_v64_marca_origen',internalLoanId:id,otherRef:destRef,physicalStockChange:0});changed=true;
-    }else throw new Error('La donante no tiene saldo verificable para conciliar: '+fNow+' barras. No se ha modificado nada.');
+    // V65: en una reparación, NUNCA restar otra vez al origen si se perdió
+    // la marca: salvo huella previa verificable, no sabemos si ya se descontó.
+    const before=Number(loan.donorReceivedBeforeV65);
+    if(repair&&(!Number.isFinite(before)||loan.donorReceivedBeforeV65==null||fNow!==before))
+      throw new Error('La donante no tiene la marca de este préstamo y no se puede demostrar que siga sin descontar. Revisar JSON; sin cambios.');
+    if(!repair&&loan.donorReceivedBeforeV65!=null&&fNow!==before)
+      throw new Error('La recepción de la donante cambió durante el registro. Sin cambios.');
+    if(fNow<q)throw new Error('La donante no tiene barras suficientes para conciliar. Sin cambios.');
+    modifyReceived(fl,-q,sourceRef,destRef,id);changed=true;
   }
+  const others=verifiedPreviousLoanReceipts(tl,loan);
   if(!doneTo){
-    if(repair&&tNow!==0)throw new Error('La receptora ya indica '+tNow+' barras sin marca de préstamo. Es necesario comprobar el JSON para no duplicarlas.');
+    if(repair){
+      if(loan.targetReceivedBeforeV65!=null){
+        if(tNow!==num(loan.targetReceivedBeforeV65))
+          throw new Error('La receptora cambió respecto al saldo previo del préstamo. Revisar JSON; sin cambios.');
+      }else if(tNow!==others){
+        // Préstamos V64: aceptar 6 ya recibidas de otra OT SOLO si las 6
+        // están individualmente acreditadas por su traza y préstamo real.
+        throw new Error('La receptora indica '+tNow+' barras, pero solo '+others+' se acreditan por préstamos anteriores. Revisar JSON; sin cambios.');
+      }
+    }else if(loan.targetReceivedBeforeV65!=null&&tNow!==num(loan.targetReceivedBeforeV65)){
+      throw new Error('La receptora cambió durante el registro. Sin cambios; usar sincronización del préstamo.');
+    }
     if(tNow+q>tMax)throw new Error('La recepción superaría las '+tMax+' barras pedidas. No se ha modificado nada.');
     modifyReceived(tl,q,destRef,sourceRef,id);changed=true;
-  }else if(tNow<q){
-    // La marca sobrevivió pero un sincronizador antiguo degradó la cantidad.
-    if(!repair||tNow!==0||q>tMax)throw new Error('La recepción ya tiene la marca del préstamo, pero su cantidad es incompatible. Requiere revisión manual.');
-    modifyReceived(tl,q,destRef,sourceRef,id);changed=true;
+  }else{
+    // Si el rastro subsiste pero una sincronización antigua degradó la cifra,
+    // jamás volver a agregar la misma traza: ajustar solo el diferencial.
+    const credited=others+q;
+    if(tNow+0.000001<credited){
+      if(!repair||tNow!==others||credited>tMax)
+        throw new Error('Hay marcas de préstamos que no cuadran con las barras recibidas. Revisar JSON; sin cambios.');
+      const delta=credited-tNow;
+      tl.qty_recibida=credited;tl.recibida=credited;
+      tl.aplicado_qty=Math.min(credited,num(first(tl.aplicado_qty,tl.aplicado))+delta);
+      tl.aplicado=tl.aplicado_qty;
+      tl.ok=credited>=tMax;tl.completo=tl.ok;tl.done=tl.ok;tl.isDone=tl.ok;tl.isCompleted=tl.ok;
+      if(!Array.isArray(tl.trace))tl.trace=[];
+      tl.trace.push({at:new Date().toISOString(),qty:0,source:'prestamo_interno_ot_v65_reconciliacion_cifra',internalLoanId:id,oldReceived:tNow,newReceived:credited,physicalStockChange:0});
+      changed=true;
+    }
   }
   const fromMeta=stateMeta(parse(data[fm],{}),from),toMeta=stateMeta(parse(data[tm],{}),to);
   if(changed){
    const patch={[fk]:JSON.stringify(from),[tk]:JSON.stringify(to),[fm]:JSON.stringify(fromMeta),[tm]:JSON.stringify(toMeta)};
    tx.set(dr,{schema:old.schema||'prep_live_sync_v6_authoritative',data:{...data,...patch},keys:[...new Set([...(old.keys||Object.keys(data)),...Object.keys(patch)])].sort(),updatedAt:Date.now(),reason:'PREPARACION_V64_LOAN_RECEIPT_'+id},{merge:true});
   }
-  return {from,to,fromMeta,toMeta,changed,expected:tNow+(doneTo?0:q)};
+  return {from,to,fromMeta,toMeta,changed,expected:num(first(tl.qty_recibida,tl.recibida))};
  });
  for(const x of [{ref:sourceRef,lines:result.from,meta:result.fromMeta},{ref:destRef,lines:result.to,meta:result.toMeta}]){
    put('prep_recepcion_'+x.ref,JSON.stringify(x.lines));put('prep_meta_'+x.ref,JSON.stringify(x.meta));
  }
  // Verificación por servidor: no marcar Stock como sincronizado si otro escritor anuló la recepción.
  const check=await loanPrepState(destRef,loan.materialId,loan.materialName);
- if(!loanStamped(check.l,id)||num(first(check.l.qty_recibida,check.l.recibida))<q)
-  throw new Error('Preparación no confirmó las barras prestadas. No repitas el préstamo; utiliza SINCRONIZAR RECEPCIÓN.');
+ if(!loanStamped(check.l,id)||num(first(check.l.qty_recibida,check.l.recibida))<result.expected)
+  throw new Error('Preparación no confirmó la recepción acumulada ('+result.expected+' barras). No repitas el préstamo; utiliza SINCRONIZAR RECEPCIÓN.');
  return {qty:q,received:num(first(check.l.qty_recibida,check.l.recibida)),ordered:num(first(check.l.qty_pedida,check.l.pedida,check.l.qty)),changed:result.changed};
 }
 async function repairExistingLoan(id){
@@ -34454,6 +34502,15 @@ async function repairExistingLoan(id){
  pending=true;window.__LDH_PREP_V64_BUSY=true;
  try{
   const result=await reconcileLoanPrep(loan,true);
+  // La deuda ya existía; actualizar solo su estado de sincronización en Stock.
+  if(typeof window.LDH_prepRunStockMutationV129!=='function')
+    throw new Error('Recepción verificada, pero no se dispone de la actualización de estado del préstamo.');
+  await window.LDH_prepRunStockMutationV129(SOURCE+'_v65_sync_receipt',async db=>{
+    const record=ledger(db).find(x=>str(x.id)===str(id));
+    if(!record)throw new Error('Ha desaparecido el identificador del préstamo; no se alteran cantidades.');
+    record.syncState='sincronizado';record.syncedAtV65=new Date().toISOString();
+    return {loanId:id};
+  });
   getInput('ldhV55Panel')?.classList.remove('show');
   if(currentRef()===loan.toRef&&typeof abrirPedido==='function')abrirPedido(loan.toRef);else if(typeof cargarLista==='function')cargarLista();
   alert('Recepción sincronizada: '+result.received+' de '+result.ordered+' barras recibidas.\nPendientes: '+Math.max(0,result.ordered-result.received)+'.\nStock físico SIN CAMBIOS. Préstamo ya registrado, sin duplicar.');
@@ -34479,6 +34536,9 @@ async function execute(){
    const checked=phase(d.ref);if(!checked.ok)throw new Error('La fase de origen ha cambiado: '+checked.reason);
    const originalEntry={ref:d.ref,lines:linesFor(d.ref),meta:metaFor(d.ref)};
    const targetEntry={ref:active.ref,lines:linesFor(active.ref),meta:metaFor(active.ref)};
+   // V65: huella anterior al traspaso para poder conciliar sin dobles descuentos.
+   const donorBeforeV65=num(first(originLine.l.qty_recibida,originLine.l.recibida));
+   const targetBeforeV65=num(first(targetLine.l.qty_recibida,targetLine.l.recibida));
    modifyReceived(originalEntry.lines[originLine.i],-qty,d.ref,active.ref,id);
    modifyReceived(targetEntry.lines[targetLine.i],qty,active.ref,d.ref,id);
    originalEntry.meta=stateMeta(originalEntry.meta,originalEntry.lines);targetEntry.meta=stateMeta(targetEntry.meta,targetEntry.lines);
@@ -34500,6 +34560,7 @@ async function execute(){
      if(!Array.isArray(db[FIELD]))db[FIELD]=[];
      db[FIELD].push({id,fromRef:d.ref,toRef:active.ref,companyId:active.cid,materialId:active.mid,materialName:active.name,qty,returnedQty:0,status:'pendiente',syncState:'pendiente_prep',createdAt:now,confirmedUnused:!!d.needsCheck,
        sourceAlreadyCountedQtyV63:alreadyCounted,sourceActiveQtyV63:fromActive,accountingMarkerV63:marker,
+       donorReceivedBeforeV65:donorBeforeV65,targetReceivedBeforeV65:targetBeforeV65,
        history:[{type:'prestamo',qty,at:now,sourceAlreadyCountedQtyV63:alreadyCounted,physicalStockChange:0}]});
      return {id};
    });
@@ -34621,7 +34682,7 @@ function inject(){
 function wrap(){const prev=window.renderTabla;if(typeof prev==='function'&&!prev.__v55){const fn=function(){const r=prev.apply(this,arguments);setTimeout(inject,25);return r;};fn.__v55=true;window.renderTabla=fn;try{renderTabla=fn;}catch(_){}}}
 ui();wrap();setTimeout(inject,500);window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(inject,100));
 window.LDH_V55_INTERNAL_OPEN=open;window.LDH_V55_INTERNAL_RETURN=openReturn;
-console.info('[Preparacion V55] Asignar desde otras OTs de la misma empresa: activo; valida fase y confirmacion Fabricacion.');
+console.info('[Preparacion V65] Recepción de múltiples OT con acreditación acumulada y reparación sin doble salida física.');
 })();
 </script>
 
