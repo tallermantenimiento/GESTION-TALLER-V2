@@ -3,6 +3,7 @@
 <html lang="es">
 <head>
 <meta name="ldh-stock-v149" content="RESGUARDO_WOODS_PAREJA_CERO_20261110">
+<meta name="ldh-stock-v153" content="CORE_DISPONIBILIDAD_WOODS_20261110">
 <meta name="ldh-stock-v152" content="CONCILIACION_RENDER_REAL_20261110">
 <meta name="ldh-stock-v151" content="FILA_WOODS_CONCILIACION_17_20261110">
 <meta name="ldh-stock-v140" content="RECONCILIACION_OT_PLETINAS_PROTEGIDAS_20261110">
@@ -3195,6 +3196,12 @@ function LDH_stockOtReceiptAllocationV144(companyId,materialId){
   }catch(e){console.warn('[Stock V144] Reserva por OT no disponible',e);return null;}
 }
 function LDH_effectiveAssignedStockV144(companyId,materialId){
+  // V153: el lote exacto conciliado protege las operaciones y la pantalla.
+  const protectedV153=LDH_woodsAllocationV153(companyId,materialId);
+  if(protectedV153){
+    const direct=Number(reservedStock(companyId,materialId))||0;
+    return Math.max(0,Math.min(protectedV153.qty,protectedV153.physical-Math.max(0,direct)));
+  }
   // V150: la fuente documental viva del par WOODS/40x40 prevalece si
   // su desglose verificado sigue intacto. SOLO lectura, no crea reservas.
   try{
@@ -3238,7 +3245,10 @@ function LDH_effectiveOwnAssignmentsV144(companyId,materialId){
   const v=LDH_stockOtReceiptAllocationV144(companyId,materialId);
   return v!==null ? v.rows : LDH_stockOwnAssignmentsV116(companyId,materialId);
 }
-function freeStock(companyId,materialId){return realStock(companyId,materialId)-reservedStock(companyId,materialId)-LDH_effectiveAssignedStockV144(companyId,materialId)-lentStock(companyId,materialId)}
+function freeStock(companyId,materialId){
+ const physical=realStock(companyId,materialId),direct=reservedStock(companyId,materialId),assigned=LDH_effectiveAssignedStockV144(companyId,materialId),lent=lentStock(companyId,materialId);
+ return Math.max(0,physical-direct-assigned-lent);
+}
 
 function loadSample(force){
   if(!force && localStorage.getItem(KEY)) return;
@@ -3791,6 +3801,33 @@ function LDH_stockInternalReplenishmentsV116(companyId,materialId){
   }catch(_){ return []; }
 }
 // V152: conciliacion documental SOLO de lectura, integrada en rowHTML.
+/* V153: unica fuente de disponibilidad para el lote real WOODS de 17 barras.
+   El duplicado vacio (mat_6juw0a1d4y) no se toca. Nunca escribe datos. */
+function LDH_woodsAllocationV153(companyId,materialId){
+  try{
+    if(String(companyId)!=='emp_g3pgbthcsq'||String(materialId)!=='mat_f2i1l7io1e')return null;
+    const marker=db?.stockReconciliationV140;
+    const pair=(marker?.materialPairs||[]).find(p=>String(p.c)===String(companyId)&&String(p.m)===String(materialId));
+    const refs=Array.isArray(pair?.refs)?pair.refs:[];
+    const expected=[['OT-260817-001-B',3],['OT-260817-001-C',5],['OT-261109-002',9]];
+    if(!marker?.appliedAt||Number(pair?.q)!==17||refs.length!==3 ||
+       !expected.every(([ref,q])=>refs.some(r=>String(r.r)===ref&&Number(r.q)===q)))return null;
+    const physical=Number(realStock(companyId,materialId));
+    if(physical!==17)return null;
+    const cutoff=Date.parse(marker.appliedAt)||0;
+    const newer=(db.movements||[]).some(m=>{
+      if(String(m.companyId||m.empresaId||'')!==String(companyId)||String(m.materialId||m.matId||'')!==String(materialId))return false;
+      if((Date.parse(m.date||m.createdAt||m.updatedAt||'')||0)<=cutoff)return false;
+      if(m.nonPhysical===true||m.reconciliationOnly===true)return false;
+      return ['salida','consumo','out','ajuste_neg','consumo_terminal'].includes(String(m.type||m.tipo||'').toLowerCase());
+    });
+    const loanChanged=(db.internalOtLoansV55||[]).some(m=>
+      String(m.companyId||'')===String(companyId)&&String(m.materialId||'')===String(materialId)&&
+      Math.max(Date.parse(m.createdAt||'')||0,Date.parse(m.updatedAt||'')||0)>cutoff);
+    if(newer||loanChanged)return null;
+    return {qty:17,physical,refs:expected,source:'stockReconciliationV140',materialId};
+  }catch(e){console.warn('[Stock V153] validacion de asignacion',e);return null;}
+}
 function LDH_woodsReconciliationForDisplayV152(companyId, materialId){
   try{
     if(String(companyId)!=='emp_g3pgbthcsq'||String(materialId)!=='mat_f2i1l7io1e')return null;
@@ -3819,7 +3856,12 @@ function rowHTML(s,m){
   const cls=free<=0?'stock-bad':(free<=min?'stock-warn':'stock-ok');
 
   const reservations=db.reservations.filter(r=>r.companyId===activeCompany&&r.materialId===m.id&&String(r.status||r.estado)==='activa');
-  const assignments=LDH_effectiveOwnAssignmentsV144(activeCompany,m.id);
+  let assignments=LDH_effectiveOwnAssignmentsV144(activeCompany,m.id);
+  const liveV153=LDH_woodsAllocationV153(activeCompany,m.id);
+  if(liveV153 && !assignments.some(a=>Number(a.qty||a.cantidad||0)>0)){
+    assignments=liveV153.refs.map(([ref,qty])=>({ref,jobRef:ref,qty,cantidad:qty,phase:'fabricacion',virtualOnlyV153:true}));
+  }
+
   const internalReplenishments=LDH_stockInternalReplenishmentsV116(activeCompany,m.id);
   const debts=visibleReservationDebts(activeCompany,m.id);
   const borrowedDebts=borrowedDebtRows(activeCompany,m.id);
@@ -3881,7 +3923,7 @@ function rowHTML(s,m){
        </div>`
     : '<span class="muted">Sin reservas/deudas</span>';
 
-  return `<tr draggable="true" data-stock-id="${s.id}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(String(s.lengthMode||'').toLowerCase()==='mm'?'mm':m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv+asg)}</td><td class="num" aria-hidden="true">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','entrada')">+ Entrada</button> <button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','salida')">- Salida</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
+  return `<tr draggable="true" data-stock-id="${s.id}" data-material-id="${m.id}" data-company-id="${activeCompany}" ondragstart="stockDragStart(event,'${s.id}')" ondragover="stockDragOver(event,'${s.id}')" ondragleave="stockDragLeave(event)" ondrop="stockDrop(event,'${s.id}')" ondragend="stockDragEnd(event)"><td class="drag-cell"><span class="drag-handle" title="Arrastra esta fila para ordenar" draggable="true" ondragstart="stockDragStart(event,'${s.id}')">☰</span></td><td><div class="matname">${esc(m.name)}</div><div class="sub">${esc(String(s.lengthMode||'').toLowerCase()==='mm'?'mm':m.unit)} · ${esc(s.location||'Sin ubicación')}</div></td><td>${esc(m.family||'')}</td><td class="num">${fmt(real)}</td><td class="num">${fmt(rv+asg)}</td><td class="num" aria-hidden="true">${fmt(asg)}</td><td class="num ${lent>0?'stock-warn':''}">${lent?fmt(lent):'0'}</td><td class="num ${borrowed>0?'stock-warn':''}">${borrowed?fmt(borrowed):'0'}</td><td class="num ${cls}">${fmt(free)}</td><td class="res-cell">${compact}</td><td class="actions-cell"><button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','entrada')">+ Entrada</button> <button class="btn small" onclick="LDH_openMoveForStockLine('${s.id}','salida')">- Salida</button> <button class="btn small" onclick="openReserveModal('${m.id}')">Reservar</button> <button class="btn small" onclick="openEditMaterialModal('${m.id}')">Editar</button> <button class="btn small" onclick="openDetail('${m.id}')">Ver</button> <button class="btn small danger" onclick="deleteMaterialFromCompany('${m.id}')">Borrar</button></td></tr>`
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
@@ -10715,47 +10757,38 @@ console.info('[Stock V137] Firebase producción: sin test_guard/CSP local y app 
 })();
 </script>
 
-<!-- LDH_STOCK_V152_RECONCILIACION_RENDER_REAL_20261110 -->
-<script id="LDH_STOCK_V152_RECONCILIACION_RENDER_REAL">
+
+<!-- LDH_STOCK_V153_VALIDACION_FILAS_20261110 -->
+<script id="LDH_STOCK_V153_VALIDACION_FILAS">
 (function(){
  'use strict';
  const C='emp_g3pgbthcsq',M='mat_f2i1l7io1e';
- let updating=false,checkCount=0,last='PENDIENTE';
- function readRow(){
-   const stock=(typeof db!=='undefined'&&db?.stock||[]).find(x=>String(x.companyId)===C&&String(x.materialId)===M);
-   const host=document.getElementById('stockTableWrap');
-   const rows=host?Array.from(host.querySelectorAll('tr[data-stock-id]')):[];
-   const row=stock?rows.find(x=>x.dataset.stockId===String(stock.id)):null;
-   if(!row||row.cells.length<11)return null;
-   return {row,visible:row.cells[4].textContent.trim(),free:row.cells[8].textContent.trim(),detail:row.cells[9].textContent.trim()};
+ let busy=false,checks=0;
+ function diagnostic(){
+  const alloc=typeof LDH_woodsAllocationV153==='function'?LDH_woodsAllocationV153(C,M):null;
+  const host=document.getElementById('stockTableWrap');
+  const matching=host?Array.from(host.querySelectorAll('tr[data-material-id]')).filter(r=>r.dataset.materialId===M&&r.dataset.companyId===C):[];
+  const rows=matching.map(r=>({id:r.dataset.stockId,visible:r.getClientRects().length>0,reservado:r.cells[4]?.textContent.trim(),libre:r.cells[8]?.textContent.trim(),detalle:r.cells[9]?.textContent.trim()}));
+  const shown=rows.filter(r=>r.visible);
+  const correct=shown.length===1&&shown.every(r=>r.reservado==='17'&&r.libre==='0');
+  return {version:'V153',conciliacion:!!alloc,asignacion:alloc?.qty??null,disponible:typeof freeStock==='function'?freeStock(C,M):null,pantallaVerificada:correct,filas:rows,estado:correct&&alloc?'CORRECTO':'PENDIENTE'};
  }
- function status(){
-   const data=typeof LDH_woodsReconciliationForDisplayV152==='function' ? LDH_woodsReconciliationForDisplayV152(C,M) : null;
-   const found=readRow();
-   const shown=found&&found.visible==='17'&&found.free==='0'&&found.detail.includes('17');
-   return {version:'V152',conciliacion:!!data,pantallaVerificada:!!shown,estado:shown?'VISIBLE_17_RESERVADAS_0_LIBRES':(data?'PENDIENTE_ACTUALIZAR_TABLA':'SIN_CONCILIACION_VALIDA'),fila:found?{reservado:found.visible,libre:found.free,detalle:found.detail}:null,desglose:data?.refs||null};
+ function verify(){
+  if(busy||String(typeof activeCompany!=='undefined'?activeCompany:'')!==C||String(typeof activeType!=='undefined'?activeType:'')!=='hierro')return;
+  const st=diagnostic();
+  if(st.conciliacion&&!st.pantallaVerificada){
+   busy=true;
+   try{if(typeof render==='function')render();}
+   catch(e){console.warn('[Stock V153] render fallido',e);}
+   finally{busy=false;}
+  }
  }
- function check(){
-   if(updating || String(typeof activeCompany!=='undefined'?activeCompany:'')!==C || String(typeof activeType!=='undefined'?activeType:'')!=='hierro')return;
-   const result=status();last=result.estado;
-   if(result.conciliacion && !result.pantallaVerificada){
-     updating=true;
-     try{if(typeof render==='function')render();}catch(e){console.warn('[Stock V152] render',e);}
-     finally{updating=false;}
-     last=status().estado;
-   }
- }
- function start(){
-   check();
-   // Revalidar el HTML tras la carga inicial/remota sin escribir stock.
-   const ticker=setInterval(()=>{check();if(++checkCount>=90)clearInterval(ticker);},1000);
- }
- if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
- window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(check,50));
- window.addEventListener('focus',()=>setTimeout(check,80));
- window.addEventListener('storage',e=>{if(e.key==='ldh_v2_company_stock_v1')setTimeout(check,50);});
- window.LDH_STOCK_V152_ESTADO=()=>status();
- window.LDH_STOCK_V152_REFRESCAR=()=>{check();return status();};
+ function init(){verify();const poll=setInterval(()=>{verify();if(++checks>=60)clearInterval(poll)},1000);}
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+ window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(verify,50));
+ window.addEventListener('focus',()=>setTimeout(verify,50));
+ window.addEventListener('storage',ev=>{if(ev.key==='ldh_v2_company_stock_v1')setTimeout(verify,50)});
+ window.LDH_STOCK_V153_ESTADO=diagnostic;
 })();
 </script>
 </body>
