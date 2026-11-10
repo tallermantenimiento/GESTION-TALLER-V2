@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<meta name="ldh-prep-v67" content="GUARDIA_CONCILIACION_NUBE_LOCAL_20261110">
 <meta name="ldh-prep-v66" content="RESERVADO_FABRICACION_STOCK_CONCILIADO_20261110">
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
@@ -5649,6 +5650,17 @@ function _v2LoadCompanyStockDB(){
 }
 function _v2SaveCompanyStockDB(pack){
   if(!pack || !pack.key || !pack.db) return false;
+  // V67: impedir que una copia antigua sin V140 sustituya datos conciliados.
+  if(pack.key === 'ldh_v2_company_stock_v1'){
+    try{
+      const live=LDH_prepReadLocalStockV28();
+      if(live?.stockReconciliationV140?.appliedAt && !pack.db.stockReconciliationV140?.appliedAt){
+        console.error('[Preparacion V67] Guardado de Stock sin conciliacion bloqueado.');
+        LDH_prepShowReconciliationConflictV67();
+        return false;
+      }
+    }catch(_){ }
+  }
   try{
     pack.db.updatedAt = new Date().toISOString();
     setAny(pack.key, JSON.stringify(pack.db));
@@ -21546,6 +21558,21 @@ function LDH_prepRerenderStockV28() {
   }, 120);
 }
 
+function LDH_prepShowReconciliationConflictV67(){
+  try {
+    let notice = document.getElementById('ldhPrepReconciliationV67');
+    if(!notice){
+      notice = document.createElement('div');
+      notice.id = 'ldhPrepReconciliationV67';
+      notice.setAttribute('role','alert');
+      notice.style.cssText = 'border:1px solid #f59e0b;border-radius:12px;background:#3d2414;color:#fef3c7;padding:11px 14px;margin:10px 0;font-weight:800;font-size:12px';
+      const host=document.getElementById('vistaLista') || document.body;
+      host.prepend(notice);
+    }
+    notice.textContent='STOCK PROTEGIDO: Preparacion ha recibido una copia de nube sin conciliacion OT V140. Las reservas locales se conservan. No registrar recepciones ni publicar stock hasta revisar la nube.';
+  }catch(_){ }
+}
+
 async function LDH_prepApplyFirebaseStockV28(force = false) {
   const result = await LDH_prepReadFirebasePackageV28();
   const mirrorRows = await LDH_prepReadStockMaterialsMirrorV44();
@@ -21559,13 +21586,33 @@ async function LDH_prepApplyFirebaseStockV28(force = false) {
    * se sustituyen los botones mientras el usuario intenta pulsarlos.
    */
   if (combinedMarker === LDH_PREP_STOCK_LAST_RAW_V28) return;
-  LDH_PREP_STOCK_LAST_RAW_V28 = combinedMarker;
 
   const localDB = LDH_prepReadLocalStockV28();
   const completedRemoteDB = LDH_prepMergeStockMaterialsMirrorV44(
     result.stockDB,
     mirrorRows
   );
+  /* V67: una instantanea de nube sin conciliacion OT V140 no puede
+     sustituir la copia local conciliada ni su listado de reservas.
+     La lectura es estrictamente no destructiva; no se reconstruyen
+     cantidades ni se publica la copia local en Firebase. */
+  const localReconciledV67 = !!(localDB && localDB.stockReconciliationV140 && localDB.stockReconciliationV140.appliedAt);
+  const remoteReconciledV67 = !!(completedRemoteDB && completedRemoteDB.stockReconciliationV140 && completedRemoteDB.stockReconciliationV140.appliedAt);
+  if (localReconciledV67 && !remoteReconciledV67) {
+    window.__LDH_PREP_STOCK_RECONFLICT_V67 = {
+      detectedAt: new Date().toISOString(),
+      reason: 'Nube sin conciliacion V140; copia local preservada',
+      localAppliedAt: localDB.stockReconciliationV140.appliedAt
+    };
+    window.__LDH_PREP_STOCK_FIREBASE_STATE = {
+      connected: true, conflict: true,
+      error: 'Las reservas OT locales estan conciliadas, pero el paquete de Stock en nube no incluye V140. No se ha sustituido Stock.'
+    };
+    console.error('[Preparacion V67] BLOQUEADA sustitucion de Stock con reservas OT conciliadas por una copia de nube sin V140. No se ha escrito almacenamiento.');
+    LDH_prepShowReconciliationConflictV67();
+    return;
+  }
+  LDH_PREP_STOCK_LAST_RAW_V28 = combinedMarker;
   const stockDB = LDH_prepMergeOperationalV28(completedRemoteDB, localDB);
   const rawText = JSON.stringify(stockDB);
 

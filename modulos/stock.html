@@ -1806,7 +1806,13 @@ function load(){
     try{
       const l = rawLocal ? JSON.parse(rawLocal) : null;
       const s = rawSession ? JSON.parse(rawSession) : null;
-      if(s && (!l || String(s.updatedAt || '') >= String(l.updatedAt || ''))){
+      // V147: Preparacion puede actualizar la clave compartida sin incluir la
+      // conciliacion por OT. Su fecha mas reciente NO acredita que las reservas
+      // hayan desaparecido. Conservar el snapshot conciliado de esta pestana.
+      const lReconciled = !!(l && l.stockReconciliationV140 && l.stockReconciliationV140.appliedAt);
+      const sReconciled = !!(s && s.stockReconciliationV140 && s.stockReconciliationV140.appliedAt);
+      if(s && ((sReconciled && !lReconciled) ||
+          (sReconciled === lReconciled && (!l || String(s.updatedAt || '') >= String(l.updatedAt || ''))))){
         chosen = rawSession;
         window.__LDH_STOCK_MEMORY_DB = s;
         window.__LDH_STOCK_FORCE_MEMORY_PUBLISH = true;
@@ -7242,6 +7248,17 @@ function localStockCount(){
 }
 
 function writeStockEverywhere(raw){
+  // V147: un paquete remoto que pierde la conciliacion no puede borrar reservas
+  // documentadas en la copia activa. No se inventan cantidades ni se escribe nube.
+  const incoming = safeParse(raw);
+  const current = completePayloadFromLocalStorage().data;
+  const currentValid = !!current.stockReconciliationV140?.appliedAt;
+  const incomingValid = !!incoming.stockReconciliationV140?.appliedAt;
+  if(currentValid && !incomingValid){
+    setCloudStatus('Stock protegido · conflicto de reservas','bad',
+      'La copia recibida no contiene la conciliacion OT V140. No se ha sustituido Stock ni borrado ninguna reserva. Revisar Preparacion y Firestore.');
+    throw new Error('V147: bloqueada sustitucion de Stock conciliado por copia sin conciliacion OT');
+  }
   try{ localStorage.setItem(STOCK_KEY, raw); }catch(e){}
   try{ sessionStorage.setItem(STOCK_KEY, raw); }catch(e){}
   try{ window.__LDH_STOCK_MEMORY_DB = safeParse(raw); }catch(e){}
@@ -7304,7 +7321,36 @@ async function cloudPublishSafetyCheck(force){
 
   try{
     const remote = await readRemoteStockPackage();
+    // V147: nunca publicar por ausencia de respuesta remota: no es una prueba
+    // de que la nube este vacia ni de que se puedan descartar sus reservas.
+    if(!remote || !remote.raw || !remote.data){
+      setCloudStatus('Stock protegido · nube no verificable','bad',
+        'No se pudo verificar la copia remota. Publicacion detenida para evitar perder reservas de OT.');
+      return false;
+    }
     const remoteMaterials = remote && remote.data && remote.data.materials ? remote.data.materials.length : 0;
+    const localReconciled = !!local.data?.stockReconciliationV140?.appliedAt;
+    const remoteReconciled = !!remote?.data?.stockReconciliationV140?.appliedAt;
+    // V147: proteger ambos sentidos. Nunca publicar datos locales de Preparacion
+    // que hayan perdido el marcador; ni aceptar una nube sin el corte OT si el
+    // local lo conserva. Esto solo detiene escrituras: no rellena 17 reservas.
+    if(remote && remote.raw && remoteReconciled && !localReconciled){
+      if(hasLocalDirtyV135() || hasUserDirtyV139()){
+        setCloudStatus('Stock protegido · cambio local incompatible','bad',
+          'Hay cambios locales sin conciliacion OT V140; se bloquea su publicacion para no borrar reservas de la nube.');
+        return false;
+      }
+      writeStockEverywhere(remote.raw);
+      lastRawPublished = remote.raw;
+      if(typeof window.LDH_applyRemoteStockWithoutReload==='function')window.LDH_applyRemoteStockWithoutReload();
+      setCloudStatus('Stock conciliado recuperado de nube','ok','Se restauro la copia completa con reservas por OT.');
+      return false;
+    }
+    if(remote && remote.raw && localReconciled && !remoteReconciled){
+      setCloudStatus('Stock protegido · nube sin conciliacion','bad',
+        'La nube no trae la conciliacion V140 y el local si. Publicacion y restauracion automatica bloqueadas.');
+      return false;
+    }
     const localTime = Date.parse(String(local.data && local.data.updatedAt || '')) || 0;
     /*
      * Se compara la revisión contenida en los DATOS, no la hora técnica de
@@ -7367,11 +7413,10 @@ async function cloudPublishSafetyCheck(force){
     }
   }catch(e){
     console.warn('No se pudo comprobar remoto antes de publicar', e);
-    // Si no se puede leer remoto y el local es muy pequeño, no publicamos automáticamente.
-    if(!force && local.materials < 10){
-      setCloudStatus('Stock nube protegido','warn','No se publica local pequeño porque no se pudo comprobar la copia remota.');
-      return false;
-    }
+    // V147: bloquear tambien las publicaciones forzadas ante error de lectura.
+    setCloudStatus('Stock nube protegido','bad',
+      'Error al verificar Firestore; se bloquea toda publicacion sin copia remota comprobada.');
+    return false;
   }
 
   return true;
@@ -7608,6 +7653,12 @@ onAuthStateChanged(fbAuth, async user=>{
     setCloudStatus('Stock nube sincronizando...','warn','Leyendo primero la copia canónica de Firebase para impedir que una copia local antigua la sobrescriba.');
     const remoteV139 = await readRemoteStockPackage();
     if(remoteV139 && remoteV139.raw && remoteV139.data && remoteV139.data.materials && remoteV139.data.materials.length){
+      const localV147 = completePayloadFromLocalStorage().data;
+      if(localV147.stockReconciliationV140?.appliedAt && !remoteV139.data.stockReconciliationV140?.appliedAt){
+        setCloudStatus('Stock protegido · conflicto nube/OT','bad',
+          'La nube carece de conciliacion OT V140 y este equipo la conserva. No se restauran ni publican datos; revisar origen.');
+        return;
+      }
       /* Cualquier dirty/delete creado por saneados automáticos ANTES del login no
          tiene autoridad sobre la nube. Se vuelve a ejecutar sobre la base remota. */
       clearLocalDirtyV135();
@@ -7639,6 +7690,11 @@ onAuthStateChanged(fbAuth, async user=>{
       return;
     }
 
+    /* V147: no publicar automaticamente una copia local cuando el remoto
+       no se pudo leer; podria borrar las reservas conciliadas de otro equipo. */
+    setCloudStatus('Stock nube sin copia verificada','bad',
+      'No se pudo verificar el stock remoto. Publicacion automatica bloqueada para proteger reservas OT.');
+    return;
     /* Solo si Firebase no contiene una copia válida se adopta el local. */
     setBootstrappedV139(true);
     setCloudStatus('Stock nube sin copia remota','warn','No hay copia canónica válida; se publicará la base local existente.');
@@ -11891,8 +11947,8 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
 (function(){
  'use strict';
  if(window.__LDH_STOCK_V144__)return;
- window.__LDH_STOCK_V144__='STOCK-V146-RESERVAS-CONCILIADAS-PROTEGIDAS-SIN-ESCRITURAS';
- document.documentElement.dataset.ldhStockV144='true';document.documentElement.dataset.ldhStockV145='cierre-regularizacion';document.documentElement.dataset.ldhStockV146='reservas-fisicas-protegidas';
+ window.__LDH_STOCK_V144__='STOCK-V147-PROTECCION-SINCRONIZACION-OT';
+ document.documentElement.dataset.ldhStockV144='true';document.documentElement.dataset.ldhStockV145='cierre-regularizacion';document.documentElement.dataset.ldhStockV146='reservas-fisicas-protegidas';document.documentElement.dataset.ldhStockV147='anti-perdida-conciliacion-ot';
  let lastIndicator='';
  function indicator(){
    try{
@@ -11901,8 +11957,8 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
      let badge=document.getElementById('ldhStockV144Badge');
      if(!badge){badge=document.createElement('span');badge.id='ldhStockV144Badge';badge.style.cssText='border:1px solid rgba(56,189,248,.5);color:#a5f3fc;background:#073047;padding:7px 10px;border-radius:9px;font-weight:900;font-size:11px;white-space:nowrap;';container.prepend(badge);}
      const ready=typeof db!=='undefined'&&!!db?.stockReconciliationV140?.appliedAt;
-     badge.textContent='STOCK V146 · '+(ready?'RESERVAS OT PROTEGIDAS':'ESPERANDO CONCILIACION');
-     badge.title=ready?'Conciliacion cerrada; disponibilidad limitada por reservas documentales hasta un consumo fisico contabilizado':'Esperando datos conciliados';
+     badge.textContent='STOCK V147 · '+(ready?'RESERVAS OT PROTEGIDAS':'ESPERANDO CONCILIACION');
+     badge.title=ready?'Conciliacion cerrada; disponibilidad limitada por reservas documentales hasta un consumo fisico contabilizado':'Sin conciliacion OT V140: no usar este saldo para confirmar reservas';
      lastIndicator=badge.textContent;
    }catch(_){ }
  }
