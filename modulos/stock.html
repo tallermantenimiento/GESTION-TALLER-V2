@@ -3147,7 +3147,14 @@ function LDH_stockOtReceiptAllocationV144(companyId,materialId){
       return null;
     }
     const entry=marker.materialPairs.find(p=>String(p.c)===String(companyId)&&String(p.m)===String(materialId));
-    if(!entry)return null;
+    if(!entry){
+      // V146: si una fila conciliada perdió su desglose tras una lectura remota,
+      // nunca interpretar toda su existencia como stock libre. Bloqueo de solo
+      // lectura hasta recuperar el desglose, sin inventar una OT ni movimientos.
+      const row=(db?.stock||[]).find(s=>String(s.companyId)===String(companyId)&&String(s.materialId)===String(materialId));
+      const q=row?.stockReconciledV140 ? Math.max(0,Number(row.physicalQty??row.fisico??0)||0) : 0;
+      return q>0 ? {qty:q,rows:[{id:'v146_sin_desglose_'+String(materialId),companyId,materialId,ref:'CONCILIACION OT: DESGLOSE NO DISPONIBLE',jobRef:'CONCILIACION OT: DESGLOSE NO DISPONIBLE',qty:q,cantidad:q,status:'activa',phase:'preparacion',virtualOnlyV144:true}],pending:true} : null;
+    }
     let allocations=null;
     if(window.LDH_STOCK_RECON_CORE_V140 && typeof window.LDH_STOCK_RECON_CORE_V140.activeAllocations==='function'){
       allocations=window.LDH_STOCK_RECON_CORE_V140.activeAllocations(db,companyId,materialId);
@@ -3156,6 +3163,16 @@ function LDH_stockOtReceiptAllocationV144(companyId,materialId){
       // Durante el primer render el nucleo puede no haberse cargado aun.
       // Bloqueo conservador de disponibilidad, nunca se ofrece como libre.
       allocations=(entry.refs||[]).map(r=>({ref:String(r.r||''),qty:Math.max(0,Number(r.q)||0),phase:r.phase||'fabricacion'}));
+    }
+    // V146: no liberar existencias ya adjudicadas por OT si una capa auxiliar
+    // descarta las referencias. Solo un consumo físico confirmado podrá
+    // reducir la cantidad asignada; los préstamos se aplican en activeAllocations.
+    const eligible=Math.max(0,Math.min(Number(entry.q)||0,Number(realStock(companyId,materialId))||0));
+    const reported=allocations.reduce((n,x)=>n+Math.max(0,Number(x?.qty)||0),0);
+    if(eligible>1e-7 && reported+1e-7<eligible){
+      // Falla cerrada: reserva la diferencia como pendiente de contrastar,
+      // sin fingir nuevas asignaciones ni duplicar los préstamos documentados.
+      allocations=allocations.concat([{ref:'CONCILIACION OT: RESERVA PROTEGIDA',qty:eligible-reported,phase:'preparacion',pending:true}]);
     }
     const rows=allocations.filter(x=>x&&Number(x.qty)>0).map(x=>({
       id:'v144_ot_'+String(companyId)+'_'+String(materialId)+'_'+String(x.ref),
@@ -4523,6 +4540,13 @@ function saveReservation(){
   const mat=$('resMat').value;
   let job=$('resJob').value;
   const qty=Number($('resQty').value||0);
+
+  // V146: impedir que la reserva manual tome barras ya asignadas a otras OT.
+  // Comprobar ANTES de crear trabajos para no dejar trabajos fantasma.
+  if(mat && Number.isFinite(qty) && qty>0){
+    const available=Math.max(0,Number(freeStock(activeCompany,mat))||0);
+    if(qty>available+1e-7) return alert('No se puede reservar: libre '+fmt(available)+', solicitado '+fmt(qty)+'. El material asignado a otras OT no esta disponible.');
+  }
 
   if(!job && $('quickRef') && $('quickRef').value.trim()){
     quickJob();
@@ -6947,14 +6971,12 @@ function activeAllocations(db,c,m){
    post.set(ref,Math.max(post.get(ref)||0,value));
  }
  for(const [ref,value] of post)alloc.set(ref,Math.max(alloc.get(ref)||0,value));
- // Una OT totalmente en pintura/almacen/entregado deja de reservar.
- const flows=(root.__LDH_STOCK_V126_FAB_FLOW_BY_REF||new Map());
- for(const [ref,value] of alloc){
-   const match=String(ref).toUpperCase().match(/OT[-_ ]*(\d{6})[-_ ]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
-   const normalized=match?'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:''):String(ref);
-   const f=flows.get?.(normalized);
-   if(f && num(f.fabricacion)<=EPS && num(f.pintura)+num(f.almacen)+num(f.entregado)>EPS)alloc.set(ref,0);
- }
+ // V146: NO cancelar material conciliado por un cambio de fase V126.
+ // Ese mapa es externo/asíncrono y no acredita una salida física: con datos
+ // incoherentes ponía a cero las 17 barras WOODS aunque seguían en Stock.
+ // Los consumos físicos verificados reducen realStock(), cuyo saldo LIMITA la
+ // reserva visual y el libre en LDH_effectiveAssignedStockV144().
+ // El saldo por OT se conserva hasta salida/consumo físico contabilizado.
  return Array.from(alloc.entries()).filter(([ref,qty])=>qty>EPS).map(([ref,qty])=>({ref,qty:round(qty),phase:(pair.refs||[]).find(v=>v.r===ref)?.phase||'fabricacion'}));
 }
 function activeAssigned(db,c,m){
@@ -11768,11 +11790,24 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
    e.style.color='#86efac';if(apply)apply.disabled=false;
   }catch(err){e.textContent='NO APLICAR: '+String(err&&err.message||err);e.style.color='#fca5a5';}
  };
+ // V145: La conciliacion unica ya se aplico el 10/11/2026.
+ // No mostrar el boton ni permitir volver a ejecutar el asistente antiguo.
+ // Se mantiene el nucleo de lectura del desglose por OT; NO se borran
+ // datos, marcadores, prestamos, reservas ni auditoria en Firestore.
+ window.LDH_stockOpenReconcileV140=function(){
+   alert('Regularizacion extraordinaria ya ejecutada. No se puede repetir desde esta version.');
+   return false;
+ };
+ window.LDH_stockPreflightV140=async function(){
+   return {matches:false,reason:'Regularizacion ya cerrada'};
+ };
+ window.LDH_stockApplyV140=async function(){
+   alert('Regularizacion extraordinaria ya ejecutada. Operacion bloqueada.');
+   return false;
+ };
  const attach=()=>{
-  const parent=document.querySelector('.top .actions');
-  if(!parent||document.getElementById('ldhStockReconciliationOpenV140'))return;
-  const b=document.createElement('button');b.type='button';b.className='btn warn';b.id='ldhStockReconciliationOpenV140';
-  b.textContent='Regularización Stock OT';b.onclick=window.LDH_stockOpenReconcileV140;parent.appendChild(b);
+   const old=document.getElementById('ldhStockReconciliationOpenV140');
+   if(old)old.remove();
  };
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',attach,{once:true});else attach();
  document.documentElement.dataset.ldhStockV140='candidato-v142-snapshot-0849';
@@ -11856,8 +11891,8 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
 (function(){
  'use strict';
  if(window.__LDH_STOCK_V144__)return;
- window.__LDH_STOCK_V144__='STOCK-V144-RESERVAS-OT-DETERMINISTAS-SIN-ESCRITURAS';
- document.documentElement.dataset.ldhStockV144='true';
+ window.__LDH_STOCK_V144__='STOCK-V146-RESERVAS-CONCILIADAS-PROTEGIDAS-SIN-ESCRITURAS';
+ document.documentElement.dataset.ldhStockV144='true';document.documentElement.dataset.ldhStockV145='cierre-regularizacion';document.documentElement.dataset.ldhStockV146='reservas-fisicas-protegidas';
  let lastIndicator='';
  function indicator(){
    try{
@@ -11866,8 +11901,8 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
      let badge=document.getElementById('ldhStockV144Badge');
      if(!badge){badge=document.createElement('span');badge.id='ldhStockV144Badge';badge.style.cssText='border:1px solid rgba(56,189,248,.5);color:#a5f3fc;background:#073047;padding:7px 10px;border-radius:9px;font-weight:900;font-size:11px;white-space:nowrap;';container.prepend(badge);}
      const ready=typeof db!=='undefined'&&!!db?.stockReconciliationV140?.appliedAt;
-     badge.textContent='STOCK V144 · '+(ready?'RESERVAS OT':'ESPERANDO CONCILIACION');
-     badge.title=ready?'Vista segura: reservas calculadas desde la regularizacion existente, sin movimientos fisicos':'Comprobar que se ha cargado la copia de Stock conciliada';
+     badge.textContent='STOCK V146 · '+(ready?'RESERVAS OT PROTEGIDAS':'ESPERANDO CONCILIACION');
+     badge.title=ready?'Conciliacion cerrada; disponibilidad limitada por reservas documentales hasta un consumo fisico contabilizado':'Esperando datos conciliados';
      lastIndicator=badge.textContent;
    }catch(_){ }
  }
