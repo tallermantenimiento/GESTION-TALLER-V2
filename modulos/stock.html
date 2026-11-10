@@ -2840,7 +2840,7 @@ function depurarAsignadoVisibleSinOrigen(){
 
     rows.forEach(({s,m})=>{
       const matId = m.id;
-      const asg = assignedStock(activeCompany, matId);
+      const asg = LDH_effectiveAssignedStockV144(activeCompany, matId);
       const rv = reservedStock(activeCompany, matId);
       const debt = pendingDebt(activeCompany, matId) + borrowedDebt(activeCompany, matId) + lentDebt(activeCompany, matId);
 
@@ -3125,7 +3125,64 @@ function activeCompanyLabelNice(){
 
 
 
-function freeStock(companyId,materialId){return realStock(companyId,materialId)-reservedStock(companyId,materialId)-assignedStock(companyId,materialId)-lentStock(companyId,materialId)}
+
+/** V144: lectura determinista de la reserva documental por OT.
+ * NO escribe en Stock; protege las filas conciliadas incluso si las capas
+ * historicas de asignaciones consideran consumido el paso a Fabricacion.
+ * Las pletinas Stock Comun NO forman parte de materialPairs y siguen su
+ * comportamiento operativo anterior, sin modificaciones.
+ */
+function LDH_stockOtReceiptAllocationV144(companyId,materialId){
+  try{
+    const marker=db && db.stockReconciliationV140;
+    if(!marker || !marker.appliedAt || !Array.isArray(marker.materialPairs)){
+      // El fisico ya conciliado sin su desglose NO se puede ofertar como libre.
+      // En esta situacion temporal se bloquea conservadoramente la disponibilidad
+      // hasta que llegue la fotografia de Firestore completa. Sin escrituras.
+      const row=(db?.stock||[]).find(s=>String(s.companyId)===String(companyId)&&String(s.materialId)===String(materialId));
+      if(row?.stockReconciledV140 && Number(row.physicalQty??row.fisico??0)>0){
+        const q=Math.max(0,Number(row.physicalQty??row.fisico??0)||0);
+        return {qty:q,rows:[{id:'v144_pending_'+String(materialId),companyId,materialId,ref:'RESERVAS OT PENDIENTES DE SINCRONIZAR',jobRef:'RESERVAS OT PENDIENTES DE SINCRONIZAR',qty:q,cantidad:q,status:'activa',phase:'preparacion',virtualOnlyV144:true}],pending:true};
+      }
+      return null;
+    }
+    const entry=marker.materialPairs.find(p=>String(p.c)===String(companyId)&&String(p.m)===String(materialId));
+    if(!entry)return null;
+    let allocations=null;
+    if(window.LDH_STOCK_RECON_CORE_V140 && typeof window.LDH_STOCK_RECON_CORE_V140.activeAllocations==='function'){
+      allocations=window.LDH_STOCK_RECON_CORE_V140.activeAllocations(db,companyId,materialId);
+    }
+    if(!Array.isArray(allocations)){
+      // Durante el primer render el nucleo puede no haberse cargado aun.
+      // Bloqueo conservador de disponibilidad, nunca se ofrece como libre.
+      allocations=(entry.refs||[]).map(r=>({ref:String(r.r||''),qty:Math.max(0,Number(r.q)||0),phase:r.phase||'fabricacion'}));
+    }
+    const rows=allocations.filter(x=>x&&Number(x.qty)>0).map(x=>({
+      id:'v144_ot_'+String(companyId)+'_'+String(materialId)+'_'+String(x.ref),
+      companyId,materialId,ref:String(x.ref),jobRef:String(x.ref),
+      qty:Math.max(0,Number(x.qty)||0),cantidad:Math.max(0,Number(x.qty)||0),
+      status:'activa',estado:'activa',phase:String(x.phase||'fabricacion'),
+      fase:String(x.phase||'fabricacion'),source:'stock_v144_desglose_ot_virtual',
+      assignmentType:'reserva_documental_ot_v144',virtualOnlyV144:true
+    }));
+    return {qty:rows.reduce((sum,a)=>sum+a.qty,0),rows,companyId,materialId};
+  }catch(e){console.warn('[Stock V144] Reserva por OT no disponible',e);return null;}
+}
+function LDH_effectiveAssignedStockV144(companyId,materialId){
+  const v=LDH_stockOtReceiptAllocationV144(companyId,materialId);
+  if(v!==null){
+    let physical=0,direct=0;
+    try{physical=Math.max(0,Number(realStock(companyId,materialId))||0);}catch(_){ }
+    try{direct=Math.max(0,Number(reservedStock(companyId,materialId))||0);}catch(_){ }
+    return Math.min(v.qty,Math.max(0,physical-direct));
+  }
+  return assignedStock(companyId,materialId);
+}
+function LDH_effectiveOwnAssignmentsV144(companyId,materialId){
+  const v=LDH_stockOtReceiptAllocationV144(companyId,materialId);
+  return v!==null ? v.rows : LDH_stockOwnAssignmentsV116(companyId,materialId);
+}
+function freeStock(companyId,materialId){return realStock(companyId,materialId)-reservedStock(companyId,materialId)-LDH_effectiveAssignedStockV144(companyId,materialId)-lentStock(companyId,materialId)}
 
 function loadSample(force){
   if(!force && localStorage.getItem(KEY)) return;
@@ -3267,7 +3324,7 @@ function render(){
   const rows=db.stock.filter(s=>s.companyId===activeCompany).map(s=>({s,m:materialById(s.materialId)})).filter(x=>x.m&&x.m.type===activeType).filter(x=>!q||[x.m.name,x.m.family,x.s.location].join(' ').toLowerCase().includes(q));
   let totalReal=0,totalReserved=0,totalAssigned=0,totalDebt=0,totalLent=0,low=0;
   rows.forEach(({s,m})=>{
-    const r=realStock(activeCompany,m.id),rv=reservedStock(activeCompany,m.id),asg=assignedStock(activeCompany,m.id),debt=pendingDebt(activeCompany,m.id)+borrowedDebt(activeCompany,m.id),lent=lentDebt(activeCompany,m.id);
+    const r=realStock(activeCompany,m.id),rv=reservedStock(activeCompany,m.id),asg=LDH_effectiveAssignedStockV144(activeCompany,m.id),debt=pendingDebt(activeCompany,m.id)+borrowedDebt(activeCompany,m.id),lent=lentDebt(activeCompany,m.id);
     totalReal+=r; totalReserved+=rv+asg; totalAssigned+=asg; totalDebt+=debt; totalLent+=lent;
     { const libreTmp=freeStock(activeCompany,m.id); if(libreTmp>0 && libreTmp<=Number(s.min||0))low++; }
   });
@@ -3564,7 +3621,7 @@ function familiaHTML(group){
   group.items.forEach(({m})=>{
     const r=realStock(activeCompany,m.id);
     const rv=reservedStock(activeCompany,m.id);
-    const a=assignedStock(activeCompany,m.id);
+    const a=LDH_effectiveAssignedStockV144(activeCompany,m.id);
     const l=lentStock(activeCompany,m.id);
     real+=r; res+=rv; asg+=a; free+=Math.max(0,r-rv-a-l);
   });
@@ -3680,7 +3737,7 @@ function LDH_stockInternalReplenishmentsV116(companyId,materialId){
 function rowHTML(s,m){
   const real=realStock(activeCompany,m.id),
         rv=reservedStock(activeCompany,m.id),
-        asg=assignedStock(activeCompany,m.id),
+        asg=LDH_effectiveAssignedStockV144(activeCompany,m.id),
         lent=lentStock(activeCompany,m.id),
         borrowed=borrowedStock(activeCompany,m.id),
         debt=pendingDebt(activeCompany,m.id)+borrowed,
@@ -3689,7 +3746,7 @@ function rowHTML(s,m){
   const cls=free<=0?'stock-bad':(free<=min?'stock-warn':'stock-ok');
 
   const reservations=db.reservations.filter(r=>r.companyId===activeCompany&&r.materialId===m.id&&String(r.status||r.estado)==='activa');
-  const assignments=LDH_stockOwnAssignmentsV116(activeCompany,m.id);
+  const assignments=LDH_effectiveOwnAssignmentsV144(activeCompany,m.id);
   const internalReplenishments=LDH_stockInternalReplenishmentsV116(activeCompany,m.id);
   const debts=visibleReservationDebts(activeCompany,m.id);
   const borrowedDebts=borrowedDebtRows(activeCompany,m.id);
@@ -4753,7 +4810,7 @@ function saveEditMaterial(materialId){
 function _materialCompanyUsage(companyId, materialId){
   const real = realStock(companyId, materialId);
   const res = reservedStock(companyId, materialId);
-  const asg = assignedStock(companyId, materialId);
+  const asg = LDH_effectiveAssignedStockV144(companyId, materialId);
   const debt = (typeof pendingDebt === 'function' ? pendingDebt(companyId, materialId) : 0) + (typeof borrowedDebt === 'function' ? borrowedDebt(companyId, materialId) : 0);
   const lent = typeof lentDebt === 'function' ? lentDebt(companyId, materialId) : 0;
   const movs = (db.movements||[]).filter(x=>x.companyId===companyId && x.materialId===materialId).length;
@@ -5178,7 +5235,7 @@ function openDetail(materialId){
     .sort((a,b)=>moveDate(b)-moveDate(a));
 
   const reserves=db.reservations.filter(x=>x.companyId===activeCompany&&x.materialId===materialId&&x.status==='activa'&&!isAutoReceivedPrepReservation(x));
-  const assignments=LDH_stockOwnAssignmentsV116(activeCompany,materialId);
+  const assignments=LDH_effectiveOwnAssignmentsV144(activeCompany,materialId);
   const internalReplenishments=LDH_stockInternalReplenishmentsV116(activeCompany,materialId);
   const debtInfo=_deudasDetalleMaterial(materialId);
   const borrowed=debtInfo.borrowed||[];
@@ -5214,7 +5271,7 @@ function openDetail(materialId){
 
   openModal(m.name,`<div class="kpis">
     <div class="kpi ok"><div class="lbl">Real</div><div class="val">${fmt(realStock(activeCompany,materialId))}</div></div>
-    <div class="kpi warn"><div class="lbl">Reservado</div><div class="val">${fmt(reservedStock(activeCompany,materialId)+assignedStock(activeCompany,materialId))}</div></div>
+    <div class="kpi warn"><div class="lbl">Reservado</div><div class="val">${fmt(reservedStock(activeCompany,materialId)+LDH_effectiveAssignedStockV144(activeCompany,materialId))}</div></div>
     <div class="kpi"><div class="lbl">Libre</div><div class="val">${fmt(freeStock(activeCompany,materialId))}</div></div>
     <div class="kpi bad"><div class="lbl">Recibido prestado / debo</div><div class="val">${fmt(totalDebo)}</div></div>
   </div>
@@ -5426,7 +5483,7 @@ function LDH_verAgotados(){
     .map(({s,m})=>{
       const real=realStock(activeCompany,m.id);
       const rv=reservedStock(activeCompany,m.id);
-      const asg=assignedStock(activeCompany,m.id);
+      const asg=LDH_effectiveAssignedStockV144(activeCompany,m.id);
       const free=real-rv-asg;
       return {s,m,real,rv,asg,free};
     })
@@ -5595,7 +5652,7 @@ function LDH_verBajoMinimos(){
     .map(({s,m})=>{
       const real=realStock(activeCompany,m.id);
       const rv=reservedStock(activeCompany,m.id);
-      const asg=assignedStock(activeCompany,m.id);
+      const asg=LDH_effectiveAssignedStockV144(activeCompany,m.id);
       const free=real-rv-asg;
       const min=Number(s.min||0);
       return {s,m,real,rv,asg,free,min};
@@ -11791,6 +11848,44 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
  else setTimeout(start,0);
  window.LDH_STOCK_V143='RESERVAS_OT_CONCILIADAS_VISIBLES_SIN_ESCRITURAS_20261110';
  document.documentElement.dataset.ldhStockV143='true';
+})();
+</script>
+
+
+<script id="LDH_STOCK_V144_RESERVAS_OT_VISIBLES_PROTEGIDAS_20261110">
+(function(){
+ 'use strict';
+ if(window.__LDH_STOCK_V144__)return;
+ window.__LDH_STOCK_V144__='STOCK-V144-RESERVAS-OT-DETERMINISTAS-SIN-ESCRITURAS';
+ document.documentElement.dataset.ldhStockV144='true';
+ let lastIndicator='';
+ function indicator(){
+   try{
+     const container=document.querySelector('.top .actions')||document.querySelector('.top');
+     if(!container)return;
+     let badge=document.getElementById('ldhStockV144Badge');
+     if(!badge){badge=document.createElement('span');badge.id='ldhStockV144Badge';badge.style.cssText='border:1px solid rgba(56,189,248,.5);color:#a5f3fc;background:#073047;padding:7px 10px;border-radius:9px;font-weight:900;font-size:11px;white-space:nowrap;';container.prepend(badge);}
+     const ready=typeof db!=='undefined'&&!!db?.stockReconciliationV140?.appliedAt;
+     badge.textContent='STOCK V144 · '+(ready?'RESERVAS OT':'ESPERANDO CONCILIACION');
+     badge.title=ready?'Vista segura: reservas calculadas desde la regularizacion existente, sin movimientos fisicos':'Comprobar que se ha cargado la copia de Stock conciliada';
+     lastIndicator=badge.textContent;
+   }catch(_){ }
+ }
+ function refresh(){
+   indicator();
+   try{if(typeof render==='function')render();}catch(e){console.warn('[Stock V144] Render no disponible',e);}
+ }
+ const prev=window.LDH_applyRemoteStockWithoutReload;
+ if(typeof prev==='function')window.LDH_applyRemoteStockWithoutReload=function(){
+   const out=prev.apply(this,arguments);
+   if(out)setTimeout(refresh,35);
+   return out;
+ };
+ window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(refresh,80));
+ window.addEventListener('storage',evt=>{if(evt?.key==='ldh_v2_company_stock_v1')setTimeout(refresh,80);});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden){indicator();}});
+ const start=()=>{refresh();setTimeout(indicator,200);setTimeout(refresh,1500);};
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else setTimeout(start,0);
 })();
 </script>
 
