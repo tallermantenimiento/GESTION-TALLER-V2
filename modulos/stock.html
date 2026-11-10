@@ -3193,6 +3193,36 @@ function LDH_stockOtReceiptAllocationV144(companyId,materialId){
   }catch(e){console.warn('[Stock V144] Reserva por OT no disponible',e);return null;}
 }
 function LDH_effectiveAssignedStockV144(companyId,materialId){
+  // V150: la fuente documental viva del par WOODS/40x40 prevalece si
+  // su desglose verificado sigue intacto. SOLO lectura, no crea reservas.
+  try{
+    if(String(companyId)==='emp_g3pgbthcsq' && String(materialId)==='mat_f2i1l7io1e'){
+      const marker=db && db.stockReconciliationV140;
+      const pair=marker && Array.isArray(marker.materialPairs) ? marker.materialPairs.find(p=>String(p.c)===String(companyId)&&String(p.m)===String(materialId)) : null;
+      const refs=pair && Array.isArray(pair.refs) ? pair.refs : [];
+      const q=refs.reduce((n,r)=>n+Math.max(0,Number(r.q)||0),0);
+      const expected=['OT-260817-001-B','OT-260817-001-C','OT-261109-002'];
+      const matched=expected.every(ref=>refs.some(r=>String(r.r)===ref));
+      const physical=Math.max(0,Number(realStock(companyId,materialId))||0);
+      const direct=Math.max(0,Number(reservedStock(companyId,materialId))||0);
+      const cutoff=Date.parse(marker?.appliedAt||'')||0;
+      const posterior=(db.movements||[]).some(x=>{
+        if(String(x.companyId||x.empresaId||'')!==String(companyId)||String(x.materialId||x.matId||'')!==String(materialId))return false;
+        if((Date.parse(x.date||x.createdAt||'')||0)<=cutoff)return false;
+        if(x.nonPhysical===true||x.reconciliationOnly===true)return false;
+        return ['salida','consumo','out','ajuste_neg','consumo_terminal'].includes(String(x.type||x.tipo||'').toLowerCase());
+      });
+      const loansChanged=(db.internalOtLoansV55||[]).some(x=>{
+        if(String(x.companyId||'')!==String(companyId)||String(x.materialId||'')!==String(materialId))return false;
+        return Math.max(Date.parse(x.createdAt||'')||0,Date.parse(x.updatedAt||'')||0)>cutoff;
+      });
+      if(marker?.appliedAt && matched && Math.abs(Number(pair.q)-17)<1e-7 && Math.abs(q-17)<1e-7 && physical===17 && !posterior && !loansChanged){
+        window.__LDH_STOCK_V150_WOODS_LAST={mode:'CONCILIACION_OT_VIVA',fisico:physical,asignado:Math.min(q,Math.max(0,physical-direct)),directo:direct,refs:refs.map(r=>({ref:r.r,qty:r.q}))};
+        return Math.min(q,Math.max(0,physical-direct));
+      }
+      window.__LDH_STOCK_V150_WOODS_LAST={mode:'CALCULO_GENERAL',fisico:physical,conciliado:pair?.q??null,refsQty:q,posterior,loansChanged};
+    }
+  }catch(e){console.warn('[Stock V150] calculo documental WOODS',e);}
   const v=LDH_stockOtReceiptAllocationV144(companyId,materialId);
   if(v!==null){
     let physical=0,direct=0;
@@ -10633,6 +10663,31 @@ console.info('[Stock V137] Firebase producción: sin test_guard/CSP local y app 
  window.LDH_STOCK_V149_ESTADO=()=>({resguardo:!!protect(C,M),modo:lastMode,referencias:PROOF.map(x=>({...x})),conciliacionActual:(db?.stockReconciliationV140?.materialPairs||[]).find(p=>String(p.c)===C&&String(p.m)===M)?.q??null,fisico:realStock(C,M)});
  window.LDH_STOCK_V148_ESTADO=window.LDH_STOCK_V149_ESTADO;
  document.documentElement.dataset.ldhStockV149='resguardo-woods-17-revision-entrada-cero';
+})();
+</script>
+<script id="LDH_STOCK_V150_VISUAL_CONCILIACION_20261110">
+(function(){
+ window.LDH_STOCK_V150_ESTADO=function(){
+   const c='emp_g3pgbthcsq',m='mat_f2i1l7io1e';
+   const previous=window.LDH_STOCK_V149_ESTADO?.()||{};
+   const allocated=typeof LDH_effectiveAssignedStockV144==='function'?LDH_effectiveAssignedStockV144(c,m):null;
+   const physical=typeof realStock==='function'?realStock(c,m):null;
+   const reserved=typeof reservedStock==='function'?reservedStock(c,m):null;
+   const free=physical===null?null:Math.max(0,physical-(reserved||0)-(allocated||0)-(typeof lentStock==='function'?lentStock(c,m):0));
+   return {version:'V150',company:'WOODS',material:'40x40x1.5',fisico:physical,reservadoDirecto:reserved,asignadoOT:allocated,libre:free,detalle:window.__LDH_STOCK_V150_WOODS_LAST||null,anterior:previous};
+ };
+ const show=()=>{
+  try{
+   const host=document.querySelector('.top .actions');if(!host)return;
+   let el=document.getElementById('ldhStockV150Badge');
+   if(!el){el=document.createElement('span');el.id='ldhStockV150Badge';el.style.cssText='border:1px solid #38bdf8;color:#a5f3fc;background:#073047;padding:7px 10px;border-radius:9px;font-weight:900;font-size:11px;';host.prepend(el);}
+   el.textContent='STOCK V150 · CONCILIACION VISIBLE';
+   if(typeof render==='function')render();
+  }catch(e){console.warn('[Stock V150] refresco',e);}
+ };
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(show,80),{once:true});else setTimeout(show,80);
+ window.addEventListener('ldh:stock-cloud-updated',()=>setTimeout(show,120));
+ document.documentElement.dataset.ldhStockV150='visible';
 })();
 </script>
 </body>
