@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<meta name="ldh-config-stock-picker-v140-r4" content="CATALOGO-VIGENTE-HISTORICO-OPCIONAL-SIN-FALLBACK-20261110">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="ldh-ai-module" content="configuracion">
@@ -4019,9 +4020,9 @@ _uaPill(item){
 
       const remoteState = window.LDH_CFG_REMOTE_STOCK || {};
       const remoteDB = {
-        materials: Array.isArray(remoteState.materials)
-          ? remoteState.materials
-          : []
+        materials: (window.LDH_cfgShowCatalogHistoricalV140 && Array.isArray(remoteState.catalogAllRows))
+          ? remoteState.catalogAllRows
+          : (Array.isArray(remoteState.materials) ? remoteState.materials : [])
       };
       const ferDB = parseCurrent('ldh_v2_ferreteria_stock_v1') ||
         parseCurrent('terminal_ferreteria_stock_v1') || {};
@@ -4286,13 +4287,13 @@ _uaPill(item){
 
       const tableId = tr.closest('table')?.id || '';
       const preferredCat = (tableId === 'cfgTblLines' || tr.dataset.configKind === 'line') ? 'Hierro' : '';
+      // R4: un enlace previo nunca se sustituye por una ficha diferente solo
+      // porque la anterior esté archivada y comparta el mismo nombre.
+      if(previousId) return false;
       const mat = this._cfgFindExactStockMaterial(name, preferredCat);
       if(!mat || !mat.id){
-        if(previousId && this._cfgHasAuthoritativeStockCatalog()){
-          delete tr.dataset.stockMatId;
-          this._decorateCfgRowStockPill(tr);
-          return true;
-        }
+        // V140: una ficha retirada del selector no autoriza borrar el vínculo
+        // histórico de una receta ya guardada. Se conserva el ID anterior.
         return false;
       }
       const changed = String(mat.id) !== previousId;
@@ -4307,7 +4308,7 @@ _uaPill(item){
       if(!st.ok || !(st.materials || []).length) return 0;
 
       let changed = 0;
-      const canCleanOrphans = this._cfgHasAuthoritativeStockCatalog();
+      const canCleanOrphans = false; // V140: nunca borrar enlaces históricos por filtrar el selector
       const materialFor = (name, preferredCat='') => this._cfgFindExactStockMaterial(name, preferredCat);
       const formulaName = (formula) => String(formula || '').split('=')[0].trim();
       const linkedKeyFor = (map, name) => {
@@ -4343,6 +4344,9 @@ _uaPill(item){
               return;
             }
 
+            // R4: se conservan los IDs históricos de recetas ya guardadas.
+            // Solo se vinculan automáticamente las líneas que NO tenían enlace.
+            if(previousId) return;
             const mat = materialFor(name, preferredCat);
             if(!mat || !mat.id){
               if(previousId && canCleanOrphans){
@@ -4403,8 +4407,11 @@ _uaPill(item){
       const st = this._loadStockForConfig();
       warn.style.display = st.ok ? 'none' : 'block';
       const info = document.getElementById('cfgStockInfo');
-      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + (st.materials||[]).length + ' materiales únicos · ' + (st.source||'')) : '';
+      if(info) info.textContent = 'Materiales del selector: ' + (st.materials||[]).length + ' · ' + (st.source||'') +
+        (window.LDH_CFG_REMOTE_STOCK?.loaded && !window.LDH_CFG_REMOTE_STOCK?.reconciled ? ' · Stock principal oculto hasta regularización' : '');
       search.value = '';
+      const hist = document.getElementById('cfgStockShowHistoricalV140');
+      if(hist){ hist.checked=false; window.LDH_cfgShowCatalogHistoricalV140=false; }
 
       // Si ya venías asignando, mantenemos el último grupo abierto.
       // Si es la primera vez en la sesión, todo colapsado por defecto.
@@ -4450,7 +4457,8 @@ _uaPill(item){
       const st = this._loadStockForConfig();
       const arr = (st.materials || []).slice();
       const info = document.getElementById('cfgStockInfo');
-      if(info) info.textContent = st.ok ? ('Stock real cargado: ' + arr.length + ' materiales únicos · ' + (st.source||'')) : '';
+      if(info) info.textContent = 'Materiales seleccionables: ' + arr.length + ' · ' + (st.source||'') +
+        (window.LDH_CFG_REMOTE_STOCK?.loaded && !window.LDH_CFG_REMOTE_STOCK?.reconciled ? ' · Stock principal antiguo excluido' : '');
 
       const filtered = q ? arr.filter(m => {
         const t = `${m.name||''} ${m.cat||''} ${m.grp||''} ${m.unit||''} ${m.id||''} ${m.companyId||''} ${(m.aliasIds||[]).join(' ')}`.toLowerCase();
@@ -6312,7 +6320,7 @@ window.CarpetaPicker = (function(){
     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
       <div>
         <div style="font-weight:800; font-size:16px;">Seleccionar material del Stock</div>
-        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vincula el concepto con los catálogos actuales de Stock, Ferretería, Tableros y Prefabricados. El Stock principal se sincroniza mediante Firebase y se ignora el catálogo del programa antiguo.</div>
+        <div style="font-size:12px; opacity:.8; margin-top:2px;">Vinculación con el Stock principal conciliado, Ferretería, Tableros y Prefabricados. Las fichas históricas de Stock se ocultan por defecto, sin borrar los vínculos existentes. Antes de conciliar Stock, solo se ofrece Ferretería/Tableros.</div>
       </div>
       <button class="btn btn-ghost" onclick="App.closeCfgStockModal()">✕</button>
     </div>
@@ -6324,7 +6332,11 @@ window.CarpetaPicker = (function(){
 \n
 </div>
 
-    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">Todavía no se han cargado los catálogos actuales de Stock, Ferretería o Tableros. Pulsa <b>Diagnóstico</b> para comprobar las fuentes disponibles.</div>\n    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
+    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">Todavía no se han cargado los catálogos actuales de Stock, Ferretería o Tableros. Pulsa <b>Diagnóstico</b> para comprobar las fuentes disponibles.</div>\n    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#9fb2d0;cursor:pointer;">
+      <input type="checkbox" id="cfgStockShowHistoricalV140" onchange="LDH_cfgToggleHistoricoV140(this.checked)" style="width:auto;">
+      Mostrar también fichas históricas de Stock (sin disponibilidad garantizada)
+    </label>
+    <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
 
     <div id="cfgStockResults" style="margin-top:12px; max-height:58vh; overflow:auto; border:1px solid rgba(0,0,0,.08); border-radius:12px;"></div>
 
@@ -8310,7 +8322,12 @@ window.ejecutarDevolucion = function(matId, maxQty){
   if(window.__LDH_CFG_STOCK_REMOTE_INSTALLED) return;
   window.__LDH_CFG_STOCK_REMOTE_INSTALLED = true;
 
-  window.LDH_CFG_REMOTE_STOCK = window.LDH_CFG_REMOTE_STOCK || {materials:[], loading:false, loaded:false, error:'', source:''};
+  window.LDH_CFG_REMOTE_STOCK = window.LDH_CFG_REMOTE_STOCK || {materials:[], catalogAllRows:[], loading:false, loaded:false, error:'', source:'', reconciled:false};
+  window.LDH_cfgShowCatalogHistoricalV140 = false;
+  window.LDH_cfgToggleHistoricoV140 = function(value){
+    window.LDH_cfgShowCatalogHistoricalV140 = !!value;
+    try{ if(window.App && App.renderCfgStockResults) App.renderCfgStockResults(); }catch(_){ }
+  };
 
   const firebaseConfig = {
     apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
@@ -8333,7 +8350,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     }catch(e){}
   }
 
-  function rowsFromStockDb(db0){
+  function rowsFromStockDb(db0, includeArchived=false){
     db0 = db0 && typeof db0 === 'object' ? db0 : {};
     const mats = Array.isArray(db0.materials) ? db0.materials : [];
     const stock = Array.isArray(db0.stock) ? db0.stock : [];
@@ -8342,6 +8359,9 @@ window.ejecutarDevolucion = function(matId, maxQty){
 
     // Primero stock para capturar orden/familia publicada.
     stock.forEach((sr,i)=>{
+      // V140: el histórico permanece en Firestore para préstamos y movimientos,
+      // pero no vuelve a ofrecerse en nuevas vinculaciones por defecto.
+      if(!includeArchived && sr.hiddenFromConceptPickerV140 === true) return;
       const mat = matById.get(nice(sr.materialId || sr.matId || sr.id)) || {};
       const name = nice(mat.name || mat.nombre || sr.name || sr.material || sr.matName);
       if(!name) return;
@@ -8396,7 +8416,12 @@ window.ejecutarDevolucion = function(matId, maxQty){
         : JSON.stringify(stockDb[STOCK_KEY]);
       stockDb = JSON.parse(rawText);
     }
-    return {rows:rowsFromStockDb(stockDb), raw:rawText};
+    return {
+      rows:rowsFromStockDb(stockDb, false),
+      allRows:rowsFromStockDb(stockDb, true),
+      reconciled:!!(stockDb && stockDb.stockReconciliationV140 && stockDb.stockReconciliationV140.appliedAt),
+      raw:rawText
+    };
   }
 
   async function readStockMaterials(db, collection, getDocs){
@@ -8415,7 +8440,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
     try{
       const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
       const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-      const {getFirestore,collection,getDocs,doc,getDoc} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+      const {getFirestore,collection,getDocs,doc,getDocFromServer} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
       let app = getApps().find(a => a.options && a.options.projectId === firebaseConfig.projectId);
       if(!app) app = initializeApp(firebaseConfig, 'ldh-config-stock-real');
@@ -8442,28 +8467,20 @@ window.ejecutarDevolucion = function(matId, maxQty){
         setTimeout(finish, 3500);
       });
 
-      const fromDocs = await readStockMaterials(db, collection, getDocs).catch(e => {
-        console.warn('[Config] stock_materials no disponible', e);
-        return [];
-      });
-      const packageResult = await readStockPackage(db, doc, getDoc).catch(e => {
-        console.warn('[Config] chunks no disponibles', e);
-        return {rows:[], raw:''};
-      });
+      const packageResult = await readStockPackage(db, doc, getDocFromServer);
+      // V140: no usar el espejo stock_materials como respaldo de vinculacion.
+      // Puede contener fichas históricas de una publicación anterior.
+      if(!packageResult.raw) throw new Error('No se pudo verificar el Stock principal; no se ofrece un catálogo antiguo de respaldo.');
       const fromChunks = packageResult.rows || [];
-
-      // El paquete taller_data/stock es la publicación autoritativa del Stock nuevo.
-      // stock_materials queda únicamente como respaldo si el paquete aún no existe.
-      // No se guarda ninguna copia local: así nunca reaparecen materiales del programa antiguo.
-      state.materials = fromChunks.length ? fromChunks : fromDocs;
+      state.reconciled = packageResult.reconciled === true;
+      state.materials = state.reconciled ? fromChunks : [];
+      state.catalogAllRows = packageResult.allRows || [];
       state.loaded = true;
       state.loading = false;
-      state.source = fromChunks.length
-        ? 'Firebase nuevo · catálogo Stock ' + fromChunks.length
-        : 'Firebase nuevo · stock_materials ' + fromDocs.length + ' (respaldo)';
-      setInfo(fromChunks.length
-        ? 'Firebase nuevo conectado: catálogo Stock ' + fromChunks.length
-        : 'Firebase nuevo conectado: respaldo stock_materials ' + fromDocs.length);
+      state.source = state.reconciled
+        ? 'Stock actual conciliado · ' + fromChunks.length + ' fichas vigentes'
+        : 'Stock principal NO conciliado · oculto para evitar vínculos antiguos';
+      setInfo(state.source);
 
       try{
         if(window.App && typeof App.autoLinkCfgRowsByExactName === 'function') App.autoLinkCfgRowsByExactName();
@@ -8473,6 +8490,9 @@ window.ejecutarDevolucion = function(matId, maxQty){
       state.loading = false;
       state.loaded = false;
       state.error = String(e && (e.code || e.message || e));
+      state.materials = [];
+      state.catalogAllRows = [];
+      state.reconciled = false;
       console.warn('[Config] No se pudo leer Stock real Firestore', e);
       setInfo('Firestore no disponible');
     }

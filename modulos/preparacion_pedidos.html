@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<meta name="ldh-prep-v66" content="RESERVADO_FABRICACION_STOCK_CONCILIADO_20261110">
 <meta charset="UTF-8" />
 <!-- BUILD: COMPRAS-STOCK-EXACTO-V47-20260728 -->
 <meta name="ldh-prep-v61-fix" content="V61-RECONCILIACION-RECIBO-DUPLICADO-WOODS-20261109" />
@@ -20319,6 +20320,14 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
     const remoteDB = LDH_prepParseStockDBV28(remoteRaw);
     if (!remoteDB) throw new Error("El Stock remoto no tiene un formato válido.");
 
+    // V66 · Con el inventario conciliado, entrar en Fabricación NO consume barras.
+    // Conserva físico y reserva hasta confirmación de utilización real.
+    // Se comprueba DENTRO de la transacción, nunca mediante caché del navegador.
+    if (remoteDB.stockReconciliationV140?.appliedAt) {
+      return { remoteDB, consumedQty:0, consumedAssignments:0,
+        ignoredHistoricalAssignments:0, reservedUntilPhysicalUseV140:true };
+    }
+
     const assignments = Array.isArray(remoteDB.assignments) ? remoteDB.assignments : [];
     const movements = Array.isArray(remoteDB.movements) ? remoteDB.movements : [];
     const movementIds = new Set(movements.map((row) => String(row?.id ?? row?.movementId ?? "")));
@@ -20557,7 +20566,8 @@ async function LDH_prepConsumeCommonAtFabricationV32(workRef) {
   return {
     consumedQty: result.consumedQty,
     consumedAssignments: result.consumedAssignments,
-    ignoredHistoricalAssignments: result.ignoredHistoricalAssignments || 0
+    ignoredHistoricalAssignments: result.ignoredHistoricalAssignments || 0,
+    reservedUntilPhysicalUseV140:result.reservedUntilPhysicalUseV140 === true
   };
 }
 
@@ -20588,6 +20598,9 @@ async function LDH_prepRestorePrematureConsumptionV106(workRef){
     const result=await runTransaction(LDH_PREP_STOCK_DB_V28,async transaction=>{
       const metaRef=doc(LDH_PREP_STOCK_DB_V28,"taller_data","stock");
       const remoteDB=await LDH_prepReadRemoteStockTransactionV45(transaction,metaRef);
+      // V66: con Stock V140 reconciliado no volver a sumar consumos históricos.
+      if(remoteDB.stockReconciliationV140?.appliedAt)
+        return {remoteDB,restoredQty:0,restoredAssignments:0,changed:false,alreadyReconciledV140:true};
       const assignments=Array.isArray(remoteDB.assignments)?remoteDB.assignments:[];
       const movements=Array.isArray(remoteDB.movements)?remoteDB.movements:[];
       const now=new Date().toISOString();
@@ -28987,8 +29000,9 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
         closed_from_preparation:true,
         preparation_closed_at:new Date().toISOString(),
         preparation_closed_by:'PREPARACION-V114-CONSUMO-ANTES-DE-RETIRAR-20260820',
-        stock_consumed_on_close:true,
-        stock_consumed_qty:Number(consumed?.consumedQty || 0)
+        stock_consumed_on_close:consumed?.reservedUntilPhysicalUseV140 === true ? false : true,
+        stock_consumed_qty:Number(consumed?.consumedQty || 0),
+        stock_reserved_until_physical_use_v140:consumed?.reservedUntilPhysicalUseV140 === true
       };
       try{
         if(typeof setAny === 'function') setAny(metaKey,JSON.stringify(closedMeta));
@@ -30304,13 +30318,15 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
 
     if(!confirm(
       `Mandar a FABRICACIÓN:\nUnidades: ${units}\n\n` +
-      'El material ya recibido/asignado se descontará ahora del Stock físico, EXCEPTO pintura y disolvente.\nPintura y disolvente quedan reservados hasta confirmar PINTADO en cabina.\n' +
+      (window.__LDH_PREP_STOCK_CLOUD_DB?.stockReconciliationV140?.appliedAt
+        ? 'Los materiales seguirán RESERVADOS durante Fabricación. No se descontarán del físico por el mero envío.\n'
+        : 'Si el inventario aún no está conciliado, se aplicará el flujo anterior de consumo al entrar en Fabricación.\n') +
       'Si todavía falta material, el trabajo seguirá también en Preparación hasta completar la recepción.'
     )) return;
 
     const button=document.getElementById('btnFaseTrabajo');
     const oldText=button?.textContent || '💾 Mandar a fabricación';
-    if(button){ button.disabled=true; button.textContent='Enviando y descontando Stock…'; }
+    if(button){ button.disabled=true; button.textContent='Enviando y verificando reserva…'; }
     window.__LDH_PREP_V115_SEND_LOCK__=true;
 
     try{
@@ -30328,8 +30344,14 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
 
       try{
         const meta=currentMeta();
-        meta.stock_consumed_at_fabrication_at=new Date().toISOString();
-        meta.stock_consumed_at_fabrication_assignments=Number(consumed?.consumedAssignments || 0);
+        if(consumed?.reservedUntilPhysicalUseV140){
+          meta.stock_reserved_until_physical_use_v140=true;
+          delete meta.stock_consumed_at_fabrication_at;
+          delete meta.stock_consumed_at_fabrication_assignments;
+        }else{
+          meta.stock_consumed_at_fabrication_at=new Date().toISOString();
+          meta.stock_consumed_at_fabrication_assignments=Number(consumed?.consumedAssignments || 0);
+        }
         meta.stock_ignored_historical_assignments_v115=Number(consumed?.ignoredHistoricalAssignments || 0);
         if(typeof setAny==='function' && typeof KM==='function') setAny(KM(reference),JSON.stringify(meta));
       }catch(_){ }
@@ -30341,7 +30363,9 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
         }
         if(closed){
           alert(
-            '✅ Enviado a Fabricación y Stock descontado correctamente.' +
+            (consumed?.reservedUntilPhysicalUseV140
+              ? '✅ Enviado a Fabricación; materiales siguen ASIGNADOS/RESERVADOS (sin consumo físico).'
+              : '✅ Enviado a Fabricación y Stock descontado correctamente.') +
             (Number(consumed?.ignoredHistoricalAssignments||0)>0
               ? '\n\nSe ignoraron '+Number(consumed.ignoredHistoricalAssignments)+' asignaciones históricas que ya no pertenecen a los materiales actuales de la OT.'
               : '')
@@ -30349,7 +30373,9 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
           try{ if(typeof volverLista==='function') volverLista(); }catch(_){ }
         }else{
           alert(
-            '✅ Enviado a Fabricación y consumo de Stock confirmado.\n\n' +
+            (consumed?.reservedUntilPhysicalUseV140
+              ? '✅ Enviado a Fabricación; las reservas siguen intactas.\n\n'
+              : '✅ Enviado a Fabricación y consumo de Stock confirmado.\n\n') +
             'La ficha seguirá visible en Preparación hasta que el cierre seguro pueda confirmarse.'
           );
           try{ if(typeof cargarLista==='function') cargarLista(); }catch(_){ }
@@ -30357,7 +30383,9 @@ window.LDH_PREP_V114_CIERRE_SEGURO_PLETINA='PREPARACION-V114-CIERRE-SEGURO-PLETI
       }else{
         alert(
           '✅ Enviado a Fabricación.\n\n' +
-          'El material ya recibido/asignado se ha descontado del Stock físico, excepto pintura y disolvente, que siguen reservados hasta Cabina.\n' +
+          (consumed?.reservedUntilPhysicalUseV140
+            ? 'El material recibido queda reservado y no se descuenta físicamente hasta su utilización.\n'
+            : 'El material recibido se ha descontado del físico excepto pintura/disolvente hasta Cabina.\n') +
           'La OT seguirá en Preparación porque todavía falta material.'
         );
         try{ if(typeof cargarLista==='function') cargarLista(); }catch(_){ }
@@ -35385,6 +35413,64 @@ function init(){
   console.info('[Preparacion V61] Guardia anti-duplicados y conciliacion de +5 WOODS lista. No hubo escritura en el arranque.');
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+})();
+</script>
+
+
+<script id="LDH_PREP_V66_MOSTRAR_RESERVAS_RECONCILIADAS_20261110">
+(function(){
+ 'use strict';
+ const norm=v=>String(v==null?'':v).trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'');
+ const number=v=>{const n=Number(v);return Number.isFinite(n)?Math.max(0,n):0;};
+ const niceName=(db,id)=>String((db.materials||[]).find(x=>String(x.id)===String(id))?.name||'');
+ const currentDB=()=>window.__LDH_PREP_STOCK_CLOUD_DB||window.__LDH_STOCK_MEMORY_DB||null;
+ function applyInfo(base,line,linkedMat){
+  try{
+   const db=currentDB(); const schema=db?.stockReconciliationV140;
+   if(!schema?.appliedAt || !base || base.state!=='ok')return base;
+   const userCompany=(typeof window._v2GetPedidoEmpresa==='function'?window._v2GetPedidoEmpresa():null)||base.empresa||'';
+   const company=(db.companies||[]).find(x=>[x.id,x.name,x.nombre,x.code,x.codigo].some(v=>norm(v)===norm(userCompany)));
+   if(!company)return base;
+   const companyId=String(company.id);
+   const possibleIds=[base.physicalMaterialIdV170,base.physicalMaterialIdV68,base.linkedMaterialIdV68,
+    line?.linked_matId,line?.stockMatId,line?.matId,line?.stockId,line?.materialId,linkedMat?.id].filter(Boolean).map(String);
+   const name=norm(line?.linked_matName||line?.mat||line?.material||line?.name||linkedMat?.name||base.material||'');
+   const pairs=(schema.materialPairs||[]).filter(x=>String(x.c)===companyId);
+   const activePairs=pairs.filter(p=>number(p.q)>0);
+   let matching=activePairs.filter(p=>possibleIds.includes(String(p.m)));
+   if(!matching.length && name){matching=activePairs.filter(p=>norm(niceName(db,p.m))===name);}
+   if(matching.length!==1)return base; // Sin coincidencia inequívoca, no inventar reserva
+   const pair=matching[0];
+   const row=(db.stock||[]).find(x=>x.companyId===companyId&&x.materialId===pair.m);
+   if(!row)return base;
+   const physical=number(row.physicalQty??row.fisico??pair.q);
+   let alloc=new Map((pair.refs||[]).map(x=>[String(x.r),number(x.q)]));
+   const baseline=new Map((schema.loanBaseline||[]).map(x=>[x.id,x]));
+   for(const loan of db.internalOtLoansV55||[]){
+     if(String(loan.companyId)!==companyId||String(loan.materialId)!==String(pair.m))continue;
+     const prior=baseline.get(loan.id);
+     const shift=prior ? -Math.max(0,number(loan.returnedQty)-number(prior.returnedQty))
+                       : Math.max(0,number(loan.qty)-number(loan.returnedQty));
+     if(!shift)continue;
+     alloc.set(loan.fromRef,Math.max(0,(alloc.get(loan.fromRef)||0)-shift));
+     alloc.set(loan.toRef,Math.max(0,(alloc.get(loan.toRef)||0)+shift));
+   }
+   const reserved=Math.min(physical,Array.from(alloc.values()).reduce((a,b)=>a+b,0));
+   return Object.assign({},base,{real:physical,reservado:reserved,asignado:0,
+    libre:Math.max(0,physical-reserved),physicalMaterialIdV68:pair.m,physicalMaterialIdV170:pair.m,
+    sourceKey:String(base.sourceKey||'')+' + Stock OT conciliado V140'});
+  }catch(e){console.warn('[Preparacion V66] reserva conciliada no disponible',e);return base;}
+ }
+ const previous=window._v2CompanyStockInfo;
+ if(typeof previous==='function'){
+   const wrapped=function(line,linkedMat){return applyInfo(previous.apply(this,arguments),line,linkedMat);};
+   wrapped.__ldhV170MasterPhysical=true;
+   wrapped.__ldhV104SafeDisplay=true;
+   wrapped.__ldhV66StockReconciled=true;
+   window._v2CompanyStockInfo=wrapped;
+   try{_v2CompanyStockInfo=wrapped;}catch(_){ }
+ }
+ window.LDH_PREP_V66_RECONCILIACION_OT='PREPARACION-V66-STOCK-RESERVADO-EN-FABRICACION-20261110';
 })();
 </script>
 

@@ -2,6 +2,7 @@
 <!-- LDH_STOCK_V49_RESERVADO_UNIFICADO · 29/07/2026 -->
 <html lang="es">
 <head>
+<meta name="ldh-stock-v140" content="RECONCILIACION_OT_PLETINAS_PROTEGIDAS_20261110">
 <meta name="ldh-stock-test-v128" content="PINTURA-FALLBACK-SIN-HISTORICO-20260910">
 
 <meta charset="utf-8" />
@@ -1674,6 +1675,10 @@ function LDH_buildMinimalStockDB(){
       reservations: Array.isArray(db.reservations) ? db.reservations : [],
       assignments: Array.isArray(db.assignments) ? db.assignments : [],
       reservationDebts: Array.isArray(db.reservationDebts) ? db.reservationDebts : [],
+      // V140: el modo compacto NO puede perder las asignaciones reconstruidas
+      // ni el estado de regularización; de lo contrario reaparece Stock ficticio.
+      stockReconciliationV140: db.stockReconciliationV140 || undefined,
+      internalOtLoansV55: Array.isArray(db.internalOtLoansV55) ? db.internalOtLoansV55 : [],
       updatedAt: now(),
       _minimalByQuota: true
     };
@@ -6741,6 +6746,150 @@ function LDH_closeMaintenanceModal(){
 </script>
 
 
+<script id="LDH_STOCK_RECON_CORE_V140">
+(function(root){
+'use strict';
+const EPS = 1e-7;
+const round = n => Math.round((Number(n)||0)*1e8)/1e8;
+const num = v => Number.isFinite(Number(v)) ? Number(v) : 0;
+const safe = v => JSON.parse(JSON.stringify(v));
+const keyOf=(c,m)=>String(c)+'|'+String(m);
+const physicalFields=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad','stock','real'];
+const mmFields=['lengthPhysicalMm','physicalMm','fisicoMm','stockMm','realMm'];
+function ledger(db,c,m){
+ let sum=0;
+ for(const v of (db.movements||[])){
+  if(String(v.companyId||v.empresaId||'')!==String(c)||String(v.materialId||v.matId||'')!==String(m))continue;
+  const type=String(v.type||v.tipo||'entrada').toLowerCase();
+  if(['recepcion_preparacion','stock_recibido_ok','prep_ok','traza_recepcion'].includes(type))continue;
+  const q=num(v.qty??v.cantidad??v.quantity??0);
+  if(['salida','ajuste_neg','consumo','out'].includes(type))sum-=q;
+  else if(['entrada','ajuste_pos','devolucion','in'].includes(type))sum+=q;
+  else sum+=q;
+ }
+ return round(sum);
+}
+function build(original,plan){
+ if(!original||!Array.isArray(original.stock)||!Array.isArray(original.materials)||!Array.isArray(original.companies))throw new Error('Stock incompatible con el respaldo');
+ if(original.stockReconciliationV140?.appliedAt)throw new Error('La regularización V140 ya figura aplicada; no se repite');
+ const db=safe(original);const target=new Map(plan.stocks.map(x=>[keyOf(x.c,x.m),x]));
+ const compById=new Map(db.companies.map(x=>[String(x.id),x]));
+ const matById=new Map(db.materials.map(x=>[String(x.id),x]));
+ if(db.stock.length !== plan.stocks.length)throw new Error('Ha cambiado el número de fichas de Stock');
+ const originalNames=new Map((original.stock||[]).map(r=>[keyOf(r.companyId,r.materialId),matById.get(String(r.materialId))?.name||'']));
+ const targetsUsed=new Set();const modifications=[];let protectedRows=0,retiredRows=0,activeRows=0;
+ for(const row of db.stock){
+  const key=keyOf(row.companyId,row.materialId),entry=target.get(key);
+  if(!entry)throw new Error('Fila desconocida en conciliación '+key);
+  targetsUsed.add(key);
+  if(entry.p){protectedRows++;continue;}
+  const q=round(Math.max(0,num(entry.q)));
+  const originalField=physicalFields.find(k=>row[k]!==undefined && row[k]!==null&&String(row[k])!==''),oldQty=originalField?num(row[originalField]):0;
+  for(const f of physicalFields)if(f in row || ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty'].includes(f))row[f]=q;
+  if(String(row.lengthMode||'').toLowerCase()==='mm') for(const f of mmFields)if(f in row)row[f]=q;
+  row.physicalManualMaster=true;
+  row.physicalSource='conciliacion_ot_recibida_v140';
+  row.hiddenFromConceptPickerV140=q<EPS;
+  row.stockReconciledV140=true;
+  if(q<EPS)retiredRows++;else activeRows++;
+  if(Math.abs(oldQty-q)>EPS)modifications.push({c:row.companyId,m:row.materialId,from:round(oldQty),to:q});
+ }
+ if(protectedRows!==plan.protectedCommonPletinaCount)throw new Error('La protección de pletinas no coincide');
+ if(targetsUsed.size!==target.size)throw new Error('Catálogo de Stock distinto del respaldo');
+ // Un solo ajuste de libro por empresa+material. No es una salida física ni consumo
+ // y no sustituye los movimientos originales (trazabilidad intacta).
+ for(const [key,entry] of target){
+  if(entry.p)continue;
+  const before=ledger(original,entry.c,entry.m),q=Math.max(0,num(entry.q)),delta=round(q-before);
+  if(Math.abs(delta)<EPS)continue;
+  const negative=delta<0;
+  db.movements.push({
+   id:'mov_recon_v140_'+String(entry.c).replace(/[^a-z0-9]/gi,'')+'_'+String(entry.m).replace(/[^a-z0-9]/gi,''),
+   companyId:entry.c,materialId:entry.m,
+   type:negative?'salida':'entrada',qty:Math.abs(delta),date:new Date().toISOString(),
+   note:'Regularización DOCUMENTAL de saldo desde OT; sin salida/entrada física',
+   source:'conciliacion_ot_v140',reconciliationOnly:true,nonPhysical:true,accountingOnly:true,
+   appliedFromSha256:plan.sourceSha256
+  });
+ }
+ const at=new Date().toISOString();
+ db.stockReconciliationV140={
+   version:plan.version,appliedAt:at,sourceCreatedAt:plan.sourceCreatedAt,
+   sourceSha256:plan.sourceSha256,physicalCriteria:'recibidas en OT Preparacion/Fabricacion, sin doble contar prestamos',
+   protectedCommonPletinaCount:protectedRows,
+   unreconciledExternalLines:plan.unmappedActive,
+   materialPairs:plan.stocks.filter(x=>!x.p).map(x=>({c:x.c,m:x.m,q:x.q,refs:x.refs})),
+   loanBaseline:(db.internalOtLoansV55||[]).map(x=>({id:x.id,qty:x.qty,returnedQty:x.returnedQty||0,fromRef:x.fromRef,toRef:x.toRef,c:x.companyId,m:x.materialId})),
+   modifications,activeRows,retiredRows,protectedRows
+ };
+ db.updatedAt=at;
+ return {data:db,summary:{activeRows,retiredRows,protectedRows,changedRows:modifications.length,externalMissingLines:plan.unmappedActive.length}};
+}
+function isProtected(db,c,m){
+ const p=(db.stockReconciliationV140?.materialPairs||[]).find(x=>x.c===c&&x.m===m);
+ return !p;
+}
+function activeAllocations(db,c,m){
+ const r=db.stockReconciliationV140;
+ if(!r)return null;
+ const pair=r.materialPairs.find(x=>x.c===c&&x.m===m);
+ if(!pair)return null;
+ const alloc=new Map();
+ for(const v of pair.refs||[])alloc.set(v.r,Math.max(0,num(v.q))+(alloc.get(v.r)||0));
+ const baseline=new Map((r.loanBaseline||[]).map(l=>[l.id,l]));
+ for(const loan of (db.internalOtLoansV55||[])){
+   if(String(loan.companyId)!==String(c)||String(loan.materialId)!==String(m))continue;
+   const base=baseline.get(loan.id);
+   const qty=Math.max(0,num(loan.qty));
+   // Préstamos existentes en el corte: la baseline YA los asigna al deudor;
+   // solo transferimos la cantidad devuelta desde entonces.
+   // Préstamos NUEVOS: transferimos la cantidad aún pendiente de regreso.
+   const shift=base ? -Math.max(0,num(loan.returnedQty)-num(base.returnedQty))
+                    : Math.max(0,qty-num(loan.returnedQty));
+   if(Math.abs(shift)<EPS)continue;
+   const to=String(loan.toRef||''),from=String(loan.fromRef||'');
+   alloc.set(from,Math.max(0,(alloc.get(from)||0)-shift));
+   alloc.set(to,Math.max(0,(alloc.get(to)||0)+shift));
+ }
+ // Futuras recepciones, si se registran por primera vez para una OT nueva.
+ const cutoff=Date.parse(r.appliedAt)||0;
+ const post=new Map();
+ for(const a of db.assignments||[]){
+   if(String(a.companyId||a.empresaId)!==String(c)||String(a.materialId||a.matId)!==String(m))continue;
+   const stamp=Math.max(Date.parse(a.createdAt||'')||0,Date.parse(a.updatedAt||'')||0);
+   if(stamp<cutoff)continue;
+   const status=String(a.status||a.estado||'activa').toLowerCase();
+   const phase=String(a.phase||a.fase||'preparacion').toLowerCase();
+   if(!['activa','activo','open','abierta',''].includes(status))continue;
+   if(!['fabricacion','preparacion',''].includes(phase))continue;
+   if(a.toCompanyId||a.toEmpresa||a.internalLoanId||a.internalOtLoanIdV55)continue;
+   if(/prestamo|pr[eé]stamo|loan/i.test(String(a.source||'')+' '+String(a.reason||'')+' '+String(a.assignmentType||'')))continue;
+   const ref=String(a.ref||a.jobRef||a.consumerRef||'');if(!ref)continue;
+   const value=Math.max(0,num(a.qty??a.cantidad??0));
+   post.set(ref,Math.max(post.get(ref)||0,value));
+ }
+ for(const [ref,value] of post)alloc.set(ref,Math.max(alloc.get(ref)||0,value));
+ // Una OT totalmente en pintura/almacen/entregado deja de reservar.
+ const flows=(root.__LDH_STOCK_V126_FAB_FLOW_BY_REF||new Map());
+ for(const [ref,value] of alloc){
+   const match=String(ref).toUpperCase().match(/OT[-_ ]*(\d{6})[-_ ]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
+   const normalized=match?'OT-'+match[1]+'-'+match[2]+(match[3]?'-'+match[3]:''):String(ref);
+   const f=flows.get?.(normalized);
+   if(f && num(f.fabricacion)<=EPS && num(f.pintura)+num(f.almacen)+num(f.entregado)>EPS)alloc.set(ref,0);
+ }
+ return Array.from(alloc.entries()).filter(([ref,qty])=>qty>EPS).map(([ref,qty])=>({ref,qty:round(qty),phase:(pair.refs||[]).find(v=>v.r===ref)?.phase||'fabricacion'}));
+}
+function activeAssigned(db,c,m){
+ const rows=activeAllocations(db,c,m);
+ if(rows===null)return null;
+ return round(rows.reduce((sum,r)=>sum+r.qty,0));
+}
+root.LDH_STOCK_RECON_CORE_V140={build,activeAssigned,activeAllocations,isProtected};
+if(typeof module==='object'&&module.exports)module.exports=root.LDH_STOCK_RECON_CORE_V140;
+})(typeof window==='object'?window:globalThis);
+
+</script>
+<script type="application/json" id="LDH_STOCK_RECON_PLAN_V140">{"version":"RECON_V140_20261110","sourceCreatedAt":"2026-11-10T06:06:04.453Z","sourceSha256":"c7ff46803c6c6f61fc412d336341166d43ae35448958b9a0bec2dca8d73050f8","stockRevision":"mrab7y7l_stock_mr95nlcx_k234vp0jz9","stocks":[{"c":"PROBA","m":"mat_psmdzbr9z7","q":0,"p":false,"refs":[]},{"c":"PROCEED","m":"mat_jx7ia3klm2","q":0,"p":false,"refs":[]},{"c":"REYNOLDS","m":"mat_1hgvl2qnqc","q":0,"p":false,"refs":[]},{"c":"SKLUM","m":"mat_cvmrledive","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_0kmddai9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_0xa0zcb9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_23n906k9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_2e095jg9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_2vpzu7e9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_319ph639fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_3aqeh6hzxw","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_54ieo51a00","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_5lspgqe9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_6fj81v99fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_7ny9rsh9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_8c6dxfd9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_az6l2499fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_cn8pp6w9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_cvma9xb9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_d59uss79fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_donew359fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_e6pkczd5vs","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_eke2w6he2j","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_f9v960u9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_fa544lmz9o","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_fh55bzr5vs","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_fojt7vk9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_g45ejxk5vs","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_gwez0uy0lq","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_i51thyg9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_jlqrep19fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_jns40moe2j","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_kll8v0x9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_ks996ky9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_lgeaocm9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_mt8bdqa01e25r8zu","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_n0u2dtt9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_nzf11xo9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_ot9vqhx9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_p2ltthm9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_p64n3vo9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_pi8mkcee2j","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_prhbl3i9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_q6bs6as5vr","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_re7yt895vs","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_rfbvdk99fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_rg7i6sk9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_sj9n9vl9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_tu08d579fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_uertfss9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_vzi7buz9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_w1pptmgey0","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_w6iugw85vs","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_wir1asl9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_wshk51ne2j","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_x22fku59fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_xi7saih9fv","q":0,"p":false,"refs":[]},{"c":"emp_31u8d7b7t4","m":"mat_zkge9vp23o","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_14jml0uzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_1fujoxvzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_1jh4k4egao","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_1r98jhs967","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_2vopd4izx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_2yj94k0qmg","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_37vgjkuzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_3aqeh6hzxw","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_4yneq8yzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_5i8w89jzx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_74z5heeqo5","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_75tmrcdq9b","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_7aq2xrxzx1","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_7jkjc0vzx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_8gsxpi0g2m","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_9vbzc1h4in","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_acm8ghiguh","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_af53h35cya","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_bficjz9zx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_ca6p2crqng","q":0.1134,"p":false,"refs":[{"r":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","q":0.084,"phase":"fabricacion"},{"r":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","q":0.007,"phase":"fabricacion"},{"r":"OT-261027-001","q":0.014,"phase":"fabricacion"},{"r":"OT-261109-002","q":0.0084,"phase":"fabricacion"}]},{"c":"emp_5hg2nb3rxp","m":"mat_d2l1p120wj","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_ec7bpkzzx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_eza9koazx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_gehy0nmzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_gkpjtpuzx1","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_gqpmwdezx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_jatt9exzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_kme06sbzx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_lwh8sr0zx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_m2f0hmnzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_nv4kuylzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_pakoqie1qr","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_piw65fizx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_pkffammzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_q2r99lqzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_q6dsrc9zx1","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_rf9efm4zx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_rnx8hhbzx1","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_rr00ymszx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_sdw57r5s71","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_sq8wqy5q9b","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_sqgd2j9q9b","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_t3h1v1kq9b","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_tat86qozx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_trlkn7tzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_uzmnozezx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_v5yaibnzx2","q":0,"p":true,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_vtu4y1yzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_w1pptmgey0","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_wiyzmbqzuc","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_wnop6gozx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_x41zktqzx2","q":0,"p":false,"refs":[]},{"c":"emp_5hg2nb3rxp","m":"mat_x87k3pwq9b","q":0,"p":true,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_0d7vpur994","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_0ncbi0qvl1","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_0sv2nzgqfb","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_1c2do7k1pa","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_1crjfsdjrr","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_1fi7931zew","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_1locg8dzxn","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_1ppvmzs5yr","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_1wzysxal68","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_26k78oxj0d","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_2hql3n6mvn","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_32or80ah09","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_3aqeh6hzxw","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_49z9e9g27u","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_4day99q37p","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_4ifk45vajl","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_4wiicgimqc","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_4y4od04r0w","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_54ieo51a00","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_5jna4a0x8v","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_5oxlrh63wv","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_6jub3db2oj","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_6l954l4u60","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_7r0zx5qm70","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_807sods0n6","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_88o952aeu7","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_9a2ckaslm2","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_9b9tm7eqy8","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_9edcq8t1tn","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_9j0ffoy6lb","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_9jz87az88z","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_9yo6gfmqsd","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_agmhn8m0cz","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_ahsbrnax8w","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_axq2x2kfig","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_ayrlr6sdk2","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_bf7zs9mj68","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_bjlfmgploe","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_c2v66flq0e","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_d2l1p120wj","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_d6085lfxgz","q":2.0,"p":false,"refs":[{"r":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","q":2.0,"phase":"fabricacion"}]},{"c":"emp_a0agxt00x1","m":"mat_dafkcec9k6","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_db19f8w82e","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_do6fjlay88","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_drgy7dzfdl","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_ekrvzlbtwz","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_f8acgj8rp6","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_gwez0uy0lq","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_h5iidso7ky","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_hbmkab0dv3","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_htw09vdse2","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_huffml9bj4","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_icak4j7fig","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_ikd3gw0ijf","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_imni0we1yp","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_j8cqhrc5mj","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_jx7ia3klm2","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_krisp552zq","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_l2bbz3p81j","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_ltvgbvtfkd","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_m4uerm6beh","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_mudo2dkpw5brw7za","q":3.0,"p":false,"refs":[{"r":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","q":3.0,"phase":"fabricacion"}]},{"c":"emp_a0agxt00x1","m":"mat_muqah44saw","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_nqfrqlkf8q","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_nukhdholqp","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_o2i5e3wb1y","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_o328m23cq8","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_owzgxuxljq","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_pemcig7lm2","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_prrjugz23l","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_s8st7haya1","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_scffp8llvx","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_sggs0ckxiw","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_swcezglmbm","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_t73wixelm2","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_tmtlrtud3b","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_u7i48h9i49","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_uchyn0pc40","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_uo8zb0g753","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_v6vrsy1hxw","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_vgoi51qfif","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_w1pptmgey0","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_w85ug5cn6a","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_wfj8kahhym","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_x7gh7su9d9","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_xhkb5zotpo","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_xin4j59g09","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_xunk0q1fig","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_y9k43sgdxk","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_yw5l4dquot","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_z01mjl0m5x","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_zc7wr2zq1d","q":6.0,"p":false,"refs":[{"r":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","q":6.0,"phase":"fabricacion"}]},{"c":"emp_a0agxt00x1","m":"mat_zkge9vp23o","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_zviu918zpl","q":0,"p":false,"refs":[]},{"c":"emp_a0agxt00x1","m":"mat_zwakr29b17","q":0,"p":false,"refs":[]},{"c":"emp_create","m":"mat_p_blanco","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_0keishvd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_0vt1358d4y","q":1.152,"p":false,"refs":[{"r":"OT-260817-001-B","q":0.122,"phase":"fabricacion"},{"r":"OT-260817-001-C","q":0.122,"phase":"fabricacion"},{"r":"OT-261027-001","q":0.548,"phase":"fabricacion"},{"r":"OT-261109-002","q":0.36,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_18dvmpjd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_1i8md4ad4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_1qcd67nd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_2lqcwbhd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_2m00cwkd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_34f550qjt7","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_3aqeh6hzxw","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_3bpzga2d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_408st0dd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_4ifk45vajl","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_4p167xrlro","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_5zt096ld4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_6juw0a1d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_7ehcpgco1f","q":1.0,"p":false,"refs":[{"r":"OT-261027-001","q":1.0,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_7ipfxgad4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_9afaa9ad4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_9bf82j1d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_9vbzc1h4in","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_a3em1vkd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_bllwjomd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_bxbto1vjt8","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_byoni9ed4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_cemdwwrd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_esjs13ed4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_eubt2uad4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_f2i1l7io1e","q":17.0,"p":false,"refs":[{"r":"OT-260817-001-B","q":3.0,"phase":"fabricacion"},{"r":"OT-260817-001-C","q":5.0,"phase":"fabricacion"},{"r":"OT-261109-002","q":9.0,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_fa544lmz9o","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_i6fis53d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_i9npcind4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_ls1rghtd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_mh1fa05d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_mt21er3d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_mtr3xkqpu9rjxaz8","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_mudo2dkpw5brw7za","q":6.0,"p":false,"refs":[{"r":"OT-261027-001","q":6.0,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_mw4uf70rofnq7d3l","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_mwa9u2vwmtq73w07","q":16.0,"p":false,"refs":[{"r":"OT-261109-002","q":16.0,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_nvpg19vd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_oxgoltojt8","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_pz9cu2vd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_qjstnnrd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_qnu9nbrd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_rvouql4d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_rwh1jjhd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_stg33gyd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_ud6qjbyd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_v81ogc6d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_w1pptmgey0","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_wowv05sd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_xbg4wifjt8","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_xnn5qlyd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_yviyw16d4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_zc7wr2zq1d","q":11.0,"p":false,"refs":[{"r":"OT-261027-001","q":11.0,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_zmnykwdd4y","q":0,"p":false,"refs":[]},{"c":"emp_g3pgbthcsq","m":"mat_zr24p9pd4y","q":3.0,"p":false,"refs":[{"r":"OT-261027-001","q":3.0,"phase":"fabricacion"}]},{"c":"emp_g3pgbthcsq","m":"mat_zxvaa2kd4y","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_1df0q7ga08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_2rivtxpzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_36y54kjzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_3aqeh6hzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_3txfkjxo1f","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_4i6tftao1e","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_4p167xrlro","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_4wiicgimqc","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_54ieo51a00","q":1.0,"p":false,"refs":[{"r":"OT-261106-002","q":1.0,"phase":"preparacion"}]},{"c":"emp_jku45mmllb","m":"mat_5dc6b1icaw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_5udgy57zxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_5ws9liizxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_7ehcpgco1f","q":6.0,"p":false,"refs":[{"r":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","q":6.0,"phase":"fabricacion"}]},{"c":"emp_jku45mmllb","m":"mat_7quejtdzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_88w0qatzxw","q":15.0,"p":false,"refs":[{"r":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","q":15.0,"phase":"fabricacion"}]},{"c":"emp_jku45mmllb","m":"mat_8medx8ga08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_8zjtjzaogv","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_9rvzw31zxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_dhvir4acaw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_f2i1l7io1e","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_gwez0uy0lq","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_h24ajtmzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_h3agozczxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_h7bybuxzgc","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_hyr5ipczxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_iobv5suzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_iqgffutzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_j5txuoca08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_jcchf98zxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_jdi2mrwa08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_k27dgnqcaw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_kdureenzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_ktwjraia08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_m27bk3bzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_m2yvxekzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_mfskp4qzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_mudo2dkpw5brw7za","q":36.0,"p":false,"refs":[{"r":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","q":36.0,"phase":"fabricacion"}]},{"c":"emp_jku45mmllb","m":"mat_muqah44saw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_n3w9qpuzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_n68rls6zxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_n8helvprf6","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_n9scb0ia08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_nj9zt6dzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_nkxkemuzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_nmtj754caw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_onpubizzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_pllbl73a08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_pmibx2bzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_rrmsfynggg","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_stgkd4mzxv","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_u1os0zaa08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_uthdj0hzxw","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_vs9s4wezxv","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_w1pptmgey0","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_w600lhpa08","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_wm5ottgzxx","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_xbyycxkzxv","q":0,"p":false,"refs":[]},{"c":"emp_jku45mmllb","m":"mat_xt4uqdwzxx","q":0,"p":false,"refs":[]},{"c":"emp_sklum","m":"mat_p_ral7016","q":0,"p":false,"refs":[]},{"c":"emp_woods","m":"mat_p_ral7016","q":0,"p":false,"refs":[]}],"unmappedActive":[{"ref":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","company":"SKLUM","name":"eschufe superficie estanco 80x80","qty":72.0,"unit":"ud"},{"ref":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","company":"SKLUM","name":"caja superficie estanca 100x100","qty":24.0,"unit":"ud"},{"ref":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","company":"SKLUM","name":"tornillo M12x70","qty":96.0,"unit":"ud"},{"ref":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","company":"SKLUM","name":"tuerca M12","qty":288.0,"unit":"ud"},{"ref":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","company":"SKLUM","name":"tornillo M12x30","qty":192.0,"unit":"ud"},{"ref":"OT-260724-004 PARKING PATINETES Y BICICLETAS: 1und. ALQUERIA-4 / 1und. ALQUERIA-3 / 1und. BELLREGUARD / 1und. PEIRO CAMARO / 3und. RG3 / 1und. RG2 / 2und. FAUS / 1und. OLIVA LOGISTIC / 1und. LLOC NOU","company":"SKLUM","name":"contera ø 25 negra","qty":24.0,"unit":"ud"},{"ref":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","company":"PROCEED","name":"eschufe superficie estanco 80x80","qty":6.0,"unit":"ud"},{"ref":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","company":"PROCEED","name":"caja superficie estanca 100x100","qty":2.0,"unit":"ud"},{"ref":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","company":"PROCEED","name":"tornillo M12x70","qty":8.0,"unit":"ud"},{"ref":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","company":"PROCEED","name":"tuerca M12","qty":24.0,"unit":"ud"},{"ref":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","company":"PROCEED","name":"tornillo M12x30","qty":16.0,"unit":"ud"},{"ref":"OT-260724-005 PARKING PATINETES Y BICICLETAS: 1und. VILLALONGA","company":"PROCEED","name":"contera ø 25 negra","qty":2.0,"unit":"ud"},{"ref":"OT-261027-001","company":"WOODS","name":"eschufe superficie estanco 80x80","qty":12.0,"unit":"ud"},{"ref":"OT-261027-001","company":"WOODS","name":"caja superficie estanca 100x100","qty":4.0,"unit":"ud"},{"ref":"OT-261027-001","company":"WOODS","name":"tornillo M12x70","qty":16.0,"unit":"ud"},{"ref":"OT-261027-001","company":"WOODS","name":"tuerca M12","qty":48.0,"unit":"ud"},{"ref":"OT-261027-001","company":"WOODS","name":"tornillo M12x30","qty":32.0,"unit":"ud"},{"ref":"OT-261027-001","company":"WOODS","name":"contera ø 25 negra","qty":4.0,"unit":"ud"}],"protectedCommonPletinaCount":9,"companies":5}</script>
 <script type="module" id="LDH_STOCK_FIRESTORE_PUBLICADOR_COMPLETO_1206">
 const firebaseConfig = {
   apiKey: "AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA",
@@ -6753,7 +6902,7 @@ const firebaseConfig = {
 
 const {initializeApp,getApps,getApp} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js');
 const {getAuth,onAuthStateChanged,signInAnonymously} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js');
-const {getFirestore,doc,getDoc,setDoc,serverTimestamp,writeBatch,collection,getDocs} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
+const {getFirestore,doc,getDoc,setDoc,serverTimestamp,writeBatch,collection,getDocs,runTransaction} = await import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js');
 
 let fbApp = getApps().find(app => app && app.options && app.options.projectId === firebaseConfig.projectId);
 if(!fbApp){
@@ -6853,6 +7002,98 @@ async function readRemoteStockPackage(){
   data.reservationDebts = Array.isArray(data.reservationDebts) ? data.reservationDebts : [];
   return {data, raw, meta};
 }
+
+// V140 - Reconciliación EXPLÍCITA y transaccional. Ninguna escritura al abrir.
+async function LDH_stockHashRawV140(raw){
+ const bytes=new TextEncoder().encode(raw);
+ const digest=await crypto.subtle.digest('SHA-256',bytes);
+ return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function LDH_stockPlanV140(){
+ const el=document.getElementById('LDH_STOCK_RECON_PLAN_V140');
+ if(!el)throw new Error('Falta el plan de conciliación');
+ return JSON.parse(el.textContent);
+}
+window.LDH_stockPreviewV140=async function(){
+ const plan=LDH_stockPlanV140();
+ const core=window.LDH_STOCK_RECON_CORE_V140;
+ if(!core)throw new Error('El módulo de conciliación no está listo');
+ const remote=await readRemoteStockPackage();
+ if(!remote||!remote.raw)throw new Error('No se pudo leer el Stock canónico de Firestore');
+ const sha=await LDH_stockHashRawV140(remote.raw);
+ const matches=(sha===plan.sourceSha256);
+ const preview=matches?core.build(remote.data,plan).summary:null;
+ return {matches,sha,preview,plan};
+};
+window.LDH_stockApplyV140=async function(){
+ const plan=LDH_stockPlanV140();
+ const setState=(text,ok)=>{
+  const x=document.getElementById('ldhStockReconciliationStatusV140');
+  if(x){x.textContent=text;x.style.color=ok?'#86efac':'#fca5a5';}
+ };
+ const btn=document.getElementById('ldhStockReconciliationApplyV140');
+ if(btn)btn.disabled=true;
+ try{
+  if(!authReady||window.__LDH_STOCK_CLOUD_BOOTSTRAPPED_V139!==true)throw new Error('Stock nube no está preparado. Abre Stock desde GitHub y comprueba la conexión.');
+  if(hasUserDirtyV139()||hasLocalDirtyV135())throw new Error('Hay datos de Stock locales pendientes de publicar; no se puede conciliar ahora.');
+  const answer=prompt('ATENCIÓN: se regularizarán los saldos históricos de Stock según el respaldo del 10/11/2026.\n\nLas 9 pletinas del Stock Común y todos los préstamos permanecerán intactos.\n\nPara continuar, escribe exactamente: REGULARIZAR STOCK');
+  if(answer!=='REGULARIZAR STOCK')return;
+  const core=window.LDH_STOCK_RECON_CORE_V140;
+  if(!core)throw new Error('No está cargada la rutina de conciliación');
+  setState('Verificando datos actuales en una transacción de Firestore...',false);
+  const metaRef=doc(fbDb,...META_PATH);
+  // Lectura transaccional de meta y chunks: una modificación simultánea cancela la operación.
+  const output=await runTransaction(fbDb,async(tx)=>{
+    const metaSnap=await tx.get(metaRef);
+    if(!metaSnap.exists())throw new Error('No hay documento maestro de Stock');
+    const meta=metaSnap.data()||{};
+    const total=Math.max(0,Number(meta.totalChunks)||0);
+    if(!total||total>20)throw new Error('Estructura de chunks desconocida');
+    const chunkDocs=[];
+    for(let i=0;i<total;i++){
+      const ref=doc(fbDb,...META_PATH,'chunks',String(i));
+      const snap=await tx.get(ref);
+      if(!snap.exists())throw new Error('Falta el chunk '+i);
+      chunkDocs.push(String((snap.data()||{}).part||''));
+    }
+    const packed=JSON.parse(chunkDocs.join(''));
+    const raw=packed[STOCK_KEY];
+    if(typeof raw!=='string')throw new Error('El Stock remoto ya no tiene el formato esperado');
+    const sha=await LDH_stockHashRawV140(raw);
+    if(sha!==plan.sourceSha256)throw new Error('LOS DATOS DE LA NUBE HAN CAMBIADO desde el JSON 07:06. Conciliación cancelada sin modificar nada. Necesitamos un respaldo nuevo.');
+    const original=JSON.parse(raw);
+    const rebuilt=core.build(original,plan);
+    const newRaw=JSON.stringify(rebuilt.data);
+    const complete=JSON.stringify({[STOCK_KEY]:newRaw,updatedAt:new Date().toISOString(),schema:'ldh_stock_chunked_v2_full'});
+    const chunks=chunkString(complete,350000);
+    for(let i=0;i<chunks.length;i++){
+      tx.set(doc(fbDb,...META_PATH,'chunks',String(i)),{part:chunks[i],index:i,updatedAt:serverTimestamp()},{merge:false});
+    }
+    tx.set(metaRef,{
+      totalChunks:chunks.length,chunkSize:350000,updatedAt:serverTimestamp(),updatedAtISO:new Date().toISOString(),
+      revision:'reconciliacion_v140_'+Date.now(),key:STOCK_KEY,
+      rawCompanies:rebuilt.data.companies.length,rawMaterials:rebuilt.data.materials.length,
+      rawStock:rebuilt.data.stock.length,rawMovements:rebuilt.data.movements.length,
+      rawReservations:rebuilt.data.reservations.length,rawAssignments:rebuilt.data.assignments.length,
+      source:'stock.html_conciliacion_v140_confirmada'
+    },{merge:true});
+    return {raw:newRaw,data:rebuilt.data,summary:rebuilt.summary};
+  },{maxAttempts:3});
+  // Solo después de confirmar la transacción se cambia el local. No se carga un respaldo antiguo.
+  writeStockEverywhere(output.raw);
+  lastRawPublished=output.raw;
+  clearLocalDirtyV135();clearUserDirtyV139();
+  setBootstrappedV139(true);
+  try{if(typeof window.LDH_applyRemoteStockWithoutReload==='function')window.LDH_applyRemoteStockWithoutReload();}catch(e){console.warn('Stock publicado; re-render local diferido',e);}
+  setState('Conciliación confirmada en Firestore. '+output.summary.activeRows+' fichas con material, '+output.summary.retiredRows+' sin existencia (ocultas del selector), '+output.summary.protectedRows+' pletinas protegidas.',true);
+  try{await publishStockMaterialsMirror(output.data);}catch(e){console.warn('Espejo de catálogos pendiente',e);}
+  setCloudStatus('Stock conciliado V140','ok','Aplicado por transacción a partir del JSON 10/11/2026.');
+  alert('REGULARIZACIÓN GUARDADA EN LA NUBE.\n\nWOODS 40x40x1.5: 17 físicas, 17 asignadas, 0 libres.\nPletinas Stock Común: sin modificar.\nLíneas fuera de Stock principal: '+output.summary.externalMissingLines+'.\n\nGenera un JSON completo para verificar el resultado.');
+ }catch(e){
+  setState('NO SE HA APLICADO: '+String(e&&e.message||e),false);
+  alert('Conciliación CANCELADA.\n\n'+String(e&&e.message||e));
+ }finally{if(btn)btn.disabled=false;}
+};
 
 function localStockCount(){
   const p = completePayloadFromLocalStorage();
@@ -8598,6 +8839,7 @@ body{
   }
 
   function repair(publishNow){
+    if(typeof db!=="undefined" && db && db.stockReconciliationV140?.appliedAt)return false;
     if(repairing) return false;
     repairing = true;
     let changed = false;
@@ -8932,6 +9174,7 @@ body{
   }
 
   function repair(publishNow){
+    if(typeof db!=="undefined" && db && db.stockReconciliationV140?.appliedAt)return false;
     if(repairing) return false;
     repairing=true;
     let changed=false;
@@ -9209,6 +9452,7 @@ body{
   }
 
   function repair(publishNow){
+    if(typeof db!=="undefined" && db && db.stockReconciliationV140?.appliedAt)return false;
     if(repairing) return false;
     repairing = true;
     try{
@@ -9437,7 +9681,7 @@ body{
     return Math.abs(physical(cid,mid))<EPS;
   }
   let busy=false;
-  function repair(publish){if(busy)return false;busy=true;try{if(typeof db==='undefined'||!db)return false;const c=company();if(!c)return false;const cid=String(c.id??c.companyId??c.empresaId??'');if(!cid)return false;const p=repairPletina(cid),b=repair100x40(cid);if(!(p||b))return false;db.updatedAt=new Date().toISOString();db.reynoldsResidueRepairV63={at:new Date().toISOString(),ref:REF,pletina30x6:p,barra100x40:b};if(typeof save==='function')save();try{if(typeof render==='function')render();}catch(_){}if(publish!==false)try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){}console.info('[Stock V63] Residuos REYNOLDS corregidos',db.reynoldsResidueRepairV63);return true;}catch(e){console.warn('[Stock V63] No se pudo reparar REYNOLDS',e);return false;}finally{busy=false;}}
+  function repair(publish){if(typeof db!=="undefined" && db && db.stockReconciliationV140?.appliedAt)return false;if(busy)return false;busy=true;try{if(typeof db==='undefined'||!db)return false;const c=company();if(!c)return false;const cid=String(c.id??c.companyId??c.empresaId??'');if(!cid)return false;const p=repairPletina(cid),b=repair100x40(cid);if(!(p||b))return false;db.updatedAt=new Date().toISOString();db.reynoldsResidueRepairV63={at:new Date().toISOString(),ref:REF,pletina30x6:p,barra100x40:b};if(typeof save==='function')save();try{if(typeof render==='function')render();}catch(_){}if(publish!==false)try{if(window.LDH_scheduleStockCloudPublish)window.LDH_scheduleStockCloudPublish(true);}catch(_){}console.info('[Stock V63] Residuos REYNOLDS corregidos',db.reynoldsResidueRepairV63);return true;}catch(e){console.warn('[Stock V63] No se pudo reparar REYNOLDS',e);return false;}finally{busy=false;}}
   try{if(typeof window.LDH_applyRemoteStockWithoutReload==='function'&&!window.LDH_applyRemoteStockWithoutReload.__ldhReynoldsResidueV63){const prev=window.LDH_applyRemoteStockWithoutReload;const wrap=function(){const r=prev.apply(this,arguments);setTimeout(()=>repair(true),120);return r;};wrap.__ldhReynoldsResidueV63=true;window.LDH_applyRemoteStockWithoutReload=wrap;}}catch(_){}
   const run=()=>repair(true);if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run,{once:true});else setTimeout(run,0);[1000,2600,6000].forEach(ms=>setTimeout(run,ms));window.addEventListener('storage',()=>setTimeout(run,250));
   window.LDH_repararReynoldsResiduosV63=run;
@@ -9960,6 +10204,12 @@ console.info('[Stock V116] Préstamo interno OT visible, asignación restante co
 
 
 
+<script id="LDH_STOCK_V140_BLOQUEAR_CIERRE_PREMATURO_OT">
+// Recibido en Fabricacion no prueba consumo. El cierre futuro solo ocurrira
+// tras constancia fisica o fase Pintura/Almacen/Entregado.
+window.__LDH_STOCK_V125_RESERVA_FISICA__=true;
+window.__LDH_STOCK_V127_RESERVA_SOLO_PREPARACION__=true;
+</script>
 <!-- === LDH STOCK V127 · reservado SOLO mientras la OT esta en Preparacion === -->
 <script id="LDH_STOCK_V127_RESERVA_SOLO_PREPARACION_20260910">
 (function(){
@@ -10555,6 +10805,8 @@ console.info('[Stock V137] Firebase producción: sin test_guard/CSP local y app 
     row.closeReason = 'reserva_preparacion_consumida_al_entrar_fabricacion_v126';
   }
   function repair(reason){
+    // V140: SOLO lectura de fases. No convertir una entrada a Fabricacion en consumo.
+    return 0;
     if(repairBusy || typeof db === 'undefined' || !db) return 0;
     repairBusy = true;
     try{
@@ -11322,5 +11574,96 @@ console.info('[Stock V139] Firebase es la base de arranque; solo acciones reales
   window.LDH_STOCK_AI_GLOBAL_R1='STOCK-AI-GLOBAL-R1-20261007';
 })();
 </script>
+<script id="LDH_STOCK_V140_RECONCILIACION_OT_20261110">
+(function(){
+ 'use strict';
+ // El cálculo de reservas V140 solo se activa tras una conciliación confirmada.
+ const previousAssigned=window.assignedStock;
+ const previousReserved=window.reservedStock;
+ const previousOwnAssignments=window.LDH_stockOwnAssignmentsV116;
+ if(typeof previousOwnAssignments==='function')window.LDH_stockOwnAssignmentsV116=function(companyId,materialId){
+  try{
+    if(typeof db!=='undefined'&&db&&db.stockReconciliationV140?.appliedAt){
+      const rows=window.LDH_STOCK_RECON_CORE_V140?.activeAllocations(db,companyId,materialId);
+      if(rows!==null&&Array.isArray(rows)){
+        return rows.map((a,index)=>({
+          id:'v140_virtual_'+companyId+'_'+materialId+'_'+index,
+          companyId,materialId,ref:a.ref,jobRef:a.ref,
+          qty:a.qty,cantidad:a.qty,status:'activa',estado:'activa',
+          phase:a.phase,fase:a.phase,assignmentType:'reserva_documental_ot_v140',
+          reason:'Asignado segun OT recibida; no crear movimiento al visualizar',
+          source:'conciliacion_ot_v140_virtual',virtualOnlyV140:true,
+          createdAt:db.stockReconciliationV140.appliedAt
+        }));
+      }
+    }
+  }catch(e){console.warn('[Stock V140] desglose OT no disponible',e);}
+  return previousOwnAssignments.apply(this,arguments);
+ };
+
+ if(typeof previousAssigned==='function')window.assignedStock=function(companyId,materialId){
+   try{
+    if(typeof db!=='undefined' && db && db.stockReconciliationV140?.appliedAt){
+      const assigned=window.LDH_STOCK_RECON_CORE_V140?.activeAssigned(db,companyId,materialId);
+      if(assigned!==null && Number.isFinite(assigned))return assigned;
+    }
+   }catch(e){console.warn('[Stock V140] reserva OT no calculable; usando base',e);}
+   return previousAssigned.apply(this,arguments);
+ };
+ if(typeof previousReserved==='function')window.reservedStock=function(companyId,materialId){
+   try{
+    if(typeof db!=='undefined' && db && db.stockReconciliationV140?.appliedAt){
+      const assigned=window.LDH_STOCK_RECON_CORE_V140?.activeAssigned(db,companyId,materialId);
+      if(assigned!==null){
+        // Las reservas antiguas quedaron sustituidas por el inventario real por OT.
+        // Solo reservas creadas después de la conciliación vuelven a contar aquí.
+        const at=Date.parse(db.stockReconciliationV140.appliedAt)||0;
+        return (db.reservations||[]).filter(r=>r.companyId===companyId&&r.materialId===materialId)
+         .filter(r=>['activa','activo','open','abierta',''].includes(String(r.status||r.estado||'activa').toLowerCase()))
+         .filter(r=>Date.parse(r.createdAt||'')>at)
+         .reduce((s,r)=>s+(Number(r.qty??r.cantidad)||0),0);
+      }
+    }
+   }catch(e){console.warn('[Stock V140] reserva directa no calculable',e);}
+   return previousReserved.apply(this,arguments);
+ };
+ window.LDH_stockOpenReconcileV140=function(){
+   const plan=JSON.parse(document.getElementById('LDH_STOCK_RECON_PLAN_V140').textContent);
+   const body=`<div style="display:grid;gap:12px;line-height:1.45">
+    <div class="note">Regularización única desde el respaldo del 10/11/2026 a las 07:06. Primero se verifica el estado de Firestore; si ha cambiado, <b>se cancela sin escribir</b>.</div>
+    <div><b>15</b> fichas con material recibido y asignado en OT activas. <b>300</b> fichas pasan a existencia cero y salen del selector habitual de Configuración; no se borran del historial.</div>
+    <div><b>9 pletinas Stock Común:</b> excluidas por completo. <b>3 préstamos WOODS:</b> intactos, incluidos el saldado de 5 y los pendientes de 6 + 3.</div>
+    <div><b>18 líneas de ferretería/accesorios sin correspondencia inequívoca en Stock principal:</b> no se inventarán fichas. Se conservan en sus OT y quedan identificadas para resolver desde sus módulos.</div>
+    <div><b>WOODS 40×40×1,5:</b> 121 registradas actualmente → 17 físicas según OT, 17 asignadas, 0 libres.</div>
+    <div style="color:#fcd34d">Importante: se aplica el criterio acordado «recibido en Preparación o Fabricación = reservado si no consta fase posterior». Eso no demuestra por sí solo que todas las barras sigan intactas en el taller.</div>
+    <button type="button" class="btn primary" onclick="LDH_stockPreflightV140()">Comprobar nube y mostrar resultado</button>
+    <div id="ldhStockReconciliationPreflightV140" style="font-weight:800;color:#93c5fd"></div>
+    <button type="button" id="ldhStockReconciliationApplyV140" class="btn warn" disabled onclick="LDH_stockApplyV140()">Aplicar regularización a Firestore (confirmación)</button>
+    <div id="ldhStockReconciliationStatusV140" style="font-weight:800"></div>
+   </div>`;
+   if(typeof openModal==='function')openModal('Regularización Stock por OT · V140',body,'');
+ };
+ window.LDH_stockPreflightV140=async function(){
+  const e=document.getElementById('ldhStockReconciliationPreflightV140');const apply=document.getElementById('ldhStockReconciliationApplyV140');
+  if(!e)return;if(apply)apply.disabled=true;e.textContent='Leyendo Stock real de Firestore...';
+  try{
+   if(!window.LDH_stockPreviewV140)throw new Error('Todavía no terminó de cargar Firestore');
+   const result=await window.LDH_stockPreviewV140();
+   if(!result.matches)throw new Error('La nube ha cambiado respecto al respaldo del 10/11 a las 07:06. No es seguro aplicar este plan.');
+   e.textContent='Nube verificada. Propuesta: '+result.preview.activeRows+' fichas con material, '+result.preview.retiredRows+' sin material, '+result.preview.protectedRows+' pletinas protegidas. Puedes aplicar la corrección.';
+   e.style.color='#86efac';if(apply)apply.disabled=false;
+  }catch(err){e.textContent='NO APLICAR: '+String(err&&err.message||err);e.style.color='#fca5a5';}
+ };
+ const attach=()=>{
+  const parent=document.querySelector('.top .actions');
+  if(!parent||document.getElementById('ldhStockReconciliationOpenV140'))return;
+  const b=document.createElement('button');b.type='button';b.className='btn warn';b.id='ldhStockReconciliationOpenV140';
+  b.textContent='Regularización Stock OT';b.onclick=window.LDH_stockOpenReconcileV140;parent.appendChild(b);
+ };
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',attach,{once:true});else attach();
+ document.documentElement.dataset.ldhStockV140='candidato-revision';
+})();
+</script>
+
 <script src="../asistente_ia_global.js?v=20261007-15" data-ldh-ai-global-loader="stock"></script>
 <!-- /LDH_AI_GLOBAL_STOCK_R1_20261007 -->
