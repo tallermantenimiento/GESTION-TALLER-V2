@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<meta name="ldh-config-stock-picker-v141-perfileria" content="PERFILERIA-19-SIN-FAMILIA-HIERRO-LEGACY-20261111">
 <meta name="ldh-config-stock-picker-v140-r4" content="CATALOGO-VIGENTE-HISTORICO-OPCIONAL-SIN-FALLBACK-20261110">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -4178,6 +4179,12 @@ _uaPill(item){
         });
       };
 
+      // Las fichas vigentes se procesan primero. Si hay duplicados por nombre
+      // entre empresas, nunca seleccionamos por defecto el ID de una copia
+      // historica cuando existe otra ficha del mismo perfil marcada vigente.
+      remoteDB.materials = (remoteDB.materials || []).slice().sort((a,b)=>
+        (Number(b.catalogPriorityV141)||0)-(Number(a.catalogPriorityV141)||0)
+      );
       ingestDB(remoteDB, 'stock', '');
       ingestDB(ferDB, 'ferreteria', 'Ferretería', true);
       ingestDB(tabDB, 'tableros', 'Tableros');
@@ -6328,14 +6335,11 @@ window.CarpetaPicker = (function(){
     <div style="display:flex; gap:10px; align-items:center; margin-top:12px;">
       <input id="cfgStockSearch" type="text" placeholder="Buscar por nombre / categoría / grupo..." style="flex:1;" oninput="App.renderCfgStockResults()" />
       <button class="btn btn-chip" onclick="App.clearCfgStockLink()">Desvincular</button>
-      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>\n
-\n
+      <button class="btn btn-chip" type="button" onclick="LDH_cfgStockDiagnostico()">Diagnóstico</button>
 </div>
 
-    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">Todavía no se han cargado los catálogos actuales de Stock, Ferretería o Tableros. Pulsa <b>Diagnóstico</b> para comprobar las fuentes disponibles.</div>\n    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#9fb2d0;cursor:pointer;">
-      <input type="checkbox" id="cfgStockShowHistoricalV140" onchange="LDH_cfgToggleHistoricoV140(this.checked)" style="width:auto;">
-      Mostrar también fichas históricas de Stock (sin disponibilidad garantizada)
-    </label>
+    <div id="cfgStockWarn" style="display:none; margin-top:10px; font-size:12px; color:var(--danger);">Todavía no se han cargado los catálogos actuales de Stock, Ferretería o Tableros. Pulsa <b>Diagnóstico</b> para comprobar las fuentes disponibles.</div>
+    <div style="margin-top:10px;font-size:12px;color:#9fb2d0;">Catálogo vigente · las fichas históricas quedan fuera de nuevas vinculaciones y se conservan para los vínculos anteriores.</div>
     <div id="cfgStockInfo" style="margin-top:8px; font-size:12px; opacity:.72;"></div>
 
     <div id="cfgStockResults" style="margin-top:12px; max-height:58vh; overflow:auto; border:1px solid rgba(0,0,0,.08); border-radius:12px;"></div>
@@ -8325,7 +8329,7 @@ window.ejecutarDevolucion = function(matId, maxQty){
   window.LDH_CFG_REMOTE_STOCK = window.LDH_CFG_REMOTE_STOCK || {materials:[], catalogAllRows:[], loading:false, loaded:false, error:'', source:'', reconciled:false};
   window.LDH_cfgShowCatalogHistoricalV140 = false;
   window.LDH_cfgToggleHistoricoV140 = function(value){
-    window.LDH_cfgShowCatalogHistoricalV140 = !!value;
+    window.LDH_cfgShowCatalogHistoricalV140 = false; // V8: nunca ofrecer historicos para vinculos nuevos
     try{ if(window.App && App.renderCfgStockResults) App.renderCfgStockResults(); }catch(_){ }
   };
 
@@ -8361,10 +8365,18 @@ window.ejecutarDevolucion = function(matId, maxQty){
     stock.forEach((sr,i)=>{
       // V140: el histórico permanece en Firestore para préstamos y movimientos,
       // pero no vuelve a ofrecerse en nuevas vinculaciones por defecto.
-      if(!includeArchived && sr.hiddenFromConceptPickerV140 === true) return;
       const mat = matById.get(nice(sr.materialId || sr.matId || sr.id)) || {};
       const name = nice(mat.name || mat.nombre || sr.name || sr.material || sr.matName);
       if(!name) return;
+      // V141: el flag de V140 fue aplicado por stock fisico cero y no es
+      // indicador fiable de que un perfil haya dejado de pertenecer al catalogo.
+      // Mantener las 19 medidas de perfileria, incluidas las de stock cero.
+      const family = nice(mat.family || mat.familia || mat.grp || sr.family || sr.familia || sr.grp);
+      const type = nice(mat.type || mat.tipo || sr.type || sr.tipo);
+      const isPerfileria = family.toLowerCase().trim() === 'perfileria' && type.toLowerCase().trim() === 'hierro';
+      const legacyHierro = family.toLowerCase().trim() === 'hierro' && type.toLowerCase().trim() === 'hierro';
+      if(!includeArchived && legacyHierro) return;
+      if(!includeArchived && !isPerfileria && sr.hiddenFromConceptPickerV140 === true) return;
       out.push({
         id: nice(mat.id || sr.materialId || sr.matId || sr.id || ('st_'+i)),
         materialId: nice(mat.id || sr.materialId || sr.matId || sr.id || ('st_'+i)),
@@ -8374,7 +8386,8 @@ window.ejecutarDevolucion = function(matId, maxQty){
         unit: nice(mat.unit || mat.unidad || sr.unit || sr.unidad || 'und'),
         order: Number(sr.order ?? mat.order ?? i) || i,
         familyOrder: Number(sr.familyOrder ?? mat.familyOrder ?? i) || i,
-        companyId: nice(sr.companyId || mat.companyId || '')
+        companyId: nice(sr.companyId || mat.companyId || ''),
+        catalogPriorityV141: sr.hiddenFromConceptPickerV140 === true ? 0 : 1
       });
     });
 
