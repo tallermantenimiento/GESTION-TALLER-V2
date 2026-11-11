@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
 <meta name="ldh-config-stock-picker-v141-perfileria" content="PERFILERIA-19-SIN-FAMILIA-HIERRO-LEGACY-20261111">
+<meta name="ldh-variable-concepts-v9" content="ESPEJO-INDEPENDIENTE-CONCILIACION-ANTES-GUARDAR-20261111">
 <meta name="ldh-config-stock-picker-v140-r4" content="CATALOGO-VIGENTE-HISTORICO-OPCIONAL-SIN-FALLBACK-20261110">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1584,6 +1585,51 @@ function fmtFecha(v){
 
 var event = (typeof window !== 'undefined' && window.event) ? window.event : { stopPropagation:function(){}, preventDefault:function(){} };
 
+/* LDH VARIABLE-CONCEPT GUARD V9: read-only merge and independent safety mirror.
+   Only variableConceptsV1. Never changes standard concepts, OT, Stock or loans. */
+const LDH_VCG_V9 = (()=>{
+  const KEY='LDH_VARIABLE_CONCEPTS_PROTECTED_V9';
+  const LEGACY='LDH_VARIABLE_CONCEPTS_PROTECTED_V1';
+  function parse(raw){try{return JSON.parse(raw)}catch(_){return null}}
+  function read(storage,key){try{return parse(storage.getItem(key))}catch(_){return null}}
+  function valid(x){return Array.isArray(x)?x.filter(v=>v&&typeof v==='object'&&String(v.id||v.name||'').trim()):[]}
+  function extract(payload){return valid(Array.isArray(payload)?payload:(payload&&payload.variableConceptsV1))}
+  function ts(v){const x=v?._ldhUpdatedAtMs??v?.updatedAtMs??v?.updatedAt??0;const n=Number(x);return Number.isFinite(n)?n:(Date.parse(String(x||''))||0)}
+  function richness(v){const r=v?.recipe||{},parts=Array.isArray(v?.parts)?v.parts:[];
+    return (Array.isArray(r.lines)?r.lines.length:0)*10+(Array.isArray(r.units)?r.units.length:0)*10+
+      parts.reduce((s,p)=>s+(Array.isArray(p?.recipe?.lines)?p.recipe.lines.length:0)*10+(Array.isArray(p?.recipe?.units)?p.recipe.units.length:0)*10,0)+parts.length;
+  }
+  function key(v){return String(v.id||'').trim()||'name:'+String(v.name||'').trim().toLowerCase()}
+  function merge(...sources){const map=new Map();for(const arr of sources)for(const v of valid(arr)){
+    const k=key(v),prev=map.get(k);if(!prev||ts(v)>ts(prev)||(ts(v)===ts(prev)&&richness(v)>richness(prev)))map.set(k,v);
+  }return [...map.values()];}
+  function sources(){return [
+    extract(read(localStorage,KEY)),extract(read(sessionStorage,KEY)),
+    extract(read(localStorage,LEGACY)),extract(read(sessionStorage,LEGACY)),
+    extract(read(localStorage,'ldh_db')),extract(read(sessionStorage,'ldh_db'))
+  ];}
+  function reconcile(state){if(!state||typeof state!=='object')return 0;
+    const prev=valid(state.variableConceptsV1),all=merge(...sources(),prev);
+    state.variableConceptsV1=all;return all.length-prev.length;
+  }
+  function mirror(rows){const all=merge(...sources(),rows);if(!all.length)return {ok:true,count:0};
+    const value=JSON.stringify({version:9,updatedAt:new Date().toISOString(),variableConceptsV1:all});
+    let local=false,session=false;try{localStorage.setItem(KEY,value);local=true}catch(e){console.warn('[VCG V9] Espejo local no persistido',e)}
+    try{sessionStorage.setItem(KEY,value);session=true}catch(e){}
+    if(!local&&!session)console.error('[VCG V9] Ningun respaldo independiente disponible');
+    return {ok:local||session,count:all.length,local,session};
+  }
+  function diagnose(){const current=read(localStorage,'ldh_db');const session=read(sessionStorage,'ldh_db');const m=read(localStorage,KEY);
+    const state=window.App?.state;
+    return {version:'V9',enPantalla:valid(state?.variableConceptsV1).map(x=>({name:x.name,type:x.type,designStatus:x.designStatus,archived:x.archived})),
+      local:extract(current).length,sesion:extract(session).length,resguardo:extract(m).length,
+      recuperables:merge(...sources(),valid(state?.variableConceptsV1)).length,
+      aviso:'No elimina, no publica, no reconstruye recetas inexistentes'};
+  }
+  return {reconcile,mirror,diagnose,merge};
+})();
+window.LDH_VARIABLE_CONCEPTS_V9_ESTADO=()=>LDH_VCG_V9.diagnose();
+
 const App = {
 
     /* === ALERTAS DINÁMICAS (Agenda diaria) + POSPONER (PROTOCOLO) === */
@@ -1859,6 +1905,12 @@ _fmtPartialStore(s){
             this.state.concepts = [];
             console.warn('[Conceptos] Catalogo no verificado: no se crea ni publica una plantilla provisional.');
         }
+        // V9: preservar conceptos variables antes de cualquier sincronizacion del catalogo estandar.
+        try{
+          const recovered=LDH_VCG_V9.reconcile(this.state);
+          if(recovered)console.warn('[Conceptos V9] Recuperados del resguardo independiente:',recovered);
+          LDH_VCG_V9.mirror(this.state.variableConceptsV1);
+        }catch(e){console.error('[Conceptos V9] Lectura de proteccion',e);}
         // === LDH RECUPERACION ADITIVA + BLINDAJE DE CONCEPTOS 2026-09-01 ===
         // Los conceptos A/B/C/D se recuperan una sola vez como conceptos vacios.
         // No se crean perfiles, accesorios ni pintura.
@@ -1974,6 +2026,16 @@ saveData() {
                 return false;
             }
         }
+        // V9: conciliar siempre antes de escribir: App.state puede estar atrasada
+        // respecto a otra pestaña, la nube o una copia anterior de la OT.
+        try{
+          LDH_VCG_V9.reconcile(this.state);
+          const protectedResult=LDH_VCG_V9.mirror(this.state.variableConceptsV1);
+          if(!protectedResult.ok && protectedResult.count>0){
+            console.error('[Conceptos V9] Guardado suspendido: no se pudo proteger el catalogo variable.');
+            return false;
+          }
+        }catch(e){console.error('[Conceptos V9] Guardado suspendido',e);return false;}
         return _setStoreItem('ldh_db', JSON.stringify(this.state));
     },
 
@@ -9335,6 +9397,7 @@ console.info('[Configuracion LiveSync V5] Cola de escrituras protegida: debounce
   }
   function renderList(selectId){
     const sel=document.getElementById(selectId||'ldhVcSaved');if(!sel)return;
+    try{LDH_VCG_V9.reconcile(App.state);}catch(e){console.warn('[Conceptos V9] Selector',e);}
     const rows=all().slice().sort((a,b)=>(!!a.archived-!!b.archived)||String(a.name||'').localeCompare(String(b.name||''),'es',{sensitivity:'base'}));
     sel.innerHTML='<option value="">— Nuevo concepto variable —</option>'+rows.map(v=>`<option value="${esc(v.id)}">${designState(v)==='pending'?'[DISEÑO PENDIENTE] ':designState(v)==='archived'?'[ARCHIVADO] ':'[DISEÑO COMPLETO] '}${esc(v.name||'Sin nombre')} · ${v.type==='compound'?'COMPUESTO':'SIMPLE'}</option>`).join('');
     if(draft&&rows.some(v=>v.id===draft.id))sel.value=draft.id;
