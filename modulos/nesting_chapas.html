@@ -151,15 +151,15 @@ header{height:auto;min-height:66px;flex-wrap:wrap;padding-top:8px;padding-bottom
 <div id="jobSaveStatus" class="status" role="status">Sin guardar todav&iacute;a.</div>
 <details id="jobLibraryDetails" class="library-fold"><summary>TRABAJOS GUARDADOS POR OT <span id="jobLibraryStats">0 activos</span></summary>
 <div class="tiny muted" style="margin:8px 0">Cada OT puede tener varios c&aacute;lculos independientes. Archivar oculta del listado activo sin eliminar el trabajo.</div>
-<div class="actionrow" style="margin:9px 0"><button class="btn" id="exportJobJson" type="button">Exportar estudio JSON</button><button class="btn" id="importJobJson" type="button">Importar estudio JSON</button></div>
+<details style="margin:9px 0"><summary class="tiny muted">Opciones avanzadas · estudio individual</summary><div class="actionrow" style="margin:9px 0"><button class="btn" id="exportJobJson" type="button">Exportar estudio JSON</button><button class="btn" id="importJobJson" type="button">Importar estudio JSON</button></div></details>
 <div class="actionrow" style="margin:7px 0"><button class="btn main" id="backupAllJobs" type="button">Exportar copia completa</button><button class="btn" id="restoreAllJobs" type="button">Restaurar copia completa</button></div>
 <div class="tiny muted" style="margin:5px 0 9px">Copia local de todos los estudios, incluidos archivados y planos. Restaurar añade solo estudios nuevos: no elimina ni sobrescribe trabajos existentes y no escribe en Firestore.</div>
 <div class="field"><label for="jobSearch">Buscar por OT o nombre</label><input id="jobSearch" placeholder="Referencia, nombre o empresa" autocomplete="off" /></div>
 <div class="field"><label for="jobView">Mostrar trabajos</label><select id="jobView"><option value="active">Activos</option><option value="archived">Archivados</option><option value="all">Todos</option></select></div>
 <div id="jobLibraryList" class="job-library-list" aria-live="polite"><span class="muted">Cargando biblioteca local…</span></div>
-<div class="line"></div><div class="checks"><label><input id="cloudPilot" type="checkbox"> Habilitar sincronización de OT con Firestore</label></div>
-<div class="actionrow" style="margin-top:9px"><button class="btn" id="cloudSave" type="button">Guardar en Firestore</button><button class="btn" id="cloudLoad" type="button">Consultar nube</button></div>
-<div class="tiny muted" style="margin-top:6px">Archivar o eliminar aqu&iacute; act&uacute;a solo en la biblioteca local. No elimina documentos de Firestore.</div>
+<div class="line"></div><div id="cloudSyncStatus" class="tiny muted" role="status" aria-live="polite" style="margin-top:8px">Sincronización compartida: conectando…</div>
+<div class="actionrow" style="margin-top:8px"><button class="btn" id="cloudRetry" type="button">Reintentar sincronización</button></div>
+<div class="tiny muted" style="margin-top:6px">Los estudios se guardan primero en este navegador. Firestore se sincroniza cuando hay acceso autorizado y conexión. Los conflictos se bloquean, nunca se sobrescriben. Eliminar archivados solo borra la copia local; podría reaparecer desde la nube.</div>
 </details>
 </section>
 <section class="panel"><h2>02 · Chapas y proceso</h2><div class="field"><label>Proceso</label><select id="process"><option value="shear" selected>Cizalla / guillotina</option><option value="laser">Láser / CNC externo</option></select></div>
@@ -2393,7 +2393,7 @@ async function saveJob(){
  const data=snapshot(),name=String($('desc').value||'').trim(),ref=String($('ref').value||'').trim(),company=String($('company').value||'').trim();
  if(!ref||!name){notice('Introduce una referencia OT y un nombre del trabajo antes de guardar.','dirty');$('ref').focus();return false}
  const id=jobId||newId(),createdAt=loadedCreated||stamp(),record={id,ref,name,company,archived:jobArchived,createdAt,updatedAt:stamp(),data};
- await dbPut(STORE,record);jobId=id;loadedCreated=createdAt;dirty=false;clearTimeout(draftTimer);await dbDelete(META,'draft');notice('OT '+ref+' · '+name+' · Guardado en la biblioteca de este navegador.','saved');await drawLibrary();return true;
+ await dbPut(STORE,record);jobId=id;loadedCreated=createdAt;dirty=false;clearTimeout(draftTimer);await dbDelete(META,'draft');notice('OT '+ref+' · '+name+' · Guardado en biblioteca local.','saved');await drawLibrary();cloudEnqueue(publishPending);return true;
 }
 async function drawLibrary(){
  const all=await dbAll();all.sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));
@@ -2423,7 +2423,7 @@ async function archiveJob(id,archive){
  if(jobId===id&&dirty){if(!confirm('Hay cambios sin guardar. \u00bfGuardarlos antes de archivar?'))return;if(!await saveJob())return;j=await dbGet(STORE,id)}
  j.archived=archive;j.updatedAt=stamp();j.data={...j.data,archived:archive};await dbPut(STORE,j);
  if(jobId===id)jobArchived=archive;
- notice((archive?'Archivado':'Recuperado')+' localmente: '+j.ref+' \u00b7 '+j.name+'. Firestore no se ha modificado.','saved');await drawLibrary();
+ notice((archive?'Archivado':'Recuperado')+' localmente: '+j.ref+' · '+j.name+'.','saved');await drawLibrary();cloudEnqueue(publishPending);
 }
 async function resetIfDeleted(id){
  if(jobId!==id)return;
@@ -2570,7 +2570,7 @@ async function restoreAllJobs(){
    $('jobView').value='all';
    $('jobSearch').value='';
    await drawLibrary();
-   notice('Restauracion completada: '+fresh.length+' nuevo(s), '+duplicates.length+' duplicado(s) omitido(s).','saved');
+   notice('Restauracion completada: '+fresh.length+' nuevo(s), '+duplicates.length+' duplicado(s) omitido(s).','saved');cloudEnqueue(publishPending);
   }catch(e){notice('Restauracion cancelada, sin sustituir estudios: '+e.message,'dirty')}
  };
  input.click();
@@ -2582,40 +2582,187 @@ async function maybeRestoreDraft(){const rec=await dbGet(META,'draft');if(!rec?.
 async function newJob(){if(dirty&&!confirm('Hay cambios sin guardar. ¿Crear una OT nueva?'))return;await dbDelete(META,'draft');newBaseline();dirty=false;notice('Trabajo nuevo. Introduce referencia OT y nombre antes de guardar.');$('ref').focus()}
 // El modo piloto es una escritura específica y voluntaria, nunca una migración.
 const FIREBASE_CONFIG={apiKey:'AIzaSyDXKRAam6e8dlHFajtzMNueIo2hUMW-Gkg',authDomain:'gestion-taller-v2.firebaseapp.com',projectId:'gestion-taller-v2',storageBucket:'gestion-taller-v2.firebasestorage.app',messagingSenderId:'888590823508',appId:'1:888590823508:web:6dfd420a3e7ac17d647dc1'};
-async function cloudContext(){
- if(!$('cloudPilot').checked)throw Error('Activa primero la casilla «Firestore».');
- const [appmod,authmod,fs]=await Promise.all([import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')]);
- const cfg=window.LDH_CHAPAS_FIREBASE_CONFIG||FIREBASE_CONFIG;
- if(cfg.projectId!=='gestion-taller-v2')throw Error('Proyecto Firestore inesperado. Se ha bloqueado la operación.');
- const app=appmod.getApps().find(a=>a.options?.projectId===cfg.projectId)||appmod.initializeApp(cfg,'ldh-chapas-v85');
- const auth=authmod.getAuth(app);if(typeof auth.authStateReady==='function')await auth.authStateReady();
- if(!auth.currentUser)throw Error('No hay sesión autorizada en gestion-taller-v2. Inicia sesión desde Gestión Taller.');
- return {fs,db:fs.getFirestore(app),uid:auth.currentUser.uid};
+
+/* V9.5: biblioteca compartida con sincronizacion optimista, sin escrituras
+ * sobre Stock/Agenda/Preparacion. Cada documento es un estudio independiente.
+ * El permiso REAL depende de las reglas Firestore del proyecto, que se han
+ * de validar con dos sesiones diferentes antes de considerar esto operativo. */
+const CLOUD_COLLECTION='chapas_trabajos';
+const cloudSync={connected:false,initial:false,db:null,fs:null,uid:null,stop:null,
+  known:new Map(),remoteKeys:new Map(),queue:Promise.resolve(),busy:new Set(),failed:new Set(),lastError:null};
+function cloudStatus(message,bad=false){
+ const el=$('cloudSyncStatus');if(!el)return;
+ el.textContent='Firestore · '+message;
+ el.style.color=bad?'#fbbf82':'#9ee4d8';
 }
-async function cloudSave(){const btn=$('cloudSave');btn.disabled=true;try{
- if(dirty||!jobId){const ok=await saveJob();if(!ok)return}
- const {fs,db,uid}=await cloudContext();const data=snapshot(),serialized=JSON.stringify(data);
- if(new TextEncoder().encode(serialized).length>700000)throw Error('Este trabajo supera el límite prudente de 700 KB. Exporta copia JSON; hay que habilitar almacenamiento fragmentado antes de sincronizarlo.');
- const ref=fs.doc(db,'chapas_trabajos',jobId);const prev=await fs.getDoc(ref);
- if(prev.exists()){
-  const old=prev.data();if(old.ownerId!==uid)throw Error('La OT está asociada a otro usuario. Operación bloqueada.');
-  if(old.updatedAt&&old.updatedAt!==lastCloudSavedAt){if(!confirm('Existe una copia en Firestore de otra sesión/versión. ¿Deseas sobrescribirla después de guardar una copia local?'))return}
+function cloudEnqueue(job){
+ cloudSync.queue=cloudSync.queue.catch(()=>{}).then(job).catch(err=>{
+  cloudSync.lastError=err;
+  cloudStatus('Sin sincronizar; copia local conservada. '+(err?.message||err),true);
+  console.warn('[Nesting compartido]',err);
+ });
+ return cloudSync.queue;
+}
+function normalizeCloudDoc(id,value){
+ if(!value||value.format!=='LDH_CHAPAS_V85'||typeof value.payload!=='string')return null;
+ if(value.payload.length>850000)throw Error('Documento remoto demasiado grande');
+ const data=validated(JSON.parse(value.payload));
+ return checkedBackupRecord({id,ref:value.ref,name:value.name,company:value.company,archived:value.archived,
+  createdAt:value.createdAt,updatedAt:value.updatedAt,data});
+}
+async function cloudContext(){
+ if(cloudSync.db)return cloudSync;
+ const [appmod,authmod,fs]=await Promise.all([
+  import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+  import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),
+  import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')]);
+ const cfg=window.LDH_CHAPAS_FIREBASE_CONFIG||FIREBASE_CONFIG;
+ if(cfg.projectId!=='gestion-taller-v2')throw Error('Proyecto Firestore inesperado');
+ const app=appmod.getApps().find(a=>a.options?.projectId===cfg.projectId)
+     ||appmod.initializeApp(cfg,'ldh-chapas-shared-v95');
+ const auth=authmod.getAuth(app);
+ if(typeof auth.authStateReady==='function')await auth.authStateReady();
+ if(!auth.currentUser)await authmod.signInAnonymously(auth);
+ if(!auth.currentUser)throw Error('No se ha podido autenticar este navegador');
+ Object.assign(cloudSync,{db:fs.getFirestore(app),fs,uid:auth.currentUser.uid});
+ return cloudSync;
+}
+async function remoteMerge(docs){
+ let imported=0,conflicts=0;
+ cloudSync.remoteKeys.clear();
+ const all=await dbAll(),localById=new Map(all.map(j=>[String(j.id),j]));
+ const byIdentity=new Map(all.map(j=>[recordIdentity(j),j]));
+ for(const docSnap of docs){
+  let remote;
+  try{remote=normalizeCloudDoc(docSnap.id,docSnap.data())}catch(err){
+   console.warn('[Nesting] Documento remoto rechazado: '+docSnap.id,err);continue;
+  }
+  if(!remote)continue;
+  cloudSync.known.set(remote.id,{updatedAt:remote.updatedAt,payload:docSnap.data().payload});
+ cloudSync.remoteKeys.set(recordIdentity(remote),remote.id);
+  const local=localById.get(remote.id);
+  if(!local){
+   const matched=byIdentity.get(recordIdentity(remote));
+   if(matched){
+    if(JSON.stringify(matched.data)!==JSON.stringify(remote.data))conflicts++;
+    // Otra ID para la misma OT+nombre: no duplicar ni sobrescribir silenciosamente.
+    continue;
+   }
+   await dbPut(STORE,remote);
+   await dbPut(META,{key:'cloud-version:'+remote.id,updatedAt:remote.updatedAt});
+   localById.set(remote.id,remote);byIdentity.set(recordIdentity(remote),remote);imported++;
+   continue;
+  }
+  const localPayload=JSON.stringify(local.data),remotePayload=JSON.stringify(remote.data);
+  if(localPayload===remotePayload && !!local.archived===!!remote.archived){
+   await dbPut(META,{key:'cloud-version:'+remote.id,updatedAt:remote.updatedAt});
+   continue;
+  }
+  const baseline=await dbGet(META,'cloud-version:'+remote.id);
+  if(baseline?.updatedAt===local.updatedAt && !(dirty&&jobId===remote.id)){
+   // Local no ha cambiado desde su última sincronizacion: descargar revision remota.
+   await dbPut(STORE,remote);await dbPut(META,{key:'cloud-version:'+remote.id,updatedAt:remote.updatedAt});imported++;
+  }else{
+   // Dos versiones divergentes: nunca se reemplaza ninguna; la local queda intacta.
+   conflicts++;cloudSync.failed.add(remote.id);
+  }
  }
- const now=stamp();await fs.setDoc(ref,{schema:1,format:'LDH_CHAPAS_V85',ref:String($('ref').value),name:String($('desc').value),company:String($('company').value),ownerId:uid,archived:jobArchived,createdAt:prev.exists()?prev.data().createdAt||now:now,updatedAt:now,payload:serialized});
- lastCloudSavedAt=now;notice('OT sincronizada en Firestore: '+$('ref').value,'saved');
- }catch(e){notice('Firestore NO guardado: '+e.message,'dirty')}finally{btn.disabled=false}}
-async function cloudLoad(){const btn=$('cloudLoad');btn.disabled=true;try{
- const {fs,db,uid}=await cloudContext();const results=await fs.getDocs(fs.collection(db,'chapas_trabajos'));
- const jobs=results.docs.map(d=>({id:d.id,...d.data()})).filter(d=>d.ownerId===uid&&d.format==='LDH_CHAPAS_V85').sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));
- if(!jobs.length){notice('No se encontraron OT de chapas accesibles en Firestore.','saved');return}
- const q=prompt('OT en Firestore (selecciona número para importar a biblioteca LOCAL):\n'+jobs.slice(0,30).map((j,i)=>(i+1)+'. '+j.ref+' · '+j.name).join('\n'),'1');
- if(q===null)return;const choice=jobs[Number(q)-1];if(!choice)throw Error('Selección no válida');
- if(dirty&&!confirm('Hay cambios pendientes. ¿Abrir la OT de la nube?'))return;
- const data=validated(JSON.parse(choice.payload));
- applyData(data,{id:choice.id,created:choice.createdAt,archived:!!choice.archived});lastCloudSavedAt=choice.updatedAt;
- await dbPut(STORE,{id:choice.id,ref:choice.ref,name:choice.name,company:choice.company,archived:!!choice.archived,createdAt:choice.createdAt,updatedAt:choice.updatedAt,data});await dbDelete(META,'draft');
- await drawLibrary();notice('OT importada desde Firestore y guardada en biblioteca local.','saved');
- }catch(e){notice('No se pudo consultar Firestore: '+e.message,'dirty')}finally{btn.disabled=false}}
+ if(imported)await drawLibrary();
+ if(conflicts)cloudStatus(conflicts+' conflicto(s) entre ordenadores. No se ha sobrescrito ningún estudio; exporta copia completa para resolver.',true);
+ return {imported,conflicts};
+}
+async function publishOne(record){
+ if(!cloudSync.connected)return false;
+ if(cloudSync.failed.has(record.id))return false;
+ const payload=JSON.stringify(record.data);
+ if(new TextEncoder().encode(payload).length>700000){
+  cloudSync.failed.add(record.id);
+  cloudStatus('El estudio '+record.ref+' supera 700 KB y permanece solo en local. Requiere almacenamiento fragmentado.',true);
+  return false;
+ }
+ const {fs,db,uid}=cloudSync;
+ const docref=fs.doc(db,CLOUD_COLLECTION,String(record.id));
+ const baseline=await dbGet(META,'cloud-version:'+record.id);
+ let outcome='none';
+ await fs.runTransaction(db,async tx=>{
+  const existing=await tx.get(docref);
+  const value=existing.exists()?existing.data():null;
+  if(value){
+   if(value.format!=='LDH_CHAPAS_V85')throw Error('Documento de formato desconocido: '+record.id);
+   if(value.payload===payload&&!!value.archived===!!record.archived){outcome='same';return}
+   if(!baseline || baseline.updatedAt!==value.updatedAt){
+    outcome='conflict';return;
+   }
+  }
+  const updatedAt=String(record.updatedAt||stamp());
+  tx.set(docref,{schema:1,format:'LDH_CHAPAS_V85',
+    ref:record.ref,name:record.name,company:record.company,archived:!!record.archived,
+    ownerId:value?.ownerId||uid,createdAt:value?.createdAt||record.createdAt||stamp(),
+    updatedAt,payload});
+  outcome='published';
+ });
+ if(outcome==='conflict'){
+  cloudSync.failed.add(record.id);
+  cloudStatus('Conflicto detectado en '+record.ref+'. No se ha sobrescrito la nube ni el trabajo local.',true);
+  return false;
+ }
+ if(outcome==='published'||outcome==='same'){
+  await dbPut(META,{key:'cloud-version:'+record.id,updatedAt:outcome==='same'
+    ?cloudSync.known.get(record.id)?.updatedAt||record.updatedAt:record.updatedAt});
+  return true;
+ }
+ return false;
+}
+async function publishPending(){
+ if(!cloudSync.connected||!cloudSync.initial)return;
+ const all=await dbAll(),cloudIds=new Set(cloudSync.known.keys());
+ let sent=0;
+ for(const rec of all){
+  if(cloudSync.failed.has(rec.id))continue;
+  if(dirty&&jobId===rec.id)continue;
+  const version=await dbGet(META,'cloud-version:'+rec.id);
+  // Si la nube no tiene esta ID, permitir su creacion; si existe, solo
+  // publicar cambios locales sobre la revision remota que conocíamos.
+  if(version?.updatedAt===rec.updatedAt&&cloudIds.has(rec.id))continue;
+  const remoteSameIdentity=cloudSync.remoteKeys.get(recordIdentity(rec));
+  if(remoteSameIdentity && remoteSameIdentity!==rec.id){
+   cloudSync.failed.add(rec.id);
+   cloudStatus('Hay dos IDs para '+rec.ref+' · '+rec.name+'. Ninguno se ha sobrescrito.',true);
+   continue;
+  }
+  if(await publishOne(rec))sent++;
+ }
+ if(sent)cloudStatus('sincronización activa · '+sent+' estudio(s) enviados.');
+ else if(!cloudSync.failed.size)cloudStatus('conectado · biblioteca compartida actualizada.');
+}
+async function startSharedSync(){
+ if(cloudSync.stop)return;
+ cloudStatus('conectando y verificando permisos…');
+ try{
+  const {fs,db}=await cloudContext();
+  // No publicar NADA hasta poder leer la colección; protege frente a reglas incompletas.
+  const first=await fs.getDocs(fs.collection(db,CLOUD_COLLECTION));
+  await remoteMerge(first.docs);
+  cloudSync.initial=true;cloudSync.connected=true;
+  await publishPending();
+  cloudSync.stop=fs.onSnapshot(fs.collection(db,CLOUD_COLLECTION),snapshot=>{
+   cloudEnqueue(async()=>{await remoteMerge(snapshot.docs);await publishPending()});
+  },error=>{
+   cloudSync.connected=false;cloudStatus('sin permiso o sin conexión: '+error.message+'. Copia local disponible.',true);
+   cloudSync.stop?.();cloudSync.stop=null;
+  });
+ }catch(err){
+  cloudSync.connected=false;cloudStatus('sin sincronizar: '+(err.message||err)+'. Copia local disponible.',true);
+  console.warn('[Nesting] La sincronización compartida requiere permisos Firestore válidos:',err);
+ }
+}
+function restartSharedSync(){
+ cloudSync.stop?.();cloudSync.stop=null;
+ cloudSync.db=null;cloudSync.fs=null;cloudSync.initial=false;cloudSync.connected=false;
+ cloudSync.known.clear();cloudSync.remoteKeys.clear();cloudSync.failed.clear();
+ return cloudEnqueue(startSharedSync);
+}
+
 // Contexto de consulta para el asistente YA compartido en Gestión Taller.
 window.LDH_AI_CONTEXT_PROVIDER=function(){
  const projects={};for(const p of state.parts){const name=String(p.design||'SIN ASIGNAR');projects[name]=(projects[name]||0)+(Number(p.qty)||0)}
@@ -2628,12 +2775,12 @@ $('duplicateJob').onclick=()=>duplicateJob().catch(e=>notice('Error: '+e.message
 $('newSameOT').onclick=()=>newSameOT().catch(e=>notice('Error: '+e.message,'dirty'));
 $('reset').onclick=()=>newJob().catch(e=>notice('Error creando OT: '+e.message,'dirty'));
 $('exportJobJson').onclick=downloadJson;$('importJobJson').onclick=importJson;$('backupAllJobs').onclick=exportAllJobs;$('restoreAllJobs').onclick=restoreAllJobs;$('jobSearch').oninput=()=>drawLibrary().catch(console.error);
-$('cloudSave').onclick=cloudSave;$('cloudLoad').onclick=cloudLoad;$('jobView').onchange=()=>drawLibrary().catch(console.error);
+$('cloudRetry').onclick=restartSharedSync;$('jobView').onchange=()=>drawLibrary().catch(console.error);
 document.addEventListener('input',e=>{if(e.target?.closest('#workLibrary'))return;if(e.target?.matches('input,textarea,select')&&!['jobSearch','files'].includes(e.target.id))markChanged()},true);
 document.addEventListener('change',e=>{if(e.target?.closest('#workLibrary'))return;if(e.target?.matches('input,textarea,select')&&!['files'].includes(e.target.id))markChanged()},true);
 window.addEventListener('beforeunload',e=>{if(!dirty)return;e.preventDefault();e.returnValue='';});
 window.addEventListener('pagehide',()=>{if(dirty){clearTimeout(draftTimer);writeDraft().catch(console.warn)}});
-(async()=>{try{await openDB().then(db=>db.close());ready=true;let seeded={added:0};try{seeded=await installOlasoStudiesOnce()}catch(seedError){console.warn('No se pudieron precargar los estudios OLASO:',seedError)}await drawLibrary();await maybeRestoreDraft();if(!dirty)notice(seeded.added?'Biblioteca lista: '+seeded.added+' estudio(s) de la OT OLASO incorporado(s) automaticamente.':'Biblioteca lista. Introduce OT y nombre para guardar.','saved')}catch(e){notice('Biblioteca local no disponible: '+e.message,'dirty')}})();
+(async()=>{try{await openDB().then(db=>db.close());ready=true;let seeded={added:0};try{seeded=await installOlasoStudiesOnce()}catch(seedError){console.warn('No se pudieron precargar los estudios OLASO:',seedError)}await drawLibrary();await maybeRestoreDraft();cloudEnqueue(startSharedSync);if(!dirty)notice(seeded.added?'Biblioteca lista: '+seeded.added+' estudio(s) de la OT OLASO incorporado(s) automaticamente.':'Biblioteca lista. Introduce OT y nombre para guardar.','saved')}catch(e){notice('Biblioteca local no disponible: '+e.message,'dirty')}})();
 })();
 
 </script><script src="../asistente_ia_global.js?v=20261116-nesting-web93" data-ldh-ai-global-loader="chapas"></script></body></html>
