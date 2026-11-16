@@ -1221,9 +1221,13 @@ async function runNest(forceOne=false){
   await displayResults(best,{tested:ok.length,summary});
   const pieceArea=state.parts.reduce((sum,p)=>sum+area(p.poly)*(+p.qty||0),0)/1e6;
   const comp=el('sheetComparison');comp.hidden=false;
+  const finalSheets=window.__chapasPrintSnapshot?.()||[];
+  const finalArea=finalSheets.reduce((sum,sh)=>sum+sh.w*sh.h,0)/1e6;
+  const finalInfo=finalSheets.map(sh=>sh.w+'×'+sh.h).join(' + ');
+  const finalRow=(finalSheets.length&&finalArea+0.0001<totalSheetArea(best)/1e6)?`<tr><td><b>✓ Final ajustado y validado</b></td><td>${finalSheets.length}</td><td><b>${formatM2(finalArea)}</b></td><td>${formatM2(Math.max(0,finalArea-pieceArea))}</td><td>${formatM2(finalArea?100*Math.max(0,finalArea-pieceArea)/finalArea:0)}%</td><td>${esc(finalInfo)}</td></tr>`:'';
   const limit=12;
-  const rows=ok.slice(0,limit).map((r,i)=>{const purchased=totalSheetArea(r)/1e6;const waste=Math.max(0,purchased-pieceArea);const fmts=(r.sheets||[]).map(sh=>sh.width+'×'+sh.height).join(' + ');return `<tr><td>${i===0?'★ Mejor encontrada':i+1}</td><td>${r.sheets.length}</td><td>${formatM2(purchased)}</td><td>${formatM2(waste)}</td><td>${formatM2(purchased?100*waste/purchased:0)}%</td><td>${esc(fmts)}</td></tr>`}).join('');
-  comp.innerHTML=`<h3>Comparativa real de formatos · ${ok.length} soluciones válidas / ${variants.length} ensayos</h3><p>Superficie de piezas: <b>${formatM2(pieceArea)} m²</b>. Se ha elegido la menor superficie comprada <b>entre las soluciones calculadas</b>. Merma teórica = superficie de chapas − superficie de piezas; no equivale al coste ni a una garantía de óptimo absoluto. La mejora manual posterior puede reducir aún más la superficie usada.</p><table><thead><tr><th>Opción</th><th>Chapas</th><th>Comprados m²</th><th>Merma m²</th><th>Merma %</th><th>Formatos colocados (mm)</th></tr></thead><tbody>${rows}</tbody></table><p class="muted">${errs.length} ensayos no produjeron un resultado completo válido.${ok.length>limit?' Se muestran los '+limit+' mejores.':''}</p>`;
+  const rows=finalRow+ok.slice(0,limit).map((r,i)=>{const purchased=totalSheetArea(r)/1e6;const waste=Math.max(0,purchased-pieceArea);const fmts=(r.sheets||[]).map(sh=>sh.width+'×'+sh.height).join(' + ');return `<tr><td>${i===0?'★ Mejor encontrada':i+1}</td><td>${r.sheets.length}</td><td>${formatM2(purchased)}</td><td>${formatM2(waste)}</td><td>${formatM2(purchased?100*waste/purchased:0)}%</td><td>${esc(fmts)}</td></tr>`}).join('');
+  comp.innerHTML=`<h3>Comparativa real de formatos · ${ok.length} soluciones válidas / ${variants.length} ensayos</h3><p>Superficie de piezas: <b>${formatM2(pieceArea)} m²</b>. La primera fila, si aparece, incluye el ajuste final de formatos por chapa, validado sin cambiar las piezas; las demás filas son resultados iniciales del motor. Merma teórica = superficie de chapas − superficie de piezas; no equivale al coste ni a una garantía de óptimo absoluto. La mejora manual posterior puede reducir aún más la superficie usada.</p><table><thead><tr><th>Opción</th><th>Chapas</th><th>Comprados m²</th><th>Merma m²</th><th>Merma %</th><th>Formatos colocados (mm)</th></tr></thead><tbody>${rows}</tbody></table><p class="muted">${errs.length} ensayos no produjeron un resultado completo válido.${ok.length>limit?' Se muestran los '+limit+' mejores.':''}</p>`;
  }catch(e){sayEngine('No se pudo calcular: '+e.message,true);el('nestResult').innerHTML='<div class="empty-result">No se ha generado ningún plano. Revisa el diagnóstico y la configuración.</div>'}
  finally{btn.textContent='Optimizar TODAS las piezas';btn.disabled=false}
 }
@@ -2127,11 +2131,68 @@ async function autoImprove(){
 byId('meImprove').onclick=autoImprove;
 // Refinamiento automatico en el mismo boton Optimizar. El boton del editor
 // se conserva para repetir la busqueda tras una modificacion manual.
+// V9.2: comprobación de compra por chapa, posterior a la colocación validada.
+// Si una chapa ya colocada cabe en un formato permitido menor, conservar la
+// geometría, el giro y la separación: cambiar SOLO el tamaño de la chapa.
+function rightSizeOccupiedSheets(){
+ if(!ed.active||ed.drag)return {changed:0,areaSaved:0};
+ const formats=enabledStandardSheets().map(f=>({w:Number(f.width),h:Number(f.height),limited:false}));
+ if(byId('custom').checked){
+  const w=Number(byId('cw').value),h=Number(byId('ch').value);
+  if(w>=50&&h>=50)formats.push({w,h,limited:true});
+ }
+ const choices=formats.filter(f=>Number.isFinite(f.w)&&Number.isFinite(f.h)&&f.w>0&&f.h>0)
+  .sort((a,b)=>a.w*a.h-b.w*b.h||a.w-b.w||a.h-b.h);
+ const margin=Math.max(0,Number(byId('margin').value)||0),tolerance=.02;
+ const customInUse=formats.filter(f=>f.limited).map(f=>({f,used:ed.sheets.filter(sh=>sh.pieces.length&&sh.w===f.w&&sh.h===f.h).length}));
+ let changed=0,areaSaved=0;
+ for(const sh of ed.sheets){
+  if(!sh.pieces.length)continue;
+  const originalArea=sh.w*sh.h;
+  const points=sh.pieces.flatMap(p=>p.poly),bb=box(points);
+  let chosen=null;
+  for(const f of choices){
+   if(f.w*f.h>=originalArea-tolerance)continue;
+   const limited=customInUse.find(x=>x.f===f);
+   if(limited?.used>=1)continue;
+   if(bb.w>f.w-2*margin+tolerance||bb.h>f.h-2*margin+tolerance)continue;
+   // Trasladar todo el conjunto sin rotar ninguna pieza ni cambiar distancias.
+   const dx=margin-bb.minX,dy=margin-bb.minY;
+   const projected=sh.pieces.map(p=>({...p,poly:move(p.poly,dx,dy)}));
+   const testSheet={w:f.w,h:f.h,pieces:projected};
+   if(!projected.every(p=>valid(testSheet,p,p.poly).ok))continue;
+   chosen={...f,dx,dy};break;
+  }
+  if(!chosen)continue;
+  sh.pieces.forEach(p=>{p.poly=move(p.poly,chosen.dx,chosen.dy)});
+  sh.w=chosen.w;sh.h=chosen.h;
+  sh.svg.setAttribute('viewBox',`0 0 ${chosen.w} ${chosen.h}`);
+  sh.svg.setAttribute('width',chosen.w+'mm');sh.svg.setAttribute('height',chosen.h+'mm');
+  const heading=sh.card?.querySelector('.nest-head h3');
+  if(heading)heading.textContent='CHAPA '+(ed.sheets.indexOf(sh)+1)+' · '+chosen.w+' × '+chosen.h+' mm';
+  const caption=sh.card?.querySelector('.nest-caption > span:last-child');
+  if(caption)caption.textContent='Formato final verificado: '+chosen.w+' × '+chosen.h+' mm';
+  const taken=customInUse.find(x=>x.f.w===chosen.w&&x.f.h===chosen.h);if(taken)taken.used++;
+  areaSaved+=originalArea-chosen.w*chosen.h;changed++;
+ }
+ if(changed){
+  const total=ed.sheets.filter(sh=>sh.pieces.length).reduce((sum,sh)=>sum+sh.w*sh.h,0);
+  for(const card of ed.sheets.map(sh=>sh.card)){
+   const chip=card?.querySelector('.nest-meta .nest-chip:nth-child(2)');
+   if(chip)chip.textContent='Compra final: '+(total/1e6).toFixed(2).replace('.',',')+' m²';
+  }
+  ed.modified=true;
+  paintAll();
+  status(changed+' chapa(s) ajustadas a formatos menores habilitados · ahorro de '+(areaSaved/1e6).toFixed(2).replace('.',',')+' m². Geometría y separación verificadas.');
+ }
+ return {changed,areaSaved};
+}
 window.__chapasAutoImprove=async()=>{
  try{
   if(!ed.active)enterEdit(true);
   if(!ed.active)return {error:'el editor no pudo reconocer todas las piezas del SVG'};
   await autoImprove();
+  const adjusted=rightSizeOccupiedSheets();
   const chk=everyPieceValid();
   if(!chk.ok)return {error:'la propuesta requiere correccion manual: '+chk.reason};
   const nonempty=ed.sheets.filter(sh=>sh.pieces.length>0);
@@ -2140,7 +2201,7 @@ window.__chapasAutoImprove=async()=>{
   // El ZIP original de motor de cálculo no incluye estas recolocaciones.
   exportBtn.hidden=!ed.modified;
   const originalLink=byId('getDXF');if(originalLink)originalLink.textContent='ZIP de la distribución inicial (sin ajustes manuales)';
-  return {ok:true,sheets:nonempty.length,area:areaFinal,pieces:nonempty.reduce((n,sh)=>n+sh.pieces.length,0),detail:ed.modified?'Se aplicó una colocación mejor.':'Se conserva la mejor colocación válida encontrada.'};
+  return {ok:true,sheets:nonempty.length,area:areaFinal,pieces:nonempty.reduce((n,sh)=>n+sh.pieces.length,0),detail:adjusted.changed?'Se sustituyeron '+adjusted.changed+' chapa(s) por formatos activos más pequeños, con '+(adjusted.areaSaved/1e6).toFixed(2).replace('.',',')+' m² menos.':ed.modified?'Se aplicó una colocación mejor.':'Se conserva la mejor colocación válida encontrada.'};
  }catch(err){console.error('Error mejora automática',err);return {error:err.message}}
 };
 
