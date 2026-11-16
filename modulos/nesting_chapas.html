@@ -151,7 +151,9 @@ header{height:auto;min-height:66px;flex-wrap:wrap;padding-top:8px;padding-bottom
 <div id="jobSaveStatus" class="status" role="status">Sin guardar todav&iacute;a.</div>
 <details id="jobLibraryDetails" class="library-fold"><summary>TRABAJOS GUARDADOS POR OT <span id="jobLibraryStats">0 activos</span></summary>
 <div class="tiny muted" style="margin:8px 0">Cada OT puede tener varios c&aacute;lculos independientes. Archivar oculta del listado activo sin eliminar el trabajo.</div>
-<div class="actionrow" style="margin:9px 0"><button class="btn" id="exportJobJson" type="button">Exportar copia JSON</button><button class="btn" id="importJobJson" type="button">Importar JSON</button></div>
+<div class="actionrow" style="margin:9px 0"><button class="btn" id="exportJobJson" type="button">Exportar estudio JSON</button><button class="btn" id="importJobJson" type="button">Importar estudio JSON</button></div>
+<div class="actionrow" style="margin:7px 0"><button class="btn main" id="backupAllJobs" type="button">Exportar copia completa</button><button class="btn" id="restoreAllJobs" type="button">Restaurar copia completa</button></div>
+<div class="tiny muted" style="margin:5px 0 9px">Copia local de todos los estudios, incluidos archivados y planos. Restaurar añade solo estudios nuevos: no elimina ni sobrescribe trabajos existentes y no escribe en Firestore.</div>
 <div class="field"><label for="jobSearch">Buscar por OT o nombre</label><input id="jobSearch" placeholder="Referencia, nombre o empresa" autocomplete="off" /></div>
 <div class="field"><label for="jobView">Mostrar trabajos</label><select id="jobView"><option value="active">Activos</option><option value="archived">Archivados</option><option value="all">Todos</option></select></div>
 <div id="jobLibraryList" class="job-library-list" aria-live="polite"><span class="muted">Cargando biblioteca local…</span></div>
@@ -2457,6 +2459,123 @@ async function newSameOT(){if(dirty&&!confirm('Tienes cambios sin guardar. ¿Cre
  await dbDelete(META,'draft');newBaseline();$('ref').value=mother;$('company').value=company;$('material').value=material;$('thickness').value=thickness;$('sheetFinish').value=finish;
  $('desc').value='Corte '+String(prev+1).padStart(2,'0');renderSheetFinish();markChanged();notice('Cálculo nuevo para OT '+mother+'. Importa las piezas y guarda.','dirty');
 }
+
+/* V9.4 - respaldo de toda la biblioteca, con restauracion no destructiva.
+ * Acepta tanto la lista de registros exportada desde la consola como nuestro respaldo oficial.
+ * No importa trabajos incompletos, no sobrescribe IDs ni modifica Firestore. */
+const CHAPAS_BACKUP_FORMAT='LDH_CHAPAS_BIBLIOTECA_COMPLETA_V1';
+function backupRecords(data){
+ if(Array.isArray(data))return data;
+ if(data&&data.format===CHAPAS_BACKUP_FORMAT&&Array.isArray(data.jobs))return data.jobs;
+ throw Error('El archivo no es una copia completa de la biblioteca de Nesting de Chapas');
+}
+function recordIdentity(j){
+ return [String(j.company||j.data?.options?.company||'').trim().toLocaleUpperCase('es'),
+         String(j.ref||j.data?.options?.ref||'').trim().toLocaleUpperCase('es'),
+         String(j.name||j.data?.options?.desc||'').trim().toLocaleUpperCase('es')].join('\u001f');
+}
+function checkedBackupRecord(raw){
+ if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('Registro incorrecto');
+ const data=validated(raw.data);
+ const ref=String(raw.ref||data.options?.ref||'').trim();
+ const name=String(raw.name||data.options?.desc||'').trim();
+ const company=String(raw.company||data.options?.company||'').trim();
+ if(!ref||!name||ref.length>250||name.length>250||company.length>250)throw Error('Un estudio no tiene OT/nombre validos');
+ if(!data.parts.length)throw Error('El estudio '+ref+' · '+name+' no contiene piezas');
+ return {
+  id:String(raw.id||newId()),ref,name,company,archived:!!raw.archived,
+  createdAt:String(raw.createdAt||stamp()),updatedAt:String(raw.updatedAt||stamp()),
+  data
+ };
+}
+
+/* Importacion de los dos estudios originales OLASO SOLO la primera vez en cada navegador.
+ * El fichero semilla permite abrir la OT sin importar JSON; no toca trabajos existentes
+ * ni Firestore, y no reaparece si un usuario elimina manualmente una semilla. */
+const OLASO_SEED_KEY='seed-olaso-ot-333444555-001-v1';
+async function installOlasoStudiesOnce(){
+ if(await dbGet(META,OLASO_SEED_KEY))return {added:0,skipped:true};
+ const response=await fetch('./nesting_chapas_olaso_seed.json',{cache:'no-store'});
+ if(!response.ok)throw Error('No se pudieron cargar los estudios iniciales: HTTP '+response.status);
+ const source=await response.json();
+ const records=backupRecords(source).map(checkedBackupRecord);
+ if(records.length!==2||records.some(x=>x.ref!=='OT-333444555-001'||x.company!=='SKLUM'))
+  throw Error('Los estudios iniciales no coinciden con la OT esperada');
+ const existing=await dbAll(), ids=new Set(existing.map(x=>String(x.id))), keys=new Set(existing.map(recordIdentity));
+ const fresh=[];
+ for(const rec of records){
+  const k=recordIdentity(rec);
+  if(ids.has(rec.id)||keys.has(k))continue;
+  fresh.push(rec);ids.add(rec.id);keys.add(k);
+ }
+ if(fresh.length){
+  const db=await openDB();
+  try{
+   const tx=db.transaction(STORE,'readwrite'),os=tx.objectStore(STORE);
+   for(const record of fresh)os.add(record);
+   await txDone(tx);
+  }finally{db.close()}
+ }
+ await dbPut(META,{key:OLASO_SEED_KEY,savedAt:stamp(),added:fresh.length});
+ return {added:fresh.length,skipped:false};
+}
+
+async function exportAllJobs(){
+ try{
+  const jobs=await dbAll();
+  if(!jobs.length){notice('La biblioteca esta vacia: no hay estudios para exportar.','dirty');return}
+  const payload={format:CHAPAS_BACKUP_FORMAT,schema:1,exportedAt:stamp(),total:jobs.length,jobs};
+  const file='CHAPAS_BIBLIOTECA_COMPLETA_'+new Date().toISOString().slice(0,10)+'.json';
+  download(file,JSON.stringify(payload,null,2),'application/json');
+  notice('Copia completa descargada: '+jobs.length+' estudio(s), incluidos archivados.','saved');
+ }catch(e){notice('Error al crear copia completa: '+e.message,'dirty')}
+}
+async function restoreAllJobs(){
+ const input=document.createElement('input');input.type='file';input.accept='.json,application/json';
+ input.onchange=async()=>{
+  try{
+   if(!input.files?.length)return;
+   const file=input.files[0];
+   if(file.size>60*1024*1024)throw Error('El archivo supera los 60 MB');
+   const raw=JSON.parse(await file.text()),items=backupRecords(raw);
+   if(!items.length){notice('La copia no contiene estudios para restaurar.','dirty');return}
+   if(items.length>3000)throw Error('La copia contiene demasiados estudios');
+   // Validar primero TODO el respaldo; una entrada incorrecta bloquea cualquier escritura.
+   const records=items.map(checkedBackupRecord);
+   const original=await dbAll();
+   const seenIds=new Set(original.map(x=>String(x.id)));
+   const seenKeys=new Set(original.map(recordIdentity));
+   const fresh=[],duplicates=[];
+   for(const rec of records){
+    const key=recordIdentity(rec);
+    if(seenIds.has(rec.id)||seenKeys.has(key)){duplicates.push(rec.ref+' · '+rec.name);continue}
+    seenIds.add(rec.id);seenKeys.add(key);fresh.push(rec);
+   }
+   const summary='Copia examinada: '+records.length+' estudio(s).\nNuevos: '+fresh.length+
+       '\nDuplicados omitidos: '+duplicates.length+
+       '\nNo se borrara ni reemplazara ninguno de los '+original.length+' estudios actuales.\n'+
+       'No se cambiara Firestore.\n\n¿Incorporar los nuevos estudios?';
+   if(!fresh.length){notice('Restauracion revisada: '+duplicates.length+' estudio(s) ya existentes. Sin cambios.','saved');return}
+   if(!confirm(summary))return;
+   // Una sola transaccion IndexedDB: alta atomica, sin sustituir registros existentes.
+   const db=await openDB();
+   try{
+    const tx=db.transaction(STORE,'readwrite');
+    const os=tx.objectStore(STORE);
+    for(const rec of fresh)os.add(rec);
+    await txDone(tx);
+   }finally{db.close()}
+   await drawLibrary();
+   $('jobLibraryDetails').open=true;
+   $('jobView').value='all';
+   $('jobSearch').value='';
+   await drawLibrary();
+   notice('Restauracion completada: '+fresh.length+' nuevo(s), '+duplicates.length+' duplicado(s) omitido(s).','saved');
+  }catch(e){notice('Restauracion cancelada, sin sustituir estudios: '+e.message,'dirty')}
+ };
+ input.click();
+}
+
 function downloadJson(){const data=snapshot(),name=String($('ref').value||'TRABAJO').replace(/[^a-zA-Z0-9_-]/g,'_');download('CHAPAS_'+name+'.json',JSON.stringify(data,null,2),'application/json')}
 function importJson(){const inp=document.createElement('input');inp.type='file';inp.accept='.json';inp.onchange=async()=>{try{if(!inp.files?.length)return;if(dirty&&!confirm('¿Sustituir el trabajo actual?'))return;const text=await inp.files[0].text();if(text.length>15e6)throw Error('Archivo excesivamente grande');applyData(JSON.parse(text));markChanged();notice('Proyecto importado. Guarda con su OT y nombre para incorporarlo a la biblioteca.','dirty')}catch(e){notice('Error de importación: '+e.message,'dirty')}};inp.click()}
 async function maybeRestoreDraft(){const rec=await dbGet(META,'draft');if(!rec?.data)return;const text='Se ha encontrado un borrador automático del '+new Date(rec.savedAt).toLocaleString('es-ES')+'. ¿Recuperarlo?';if(confirm(text)){applyData(rec.data,{id:rec.id});dirty=true;notice('Borrador recuperado · No olvides guardar la OT.','dirty')}else await dbDelete(META,'draft')}
@@ -2508,13 +2627,13 @@ $('load').onclick=()=>{const box=$('jobLibraryDetails');box.open=true;$('jobSear
 $('duplicateJob').onclick=()=>duplicateJob().catch(e=>notice('Error: '+e.message,'dirty'));
 $('newSameOT').onclick=()=>newSameOT().catch(e=>notice('Error: '+e.message,'dirty'));
 $('reset').onclick=()=>newJob().catch(e=>notice('Error creando OT: '+e.message,'dirty'));
-$('exportJobJson').onclick=downloadJson;$('importJobJson').onclick=importJson;$('jobSearch').oninput=()=>drawLibrary().catch(console.error);
+$('exportJobJson').onclick=downloadJson;$('importJobJson').onclick=importJson;$('backupAllJobs').onclick=exportAllJobs;$('restoreAllJobs').onclick=restoreAllJobs;$('jobSearch').oninput=()=>drawLibrary().catch(console.error);
 $('cloudSave').onclick=cloudSave;$('cloudLoad').onclick=cloudLoad;$('jobView').onchange=()=>drawLibrary().catch(console.error);
 document.addEventListener('input',e=>{if(e.target?.closest('#workLibrary'))return;if(e.target?.matches('input,textarea,select')&&!['jobSearch','files'].includes(e.target.id))markChanged()},true);
 document.addEventListener('change',e=>{if(e.target?.closest('#workLibrary'))return;if(e.target?.matches('input,textarea,select')&&!['files'].includes(e.target.id))markChanged()},true);
 window.addEventListener('beforeunload',e=>{if(!dirty)return;e.preventDefault();e.returnValue='';});
 window.addEventListener('pagehide',()=>{if(dirty){clearTimeout(draftTimer);writeDraft().catch(console.warn)}});
-(async()=>{try{await openDB().then(db=>db.close());ready=true;await drawLibrary();await maybeRestoreDraft();if(!dirty)notice('Biblioteca lista. Introduce OT y nombre para guardar.')}catch(e){notice('Biblioteca local no disponible: '+e.message,'dirty')}})();
+(async()=>{try{await openDB().then(db=>db.close());ready=true;let seeded={added:0};try{seeded=await installOlasoStudiesOnce()}catch(seedError){console.warn('No se pudieron precargar los estudios OLASO:',seedError)}await drawLibrary();await maybeRestoreDraft();if(!dirty)notice(seeded.added?'Biblioteca lista: '+seeded.added+' estudio(s) de la OT OLASO incorporado(s) automaticamente.':'Biblioteca lista. Introduce OT y nombre para guardar.','saved')}catch(e){notice('Biblioteca local no disponible: '+e.message,'dirty')}})();
 })();
 
 </script><script src="../asistente_ia_global.js?v=20261116-nesting-web93" data-ldh-ai-global-loader="chapas"></script></body></html>
