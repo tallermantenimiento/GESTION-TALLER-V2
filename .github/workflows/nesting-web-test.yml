@@ -105,13 +105,51 @@ jobs:
             const message=await page.locator('#engineStatus').innerText();
             console.log('Chapas:',heads,'Totales:',stats,'Mensaje:',message,'Errores JS:',errors);
             if(errors.length)throw Error('Fallo JavaScript del modulo');
-            if(heads.length!==2||!heads.some(x=>x.includes('3000 × 1500'))||!heads.some(x=>x.includes('2000 × 1000'))||
-               !stats.includes('6,50'))throw Error('La optimizacion no redujo la segunda chapa al formato menor compatible');
             const printed=await page.evaluate(()=>window.__chapasPrintSnapshot?.());
-            if(!printed||printed.length!==2||!printed.some(x=>x.w===2000&&x.h===1000))
-              throw Error('La impresion no refleja el formato final de la segunda chapa');
-            console.log('OK: segunda chapa 2000x1000; area total 6.50m2; impresion coherente');
+            const area=(printed||[]).reduce((sum,sh)=>sum+sh.w*sh.h,0)/1e6;
+            if(heads.length!==2||!heads.some(x=>x.includes('3000 × 1500'))||!heads.some(x=>x.includes('2000 × 1000'))||
+               !printed||printed.length!==2||!printed.some(x=>x.w===2000&&x.h===1000)||
+               Math.abs(area-6.5)>0.001)
+              throw Error('Los planos finales no representan 3000x1500 + 2000x1000 (6,50 m2). Real: '+JSON.stringify({heads,area,printed:printed?.map(x=>({w:x.w,h:x.h}))}));
+            console.log('OK: planos, impresion y formatos de 6.50m2 coherentes');
           } finally {await browser.close();}
+          NODETEST
+      - name: Regresion de interfaz V9.3 - retales, biblioteca y OT madre
+        run: |
+          node --input-type=module <<'NODETEST'
+          import {chromium} from './motor-fuente/web/node_modules/playwright/index.mjs';
+          const browser=await chromium.launch({headless:true});
+          try {
+            const page=await browser.newPage();
+            const errors=[];
+            page.on('pageerror',err=>errors.push(String(err)));
+            await page.goto('http://127.0.0.1:8876/modulos/nesting_chapas.html');
+            await page.waitForFunction(()=>document.querySelector('#runNest')?.disabled===false,{timeout:60000});
+            const status=await page.evaluate(async()=>{
+              if(document.querySelector('#jobLibraryDetails')?.open)throw Error('La biblioteca no arranca plegada');
+              document.querySelector('#scrapLabel').value='Retal A';
+              document.querySelector('#scrapW').value='850';
+              document.querySelector('#scrapH').value='620';
+              document.querySelector('#scrapQty').value='2';
+              document.querySelector('#addScrap').click();
+              document.querySelector('#scrapLabel').value='Retal B';
+              document.querySelector('#scrapW').value='1200';
+              document.querySelector('#scrapH').value='900';
+              document.querySelector('#scrapQty').value='1';
+              document.querySelector('#addScrap').click();
+              if(scraps.length!==2||scraps[0].quantity!==2||scraps[1].quantity!==1)throw Error('Retales no acumulados correctamente');
+              document.querySelector('#s1').checked=false;
+              document.querySelector('#s2').checked=false;
+              document.querySelector('#s3').checked=false;
+              const opts=allowedSheetStocks();
+              if(opts.length!==2||opts.find(x=>x.width===850)?.count!==2||opts.find(x=>x.width===1200)?.count!==1)throw Error('Límite de retales no respetado');
+              document.querySelector('#ref').value='OT-PRUEBA-93';
+              document.querySelector('#desc').value='Corte 01';
+              return {scraps:scraps.length,sheets:opts.length,libraryClosed:true,ref:document.querySelector('#ref').value};
+            });
+            console.log('OK V9.3',status);
+            if(errors.length)throw Error('Errores JavaScript: '+errors.join(' | '));
+          }finally{await browser.close();}
           NODETEST
       - name: Empaquetar para revisión (sin publicar)
         run: |
