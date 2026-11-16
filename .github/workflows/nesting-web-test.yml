@@ -1,0 +1,179 @@
+name: Nesting de Chapas - compilar y probar motor web
+
+on:
+  push:
+    branches:
+      - pruebas/nesting-chapas-web-20261116
+    paths:
+      - 'modulos/nesting_chapas.html'
+      - 'modulos/nesting_engine/**'
+      - '.github/workflows/nesting-web-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Preparar dependencias del motor original
+        run: |
+          git clone --depth 1 --branch v0.1.0 https://github.com/skulitom/Nestbolt.git motor-fuente
+          test -f motor-fuente/LICENSE
+          test -f motor-fuente/THIRD_PARTY_NOTICES
+          npm ci --prefix motor-fuente/web
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Compilar WebAssembly y comprobar sintaxis
+        run: |
+          python3 motor-fuente/scripts/build_web.py --skip-bundle
+          mkdir -p modulos/nesting_engine/pkg
+          cp motor-fuente/web/src/pkg/nestbolt_wasm.js modulos/nesting_engine/pkg/
+          cp motor-fuente/web/src/pkg/nestbolt_wasm_bg.wasm modulos/nesting_engine/pkg/
+          cp motor-fuente/LICENSE modulos/nesting_engine/LICENSE.txt
+          cp motor-fuente/THIRD_PARTY_NOTICES modulos/nesting_engine/THIRD_PARTY_NOTICES.txt
+          node --check modulos/nesting_engine/bridge.js
+          node --check modulos/nesting_engine/worker.js
+          test -s modulos/nesting_engine/pkg/nestbolt_wasm_bg.wasm
+      - name: Probar el motor real desde Chromium
+        run: |
+          (cd motor-fuente/web && npx playwright install chromium --with-deps)
+          python3 -m http.server 8876 --bind 127.0.0.1 > /tmp/nesting-server.log 2>&1 &
+          node --input-type=module --eval '
+            import { chromium } from "./motor-fuente/web/node_modules/playwright/index.mjs";
+            const browser=await chromium.launch({headless:true});
+            try{
+              const page=await browser.newPage();
+              await page.goto("http://127.0.0.1:8876/modulos/nesting_chapas.html");
+              const result=await page.evaluate(async()=>{
+                const api=await import("./nesting_engine/bridge.js");
+                await api.ready();
+                const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="150mm" height="70mm" viewBox="0 0 150 70"><path d="M5 5L65 5L65 35L5 35Z"/><path d="M80 5L140 5L140 35L80 35Z"/></svg>`;
+                const req={svg,sheets:[{width:2000,height:1000,count:null}],margin:5,spacing:5,seconds:5,rotationDegrees:[0,90,180,270]};
+                return await api.calculate(req);
+              });
+              if(!result.ok||result.pieces!==2||!result.sheets.length)throw Error("No se han colocado las dos piezas");
+              console.log("Correcto: el navegador calculó y exportó "+result.pieces+" piezas");
+            }finally{await browser.close();}
+          '
+      - name: Guardar WASM exclusivamente en rama de pruebas
+        if: github.ref == 'refs/heads/pruebas/nesting-chapas-web-20261116'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add modulos/nesting_engine/pkg/nestbolt_wasm.js modulos/nesting_engine/pkg/nestbolt_wasm_bg.wasm modulos/nesting_engine/LICENSE.txt modulos/nesting_engine/THIRD_PARTY_NOTICES.txt
+          if ! git diff --cached --quiet; then
+            git commit -m 'Añadir motor WASM probado a rama de Nesting'
+            git push origin HEAD:pruebas/nesting-chapas-web-20261116
+          fi
+      - name: Regresion automatica - dos formatos sin merma artificial
+        run: |
+          node --input-type=module <<'NODETEST'
+          import {chromium} from './motor-fuente/web/node_modules/playwright/index.mjs';
+          const browser=await chromium.launch({headless:true});
+          try {
+            const page=await browser.newPage();
+            const errors=[];
+            page.on('pageerror',err=>errors.push(String(err)));
+            await page.goto('http://127.0.0.1:8876/modulos/nesting_chapas.html');
+            await page.waitForFunction(()=>document.querySelector('#runNest')?.disabled===false,{timeout:60000});
+            await page.evaluate(()=>{
+              const make=(id,w,h)=>({id,name:id,file:'PRUEBA_FORMATO.dxf',layer:'0',design:'PRUEBA',
+                poly:[[0,0],[w,0],[w,h],[0,h]],qty:1});
+              state.parts=[make('Pieza grande',2600,1250),make('Pieza pequena',1400,300)];
+              state.signatures.clear();
+              render();
+              document.querySelector('#process').value='shear';
+              document.querySelector('#s1').checked=true;
+              document.querySelector('#s2').checked=true;
+              document.querySelector('#seconds').value='5';
+              document.querySelector('#runNest').click();
+            });
+            await page.waitForFunction(()=>document.querySelector('#runNest')?.disabled===false &&
+              (document.querySelector('#sheetComparison')?.hidden===false ||
+               /No se pudo calcular/.test(document.querySelector('#engineStatus')?.textContent||'')),{timeout:130000});
+            const heads=await page.locator('#nestResult .nest-head h3').allTextContents();
+            const stats=await page.locator('#nestStats').innerText();
+            const message=await page.locator('#engineStatus').innerText();
+            console.log('Chapas:',heads,'Totales:',stats,'Mensaje:',message,'Errores JS:',errors);
+            if(errors.length)throw Error('Fallo JavaScript del modulo');
+            const details=await page.evaluate(()=>({
+              editorMessage:document.querySelector('#meStatus')?.textContent,
+              editorActive:document.querySelector('#manualEditor')?.classList.contains('active'),
+              contourNames:state.parts.map(p=>({name:p.name,vertices:p.poly.length,qty:p.qty,area:area(p.poly)})),
+              svgSheets:[...document.querySelectorAll('#nestResult .nest-canvas svg')].map(svg=>({
+                shapeCount:svg.querySelectorAll('.ldh-part-shape').length,
+                paths:[...svg.querySelectorAll('.ldh-part-shape')].map(path=>({
+                  d:path.getAttribute('d')?.slice(0,280),
+                  vertices:extractSheetVertices(path,svg.getCTM().inverse().multiply(path.getCTM())),
+                })).map(p=>({...p,vertices:p.vertices?.length??0})),
+              })),
+            }));
+            console.log('Diagnostico de editor:',JSON.stringify(details));
+            const printed=await page.evaluate(()=>window.__chapasPrintSnapshot?.());
+            const area=(printed||[]).reduce((sum,sh)=>sum+sh.w*sh.h,0)/1e6;
+            if(heads.length!==2||!heads.some(x=>x.includes('3000 × 1500'))||!heads.some(x=>x.includes('2000 × 1000'))||
+               !printed||printed.length!==2||!printed.some(x=>x.w===2000&&x.h===1000)||
+               Math.abs(area-6.5)>0.001)
+              throw Error('Los planos finales no representan 3000x1500 + 2000x1000 (6,50 m2). Real: '+JSON.stringify({heads,area,printed:printed?.map(x=>({w:x.w,h:x.h}))}));
+            console.log('OK: planos, impresion y formatos de 6.50m2 coherentes');
+          } finally {await browser.close();}
+          NODETEST
+      - name: Regresion de interfaz V9.3 - retales, biblioteca y OT madre
+        run: |
+          node --input-type=module <<'NODETEST'
+          import {chromium} from './motor-fuente/web/node_modules/playwright/index.mjs';
+          const browser=await chromium.launch({headless:true});
+          try {
+            const page=await browser.newPage();
+            const errors=[];
+            page.on('pageerror',err=>errors.push(String(err)));
+            await page.goto('http://127.0.0.1:8876/modulos/nesting_chapas.html');
+            await page.waitForFunction(()=>document.querySelector('#runNest')?.disabled===false,{timeout:60000});
+            const status=await page.evaluate(async()=>{
+              if(document.querySelector('#jobLibraryDetails')?.open)throw Error('La biblioteca no arranca plegada');
+              document.querySelector('#scrapLabel').value='Retal A';
+              document.querySelector('#scrapW').value='850';
+              document.querySelector('#scrapH').value='620';
+              document.querySelector('#scrapQty').value='2';
+              document.querySelector('#addScrap').click();
+              document.querySelector('#scrapLabel').value='Retal B';
+              document.querySelector('#scrapW').value='1200';
+              document.querySelector('#scrapH').value='900';
+              document.querySelector('#scrapQty').value='1';
+              document.querySelector('#addScrap').click();
+              if(scraps.length!==2||scraps[0].quantity!==2||scraps[1].quantity!==1)throw Error('Retales no acumulados correctamente');
+              document.querySelector('#s1').checked=false;
+              document.querySelector('#s2').checked=false;
+              document.querySelector('#s3').checked=false;
+              const opts=allowedSheetStocks();
+              if(opts.length!==2||opts.find(x=>x.width===850)?.count!==2||opts.find(x=>x.width===1200)?.count!==1)throw Error('Límite de retales no respetado');
+              document.querySelector('#ref').value='OT-PRUEBA-93';
+              document.querySelector('#desc').value='Corte 01';
+              return {scraps:scraps.length,sheets:opts.length,libraryClosed:true,ref:document.querySelector('#ref').value};
+            });
+            console.log('OK V9.3',status);
+            if(errors.length)throw Error('Errores JavaScript: '+errors.join(' | '));
+          }finally{await browser.close();}
+          NODETEST
+      - name: Empaquetar para revisión (sin publicar)
+        run: |
+          mkdir -p artifact/modulos/nesting_engine
+          cp modulos/nesting_chapas.html artifact/modulos/
+          cp modulos/nesting_engine/bridge.js modulos/nesting_engine/worker.js artifact/modulos/nesting_engine/
+          cp -r modulos/nesting_engine/pkg artifact/modulos/nesting_engine/
+          cp modulos/nesting_engine/LICENSE.txt modulos/nesting_engine/THIRD_PARTY_NOTICES.txt artifact/modulos/nesting_engine/
+          echo 'CANDIDATO DE PRUEBAS. No publicar sin validar las OT y los planos.' > artifact/LEER_ANTES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NESTING-WEB-CANDIDATO-NO-PUBLICAR
+          path: artifact/
+          if-no-files-found: error

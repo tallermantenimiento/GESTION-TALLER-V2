@@ -1,0 +1,80 @@
+name: Nesting - diagnostico rapido de editor web
+
+on:
+  push:
+    branches:
+      - pruebas/nesting-chapas-web-20261116
+    paths:
+      - 'modulos/nesting_chapas.html'
+      - 'modulos/nesting_engine/bridge.js'
+      - 'modulos/nesting_engine/worker.js'
+      - '.github/workflows/nesting-quick-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Instalar Chromium de pruebas
+        run: |
+          npm install --no-save --no-package-lock playwright@1.58.0
+          npx playwright install chromium --with-deps
+      - name: Comprobar editor y planos reales con WASM compilado
+        run: |
+          python3 -m http.server 8876 --bind 127.0.0.1 > /tmp/nesting-web.log 2>&1 &
+          node --input-type=module <<'NODETEST'
+          import {chromium} from 'playwright';
+          const browser=await chromium.launch({headless:true});
+          try {
+            const page=await browser.newPage({viewport:{width:1400,height:900}});
+            const errors=[];
+            page.on('pageerror',e=>errors.push(String(e)));
+            page.on('console',msg=>{if(msg.type()==='error')console.log('CONSOLE_ERROR',msg.text())});
+            await page.goto('http://127.0.0.1:8876/modulos/nesting_chapas.html');
+            await page.waitForFunction(()=>document.querySelector('#runNest')?.disabled===false,{timeout:60000});
+            await page.evaluate(()=>{
+              const piece=(id,w,h)=>({id,name:id,file:'PRUEBA_FORMATOS.dxf',layer:'0',design:'TEST',poly:[[0,0],[w,0],[w,h],[0,h]],qty:1});
+              state.parts=[piece('Grande',2600,1250),piece('Pequeña',1400,300)];
+              state.signatures.clear();render();
+              document.querySelector('#process').value='shear';
+              document.querySelector('#s1').checked=true;
+              document.querySelector('#s2').checked=true;
+              document.querySelector('#s3').checked=false;
+              document.querySelector('#seconds').value='5';
+              document.querySelector('#runNest').click();
+            });
+            await page.waitForFunction(()=>document.querySelector('#runNest')?.disabled===false && !document.querySelector('#sheetComparison')?.hidden,{timeout:130000});
+            const d=await page.evaluate(()=>{
+              const cards=[...document.querySelectorAll('#nestResult .nest-canvas')];
+              const details=cards.map(c=>{
+                const svg=c.querySelector('svg');if(!svg)return null;
+                const r=svg.getCTM();
+                const shapes=[...svg.querySelectorAll('.ldh-part-shape')];
+                return {vb:svg.getAttribute('viewBox'),tagCount:shapes.length,transforms:shapes.map(x=>String(x.getAttribute('transform')||'')),
+                  contours:shapes.map(x=>{
+                    const poly=extractSheetVertices(x,r.inverse().multiply(x.getCTM()));
+                    return {id:x.id,d:x.getAttribute('d')?.slice(0,300),points:poly?.length,area:poly?area(poly):null,sides:poly?poly.map((v,i)=>Math.hypot(v[0]-poly[(i+1)%poly.length][0],v[1]-poly[(i+1)%poly.length][1])).sort((a,b)=>a-b):[]}
+                  })};
+              });
+              return {message:document.querySelector('#engineStatus')?.textContent,editor:document.querySelector('#meStatus')?.textContent,
+                edActive:document.querySelector('#manualEditor')?.classList.contains('active'),original:state.parts.map(p=>({name:p.name,area:area(p.poly),
+                  sides:p.poly.map((v,i)=>Math.hypot(v[0]-p.poly[(i+1)%p.poly.length][0],v[1]-p.poly[(i+1)%p.poly.length][1])).sort((a,b)=>a-b)})),
+                cards:details,printed:window.__chapasPrintSnapshot?.()?.map(sh=>({w:sh.w,h:sh.h,pieces:sh.items.length})),
+                heads:[...document.querySelectorAll('#nestResult .nest-head h3')].map(x=>x.textContent)};
+            });
+            console.log('DIAGNOSTICO',JSON.stringify(d));
+            console.log('PAGE_ERRORS',JSON.stringify(errors));
+            const areaTotal=(d.printed||[]).reduce((n,x)=>n+x.w*x.h,0)/1e6;
+            if(!d.edActive||d.printed?.length!==2||Math.abs(areaTotal-6.5)>0.001||errors.length)
+              throw Error('El editor no ha generado un plano validado de dos chapas y 6.50m2');
+            console.log('OK: plano editable con area 6.50m2, 2 chapas');
+          }finally{await browser.close();}
+          NODETEST
