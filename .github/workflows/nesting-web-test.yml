@@ -1,0 +1,79 @@
+name: Nesting de Chapas - compilar y probar motor web
+
+on:
+  push:
+    branches:
+      - pruebas/nesting-chapas-web-20261116
+    paths:
+      - 'modulos/nesting_chapas.html'
+      - 'modulos/nesting_engine/**'
+      - '.github/workflows/nesting-web-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Preparar dependencias del motor original
+        run: |
+          git clone --depth 1 --branch v0.1.0 https://github.com/skulitom/Nestbolt.git motor-fuente
+          test -f motor-fuente/LICENSE
+          test -f motor-fuente/THIRD_PARTY_NOTICES
+          npm ci --prefix motor-fuente/web
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Compilar WebAssembly y comprobar sintaxis
+        run: |
+          python3 motor-fuente/scripts/build_web.py --skip-bundle
+          mkdir -p modulos/nesting_engine/pkg
+          cp motor-fuente/web/src/pkg/nestbolt_wasm.js modulos/nesting_engine/pkg/
+          cp motor-fuente/web/src/pkg/nestbolt_wasm_bg.wasm modulos/nesting_engine/pkg/
+          cp motor-fuente/LICENSE modulos/nesting_engine/LICENSE.txt
+          cp motor-fuente/THIRD_PARTY_NOTICES modulos/nesting_engine/THIRD_PARTY_NOTICES.txt
+          node --check modulos/nesting_engine/bridge.js
+          node --check modulos/nesting_engine/worker.js
+          test -s modulos/nesting_engine/pkg/nestbolt_wasm_bg.wasm
+      - name: Probar el motor real desde Chromium
+        run: |
+          (cd motor-fuente/web && npx playwright install chromium --with-deps)
+          python3 -m http.server 8876 --bind 127.0.0.1 > /tmp/nesting-server.log 2>&1 &
+          node --input-type=module --eval '
+            import { chromium } from "./motor-fuente/web/node_modules/playwright/index.mjs";
+            const browser=await chromium.launch({headless:true});
+            try{
+              const page=await browser.newPage();
+              await page.goto("http://127.0.0.1:8876/modulos/nesting_chapas.html");
+              const result=await page.evaluate(async()=>{
+                const api=await import("./nesting_engine/bridge.js");
+                await api.ready();
+                const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="150mm" height="70mm" viewBox="0 0 150 70"><path d="M5 5L65 5L65 35L5 35Z"/><path d="M80 5L140 5L140 35L80 35Z"/></svg>`;
+                const req={svg,sheets:[{width:2000,height:1000,count:null}],margin:5,spacing:5,seconds:5,rotationDegrees:[0,90,180,270]};
+                return await api.calculate(req);
+              });
+              if(!result.ok||result.pieces!==2||!result.sheets.length)throw Error("No se han colocado las dos piezas");
+              console.log("Correcto: el navegador calculó y exportó "+result.pieces+" piezas");
+            }finally{await browser.close();}
+          '
+      - name: Empaquetar para revisión (sin publicar)
+        run: |
+          mkdir -p artifact/modulos/nesting_engine
+          cp modulos/nesting_chapas.html artifact/modulos/
+          cp modulos/nesting_engine/bridge.js modulos/nesting_engine/worker.js artifact/modulos/nesting_engine/
+          cp -r modulos/nesting_engine/pkg artifact/modulos/nesting_engine/
+          cp modulos/nesting_engine/LICENSE.txt modulos/nesting_engine/THIRD_PARTY_NOTICES.txt artifact/modulos/nesting_engine/
+          echo 'CANDIDATO DE PRUEBAS. No publicar sin validar las OT y los planos.' > artifact/LEER_ANTES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NESTING-WEB-CANDIDATO-NO-PUBLICAR
+          path: artifact/
+          if-no-files-found: error
