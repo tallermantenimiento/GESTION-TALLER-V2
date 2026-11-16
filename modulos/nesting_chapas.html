@@ -2091,7 +2091,16 @@ function oneSheetOrders(all){
 async function autoImprove(){
  if(!ed.active)return status('Primero abre el editor manual.',true);
  if(ed.drag)return status('Termina el arrastre antes de mejorar la colocación.',true);
- const btn=byId('meImprove'),all=ed.sheets.flatMap(s=>s.pieces);
+ const btn=byId('meImprove');
+ // Orientacion canonica del DXF: la disponibilidad de retales NO debe cambiar
+ // arbitrariamente la entrada al algoritmo de colocacion final.
+ const originalById=new Map(state.parts.map(part=>[String(part.id),part]));
+ const all=ed.sheets.flatMap(sh=>sh.pieces).map(p=>{
+  const orig=originalById.get(String(p.sourceId||''));
+  if(!orig)return {...p,poly:p.poly.map(v=>v.slice())};
+  const poly=byId('process').value==='shear'?mainSideHorizontal(orig.poly):orig.poly;
+  return {...p,poly:poly.map(v=>v.slice())};
+ });
  if(!all.length)return status('No hay piezas para optimizar.',true);
  btn.disabled=true;btn.textContent='Buscando chapa única…';
  const base=ed.sheets.map(sh=>({w:sh.w,h:sh.h,pieces:sh.pieces.map(p=>({...p,poly:p.poly.map(v=>v.slice())}))}));
@@ -2227,6 +2236,8 @@ window.__chapasAutoImprove=async()=>{
   if(!ed.active)return {error:'el editor no pudo reconocer todas las piezas del SVG'};
   await autoImprove();
   const adjusted=rightSizeOccupiedSheets();
+  const retention=await chooseBestValidatedPlan();
+  if(retention.error)return {error:retention.error};
   const chk=everyPieceValid();
   if(!chk.ok)return {error:'la propuesta requiere correccion manual: '+chk.reason};
   const nonempty=ed.sheets.filter(sh=>sh.pieces.length>0);
@@ -2235,11 +2246,108 @@ window.__chapasAutoImprove=async()=>{
   // El ZIP original de motor de cálculo no incluye estas recolocaciones.
   exportBtn.hidden=!ed.modified;
   const originalLink=byId('getDXF');if(originalLink)originalLink.textContent='ZIP de la distribución inicial (sin ajustes manuales)';
-  return {ok:true,sheets:nonempty.length,area:areaFinal,pieces:nonempty.reduce((n,sh)=>n+sh.pieces.length,0),detail:adjusted.changed?'Se sustituyeron '+adjusted.changed+' chapa(s) por formatos activos más pequeños, con '+(adjusted.areaSaved/1e6).toFixed(2).replace('.',',')+' m² menos.':ed.modified?'Se aplicó una colocación mejor.':'Se conserva la mejor colocación válida encontrada.'};
+  return {ok:true,sheets:nonempty.length,area:areaFinal,pieces:nonempty.reduce((n,sh)=>n+sh.pieces.length,0),detail:retention.retained?'Se ha contrastado con la mejor solución válida previamente conservada.':adjusted.changed?'Se sustituyeron '+adjusted.changed+' chapa(s) por formatos activos más pequeños, con '+(adjusted.areaSaved/1e6).toFixed(2).replace('.',',')+' m² menos.':ed.modified?'Se aplicó una colocación mejor.':'Se conserva la mejor colocación válida encontrada.'};
  }catch(err){console.error('Error mejora automática',err);return {error:err.message}}
 };
 
 
+
+
+/* V9.7: retencion universal de la mejor solucion geométrica VALIDADA.
+ * La ampliacion de formatos/retales no puede empeorar el material comprado.
+ * El registro se identifica por geometria/cantidades y restricciones, no por OT.
+ * No publica nada en Firestore ni altera las bibliotecas de trabajos. */
+let bestPlanSession=null;
+function planInputSignature(){
+ return JSON.stringify({
+  parts:state.parts.map(p=>({id:String(p.id),qty:Number(p.qty),poly:p.poly})),
+  process:byId('process').value,
+  gap:Number(byId('gap').value)||0,
+  margin:Number(byId('margin').value)||0,
+  rotMode:byId('rotMode').value
+ });
+}
+function planMemoKey(signature){
+ let h=2166136261;for(let i=0;i<signature.length;i++){h^=signature.charCodeAt(i);h=Math.imul(h,16777619)}
+ return 'nest-best-v97-'+(h>>>0).toString(16);
+}
+function sheetPlanCost(plan){
+ const used=plan.filter(sh=>sh.items?.length);
+ return {area:used.reduce((sum,sh)=>sum+sh.w*sh.h,0),sheets:used.length};
+}
+function betterMaterialPlan(a,b){
+ const x=sheetPlanCost(a),y=sheetPlanCost(b);
+ if(Math.abs(x.area-y.area)>1)return x.area<y.area;
+ return x.sheets<y.sheets;
+}
+function checkPlanCandidate(plan,parts){
+ if(!Array.isArray(plan)||!plan.length||plan.length>100)return null;
+ const active=plan.filter(sh=>Array.isArray(sh.items)&&sh.items.length);
+ if(!active.length)return null;
+ const remaining=new Map();
+ for(const p of parts){const k=String(p.sourceId||'');const group=remaining.get(k)||[];group.push(p);remaining.set(k,group)}
+ const capacities=new Map();
+ const reconstructed=[];
+ for(const sh of active){
+  const w=Number(sh.w),h=Number(sh.h),key=sheetKey(w,h);
+  const limit=stockCapacity(allowedSheetStocks(),w,h),used=(capacities.get(key)||0)+1;
+  if(!Number.isFinite(w)||!Number.isFinite(h)||w<=0||h<=0||used>limit)return null;
+  capacities.set(key,used);
+  const trial={w,h,pieces:[]};
+  for(const item of sh.items){
+   const group=remaining.get(String(item.sourceId||'')),p=group?.shift();
+   if(!p||!Array.isArray(item.poly)||item.poly.length<3||item.poly.length>200)return null;
+   const poly=item.poly.map(pt=>[Number(pt[0]),Number(pt[1])]);
+   if(poly.some(pt=>pt.some(v=>!Number.isFinite(v))))return null;
+   // Un plano guardado debe conservar las piezas originales. Una nueva geometria
+   // o un nuevo lote tiene otra firma y no puede reutilizar un encaje anterior.
+   const np={...p,poly};
+   if(!valid(trial,np,poly).ok)return null;
+   trial.pieces.push(np);
+  }
+  reconstructed.push(trial);
+ }
+ if([...remaining.values()].some(group=>group.length))return null;
+ return reconstructed;
+}
+async function chooseBestValidatedPlan(){
+ if(!ed.active)return {retained:false};
+ const fresh=window.__chapasPrintSnapshot?.()||[];
+ const signature=planInputSignature(),key=planMemoKey(signature);
+ let incumbent=bestPlanSession?.signature===signature?bestPlanSession:null;
+ if(!incumbent){
+  try{const stored=await dbGet(META,key);if(stored?.signature===signature)incumbent=stored}
+  catch(e){console.warn('[Nesting] No se pudo leer mejor plano local:',e)}
+ }
+ const all=ed.sheets.flatMap(sh=>sh.pieces);
+ const admissible=incumbent?.plan?checkPlanCandidate(incumbent.plan,all):null;
+ if(admissible&&betterMaterialPlan(incumbent.plan,fresh)){
+  // Guardar cada objeto de pieza y su ID, sin alterar los DXF originales.
+  const pieces=ed.sheets.flatMap(sh=>sh.pieces);
+  const pending=new Map();
+  for(const p of pieces){const key=String(p.sourceId||'');const arr=pending.get(key)||[];arr.push(p);pending.set(key,arr)}
+  for(const sh of ed.sheets)sh.pieces=[];
+  for(const wanted of admissible){
+   let dest=ed.sheets.find(sh=>!sh.pieces.length&&sh.w===wanted.w&&sh.h===wanted.h);
+   if(!dest){dest=createAddedSheet(wanted.w,wanted.h);ed.sheets.push(dest)}
+   for(const item of wanted.pieces){
+    const obj=pending.get(String(item.sourceId||''))?.shift();
+    if(!obj)throw Error('No se ha podido reconstruir el plano mejor validado');
+    obj.poly=item.poly.map(p=>p.slice());dest.pieces.push(obj);
+   }
+  }
+  ed.modified=true;paintAll();
+  status('Se conserva el mejor plano validado previamente: añadir formatos o retales no aumenta la chapa comprada.');
+ }
+ const effective=window.__chapasPrintSnapshot?.()||[];
+ if(!checkPlanCandidate(effective,ed.sheets.flatMap(sh=>sh.pieces)))return {retained:!!admissible,error:'El plano final no ha superado la validación'};
+ if(!incumbent||!admissible||betterMaterialPlan(effective,incumbent.plan)){
+  const record={key,signature,plan:effective,savedAt:new Date().toISOString()};
+  bestPlanSession=record;
+  try{await dbPut(META,record)}catch(e){console.warn('[Nesting] Mejor plano conservado solo en esta sesion:',e)}
+ }else bestPlanSession=incumbent;
+ return {retained:!!admissible,plan:effective};
+}
 
 function pointerCancel(){if(!ed.drag)return;const d=ed.drag;d.p.poly=d.original;ed.undo.pop();ed.drag=null;unbindGlobalDrag();paintAll();status('Movimiento cancelado.')}
 function rotateSelected(deg){
