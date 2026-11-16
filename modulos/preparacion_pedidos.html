@@ -1329,6 +1329,7 @@ function _autoLinkPaintLinesForCurrentPedido(){
   let changed = false;
   (estadoMateriales||[]).forEach(line => {
     if(!isPaintLine(line)) return;
+    if(line && line.nonStockMaterial) return;
     if(line && line.stockLinkId) return; // ya vinculado
     let q = String(line.paintQuery||line.color||line.ral||line.mat||line.material||line.nombre||line.name||line.title||'').trim();
     // Fallback: fichas antiguas pueden guardar el texto en campos no estándar
@@ -30115,7 +30116,7 @@ console.info('[Preparación V107] Recepción física mientras vive en Preparaci�
     const unit=norm(line.unit || line.unidad || 'ud');
     if(name==='chapa escalon') return false; // conserva su flujo específico ya probado
     if(unit==='barra' || isPletina(line)) return false;
-    if(isPaintOrSolvent(line)) return false; // pintura/disolvente conservan su flujo de Stock
+    // Pintura y disolvente puntuales sin vinculo pueden recibirse por OT; vinculados usan Stock.
     if(linkedId(line)) return false;          // si existe vínculo actual, se usa Stock/Ferretería normal
     try{
       // V116: una ficha legacy exacta no es "sin Stock". Se migra al Stock por empresa
@@ -30133,6 +30134,12 @@ console.info('[Preparación V107] Recepción física mientras vive en Preparaci�
     if(requested<=0) return true;
     const already=Math.max(0,num(line.qty_recibida ?? line.recibida));
     if(already>=requested) return true;
+    const pending=Math.max(0,requested-already);
+    const answer=prompt('Material puntual sin ficha: '+lineName(line)+'\nPendiente: '+pending+'\nCantidad que recibes ahora:',String(pending));
+    if(answer===null) return true;
+    const receivedNow=num(answer);
+    if(!String(answer).trim()||!Number.isFinite(receivedNow)||receivedNow<=0||receivedNow>pending+1e-8){alert('Cantidad invalida. Maximo pendiente: '+pending);return true;}
+    const receivedTotal=Math.min(requested,already+receivedNow);
 
     const button=document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
     const oldText=button?.textContent || 'RECIBIDO';
@@ -30147,23 +30154,25 @@ console.info('[Preparación V107] Recepción física mientras vive en Preparaci�
         delete line._ldh_cleanup_tombstone_v62_material;
       }catch(_){ }
 
-      line.qty_recibida=requested;
-      line.recibida=requested;
+      line.qty_recibida=receivedTotal;
+      line.recibida=receivedTotal;
+      line.aplicado_qty=receivedTotal;
+      line.aplicado=receivedTotal;
+      line.stock_consumed_qty=0;
       line.receipt_manual_v83=true;
       line.receipt_policy_explicit_v83=true;
       line.nonStockMaterial=true;
       line.stockMode='none';
-      line.ok=true;
-      line.completo=true;
-      line.done=true;
-      line.isDone=true;
-      line.isCompleted=true;
+      line.ok=receivedTotal>=requested;
+      line.completo=line.ok;
+      line.done=line.ok;
+      line.isDone=line.ok;
+      line.isCompleted=line.ok;
 
       if(!Array.isArray(line.trace)) line.trace=[];
-      line.trace=line.trace.filter(row=>String(row && row.source || '')!=='manual_recibida_v83_accesorio_sin_stock');
       line.trace.push({
         at:new Date().toISOString(),
-        qty:requested,
+        qty:receivedNow,
         source:'manual_recibida_v83_accesorio_sin_stock',
         nonStockMaterial:true,
         material:lineName(line)

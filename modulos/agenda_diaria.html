@@ -11130,7 +11130,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
     const addBtn=document.getElementById('ldhCompositeAddPartBtn');
     if(addBtn){addBtn.hidden=false;addBtn.disabled=fixed;addBtn.title=fixed?'No se añaden partidas después de iniciar Cálculo/Preparación':'';}
     const saveButton=document.querySelector('#ldhCompositeModal .wo-dialog-actions .wo-save');
-    if(saveButton){saveButton.disabled=fixed;saveButton.title=fixed?'Estructura fijada. Puedes acceder a Cálculo, pero no modificar el desglose.':'';}
+    if(saveButton){saveButton.disabled=false;saveButton.title=fixed?'Estructura fija; el RAL solo es editable en partidas pendientes.':'';}
     host.innerHTML=draftParts.map((p,index)=>{
       const suffix=suffixOf(index),reference=`${order.reference}-${suffix}`;
       const frozen=!!p.variablePartId;
@@ -11152,7 +11152,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
         <div><label>Identificación / aclaración</label><input class="ldh-ident-input" type="text" value="${esc(p.partDescription||'')}" placeholder="Ej.: puerta abatible escalera" ${fixed?'disabled':''} oninput="LDH_CompositeAgendaV1.update(${index},'partDescription',this.value)"></div>
         <div><label>Concepto</label><select ${canEditConcept?'':'disabled'} onchange="LDH_CompositeAgendaV1.selectConcept(${index},this.value)">${choicesMixed(p,!canEditConcept)}</select><div class="ldh-mixed-kind">${typeLabel}${frozen?' · receta congelada':''}</div></div>
         <div><label>Unidades</label><input type="number" min="1" step="1" value="${Math.max(1,Number(p.quantity)||1)}" ${fixed?'disabled':''} oninput="LDH_CompositeAgendaV1.update(${index},'quantity',this.value)"></div>
-        <div><label>RAL de esta partida</label><input type="text" value="${esc(p.ral||p.agendaRal||'')}" placeholder="Ej.: 9005" ${fixed?'disabled':''} oninput="LDH_CompositeAgendaV1.update(${index},'ral',this.value)"></div>
+        <div><label>RAL / color de esta partida</label><input type="text" value="${esc(p.ral||p.agendaRal||'')}" placeholder="Ej.: 9005 o azul especial cliente" ${(inPrep||opened)?'disabled':''} oninput="LDH_CompositeAgendaV1.update(${index},'ral',this.value)"></div>
         <div class="ldh-composite-actions"><button type="button" class="${sendClass}" onclick="LDH_CompositeAgendaV1.sendPart('${esc(p.id)}')">${sendLabel}</button><button type="button" class="wo-small-btn wo-danger-btn" title="${esc(removeTitle)}" onclick="LDH_CompositeAgendaV1.removePart(${index})"${canRemove?'':' disabled'}>${p.variableGroupIdV1?'Quitar grupo':'Quitar'}</button></div>
       </div>`;
     }).join('');
@@ -11197,10 +11197,13 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
     if(empty){alert('Selecciona un concepto en todas las partidas.');return null;}
     const previous=order.compositeV1&&typeof order.compositeV1==='object'?order.compositeV1:{};
     if(structureFixed(order) && Array.isArray(previous.parts)){
-      const signature=p=>JSON.stringify([p.id,p.concept,Math.max(1,Math.round(Number(p.quantity)||1)),norm(p.ral||p.agendaRal),norm(p.partDescription||p.partLabel),norm(p.variableConceptId),norm(p.variablePartId)]);
+      const signature=p=>JSON.stringify([p.id,p.concept,Math.max(1,Math.round(Number(p.quantity)||1)),norm(p.partDescription||p.partLabel),norm(p.variableConceptId),norm(p.variablePartId)]);
       if(parts.length!==previous.parts.length||parts.some((p,i)=>signature(p)!==signature(previous.parts[i]))){
-        alert('La estructura de esta OT ya está fijada: no puedes cambiar partidas, conceptos, cantidades ni RAL después de iniciar Cálculo/Preparación.');return null;
+        alert('La estructura de esta OT está fijada: no se pueden cambiar partidas, conceptos, cantidades ni aclaraciones.');return null;
       }
+    }
+    if(structureFixed(order) && parts.some((part,i)=>{const old=(previous.parts||[])[i]||{};return (Number(old.openedAtMs)>0||Number(old.inPreparationAtMs)>0||norm(old.prepStatus)==='in_preparation')&&norm(part.ral||part.agendaRal)!==norm(old.ral||old.agendaRal);})){
+      alert('No puedes cambiar el RAL de una partida que ya se abrió en Cálculo o entró en Preparación.');return null;
     }
     order.compositeV1={version:1,enabled:true,groupId:norm(previous.groupId)||`cg_${order.id}`,masterOrderId:order.id,masterReference:order.reference,expectedPartCount:parts.length,variableLockedV1:!!previous.variableLockedV1,variableConceptId:norm(previous.variableConceptId),variableConceptName:norm(previous.variableConceptName),parts,createdAtMs:Number(previous.createdAtMs)||Date.now(),updatedAtMs:Date.now()};
     // En una OT compuesta no existe una cantidad ni un RAL universales.
@@ -11268,7 +11271,7 @@ El trabajo volverá a aparecer en la Informativa con su posición, estado y fase
     addPart(){const order=currentOrder();if(structureFixed(order))return alert('No se añaden partidas después de iniciar Cálculo o Preparación.');draftParts.push({id:makePartId(),concept:'',partDescription:'',quantity:1});renderEditor();},
     removePart(index){const order=currentOrder(),p=draftParts[index];if(!order||!p)return;if(structureFixed(order))return alert('La estructura de la OT ya está fijada.');if(frozenTemplatePart(order,p))return alert('No se eliminan partidas del diseño variable original. Puedes añadir otras partidas al pedido.');const targets=p.variableGroupIdV1?draftParts.filter(x=>x.variableGroupIdV1===p.variableGroupIdV1):[p];if(draftParts.length-targets.length<2)return alert('Un pedido compuesto necesita al menos dos partidas.');const ids=new Set(targets.map(x=>x.id));draftParts=draftParts.filter(x=>!ids.has(x.id));renderEditor();},
     selectConcept(index,value){selectConceptMixed(index,value);},
-    update(index,key,value){const order=currentOrder();if(!draftParts[index]||structureFixed(order))return;if(key==='concept')return selectConceptMixed(index,value);const v=key==='quantity'?Math.max(1,Math.round(Number(value)||1)):(key==='partDescription'||key==='ral')?norm(value):value;draftParts[index][key]=v;if(key==='ral')draftParts[index].agendaRal=v;},
+    update(index,key,value){const order=currentOrder();if(!draftParts[index])return;const part=draftParts[index];const started=Number(part.openedAtMs)>0||Number(part.inPreparationAtMs)>0||norm(part.prepStatus)==='in_preparation';if(structureFixed(order)&&(key!=='ral'||started))return;if(key==='concept')return selectConceptMixed(index,value);const v=key==='quantity'?Math.max(1,Math.round(Number(value)||1)):(key==='partDescription'||key==='ral')?norm(value):value;draftParts[index][key]=v;if(key==='ral')draftParts[index].agendaRal=v;},
     save(closeAfter){return saveInternal(!!closeAfter);},
     async sendPart(partId){
       const order=await saveInternal(false);if(!order)return;
