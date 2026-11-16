@@ -5,7 +5,7 @@
 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Cálculo · Gestión Taller</title>
+  <title>Cálculo · Gestión Taller · RAL candidato V1</title>
   <meta name="ldh-build" content="CALC-REAL-V22-IDENTIFICACION-VISUAL-UNIFICADA-20260902">
   <style>
     :root{
@@ -188,8 +188,13 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
         </div>
         <div>
           <label>Color / pintura (solo empresa receptora)</label>
-          <select id="paintSelect"></select>
+          <select id="paintSelect" onchange="App.calculate()"></select>
           <div id="paintHint" class="muted" style="margin-top:6px"></div>
+          <div id="agendaRalEditorWrap" style="display:none;margin-top:12px">
+            <label for="agendaRalEditor">RAL de esta partida (recibido desde Agenda; editable)</label>
+            <input id="agendaRalEditor" type="text" maxlength="40" placeholder="Ej.: 9005" oninput="App.setAgendaRal(this.value)" autocomplete="off">
+            <div class="muted" style="margin-top:5px">El RAL identifica el color de la OT; la pintura de Stock se vincula por separado. No altera la receta congelada.</div>
+          </div>
         </div>
       </div>
 
@@ -1101,11 +1106,40 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
       this.calculate();
     },
 
+    setAgendaRal(value){
+      if(!this.agendaHandoff) return;
+      const ral = String(value || "").trim();
+      const old = String(this.agendaHandoff.agendaRal || this.agendaHandoff.ral || "").trim();
+      this.agendaHandoff.agendaRal = ral;
+      this.agendaHandoff.ral = ral;
+      if(old !== ral){
+        const sel = document.getElementById("paintSelect");
+        if(sel) sel.value = "";
+      }
+      for(const storage of [sessionStorage,localStorage]){
+        try {
+          const saved = parse(storage.getItem(AGENDA_HANDOFF_KEY),null);
+          if(saved && String(saved.orderId||"")===String(this.agendaHandoff.orderId||"") && String(saved.partId||"")===String(this.agendaHandoff.partId||"")){
+            storage.setItem(AGENDA_HANDOFF_KEY,JSON.stringify(this.agendaHandoff));
+          }
+        } catch(err){console.warn("[RAL partida] no se pudo actualizar el envío local",err);}
+      }
+      this.refreshPaintOptions();
+      this.calculate();
+    },
+
     refreshPaintOptions(){
       const sel = document.getElementById("paintSelect");
       const hint = document.getElementById("paintHint");
       const company = document.getElementById("companySelect").value;
       const previous = String(sel && sel.value || "").trim();
+      const ralEditorWrap = document.getElementById("agendaRalEditorWrap");
+      const ralEditor = document.getElementById("agendaRalEditor");
+      const hasAgendaPart = !!(this.agendaHandoff && this.agendaHandoff.composite && this.agendaHandoff.partId);
+      if(ralEditorWrap) ralEditorWrap.style.display = hasAgendaPart ? "block" : "none";
+      if(ralEditor && hasAgendaPart && document.activeElement !== ralEditor){
+        ralEditor.value = String(this.agendaHandoff.agendaRal || this.agendaHandoff.ral || "").trim();
+      }
       const paints = paintMaterialsForCompany(company);
       sel.innerHTML = '<option value="">— (Opcional) Selecciona pintura —</option>' + paints.map(m=>{
         const name = stockMaterialName(m);
@@ -1235,6 +1269,8 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
           if(commonStockMaterial) stockMatId = stockMaterialId(commonStockMaterial);
         }
         if(isPaintLine(u)){
+          // El RAL de la partida no depende de la existencia de una pintura en Stock.
+          color = String(this.agendaHandoff && (this.agendaHandoff.agendaRal || this.agendaHandoff.ral) || "").trim();
           const paintId = document.getElementById("paintSelect").value;
           const paint = materialById(paintId);
           if(paint){
@@ -1280,6 +1316,7 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
         barras,
         pletinas_mm:barras.filter(x=>x && x.pletina_mm),
         accesorios,
+        ral:String(this.agendaHandoff && (this.agendaHandoff.agendaRal || this.agendaHandoff.ral) || "").trim(),
         paintMaterialId:selectedPaintId,
         paintMaterialName:selectedPaint ? stockMaterialName(selectedPaint) : ""
       };
@@ -1324,6 +1361,13 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
       if(!data) return alert("Selecciona un concepto y calcula primero.");
       if(!data.ref) return alert("Introduce una referencia.");
       if(!data.empresa) return alert("Selecciona la empresa receptora para este pedido.");
+      const needsRal = !!(this.agendaHandoff && this.agendaHandoff.composite &&
+        this.concept && (this.concept.units || this.concept.unidades || []).some(line=>{
+          const unit=parseLine(line); return unit && isPaintLine(unit);
+        }));
+      if(needsRal && !String(data.ral || "").trim()){
+        return alert("Esta partida incluye pintura. Introduce su RAL antes de enviarla a Preparación.");
+      }
 
       // Preparación V81 ya entiende las PLETINAS en mm reales.
       // No se convierten aquí a barras: la fuente y la compra se deciden en Preparación.
@@ -1377,8 +1421,8 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
         variableConceptId:String(this.agendaHandoff && this.agendaHandoff.variableConceptId || ""),
         variableConceptName:String(this.agendaHandoff && this.agendaHandoff.variableConceptName || ""),
         variablePartId:String(this.agendaHandoff && this.agendaHandoff.variablePartId || ""),
-        ral:String(this.agendaHandoff && (this.agendaHandoff.agendaRal || this.agendaHandoff.ral) || "").trim(),
-        agendaRal:String(this.agendaHandoff && (this.agendaHandoff.agendaRal || this.agendaHandoff.ral) || "").trim(),
+        ral:data.ral || "",
+        agendaRal:data.ral || "",
         empresa:data.empresa,
         company:data.empresa,
         unidades:data.vars.cantidad || 1,
