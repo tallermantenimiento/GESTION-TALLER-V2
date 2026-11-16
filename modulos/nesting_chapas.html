@@ -1762,7 +1762,7 @@ function draw(sh){const svg=sh.svg;if(!svg?.isConnected)return;sh.layer?.remove(
  if(target){const found=sh.pieces.find(p=>p.id===target.pid);if(found)drawEdgeHighlight(layer,sh,found,target.edgeIndex,'manual-edge-target','DESTINO')}
  svg.appendChild(layer);
 }
-function paintAll(){const palette=cutTypePalette(ed.sheets);for(const sh of ed.sheets)for(const p of sh.pieces){const col=palette.get(cutTypeKey(p));if(col)p.color=col;}for(const sh of ed.sheets)draw(sh);refreshSelect();exportBtn.hidden=!ed.modified;if(nestCurrent)restoreOutputActions();if(ed.modified)window.__chapasChanged?.()}
+function paintAll(){let visibleIndex=0;for(const sh of ed.sheets){if(sh.card){const occupied=sh.pieces.length>0;sh.card.style.display=occupied?'':'none';sh.card.dataset.empty=occupied?'0':'1';if(occupied){const h=sh.card.querySelector('.nest-head h3');if(h)h.textContent='CHAPA '+(++visibleIndex)+' · '+sh.w+' × '+sh.h+' mm';}}}const palette=cutTypePalette(ed.sheets);for(const sh of ed.sheets)for(const p of sh.pieces){const col=palette.get(cutTypeKey(p));if(col)p.color=col;}for(const sh of ed.sheets)draw(sh);refreshSelect();exportBtn.hidden=!ed.modified;if(nestCurrent)restoreOutputActions();if(ed.modified)window.__chapasChanged?.()}
 function refreshSelect(){const options=ed.sheets.flatMap((s,si)=>s.pieces.map(p=>({id:p.id,name:`Chapa ${si+1} · ${p.name}`})));partSelect.innerHTML='<option value="">Selecciona en la chapa</option>'+options.map(o=>`<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');partSelect.value=ed.selected||'';sheetSelect.innerHTML=ed.sheets.map((s,i)=>`<option value="${i}">Chapa ${i+1} · ${s.w}×${s.h}</option>`).join('');const selected=findPart(ed.selected);if(selected)sheetSelect.value=String(selected.si);updateManualSummary()}
 function select(id){ed.selected=id;paintAll();const chosen=findPart(id);status(chosen?'Seleccionada '+chosen.p.name+' (al primer plano). Arrastra con botón izquierdo o marca una arista con clic derecho para alinearla.':'Selecciona una pieza para editar.')}
 // Arrastre entre chapas: detectar el lienzo bajo el puntero sin depender del SVG de origen.
@@ -2099,23 +2099,36 @@ async function autoImprove(){
  let best=base,bestScore=baseValid?packingScore(base):Infinity,tested=0,validTrials=0;
  const orders=packingOrderVariants(all),initialArea=base.filter(sh=>sh.pieces.length).reduce((a,sh)=>a+sh.w*sh.h,0);
  const totalPartArea=all.reduce((a,p)=>a+area(p.poly),0);
- const singleTargets=ed.sheets.map((sh,i)=>({...sh,index:i})).filter(sh=>sh.w*sh.h+0.001>=totalPartArea)
-  .sort((a,b)=>a.w*a.h-b.w*b.h).filter((sh,i,arr)=>arr.findIndex(t=>t.w===sh.w&&t.h===sh.h)===i);
+ // Incluir TODOS los formatos seleccionados, aunque el motor inicial no los usara.
+ // Antes se comparaban resultados iniciales y un formato pequeño podia ganar
+ // antes de que se probara el encaje final en una sola chapa grande.
+ const available=allowedSheetStocks().filter(f=>f.count==null||Number(f.count)>0)
+  .map(f=>({w:Number(f.width),h:Number(f.height),index:-1,extra:true}));
+ const currentTargets=ed.sheets.map((sh,i)=>({w:sh.w,h:sh.h,index:i,extra:false}));
+ const singleTargets=[...currentTargets,...available].filter(sh=>sh.w*sh.h+0.001>=totalPartArea)
+  .sort((a,b)=>a.w*a.h-b.w*b.h||Number(a.extra)-Number(b.extra))
+  .filter((sh,i,arr)=>arr.findIndex(t=>t.w===sh.w&&t.h===sh.h)===i);
  let singleTested=0,singleFound=0;
  try{
   // PASO 1: comprobar una chapa única ANTES de seguir compactando dos chapas.
   const targetOrders=oneSheetOrders(all);
   const deadline=Date.now()+18000;
   outer:for(const target of singleTargets){
+   // Presupuesto por formato: una chapa pequeña imposible no puede consumir
+   // todo el tiempo e impedir probar la grande que sí podría alojar el lote.
+   const targetDeadline=Math.min(deadline,Date.now()+Math.max(2500,Math.floor(16000/singleTargets.length)));
    for(let k=0;k<targetOrders.length;k++){
     if(Date.now()>deadline)break outer;
+    if(Date.now()>targetDeadline)break;
     if(k%3===0){btn.textContent='Una chapa '+target.w+'×'+target.h+' · '+(k+1)+'/'+targetOrders.length;
      status('Buscando un encaje de todas las piezas en una sola chapa '+target.w+' × '+target.h+' mm. '+(k+1)+'/'+targetOrders.length+' órdenes probados para este formato.');
      await new Promise(resolve=>setTimeout(resolve,0));}
     const packed=oneSheetTrial(target,targetOrders[k]);singleTested++;
     if(!packed)continue;
     singleFound++;
-    const trial=base.map(sh=>({w:sh.w,h:sh.h,pieces:[]}));trial[target.index].pieces=packed.pieces;
+    const trial=base.map(sh=>({w:sh.w,h:sh.h,pieces:[]}));
+    if(target.index>=0)trial[target.index].pieces=packed.pieces;
+    else trial.push({w:target.w,h:target.h,pieces:packed.pieces,virtual:true});
     const score=packingScore(trial);
     if(score<bestScore-1){best=trial;bestScore=score;}
     // Con una chapa en lugar de dos se ha logrado la prioridad principal;
@@ -2136,6 +2149,14 @@ async function autoImprove(){
   }
   if(best===base){status('Búsqueda terminada: '+singleTested+' intentos de chapa única ('+singleFound+' encajes completos) y '+tested+' repartos, '+validTrials+' válidos. No se encontró una distribución mejor con la búsqueda actual. Esto NO demuestra que una sola chapa sea imposible; puedes seguir editando manualmente.',false);return}
   snapshot();const objects=new Map(all.map(p=>[p.id,p]));
+  // El formato ganador puede no estar entre las chapas iniciales del motor.
+  // Crear esa chapa solo despues de validar que el nuevo encaje mejora el resultado.
+  for(let i=ed.sheets.length;i<best.length;i++){
+   if(!best[i].virtual)throw Error('Chapa objetivo sin identificador valido');
+   const added=createAddedSheet(best[i].w,best[i].h);
+   added.card.querySelector('.nest-meta').textContent='Formato elegido por la optimización final';
+   ed.sheets.push(added);
+  }
   for(const sh of ed.sheets)sh.pieces=[];
   for(let i=0;i<best.length;i++)for(const item of best[i].pieces){const p=objects.get(item.id);p.poly=item.poly.map(v=>v.slice());ed.sheets[i].pieces.push(p)}
   ed.modified=true;paintAll();
@@ -2235,7 +2256,7 @@ function rotateSelected(deg){
  else status('Giro '+deg.toFixed(1)+'° sin validar: '+res.reason+'. Ahora arrastra la pieza hasta una posición válida.',true);
 }
 
-function restoreOriginal(){closePieceMenu();if(!ed.active)return;for(const sh of ed.sheets){if(sh.manualAdded){sh.card.remove();continue}sh.box.innerHTML=sh.originalHtml;const table=sh.box.nextElementSibling;if(table?.classList.contains('sheet-dim-legend'))table.style.display='';}ed.sheets=[];ed.active=false;ed.modified=false;ed.selected=null;ed.edgePick=null;ed.edgeTarget=null;tool.classList.remove('active');editBtn.textContent='✥ Editar distribución';exportBtn.hidden=true;status('Restaurada la distribución inicial.');}
+function restoreOriginal(){closePieceMenu();if(!ed.active)return;for(const sh of ed.sheets){if(sh.manualAdded){sh.card.remove();continue}sh.card.style.display='';sh.box.innerHTML=sh.originalHtml;const table=sh.box.nextElementSibling;if(table?.classList.contains('sheet-dim-legend'))table.style.display='';}ed.sheets=[];ed.active=false;ed.modified=false;ed.selected=null;ed.edgePick=null;ed.edgeTarget=null;tool.classList.remove('active');editBtn.textContent='✥ Editar distribución';exportBtn.hidden=true;status('Restaurada la distribución inicial.');}
 window.__chapasResetEditor=restoreOriginal;
 function enterEdit(silent=false){if(ed.active){if(!silent);return;}if(!nestCurrent)return alert('Primero optimiza el trabajo.');const boxes=[...document.querySelectorAll('#nestResult .nest-canvas')];if(boxes.length!==nestCurrent.sheets.length)return alert('Los planos SVG aún no han terminado de cargarse.');
 let matches=[];let used=new Map();let countExpected=state.parts.reduce((s,p)=>s+p.qty,0);let idN=0;
