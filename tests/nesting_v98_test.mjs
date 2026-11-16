@@ -23,7 +23,7 @@ try{
   await context.route('https://**/*',r=>r.abort());
   await context.route('**/asistente_ia_global.js*',r=>r.fulfill({body:'',contentType:'text/javascript'}));
   const page=await context.newPage(),logs=[];
-  page.on('pageerror',e=>logs.push('JS: '+e.message));page.on('console',m=>{if(['warning','error'].includes(m.type()))logs.push(m.text())});page.on('dialog',d=>d.dismiss());
+  page.on('pageerror',e=>logs.push('JS: '+e.message));page.on('console',m=>{if(['warning','error'].includes(m.type()))logs.push(m.text())});page.on('dialog',d=>d.type()==='beforeunload'?d.accept():d.dismiss());
   if(c.throttle){const cdp=await context.newCDPSession(page);await cdp.send('Emulation.setCPUThrottlingRate',{rate:c.throttle})}
   await page.goto('http://127.0.0.1:8876/modulos/nesting_chapas.html');
   await page.waitForFunction(()=>el('health').textContent.includes('disponible en este navegador')&&el('jobLibraryStats').textContent.includes('2 activos'),null,{timeout:60000});
@@ -49,4 +49,4 @@ try{
   await context.close();
  }
  console.log('ALL_REGRESSIONS_PASSED',results.map(r=>r.name));
-}finally{await browser.close()}
+}finally{fs.writeFileSync('tests/nesting_v98_result.json',JSON.stringify(results,null,2));await browser.close()}
