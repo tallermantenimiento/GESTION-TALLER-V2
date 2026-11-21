@@ -869,6 +869,8 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
       meta.composite_group_id = compositeGroupId;
       meta.composite_master_order_id = String(payload.composite_master_order_id || payload.masterOrderId || payload.orderId || "").trim();
       meta.composite_master_reference = String(payload.composite_master_reference || payload.masterReference || "").trim();
+       meta.composite_master_identification = String(payload.composite_master_identification || payload.masterIdentification || "").trim();
+       meta.composite_master_concept = String(payload.composite_master_concept || payload.masterConcept || "").trim();
       meta.composite_part_id = String(payload.composite_part_id || payload.partId || "").trim();
       meta.composite_part_reference = String(payload.composite_part_reference || payload.partReference || "").trim();
       meta.composite_part_index = Math.max(1,Math.round(n(payload.composite_part_index || payload.partIndex)||1));
@@ -1254,6 +1256,19 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
         });
       });
 
+      /* CANDIDATO LOCAL: consolidar perfiles iguales ANTES de redondear cada línea. */
+      { const agrupadas = new Map();
+        barras.forEach(row=>{
+          const id=String(row.stockMatId||row.matId||'').trim();
+          const key=(id?'id:'+id:'nombre:'+String(row.mat||row.name||'').trim().toLowerCase())+'|'+String(row.measureMode||'barra');
+          if(!agrupadas.has(key))agrupadas.set(key,{...row,qty:0,qty_pedida:0,total_mm:0,mm:0});
+          const dst=agrupadas.get(key);dst.total_mm+=Number(row.total_mm||row.mm||0);dst.mm=dst.total_mm;
+        });
+        barras.splice(0,barras.length,...Array.from(agrupadas.values()).map(row=>{
+          const q=row.pletina_mm?row.total_mm:Math.ceil(Math.max(0,row.total_mm)/BAR_MM);
+          return {...row,barras_necesarias:Math.ceil(Math.max(0,row.total_mm)/BAR_MM),qty:q,qty_pedida:q};
+        }));
+      }
       (concept.units || concept.unidades || []).forEach(line=>{
         const u = parseLine(line);
         if(!u || !u.name) return;
@@ -1390,6 +1405,8 @@ body{font-size:14px}.topbar{margin:10px 14px 0 14px;border:1px solid rgba(56,189
         composite_group_id: String(this.agendaHandoff && this.agendaHandoff.compositeGroupId || "").trim(),
         composite_master_order_id: String(this.agendaHandoff && this.agendaHandoff.masterOrderId || this.agendaHandoff && this.agendaHandoff.orderId || "").trim(),
         composite_master_reference: String(this.agendaHandoff && this.agendaHandoff.masterReference || "").trim(),
+        composite_master_identification: String(this.agendaHandoff && (this.agendaHandoff.masterIdentification || this.agendaHandoff.masterClarification) || "").trim(),
+        composite_master_concept: String(this.agendaHandoff && this.agendaHandoff.masterConcept || "").trim(),
         composite_part_id: String(this.agendaHandoff && this.agendaHandoff.partId || "").trim(),
         composite_part_reference: String(this.agendaHandoff && this.agendaHandoff.partReference || "").trim(),
         composite_part_index: Math.max(0,Math.round(n(this.agendaHandoff && this.agendaHandoff.partIndex)||0)),
@@ -1994,5 +2011,349 @@ console.info('[Calculo V26] Recalculo tras borrado robusto incluso con recepcion
 </script>
 <script src="../asistente_ia_global.js" id="LDH_AI_GLOBAL_LOADER_CALCULO_20261007"></script>
 
+<script id="LDH_COMPUESTAS_LOCAL_CANDIDATA_V2">
+(function(){
+'use strict';
+const HANDOFF='ldh_agenda_to_calculo_v1', PREFIX='LDH_COMP_BATCH_V1_', LAST='LDH_COMP_BATCH_LAST_V1';
+const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0};
+const t=v=>String(v??'').trim();
+const esc=s=>t(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+const norm=s=>t(s).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
+function read(key){for(const s of [sessionStorage,localStorage])try{const o=JSON.parse(s.getItem(key)||'null');if(o)return o;}catch(e){}return null;}
+function conceptByName(name){return (window.App?.dbInfo?.db?.concepts||[]).find(c=>norm(c.name)===norm(name));}
+function parseRow(row){
+ if(typeof row==='string'){
+   const cut=row.indexOf('=');if(cut<0)return null;
+   const name=t(row.slice(0,cut)),expression=t(row.slice(cut+1)).split('*');
+   return {name,qty:n(expression[0]),multVar:t(expression[1])||'cantidad'};
+ }
+ if(!row||typeof row!=='object')return null;
+ return {name:t(row.name||row.nombre||row.material||row.mat||row.perfil),qty:n(row.qty??row.cantidad??row.mm??row.total??row.valor),multVar:t(row.var||row.variable||row.multVar)||'cantidad',stockMatId:t(row.stockMatId||row.matId||row.linked_matId||row.stock_matId)};
+}
+let payload=null,fields=[],plan=null;
+function getConcept(part){return part.conceptSnapshotV1&&typeof part.conceptSnapshotV1==='object'?part.conceptSnapshotV1:conceptByName(part.partConcept);}
+function normalizeMaterial(name,linked,iron){return linked?`id:${linked}|t:${norm(iron)}`:`nombre:${norm(name)}|t:${norm(iron)}`;}
+function partDefs(){return payload.parts.map((p,index)=>{
+ const c=getConcept(p),keys=Array.isArray(c?.vars)?c.vars.slice():['cantidad'];
+ if(!keys.includes('cantidad'))keys.unshift('cantidad');
+ return {p,c,keys:keys.filter(x=>norm(x)!=='color'),index};
+});}
+// V8.3: Recuperación verificable de despieces ya almacenados y biblioteca local.
+// Nunca deducimos longitudes a partir de los milímetros totales: se requiere
+// una fuente con piezas explícitas y suma verificada. Nada se escribe en Firebase.
+const CUT_LIBRARY_KEY='LDH_COMP_CUT_LIBRARY_V83';
+let recoveredCuts=0,manualCuts=0,missingRecords=[];
+function safeObj(value){if(!value)return null;if(typeof value==='string'){try{return JSON.parse(value);}catch(_){return null;}}return typeof value==='object'?value:null;}
+function cutLibrary(){try{return safeObj(localStorage.getItem(CUT_LIBRARY_KEY))||{};}catch(_){return {};}}
+function cutLibraryId(p,line,quantity,mm){
+ // Específico para partida/receta/material/cantidad; no mezclar diseños o variantes.
+ const source=(p.conceptSnapshotV1&&p.conceptSnapshotV1.name)||p.partConcept;
+ return [norm(source),norm(p.partDescription),norm(line.name),t(line.stockMatId),t(line.multVar),String(quantity),String(mm)].join('|');
+}
+function compressCuts(cuts){
+ const groups=new Map();for(const length of cuts)groups.set(length,(groups.get(length)||0)+1);
+ return [...groups.entries()].map(([len,count])=>`${len}${count===1?'':'x'+count}`).join(',');
+}
+function fromExplicit(value){
+ if(value==null)return '';
+ if(typeof value==='string'){
+  const s=t(value);
+  return /^\d+(?:[.,]\d+)?(?:[x×*]\d+)?(?:\s*[,;]\s*\d+(?:[.,]\d+)?(?:[x×*]\d+)?)*$/i.test(s)?s:'';
+ }
+ if(Array.isArray(value)){
+  const segments=[];
+  for(const item of value){
+   if(typeof item==='number'&&item>0){segments.push(String(item));continue;}
+   if(typeof item==='string'){const s=fromExplicit(item);if(!s)return '';segments.push(s);continue;}
+   if(item&&typeof item==='object'){
+    const len=n(item.length??item.longitud??item.len??item.mm??item.cutLength);
+    const qty=n(item.quantity??item.qty??item.cantidad??item.count??1);
+    if(len<=0||!Number.isInteger(qty)||qty<1||qty>1000)return '';
+    segments.push(String(len)+(qty===1?'':'x'+qty));continue;
+   }
+   return '';
+  }
+  return segments.join(',');
+ }
+ if(value&&typeof value==='object'){
+  return fromExplicit(value.cuts??value.cutLengths??value.despiece??value.pieces??value.piezas??null);
+ }
+ return '';
+}
+function extractRecipeCuts(p,c,source,lineIndex){
+ // Campos explícitos en la propia línea (objetos estructurados) o mapas identificados.
+ if(source&&typeof source==='object'){
+  for(const key of ['cuts','cutLengths','despiece','pieces','piezas','cutList','cutPlanV1']){
+   const result=fromExplicit(source[key]);if(result)return result;
+  }
+ }
+ const maps=[c?.cutsV1,c?.cutPlanV1,c?.despieceV1,c?.cutLengths,c?.despiece,
+             p?.conceptSnapshotV1?.cutsV1,p?.conceptSnapshotV1?.cutPlanV1];
+ for(const candidate of maps){
+  if(!candidate||typeof candidate!=='object')continue;
+  const v=Array.isArray(candidate)?candidate[lineIndex]:candidate[line.name]??candidate[String(lineIndex)];
+  const result=fromExplicit(v);if(result)return result;
+ }
+ return '';
+}
+function expectedLineMillimeters(p,line){
+ const count=Math.max(1,Math.round(n(p.partQuantity)||1));
+ // Sólo autocompletar fórmulas dependientes de cantidad; las otras variables
+ // pueden modificar el total y deben validarse con el cálculo actual.
+ return norm(line.multVar)==='cantidad'?line.qty*count:null;
+}
+function validCandidate(value,expected,ref,name){
+ if(!value||expected==null||expected<=0)return null;
+ const result=parseCuts(value,expected,ref,name);
+ return result.cuts?compressCuts(result.cuts):null;
+}
+function restoreCuts(){
+ const library=cutLibrary();let recipe=0,saved=0,unresolved=0;
+ for(const {p,c,index} of partDefs()){
+  if(!c)continue;
+  (c.lines||c.lineales||[]).forEach((source,j)=>{
+   const line=parseRow(source),node=document.getElementById(`ldhBulkCuts_${index}_${j}`);
+   if(!node||!line||norm(line.name).includes('pletina'))return;
+   const mm=expectedLineMillimeters(p,line);
+   const recipeRaw=extractRecipeCuts(p,c,source,j);
+   let explicit=validCandidate(recipeRaw,mm,p.partReference,line.name);
+   if(!explicit&&recipeRaw&&mm!==null&&norm(line.multVar)==='cantidad'){
+    // La receta puede expresar el despiece de UNA unidad: multiplicar las piezas, no su longitud.
+    const one=validCandidate(recipeRaw,line.qty,p.partReference,line.name);
+    if(one){const parsed=parseCuts(one,line.qty,p.partReference,line.name);const qty=Math.max(1,Math.round(n(p.partQuantity)||1));
+      if(parsed.cuts.length*qty<=2000)explicit=compressCuts(Array.from({length:qty},()=>parsed.cuts).flat());
+    }
+   }
+   const key=cutLibraryId(p,line,Math.max(1,Math.round(n(p.partQuantity)||1)),mm);
+   const savedValue=validCandidate(library[key],mm,p.partReference,line.name);
+   if(explicit){node.value=explicit;node.dataset.cutOrigin='recipe';recipe++;}
+   else if(savedValue){node.value=savedValue;node.dataset.cutOrigin='library';saved++;}
+   else{node.dataset.cutOrigin='unknown';unresolved++;}
+  });
+ }
+ const el=document.getElementById('ldhBulkRestoreStatus');
+ if(el)el.textContent=`Despieces recuperados: ${recipe} de recetas y ${saved} de biblioteca local. Pendientes de identificar: ${unresolved}.`;
+}
+function rememberVerifiedCuts(){
+ if(!payload||!plan||plan.errors.length||plan.missingCuts.length)return;
+ const library=cutLibrary();let count=0;
+ for(const {p,c,index} of partDefs()){
+  if(!c)continue;
+  (c.lines||c.lineales||[]).forEach((source,j)=>{
+   const line=parseRow(source),node=document.getElementById(`ldhBulkCuts_${index}_${j}`);
+   if(!line||!node||!t(node.value)||norm(line.name).includes('pletina'))return;
+   const factor=document.getElementById(`ldhBulkVar_${index}_${line.multVar.replace(/[^\w]/g,'_')}`);
+   const multiplier=line.multVar==='cantidad'?Math.max(1,Math.round(n(document.getElementById(`ldhBulkVar_${index}_cantidad`)?.value||p.partQuantity))):n(factor?.value);
+   const mm=line.qty*multiplier;
+   const verified=validCandidate(node.value,mm,p.partReference,line.name);
+   if(!verified)return;
+   const key=cutLibraryId(p,line,multiplier,mm);
+   if(library[key]!==verified){library[key]=verified;count++;}
+  });
+ }
+ if(count){try{localStorage.setItem(CUT_LIBRARY_KEY,JSON.stringify(library));}catch(e){console.warn('Despiece validado, pero la biblioteca local está llena',e);}}
+}
+// V8.2: las recetas de Configuración expresan milímetros TOTALES por unidad.
+// No contienen las longitudes individuales necesarias para realizar nesting exacto.
+// El despiece se introduce por línea y partida, p.ej. 2500x2, 1800x3.
+function parseCuts(raw, expected, partRef, materialName){
+ const value=t(raw).replace(/\s+/g,'');
+ if(!value)return {cuts:null,missing:true,reason:`${partRef} · ${materialName}: falta especificar el despiece de ${Math.round(expected)} mm.`};
+ const cuts=[];
+ for(const token of value.split(/[;,]+/)){
+   if(!token)continue;
+   const match=token.match(/^(\d+(?:[.,]\d+)?)(?:[x×*](\d+))?$/i);
+   if(!match)return {cuts:null,missing:false,reason:`${partRef} · ${materialName}: formato de corte no válido: «${token}». Usa 2500x2,1800x3.`};
+   const len=n(match[1]),qty=match[2]?Number(match[2]):1;
+   if(!Number.isFinite(len)||len<=0||!Number.isInteger(qty)||qty<=0||qty>1000)return {cuts:null,missing:false,reason:`${partRef} · ${materialName}: longitud o cantidad no válida.`};
+   if(len>6000)return {cuts:null,missing:false,reason:`${partRef} · ${materialName}: un corte de ${len} mm supera la barra de 6.000 mm.`};
+   if(cuts.length+qty>2000)return {cuts:null,missing:false,reason:`${partRef} · ${materialName}: demasiados cortes en una misma partida.`};
+   for(let j=0;j<qty;j++)cuts.push(len);
+ }
+ const sum=cuts.reduce((a,b)=>a+b,0);
+ if(!cuts.length||Math.abs(sum-expected)>0.05)return {cuts:null,missing:false,reason:`${partRef} · ${materialName}: el despiece suma ${sum.toLocaleString('es-ES')} mm, pero la receta necesita ${expected.toLocaleString('es-ES')} mm.`};
+ return {cuts,missing:false,reason:''};
+}
+function calculate(){
+ const grouped=new Map(),detail=[],errors=[],missingCuts=[],parts=partDefs();
+ if(!t(payload.compositeGroupId)) errors.push('Falta el identificador de la OT compuesta; no se puede guardar.');
+ for(const {p,c,keys,index} of parts){
+  if(!c){errors.push(`Partida ${p.partReference}: concepto no encontrado (${p.partConcept}).`);continue;}
+  const variables={};
+  keys.forEach(key=>{const input=document.getElementById(`ldhBulkVar_${index}_${key.replace(/[^\w]/g,'_')}`);variables[key]=key==='cantidad'?Math.max(1,Math.round(n(input?.value||p.partQuantity))):n(input?.value);});
+  const partLine={reference:p.partReference,partId:p.partId,partDescription:p.partDescription,concept:p.partConcept,quantity:variables.cantidad,ironType:p.ironType,ral:p.ral,lines:[],units:[]};
+  (c.lines||c.lineales||[]).forEach((source,lineIndex)=>{
+   const line=parseRow(source);if(!line||!line.name||line.qty<=0)return;
+   const multiplier=line.multVar in variables?variables[line.multVar]:variables.cantidad;
+   if(multiplier<=0)return;
+   const links=c.stockLinks?.lines||c.stockLinks?.lineales||{};
+   const linked=t(line.stockMatId||links[line.name]);
+   const mm=line.qty*multiplier;
+   const isPletina=norm(line.name).includes('pletina');
+   const key=normalizeMaterial(line.name,linked,p.ironType)+(isPletina?'|mm':'|barra');
+   if(!grouped.has(key))grouped.set(key,{key,name:line.name,linked,ironType:p.ironType,pletina:isPletina,mm:0,units:0,cuts:[],perPart:{},unresolved:[]});
+   const row=grouped.get(key);row.mm+=mm;row.perPart[p.partId]=(row.perPart[p.partId]||0)+mm;
+   let cuts=[];
+   if(!isPletina){
+     const input=document.getElementById(`ldhBulkCuts_${index}_${lineIndex}`);
+     const result=parseCuts(input?.value,mm,p.partReference,line.name);
+     if(result.reason){
+       row.unresolved.push({reference:p.partReference,mm,reason:result.reason});
+       (result.missing?missingCuts:errors).push(result.reason);
+     }else{
+       cuts=result.cuts;
+       for(const length of cuts)row.cuts.push({partId:p.partId,ref:p.partReference,mm:length});
+     }
+   }
+   partLine.lines.push({name:line.name,linked,mm,cuts:cuts.length,cutLength:cuts.length===1?cuts[0]:0,cutLengths:cuts.slice()});
+  });
+  for(const source of (c.units||c.unidades||[])){
+   const u=parseRow(source);if(!u||!u.name||u.qty<=0)continue;
+   const count=u.qty*(variables[u.multVar]??variables.cantidad);
+   if(count<=0)continue;
+   partLine.units.push({name:u.name,qty:count});
+   const unitLinks=c.stockLinks?.units||c.stockLinks?.unidades||{};
+   const linked=t(u.stockMatId||unitLinks[u.name]);
+   const key=(linked?'id:'+linked:'unit:'+norm(u.name))+'|ud|'+norm(p.ironType);
+   if(!grouped.has(key))grouped.set(key,{key,name:u.name,linked,ironType:p.ironType,kind:'unit',pletina:false,qty:0,mm:0,cuts:[],perPart:{}});
+   const entry=grouped.get(key);entry.qty+=count;entry.perPart[p.partId]=(entry.perPart[p.partId]||0)+count;
+  }
+  detail.push(partLine);
+ }
+ const kerf=Math.max(0,n(document.getElementById('ldhBulkKerf')?.value));
+ if(kerf>20)errors.push('El espesor de corte es mayor de 20 mm; verifica la configuración.');
+ const material=[...grouped.values()];
+ for(const item of material){
+   if(item.pletina||item.kind==='unit'){item.bars=0;item.remainder=0;continue;}
+   if(item.unresolved?.length){
+     // Mínimo teórico: SIN despiece no se puede garantizar un plan de cortes real.
+     item.estimated=true;
+     item.bars=Math.ceil(item.mm/6000);
+     item.remainder=Math.max(0,item.bars*6000-item.mm);
+     item.buckets=[];
+     continue;
+   }
+   const buckets=[];
+   item.cuts.sort((a,b)=>b.mm-a.mm);
+   for(const cut of item.cuts){
+     if(cut.mm+kerf>6000){errors.push(`${item.name}: corte ${cut.mm} mm + merma ${kerf} mm supera una barra de 6.000 mm.`);continue;}
+     let bucket=buckets.find(b=>b.used+cut.mm+kerf<=6000+1e-8);
+     if(!bucket){bucket={used:0,cuts:[]};buckets.push(bucket);}
+     bucket.cuts.push(cut);bucket.used+=cut.mm+kerf;
+   }
+   item.bars=buckets.length;item.buckets=buckets;
+   item.remainder=buckets.reduce((sum,b)=>sum+Math.max(0,6000-b.used),0);
+ }
+ plan={version:3,source:'calculo_compuestas_v8_5',groupId:t(payload.compositeGroupId),masterReference:t(payload.masterReference),masterOrderId:t(payload.masterOrderId||payload.orderId),masterIdentification:t(payload.masterIdentification||payload.masterClarification),masterConcept:t(payload.masterConcept),company:t(payload.companyName),createdAt:new Date().toISOString(),kerf,partCount:detail.length,parts:detail,materials:material.map(m=>({key:m.key,name:m.name,linked:m.linked,ironType:m.ironType,kind:m.kind||'bar',qty:m.qty||0,pletina:m.pletina,mm:m.mm,bars:m.bars,remainder:m.remainder,estimated:!!m.estimated,perPart:m.perPart,cuts:m.cuts,buckets:m.buckets||[]})),errors,missingCuts};
+ render();return plan;
+}
+function render(){
+ const body=document.getElementById('ldhBulkTotals');if(!body||!plan)return;
+ body.innerHTML=plan.materials.map(m=>`<tr><td>${esc(m.name)}<div style="font-size:10px;color:#9fb0c8">${esc(m.ironType||'Sin tipo especificado')}</div></td><td style="text-align:right">${m.mm.toLocaleString('es-ES',{maximumFractionDigits:1})} mm</td><td style="text-align:right"><b>${m.pletina?'mm':m.kind==='unit'?Number(m.qty.toFixed(3))+' ud':m.estimated?'Mín. '+m.bars+' (teóricas)':m.bars+' barras'}</b></td><td style="text-align:right">${m.pletina||m.kind==='unit'?'—':m.estimated?'No calculable':Math.round(m.remainder)+' mm'}</td></tr>`).join('');
+ const warnings=plan.errors.map(x=>`<div style="color:#fecaca">⚠ ${esc(x)}</div>`);
+ if(plan.missingCuts.length)warnings.push(`<details style="padding:8px 0;color:#fde68a"><summary style="cursor:pointer;font-weight:800">${plan.missingCuts.length} despieces no definidos · barras mínimas teóricas · ver detalle</summary>${plan.missingCuts.map(x=>`<div style="font-size:11px;margin:4px 0">ℹ ${esc(x)}</div>`).join('')}</details>`);
+ document.getElementById('ldhBulkErrors').innerHTML=warnings.join('');
+ const send=document.getElementById('ldhBulkSend');
+ send.disabled=plan.errors.length>0;
+ send.title=send.disabled?'Corrige los errores de cálculo antes de crear el conjunto.':'Los despieces no definidos son estimaciones: comprobar antes de cortar.';
+}
+function send(){
+ 
+ const obj=calculate();if(obj.errors.length)return alert('Corrige los errores de cálculo antes de enviar el conjunto.');
+ if(obj.missingCuts.length){
+   const ok=document.getElementById('ldhBulkTheoryOK');
+   if(!ok?.checked)return alert('Marca primero la confirmación de prueba teórica sin despiece. No es un plan de corte para el taller.');
+   if(!confirm('Este grupo contiene perfiles sin despiece. Se crearán barras mínimas TEÓRICAS y el reparto será por milímetros, sin validar el aprovechamiento de corte. ¿Continuar con una estimacion que debe comprobarse antes del corte?'))return;
+   obj.theoreticalMmAllocation=true;obj.cutsUnverified=true;
+ }
+ rememberVerifiedCuts();
+ try{localStorage.setItem(PREFIX+obj.groupId,JSON.stringify(obj));sessionStorage.setItem(PREFIX+obj.groupId,JSON.stringify(obj));localStorage.setItem(LAST,obj.groupId);sessionStorage.setItem(LAST,obj.groupId);}
+ catch(e){alert('No se ha podido guardar el conjunto: '+e.message);return;}
+ // V8: crear fichas reales de Preparación sin adjudicar/recibir material por segunda vez.
+ // Las recepciones y los cortes quedan gobernados por el libro físico común.
+ // Se admite convertir una OT compuesta antigua SOLO si no tiene ninguna recepción ni adjudicación previa.
+ const mappings=[];
+ for(const part of obj.parts){
+   const ref=t(part.reference),key='prep_recepcion_'+ref,metaKey='prep_meta_'+ref;
+   if(!ref||!part.partId)return alert('Hay una partida sin referencia o identidad.');
+   const oldLines=localStorage.getItem(key)||sessionStorage.getItem(key);
+   let oldMeta=null;try{oldMeta=JSON.parse(localStorage.getItem(metaKey)||sessionStorage.getItem(metaKey)||'null');}catch(_){}
+   if(oldLines!==null||oldMeta!==null){
+     // Solo se permiten fichas creadas exactamente por la misma generación sin movimientos.
+     if(!oldMeta||oldMeta.composite_group_id!==obj.groupId||oldMeta.deleted_from_preparation){
+       return alert('La partida '+ref+' existe, pero no coincide con este conjunto o está eliminada. Se protege su ficha.');
+     }
+     const lines=JSON.parse(oldLines||'[]');
+     if(lines.some(x=>Number(x.qty_recibida||0)>0||Number(x.aplicado_qty||0)>0||Number(x.stock_consumed_qty||0)>0)||oldMeta.unassignedBorrow?.items?.length){
+       return alert('La partida '+ref+' tiene recepciones, reservas o deuda. No es seguro convertirla automáticamente. Se conserva intacta.');
+     }
+     const state=String(oldMeta.fase||oldMeta.estado||'').toLowerCase();
+     if(/fabric|pintur|almacen|entreg/.test(state)||oldMeta.en_fabricacion||oldMeta.en_almacen||oldMeta.entregado){
+       return alert('La partida '+ref+' ya ha avanzado. No se modifica.');
+     }
+   }
+   mappings.push({part,ref,key,metaKey,oldMeta,oldLines});
+ }
+ const at=Date.now();
+ const staged=mappings.map(({part,ref,key,metaKey,oldMeta,oldLines})=>({key,metaKey,
+   lines:oldLines?JSON.parse(oldLines):[],
+   meta:{...(oldMeta||{}),ref,referencia:ref,technical_ref:ref,identification:oldMeta?.identification||part.partDescription||part.concept||'',workIdentification:oldMeta?.workIdentification||part.partDescription||part.concept||'',
+     display_ref:ref,concepto:part.concept,empresa:obj.company,company:obj.company,
+     composite_version:8,composite_shared_v8:true,composite_group_id:obj.groupId,
+     composite_master_order_id:obj.masterOrderId,composite_master_reference:obj.masterReference,
+     composite_master_identification:obj.masterIdentification||'',composite_master_concept:obj.masterConcept||'',
+     composite_part_id:part.partId,composite_part_reference:ref,composite_part_count:obj.parts.length,
+     composite_part_index:obj.parts.findIndex(x=>x.partId===part.partId)+1,
+     composite_part_quantity:part.quantity,unidades:part.quantity,cantidad:part.quantity,
+     tipo_hierro:part.ironType||oldMeta?.tipo_hierro||'',ral:part.ral||oldMeta?.ral||'',fecha:oldMeta?.fecha||at,estado:'pendiente',fase:'preparacion',
+     en_fabricacion:false,en_almacen:false,entregado:false,
+     createdAt:new Date(at).toISOString()}}));
+ // Guardamos snapshots previos para restaurar si falla cualquier escritura local.
+ const prior=staged.map(x=>({key:x.key,metaKey:x.metaKey,lines:localStorage.getItem(x.key),meta:localStorage.getItem(x.metaKey)}));
+ try{
+   staged.forEach(x=>{localStorage.setItem(x.key,JSON.stringify(x.lines));localStorage.setItem(x.metaKey,JSON.stringify(x.meta));});
+ }catch(error){
+   prior.forEach(x=>{try{x.lines===null?localStorage.removeItem(x.key):localStorage.setItem(x.key,x.lines);x.meta===null?localStorage.removeItem(x.metaKey):localStorage.setItem(x.metaKey,x.meta);}catch(_){}});
+   alert('No se pudieron crear todas las partidas: '+error.message);return;
+ }
+ location.href='preparacion_pedidos.html?ldhCompositeV8=1&groupId='+encodeURIComponent(obj.groupId);
+}
+function init(){
+ if(!new URLSearchParams(location.search).has('bulkComposite'))return;
+ payload=read(HANDOFF);
+ if(!payload?.bulkCompositeV1||!Array.isArray(payload.parts)||payload.parts.length<2){alert('No existe envío conjunto válido desde Agenda.');return;}
+ const oldCard=document.querySelector('.card.no-print');if(oldCard)oldCard.style.display='none';
+ const base=document.querySelector('.hero')||document.querySelector('.wrap');if(!base)return;
+ const sect=document.createElement('section');sect.className='card';sect.id='ldhBulkCalc';
+ sect.innerHTML=`<h2>🧩 Cálculo conjunto · ${esc(payload.masterReference)}</h2>
+ <p class="muted">${payload.parts.length} partidas · Conservamos las recetas estándar y variables sin modificarlas. El despiece es opcional y las barras sin despiece son estimaciones para pruebas.</p>
+ <label>Merma por corte (mm)</label><input type="number" id="ldhBulkKerf" min="0" max="20" step="0.1" value="3" style="max-width:140px">
+ <div id="ldhBulkParts"></div>
+ <p class="muted" id="ldhBulkRestoreStatus" role="status">Buscando despieces guardados y piezas explícitas en los conceptos...</p>
+ <p class="warn"><strong>Dos métodos:</strong> si conoces las piezas, puedes indicar su despiece (2500x2,1800x3), y se optimizan cortes reales. Si el concepto solo conserva totales, deja los cortes en blanco: el banco calculará el mínimo teórico de barras y permitirá probar adjudicaciones por mm. <strong>Sin piezas no se puede garantizar el número definitivo de barras ni las mermas.</strong></p>
+ <label style="display:flex;align-items:center;gap:9px;margin:14px 0;color:#ffdfa0;font-weight:750"><input type="checkbox" id="ldhBulkTheoryOK" style="width:17px;flex:0 0 17px"> Entiendo que las barras sin despiece son una estimación y verificaré el corte real antes de fabricar.</label>
+ <h3>Resumen conjunto del material</h3><table><thead><tr><th>Perfil</th><th style="text-align:right">Necesidad</th><th style="text-align:right">Barras</th><th style="text-align:right">Resto teórico</th></tr></thead><tbody id="ldhBulkTotals"></tbody></table>
+ <div id="ldhBulkErrors"></div><div class="toolbar"><button class="btn" id="ldhBulkRecalc">🧮 Recalcular conjunto</button><button class="btn green" id="ldhBulkSend">➡ Crear / actualizar grupo en Preparación</button></div>
+ <p class="warn">AVISO: Los perfiles sin despiece se distribuyen mediante una estimación en mm. La cantidad es una estimación. Antes de cortar se deben verificar los despieces reales. Configuración permanece intacta.</p>`;
+ base.insertAdjacentElement('afterend',sect);
+ const holder=document.getElementById('ldhBulkParts');
+ holder.innerHTML=partDefs().map(({p,c,keys,index})=>`<div style="padding:14px;margin:10px 0;border:1px solid #38506a;border-radius:12px"><strong>${esc(p.partReference)} · ${esc(p.partDescription||p.partConcept)}</strong> <span class="pill">${c?'Concepto encontrado':'Sin concepto'}</span><div class="grid-vars">${keys.map(key=>`<div><label>${esc(key)}</label><input type="number" step="0.001" min="0" id="ldhBulkVar_${index}_${key.replace(/[^\w]/g,'_')}" value="${key==='cantidad'?p.partQuantity:0}"></div>`).join('')}</div>${c?`<div style="margin-top:12px"><b style="color:#bae6fd">Despiece de perfiles de esta partida</b><div style="font-size:12px;color:#9fb0c8;margin:6px 0">Opcional: introduce longitudes individuales si las conoces. Si solo hay mm totales se calcula el mínimo teórico y se ensaya la adjudicación por milímetros en Preparación.</div>${(c.lines||c.lineales||[]).map((source,j)=>{const line=parseRow(source);if(!line||!line.name||line.qty<=0||norm(line.name).includes('pletina'))return '';return `<div style="display:grid;grid-template-columns:minmax(120px,1fr) minmax(200px,2fr);gap:10px;align-items:center;margin:8px 0"><label style="margin:0">${esc(line.name)} · ${line.qty.toLocaleString('es-ES')} mm × ${esc(line.multVar)}</label><input id="ldhBulkCuts_${index}_${j}" type="text" placeholder="Ej.: 2500x2,1800x3" spellcheck="false" aria-label="Despiece ${esc(p.partReference)} ${esc(line.name)}"></div>`}).join('')}</div>`:''}</div>`).join('');
+ // Mantener las cuatro partidas disponibles, pero colapsadas: el cálculo conjunto se ve sin desplazamientos interminables.
+ [...holder.children].forEach((card,i)=>{
+   const detail=document.createElement('details');detail.className='ldh-bulk-part-detail';
+   detail.style.cssText='border:1px solid #38506a;border-radius:11px;margin:8px 0;background:#0a182c';
+   const head=document.createElement('summary');head.style.cssText='cursor:pointer;font-weight:850;padding:12px;color:#b8eafa';
+   const pd=payload.parts[i];head.textContent=(pd?.partReference||'Partida '+(i+1))+' · '+(pd?.partDescription||pd?.partConcept||'')+' · Ver variables y cortes opcionales';
+   holder.insertBefore(detail,card);detail.append(head,card);card.style.margin='0';
+ });
+ sect.addEventListener('input',e=>{if(e.target instanceof HTMLInputElement)calculate();});
+ restoreCuts();
+ document.getElementById('ldhBulkRecalc').onclick=calculate;
+ document.getElementById('ldhBulkSend').onclick=send;
+ calculate();
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(init,0));else setTimeout(init,0);
+})();
+</script>
 </body>
 </html>
