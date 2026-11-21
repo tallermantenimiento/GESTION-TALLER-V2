@@ -70,6 +70,7 @@ async function receipt(g,plan,m,q,api){
  if(busy)return;busy=true;
  try{
   connected();currentIssue(g,plan,api);
+  if(plan.estimated===true&&!api.stock()?.compoundPlansV16?.[g.gid])throw Error('El plan de barras no esta verificado en la nube: vuelve a enviar el conjunto desde Calculo en el ordenador de origen.');
   const n=val(q),isBar=api.isBar(m);
   if(!(n>0)||(isBar&&!Number.isInteger(n)))throw Error('La recepcion de perfiles exige barras enteras.');
   const receiptId=fresh(),movementId='mov_comp_v16_'+g.gid.replace(/[^a-z0-9_-]/gi,'_')+'_'+receiptId,at=stamp();
