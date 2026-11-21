@@ -145,5 +145,118 @@ async function allocation(g,plan,m,p,override,api){
  api.renderMother(g.gid);
  return true;
 }
-window.LDH_GroupV16Remote={receipt,allocation,hydrate};
+
+/* V17: recepcion administrativa de compuestos, sin contabilizar Stock.
+ * El asiento se guarda en la misma transaccion de Preparacion que las partidas.
+ * Nunca crea entradas, salidas, reservas ni retales en Stock. */
+const manualBusy = new Set();
+const manualNorm=x=>txt(x).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ');
+function prepDb(){
+ const f=window.firebase;
+ const app=(f?.apps||[]).find(a=>a.options?.projectId==='gestion-taller-v2');
+ if(!app||!f?.firestore)throw Error('Preparacion no tiene conexion remota. No se ha registrado la recepcion.');
+ return f.firestore(app);
+}
+function ledgerKey(g){return PREFIX+g.gid;}
+function emptyLedger(g){return {version:17,groupId:g.gid,masterReference:g.master,receipts:{},allocated:{},events:[],notes:'',createdAt:stamp(),sinStockRealV17:true};}
+function materialLine(row,m){
+ const name=manualNorm(m.name),u=apiUnit(m);
+ return manualNorm(row.mat||row.material||row.name)===name &&
+   (u==='barra'?manualNorm(row.unit||row.unidad).includes('barra'):
+    u==='mm'?manualNorm(row.unit||row.unidad)==='mm':
+    !manualNorm(row.unit||row.unidad).includes('barra')&&manualNorm(row.unit||row.unidad)!=='mm');
+}
+function apiUnit(m){return m.pletina?'mm':m.kind==='unit'?'ud':'barra';}
+function physicalReceived(s,m){return (s.receipts?.[m.key]||[]).filter(x=>!x.revoked).reduce((v,x)=>v+val(x.qty),0);}
+function physicalAllocated(s,m){return Object.values(s.allocated?.[m.key]||{}).reduce((v,x)=>v+val(x),0);}
+async function manualTransaction(g,plan,m,amount,onlyPart,api){
+ const gid=txt(g.gid),key=ledgerKey(g);
+ if(manualBusy.has(gid))return;
+ manualBusy.add(gid);
+ try{
+  if(g.parts.length!==g.expected || new Set(g.parts.map(p=>txt(p.meta?.composite_part_id))).size!==g.expected)throw Error('Las partidas del grupo no estan completas.');
+  if(!plan?.parts?.length || !plan.materials?.some(x=>x.key===m.key))throw Error('Falta el plan de materiales.');
+  if(g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado))throw Error('No se reciben materiales conjuntos en partidas que ya han avanzado de fase.');
+  if(amount!==null){
+   if(!(amount>0) || (api.isBar(m)&&!Number.isInteger(amount)))throw Error('Las barras se reciben enteras.');
+   if(physicalReceived(api.initLedger(g,plan),m)+amount>api.desired(m)+1e-7)throw Error('La recepcion supera las barras o unidades previstas.');
+  }
+  const fb=prepDb(),ref=fb.collection('taller_data').doc('preparacion');
+  const operationId='comp_sinstock_'+fresh(),now=stamp();
+  const result=await fb.runTransaction(async tx=>{
+   const snap=await tx.get(ref);
+   if(!snap.exists)throw Error('No se ha encontrado el documento remoto de Preparacion.');
+   const root=snap.data()||{},data={...(root.data||{})};
+   const s=data[key]?JSON.parse(data[key]):emptyLedger(g);
+   if(s.groupId!==gid)throw Error('El registro de compra conjunta pertenece a otro grupo.');
+   s.receipts ||= {};s.allocated ||= {};s.events ||= [];
+   const rec=physicalReceived(s,m),max=api.desired(m);
+   if(amount!==null){
+    if(rec+amount>max+1e-7)throw Error('Esta recepcion ya esta registrada o supera lo necesario. Comprueba la ficha conjunta.');
+    s.receipts[m.key] ||= [];
+    s.receipts[m.key].push({id:operationId,qty:amount,at:now,manualV17:true,stockCommitted:false,sinStockReal:true});
+    s.events.push({id:operationId,at:now,type:'recepcion_sin_stock',material:m.name,qty:amount});
+   }
+   let available=physicalReceived(s,m)-physicalAllocated(s,m);
+   const changed={};
+   for(const part of plan.parts){
+    if(onlyPart && txt(part.reference)!==txt(onlyPart))continue;
+    if(available<=1e-8)break;
+    const p=g.parts.find(x=>txt(x.ref)===txt(part.reference));
+    if(!p)throw Error('La partida '+part.reference+' no existe en Preparacion.');
+    const required=api.isBar(m)?api.portion(m,part.partId)/6000:api.portion(m,part.partId);
+    if(required<=0)continue;
+    const prior=val(s.allocated[m.key]?.[p.ref]),take=Math.min(available,Math.max(0,required-prior));
+    if(take<=1e-8)continue;
+    const rowKey='prep_recepcion_'+p.ref;
+    const lines=data[rowKey]?JSON.parse(data[rowKey]):null;
+    if(!Array.isArray(lines))throw Error('No existe en nube la ficha '+p.ref+'. No se ha grabado nada.');
+    const matches=lines.map((l,i)=>({l,i})).filter(z=>materialLine(z.l,m));
+    if(matches.length!==1)throw Error('La linea '+m.name+' no es unica en '+p.ref+'.');
+    const line=matches[0].l;
+    if(line.shared_v10 && txt(line.shared_v10_group)!==gid)throw Error('Material vinculado a otro conjunto.');
+    const next=val(line.qty_recibida),assigned=prior+take;
+    // No se reduce ni reemplaza una recepcion antigua que el usuario conciliara manualmente.
+    // Nunca se crea movimiento fisico de Stock.
+    const oldRequested=val(line.qty_pedida);
+    if(next<=0 && val(line.aplicado_qty)<=0){
+     line.original_bar_need_v11 ||= oldRequested;
+     line.qty_pedida=required;line.pedida=required;
+     line.qty_recibida=assigned;line.recibida=assigned;
+     line.aplicado_qty=assigned;
+     line.ok=assigned+1e-7>=required;line.completo=line.ok;
+     line.done=line.ok;line.isDone=line.ok;line.isCompleted=line.ok;
+     line.shared_v10=true;line.shared_v10_group=gid;
+     line.shared_v10_mm=api.isBar(m)?Math.round(required*6000):null;
+     line.compra_conjunta_recepcion_exclusiva_v11=true;line.toBuy=false;
+     line.stock_consumed_qty=0;
+     line.trace=Array.isArray(line.trace)?line.trace:[];
+     line.trace.push({source:'recepcion_compartida_sin_stock_v17',groupId:gid,at:now,qty:take,stockMovement:false});
+    }
+    lines[matches[0].i]=line;
+    changed[rowKey]=JSON.stringify(lines);
+    s.allocated[m.key] ||= {};s.allocated[m.key][p.ref]=assigned;
+    available-=take;
+   }
+   data[key]=JSON.stringify(s);
+   Object.assign(data,changed);
+   const keys=[...new Set([...(root.keys||Object.keys(root.data||{})),...Object.keys(changed),key])].sort();
+   tx.set(ref,{schema:root.schema||'prep_live_sync_v6_authoritative',data,keys,updatedAt:Date.now(),reason:'compra_compuesta_sin_stock_v17'}, {merge:true});
+   return {ledger:s,changed};
+  });
+  // Solo se actualiza el navegador despues de confirmacion transaccional.
+  const raw=JSON.stringify(result.ledger);
+  localStorage.setItem(key,raw);
+  try{sessionStorage.setItem(key,raw);}catch(_){}
+  for(const [k,v] of Object.entries(result.changed)){
+   localStorage.setItem(k,v);try{sessionStorage.setItem(k,v);}catch(_){}
+  }
+  api.renderMother(gid);
+ }catch(e){alert('Compra conjunta: '+String(e.message||e));console.error('[Compra conjunta sin Stock]',e);}
+ finally{manualBusy.delete(gid);}
+}
+function manualReceipt(g,plan,m,qty,api){return manualTransaction(g,plan,m,val(qty),null,api);}
+function manualAllocation(g,plan,m,p,_override,api){return manualTransaction(g,plan,m,null,p.ref,api);}
+
+window.LDH_GroupV16Remote={receipt,allocation,hydrate,manualReceipt,manualAllocation};
 })();
