@@ -35682,7 +35682,7 @@ const get=k=>{for(const st of [localStorage,sessionStorage])try{const raw=st.get
 function put(k,x){const raw=JSON.stringify(x);localStorage.setItem(k,raw);sessionStorage.setItem(k,raw);}
 const refFrom=k=>k.slice('prep_meta_'.length);
 const groupOf=meta=>t(meta?.composite_group_id||meta?.compositeGroupId);
-const isBar=m=>m.kind!=='unit'&&!m.pletina;
+const isBar=m=>{if(!m||typeof m!=='object')throw Error('El plan conjunto contiene un material sin ficha valida (kind). No se ha descontado Stock.');return m.kind!=='unit'&&!m.pletina;};
 const unit=m=>m.pletina?'mm':m.kind==='unit'?'ud':'barra';
 const desired=m=>isBar(m)?Math.max(0,Math.ceil(num(m.bars))):m.pletina?num(m.mm):num(m.qty);
 const portion=(m,pid)=>num(m.perPart?.[pid]||0);
@@ -36212,8 +36212,12 @@ let stockComunMotherBusyV21=false;
 async function stockComunMotherV22Worker(gid,encodedKey){
  if(stockComunMotherBusyV21)return;
  const g=findGroups().find(x=>x.gid===gid);if(!g)return;
- const plan=planFor(g),m=plan.materials.find(x=>x.key===decodeURIComponent(encodedKey||''));
- if(!m||!m.pletina)return;
+ const plan=planFor(g);
+ if(!plan||!Array.isArray(plan.materials)||!Array.isArray(plan.parts))throw Error('Plan de materiales compuesto incompleto. No se ha descontado Stock.');
+ const invalid=plan.materials.findIndex(x=>!x||typeof x!=='object');
+ if(invalid>=0)throw Error('El plan contiene un material vacio en posicion '+(invalid+1)+'. No se ha descontado Stock.');
+ const m=plan.materials.find(x=>x.key===decodeURIComponent(encodedKey||''));
+ if(!m||!m.pletina)throw Error('No se encuentra la pletina seleccionada en el plan del grupo. No se ha descontado Stock.');
  const ledger=initLedger(g,plan),pending=Math.max(0,desired(m)-groupReceivedV19(g,plan,ledger));
  if(pending<=1e-7){alert('Esta pletina ya esta cubierta en el conjunto.');return;}
  const jobs=[],issues=[];
@@ -36279,8 +36283,9 @@ async function stockComunMotherV21(gid,encodedKey,button){
  try{
   await stockComunMotherV22Worker(gid,encodedKey);
  }catch(e){
-  console.error('[Stock común conjunto V23] Error inesperado antes de adjudicar',e);
-  alert('STOCK COMÚN: no se ha podido completar la comprobación.\n'+String(e?.message||e)+'\n\nSi se ha confirmado alguna operación en la nube, comprueba las partidas antes de repetir.');
+  console.error('[Stock común conjunto V24] Error inesperado',e?.stack||e);
+  const trace=String(e?.stack||'').split('\n').slice(0,3).join('\n');
+  alert('STOCK COMÚN: no se ha podido completar la comprobación.\n'+String(e?.message||e)+(trace?'\n\nDetalle técnico:\n'+trace:'')+'\n\nNo repitas adjudicaciones que ya consten confirmadas.');
  }finally{
   stockComunMotherBusyV23=false;
   if(button?.isConnected){button.disabled=false;button.textContent=originalText;button.style.removeProperty('opacity');}
