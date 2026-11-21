@@ -219,7 +219,7 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
     // No se reduce ni reemplaza una recepcion antigua que el usuario conciliara manualmente.
     // Nunca se crea movimiento fisico de Stock.
     const oldRequested=val(line.qty_pedida);
-    if(next<=0 && val(line.aplicado_qty)<=0){
+    if((next<=0 && val(line.aplicado_qty)<=0) || (line.shared_v10 && txt(line.shared_v10_group)===gid && (line.trace||[]).some(x=>x.source==='recepcion_compartida_sin_stock_v17'))){
      line.original_bar_need_v11 ||= oldRequested;
      line.qty_pedida=required;line.pedida=required;
      line.qty_recibida=assigned;line.recibida=assigned;
