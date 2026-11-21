@@ -264,14 +264,21 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
    tx.set(ref,{schema:root.schema||'prep_live_sync_v6_authoritative',data,keys,updatedAt:Date.now(),reason:'compra_compuesta_sin_stock_v17'}, {merge:true});
    return {ledger:s,changed};
   });
-  // Solo se actualiza el navegador despues de confirmacion transaccional.
+  // V28: la transaccion Firestore YA ESTA CONFIRMADA en este punto.
+  // Un localStorage lleno no debe anunciar un fallo de adjudicacion remota.
+  // Conservar la copia de sesion y evitar dejar una version local antigua.
   const raw=JSON.stringify(result.ledger);
-  localStorage.setItem(key,raw);
-  try{sessionStorage.setItem(key,raw);}catch(_){}
-  for(const [k,v] of Object.entries(result.changed)){
-   localStorage.setItem(k,v);try{sessionStorage.setItem(k,v);}catch(_){}
+  let quota=false,sessionOk=true;
+  for(const [k,v] of [[key,raw],...Object.entries(result.changed)]){
+   try{sessionStorage.setItem(k,v);}catch(e){sessionOk=false;console.warn('[Compra conjunta V28] SessionStorage',k,e);}
+   try{localStorage.setItem(k,v);}catch(e){
+    quota=true;console.warn('[Compra conjunta V28] Almacenamiento local lleno',k,e);
+    try{localStorage.removeItem(k);}catch(_){}
+   }
   }
+  if(!sessionOk&&quota)console.warn('[Compra conjunta V28] La nube ha confirmado los cambios; recargar para sincronizar copias locales.');
   api.renderMother(gid);
+  if(quota)alert('La adjudicacion se ha confirmado en la nube. El almacenamiento local esta lleno; se conserva la copia de sesion. No repitas la operacion.');
  }catch(e){alert('Compra conjunta: '+String(e.message||e));console.error('[Compra conjunta sin Stock]',e);}
  finally{manualBusy.delete(gid);}
 }
