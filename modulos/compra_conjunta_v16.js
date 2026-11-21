@@ -179,7 +179,7 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
   if(g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado))throw Error('No se reciben materiales conjuntos en partidas que ya han avanzado de fase.');
   if(amount!==null){
    if(!(amount>0) || (api.isBar(m)&&!Number.isInteger(amount)))throw Error('Las barras se reciben enteras.');
-   if(physicalReceived(api.initLedger(g,plan),m)+amount>api.desired(m)+1e-7)throw Error('La recepcion supera las barras o unidades previstas.');
+   // El limite se valida dentro de la transaccion remota.
   }
   const fb=prepDb(),ref=fb.collection('taller_data').doc('preparacion');
   const operationId='comp_sinstock_'+fresh(),now=stamp();
