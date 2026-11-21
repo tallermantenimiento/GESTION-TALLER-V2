@@ -76,6 +76,11 @@ async function receipt(g,plan,m,q,api){
   const done=await window.LDH_prepRunStockMutationV129('compra_conjunta_v16_recepcion',db=>{
    const ctx=api.target(db,g,m);if(!ctx&&isBar)throw Error('La barra no tiene un unico vinculo verificado de Stock.');
    if(!ctx)throw Error('Este material conserva su recepcion individual o de Stock comun.');
+   db.compoundPlansV16 ||= {};
+   const beforePlan=db.compoundPlansV16[g.gid];
+   const signature=p=>JSON.stringify({master:p.masterReference,parts:(p.parts||[]).map(x=>[x.reference,x.partId]),materials:(p.materials||[]).map(x=>[x.key,x.linked,x.bars,x.mm,x.qty,x.perPart])});
+   if(beforePlan&&signature(beforePlan)!==signature(plan))throw Error('El plan conjunto no coincide con el guardado en Stock.');
+   if(!beforePlan)db.compoundPlansV16[g.gid]=copy(plan);
    const old=signed(db,g,m).reduce((s,x)=>s+val(x.qty),0);
    if((db.movements||[]).some(x=>txt(x.groupId)===g.gid&&txt(x.materialId||x.matId)===ctx.mid&&txt(x.source).includes('recepcion_comun_v10')))throw Error('Existen movimientos previos sin conciliar.');
    if(old+n>api.desired(m)+1e-7)throw Error('La cantidad supera el total de barras del grupo.');
