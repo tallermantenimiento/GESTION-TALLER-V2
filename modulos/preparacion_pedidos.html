@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<meta name="ldh-comp-integration" content="V13-MOTHER-IDENTITY-AND-SCRAP-NO-RETAIL-STOCK-LOCAL-ONLY">
+<meta name="ldh-local-candidate-verified" content="V10-ONLY-PREPARATION-NO-FIREBASE">
 <meta name="ldh-prep-v67" content="GUARDIA_CONCILIACION_NUBE_LOCAL_20261110">
 <meta name="ldh-prep-v66" content="RESERVADO_FABRICACION_STOCK_CONCILIADO_20261110">
 <meta charset="UTF-8" />
@@ -4270,6 +4272,9 @@ function LDH_aplicarVinculosFerreteriaActualV45(lines){
 
 /* ========= ABRIR PEDIDO ========= */
 function abrirPedido(ref) {
+  // V12: normalize the shared commercial bar demand before opening the native
+  // individual form. No physical stock movement or synthetic reception.
+  try{window.LDH_GroupV12?.preparePart?.(ref)}catch(e){console.warn('[V11] Conversion a barra compartida detenida',e)}
   refActual = ref;
   LDH_cls("vistaLista").add("hidden");
   LDH_cls("vistaDetalle").remove("hidden");
@@ -6877,6 +6882,7 @@ function LDH_receiptTraceExplicitV83(trace){
   const s = String(trace && trace.source || "").trim().toLowerCase();
   if(!s || s === "stock_asignado_propio_sync") return false;
   if(s.startsWith("devolucion") || s.startsWith("compensacion") || s.startsWith("prestado_a_")) return false;
+  if(s === "material_comun_adjudicado_v10" || s === "stock_recibido_ok_material_comun_v12") return true;
   return s.startsWith("reserva") ||
     s.startsWith("libre") ||
     s.startsWith("stock_comun") ||
@@ -7595,17 +7601,18 @@ function renderTabla() {
             ? `<span class="small">Material propio del trabajo · no usa Stock</span>`
             : (linkedMat ? `<span class="small">Vinculado a: <b>${linkedMat.name}</b>${linkedMat.__v2 ? " · automático por nombre exacto" : ""}</span>` : `<span class="small">Pulsa “Vincular” para emparejar con Stock</span>`)}
           ${linea.pedido_compras_info ? `<span class="link-pill warn">🛒 Pedido a compras${linea.pedido_compras_fecha ? " · " + new Date(linea.pedido_compras_fecha).toLocaleDateString() : ""}</span>` : ``}
+          ${linea.shared_v10 && linea.shared_v10_mm>0 ? `<span class="link-pill ok">BARRA COMPARTIDA · ${Math.round(toNum(linea.shared_v10_mm)).toLocaleString('es-ES')} mm · recepción física solo en Compra conjunta</span>` : ``}
           ${yaAplicada > 0 ? `<span class="small">${asignacionLineaLabel(linea)} · total línea: <b>${yaAplicada}</b></span>` : ``}
           ${trazaPrestamosStock ? `<span class="link-pill danger">${trazaPrestamosStock}</span>` : ``}
           ${!isChapaEscalonNoStock && LDH_debtForCurrentLine(linea) ? `<span class="link-pill danger">DEUDOR · debe devolver a ${(LDH_debtForCurrentLine(linea).item||{}).fromEmpresa || "origen"}</span>` : ``}
           ${!isChapaEscalonNoStock && LDH_lentOutForLine(linea).qty > 0 ? `<span class="link-pill danger">PRESTADO · ${LDH_lentOutForLine(linea).qty} ${(LDH_lentOutForLine(linea).items[0]||{}).toEmpresa || "fuera"}</span>` : ``}
         </div>
       </td>
-      <td>${pedida} <span style="font-size:10px;opacity:0.5">${linea.unit || 'ud'}</span></td>
+      <td>${linea.shared_v10 && linea.shared_v10_mm>0 ? `${Math.round(toNum(linea.shared_v10_mm)).toLocaleString('es-ES')} <span style="font-size:10px;opacity:.8">mm de barra común</span>` : `${pedida} <span style="font-size:10px;opacity:0.5">${linea.unit || 'ud'}</span>`}</td>
       <td>
         <div class="ldh-recibida-cell">
-          <input type="number" value="${recibida}" ${isPletinaMm ? "readonly" : `oninput="updateQty(${index}, this)"`}>
-          ${isPletinaMm
+          <input type="number" value="${linea.shared_v10 && linea.shared_v10_mm>0 ? Math.round(recibida*6000) : recibida}" ${isPletinaMm || linea.shared_v10 && linea.shared_v10_mm>0 ? "readonly" : `oninput="updateQty(${index}, this)"`}>
+          ${linea.shared_v10 && linea.shared_v10_mm>0 ? `<span class="link-pill ok">mm · ${isComplete?'Adjudicada':'Pendiente de recepción común'}</span>` : isPletinaMm
             ? (pletinaDebeComprar
                 ? `<button type="button" class="btn-mini ldh-recibido-btn" onclick="LDH_marcarRecibidoCompleto(${index})" title="Registrar la recepción física de 1 barra completa y elegir si entra en la empresa del pedido o en STOCK COMÚN">Recibir 1 barra</button>`
                 : ``)
@@ -10051,6 +10058,8 @@ function toggleOk(index, isChecked) {
 }
 
 function LDH_marcarRecibidoCompleto(index){
+  if(estadoMateriales?.[index]?.shared_v10&&estadoMateriales[index].shared_v10_mm>0){alert('La recepción de este perfil compartido se realiza únicamente en la ficha madre.');return;}
+
   const linea = estadoMateriales[index];
   if(!linea) return;
   const pedida = toNum(linea.qty_pedida);
@@ -24947,20 +24956,33 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     const map=new Map(),manual=manualMap(group);
     group.members.forEach(m=>m.lines.forEach((line,index)=>{
       if(!line)return;
-      const requested=Math.max(0,n(line.qty_pedida??line.pedida??line.qty));
-      if(requested<=0)return;
-      const autoNeed=lineNeed(line);
+      const originalRequested=Math.max(0,n(line.qty_pedida??line.pedida??line.qty));
+      if(originalRequested<=0)return;
+      const bar=isBar(line);
+      // A/B/C are pieces of the SAME commercial bar, not independent bar purchases.
+      // When total_mm is provided by Calculo use it as the source of truth, without
+      // rounding each part. If missing, keep the original quantity conservatively.
+      const mm=bar?Math.max(0,n(line.total_mm||line.mm)):0;
+      const requested=bar&&mm>0?mm/6000:originalRequested;
+      const alreadyReceived=bar&&mm>0?Math.max(0,n(line.qty_recibida??line.recibida)):Math.max(0,n(line.qty_recibida??line.recibida));
+      const autoNeed=Math.max(0,requested-alreadyReceived);
       const info=stockInfo(m,line),key=itemKey(m,line,info),unit=String(line.unit||line.unidad||'ud').trim()||'ud';
-      if(!map.has(key))map.set(key,{key,name:String(line.mat||line.material||line.name||info?.mat?.name||'Material').trim(),unit,bar:isBar(line),needed:0,autoNeeded:0,stockKnown:!!info.stockKnown,stock:info.stockKnown?n(info.stock):0,contributions:[]});
-      const item=map.get(key);item.needed+=requested;item.autoNeeded+=autoNeed;if(info.stockKnown){item.stockKnown=true;item.stock=item.contributions.length?Math.min(item.stock,n(info.stock)):n(info.stock);}item.contributions.push({ref:m.ref,index,concept:String(m.meta.concepto||m.meta.composite_part_concept||''),need:requested,autoNeed});
+      if(!map.has(key))map.set(key,{key,name:String(line.mat||line.material||line.name||info?.mat?.name||'Material').trim(),unit,bar,needed:0,autoNeeded:0,stockKnown:!!info.stockKnown,stock:info.stockKnown?n(info.stock):0,contributions:[],totalMm:0,hasLength:false});
+      const item=map.get(key);item.needed+=requested;item.autoNeeded+=autoNeed;
+      if(bar&&mm>0){item.totalMm+=mm;item.hasLength=true;}
+      if(info.stockKnown){item.stockKnown=true;item.stock=item.contributions.length?Math.min(item.stock,n(info.stock)):n(info.stock);}
+      item.contributions.push({ref:m.ref,index,concept:String(m.meta.concepto||m.meta.composite_part_concept||''),need:requested,autoNeed,mm:mm||0});
     }));
     const items=[...map.values()].map(item=>{
-      const rawSuggested=item.stockKnown?Math.max(0,item.autoNeeded-item.stock):item.autoNeeded;
-      const suggested=item.bar?Math.ceil(Math.max(0,rawSuggested-1e-9)):rawSuggested;
+      // A single ceiling after combining all parts. E.g. 1600+2000+1200 = 4800mm -> 1 bar.
+      // The stock subtraction also uses rounded physical units, never fractions of a bar.
+      const combinedNeed=item.bar?Math.ceil(Math.max(0,item.needed-1e-9)):item.needed;
+      const combinedPending=item.bar?Math.ceil(Math.max(0,item.autoNeeded-1e-9)):item.autoNeeded;
+      const suggested=item.stockKnown?Math.max(0,combinedPending-Math.max(0,n(item.stock))):combinedPending;
       const hasManual=Object.prototype.hasOwnProperty.call(manual,item.key);
       const rawPurchase=hasManual?Math.max(0,n(manual[item.key])):suggested;
       const purchase=item.bar?Math.ceil(Math.max(0,rawPurchase-1e-9)):rawPurchase;
-      return {...item,suggested,purchase,manual:hasManual};
+      return {...item,needed:combinedNeed,autoNeeded:combinedPending,suggested,purchase,manual:hasManual};
     });
     return {group,items,totalPurchase:items.reduce((sum,item)=>sum+n(item.purchase),0),complete:group.members.length>=expected(group),currentSignature:signature(group)};
   }
@@ -25113,7 +25135,7 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
       const purchaseCell=currentMode==='history'
         ? `<span class="ldh-group-total">${fmt(it.purchase)}</span>`
         : `<div style="display:flex;align-items:center;gap:6px"><input type="number" min="0" step="${it.bar?'1':'0.01'}" value="${it.bar?String(Math.ceil(Math.max(0,n(it.purchase)-1e-9))):String(Number(n(it.purchase).toFixed(3)))}" style="width:90px;background:#071426;color:#fff;border:1px solid #3b82f6;border-radius:8px;padding:6px;font-weight:900" onchange="LDH_CompraConjuntaV1.setQty('${encodeURIComponent(it.key)}',this.value)"><span style="font-size:10px;color:#94a3b8">sug. ${it.bar?Math.ceil(Math.max(0,n(it.suggested??it.purchase)-1e-9)):fmt(it.suggested??it.purchase)}</span></div>`;
-      return `<tr><td><strong>${esc(it.name)}</strong><div style="font-size:10px;color:#9fb0c8">${esc(it.unit)}</div></td><td><div class="ldh-group-breakdown">${(it.contributions||[]).map(c=>`<span>${esc(c.ref)} · ${esc(c.concept||'Concepto')} · ${fmt(c.need)}</span>`).join('')}</div></td><td>${fmt(it.needed)}</td><td>${it.stockKnown?fmt(it.stock):'N/D'}</td><td class="ldh-group-total">${purchaseCell}</td></tr>`;
+      return `<tr><td><strong>${esc(it.name)}</strong><div style="font-size:10px;color:#9fb0c8">${esc(it.unit)}</div></td><td><div class="ldh-group-breakdown">${(it.contributions||[]).map(c=>`<span>${esc(c.ref)} · ${esc(c.concept||'Concepto')} · ${it.bar&&n(c.mm)>0?fmt(c.mm)+' mm':fmt(c.need)}</span>`).join('')}</div></td><td>${fmt(it.needed)}</td><td>${it.stockKnown?fmt(it.stock):'N/D'}</td><td class="ldh-group-total">${purchaseCell}</td></tr>`;
     }).join(''):'<tr><td colspan="5" style="text-align:center;color:#9fb0c8">No hay desglose histórico disponible para este pedido antiguo.</td></tr>';
     document.getElementById('ldhGroupModalBody').innerHTML=`${notice}<div class="ldh-group-part-list">${parts}</div><table class="ldh-group-modal-table"><thead><tr><th>Material</th><th>Desglose</th><th>Necesarias</th><th>Stock libre</th><th>Pedir</th></tr></thead><tbody>${rows}</tbody></table>`;
     const copyBtn=document.getElementById('ldhGroupCopyBtn'),exportBtn=document.getElementById('ldhGroupExportBtn'),deleteBtn=document.getElementById('ldhGroupDeleteBtn');
@@ -25143,8 +25165,14 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
       m.lines.forEach((line,lineIndex)=>{
         if(!line)return;
         const q=Math.max(0,n(allocations.get(`${m.ref}|${lineIndex}`)||0));
-        line.compra_qty_pedida_v180=q;line.compra_qty_pedido_id_v180=purchaseId;line.compra_qty_recibida_v180=0;
-        if(q>0){line.toBuy=true;line.pedido_compras_info=true;line.pedido_compras_fecha=new Date(sentAtMs).toISOString();line.pedido_compras_group_id=group.id;line.pedido_compras_id=purchaseId;}
+        const isSharedBar=isBar(line)&&n(line.total_mm||line.mm)>0;
+        // Purchase is master-owned; individual lines only retain traceability.
+        // An individual part must not show another physical RECEPCION COMPRA.
+        line.compra_qty_pedida_v180=isSharedBar?0:q;
+        line.compra_qty_pedido_id_v180=purchaseId;line.compra_qty_recibida_v180=0;
+        if(q>0){line.pedido_compras_info=true;line.pedido_compras_fecha=new Date(sentAtMs).toISOString();line.pedido_compras_group_id=group.id;line.pedido_compras_id=purchaseId;}
+        if(isSharedBar){line.compra_conjunta_recepcion_exclusiva_v11=true;line.compra_conjunta_mm_v11=n(line.total_mm||line.mm);line.toBuy=false;}
+        else if(q>0){line.toBuy=true;}
       });
       m.meta.compra_conjunta_v1={version:2,groupId:group.id,purchaseId,sentAtMs,signature:data.currentSignature,status:'sent',masterReference:masterRef(group),snapshot:memberIndex===0?snapshot:undefined};
       delete m.meta[DELETE_FLAG];setRaw('prep_recepcion_'+m.ref,JSON.stringify(m.lines));setRaw('prep_meta_'+m.ref,JSON.stringify(m.meta));
@@ -35531,6 +35559,12 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 </script>
 
 
+<style id="LDH_GRP_V13_IDENTITY_AND_WASTE">
+#lista .ldh-grp-mother-v10 .grp-main-identity{color:#fde68a;font-size:13px;font-weight:700;line-height:1.4;margin-top:7px;white-space:normal;overflow-wrap:anywhere}
+#ldhGroupV10 .grp-main-identity{color:#fde68a;font-size:15px;line-height:1.45;margin:7px 0 8px;max-width:1050px;overflow-wrap:anywhere}
+#ldhGroupV10 .grp-main-identity strong{display:block;font-size:17px}
+#ldhGroupV10 .grp-merma-v13{display:block;color:#fcd793;margin-top:5px;font-weight:650}
+</style>
 <!-- LDH_COMPRA_CONJUNTA_MODAL_RESPONSIVE_V1_20261116 -->
 <style id="LDH_COMPRA_CONJUNTA_MODAL_RESPONSIVE_V1_20261116">
 /* Solo presentacion. Encabezado y acciones siempre visibles; tabla desplazable. */
@@ -35586,4 +35620,565 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 }
 </style>
 
+<style id="LDH_GRP_V10_STYLE">
+#lista .ldh-grp-mother-v10{border:1px solid #3688b4!important;background:linear-gradient(145deg,#102b46,#07172a)!important;cursor:grab!important}
+#lista .ldh-grp-mother-v10:active{cursor:grabbing!important}
+#lista .ldh-grp-mother-v10 .ldh-grp-name{font-weight:950;color:#fff;font-size:15px}
+#lista .ldh-grp-mother-v10 .ldh-grp-info{font-size:12px;color:#b8d5e8;margin-top:6px}
+#lista .ldh-grp-mother-v10 .ldh-grp-pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+#lista .ldh-grp-mother-v10 .ldh-grp-pills span{background:#0c3048;border:1px solid #365875;padding:3px 7px;border-radius:6px;font-size:11px;color:#e6f4fe}
+#lista .ldh-grp-mother-v10.ldh-grp-dragging{opacity:.42}
+#lista .ldh-grp-drag-over{outline:2px dashed #38bdf8;outline-offset:3px}
+#ldhGroupV10{background:#091a31;color:#edf7ff;border:1px solid #3e89ac;border-radius:17px;padding:16px;max-width:100%;min-height:60vh}
+#ldhGroupV10[hidden]{display:none!important}
+#ldhGroupV10 .grp-head{display:flex;justify-content:space-between;align-items:center;gap:9px;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px solid #30506a}
+#ldhGroupV10 .grp-head h2{margin:0;color:#fff;font-size:20px}
+#ldhGroupV10 button{color:#e5f7ff;background:#104661;border:1px solid #4490b1;border-radius:9px;padding:9px 13px;cursor:pointer;font-weight:750}
+#ldhGroupV10 button:disabled{cursor:not-allowed;opacity:.4}
+#ldhGroupV10 .grp-section{margin:15px 0;background:#08162a;border:1px solid #38546d;border-radius:12px;padding:14px;overflow:auto}
+#ldhGroupV10 h3{color:#d6edff;font-size:16px;margin:0 0 12px}
+#ldhGroupV10 .grp-row{display:grid;grid-template-columns:minmax(155px,2fr) repeat(3,minmax(75px,1fr)) minmax(145px,1.1fr);gap:9px;align-items:center;padding:10px 5px;border-bottom:1px solid #2e465d}
+#ldhGroupV10 .grp-row.done{background:#134333}
+#ldhGroupV10 .grp-row.partial{background:#493512}
+#ldhGroupV10 .grp-row input{width:75px;color:#fff;background:#061328;border:1px solid #6781a0;padding:6px;border-radius:6px}
+#ldhGroupV10 small{color:#b3d1e5}
+#ldhGroupV10 .grp-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#ldhGroupV10 .grp-parts{display:flex;gap:10px;flex-wrap:wrap}
+#ldhGroupV10 .grp-part{flex:1 1 200px;background:#06152b;border:1px solid #48657e;padding:12px;border-radius:12px}
+#ldhGroupV10 .grp-part b{display:block;margin-bottom:5px;color:#fff}
+#ldhGroupV10 .grp-part button{margin-top:10px;width:100%}
+#ldhGroupV10 .grp-warning{background:#372910;color:#ffdfac;padding:12px;border:1px solid #9b751b;border-radius:9px;margin:12px 0;line-height:1.55}
+#ldhGroupV10 .grp-good{color:#a3efc5}
+#ldhGroupV10 .grp-tiny{font-size:11px;opacity:.85;line-height:1.55}
+#ldhGroupV10 textarea{background:#061528;color:#fff;border:1px solid #416783;border-radius:9px;padding:9px;width:100%;resize:vertical}
+@media(max-width:850px){#ldhGroupV10 .grp-row{min-width:720px}#ldhGroupV10{padding:9px}}
+</style>
+<script src="compra_conjunta_v16.js?v=20261121"></script>
+<script id="LDH_GROUP_V10_NATIVE_BRIDGE">
+(function(){
+'use strict';
+// V16: Banco local separado; en produccion se usa exclusivamente la transaccion remota verificada.
+const LIVE=location.protocol==='https:' || location.hostname==='127.0.0.1' || location.hostname==='localhost';
+const LOCAL=location.protocol==='http:'&&(location.hostname==='127.0.0.1'||location.hostname==='localhost')&&location.port==='8877';
+const PRE='LDH_GRP_RECEIPT_V10_',BACK='LDH_GRP_ORIGINAL_V10_',TX='LDH_GRP_TX_V10_',TXA='LDH_GRP_ALLOCTX_V10_',BATCH='LDH_COMP_BATCH_V1_',LEGACY='LDH_COMP_SHARED_LEDGER_V8_';
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const t=x=>String(x??'').trim(),nn=x=>t(x).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ');
+const num=x=>{const n=Number(String(x??0).replace(',','.'));return Number.isFinite(n)?n:0};
+const fmt=x=>num(x).toLocaleString('es-ES',{maximumFractionDigits:5});
+const uid=()=>Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,10);
+const cp=x=>JSON.parse(JSON.stringify(x));
+const get=k=>{for(const st of [localStorage,sessionStorage])try{const raw=st.getItem(k);if(raw!==null)return JSON.parse(raw)}catch(_){}return null};
+function put(k,x){const raw=JSON.stringify(x);localStorage.setItem(k,raw);sessionStorage.setItem(k,raw);}
+const refFrom=k=>k.slice('prep_meta_'.length);
+const groupOf=meta=>t(meta?.composite_group_id||meta?.compositeGroupId);
+const isBar=m=>m.kind!=='unit'&&!m.pletina;
+const unit=m=>m.pletina?'mm':m.kind==='unit'?'ud':'barra';
+const desired=m=>isBar(m)?Math.max(0,Math.ceil(num(m.bars))):m.pletina?num(m.mm):num(m.qty);
+const portion=(m,pid)=>num(m.perPart?.[pid]||0);
+let active='',panel=null,working=false,legacyReplaying=false;
+function findGroups(){
+ const keys=new Set();for(const st of [localStorage,sessionStorage])for(let i=0;i<st.length;i++){const k=st.key(i)||'';if(k.startsWith('prep_meta_'))keys.add(k)}
+ const grouped=new Map();for(const k of keys){const ref=refFrom(k),meta=get(k);if(!meta||!ref||!groupOf(meta))continue;
+ const gid=groupOf(meta);if(!grouped.has(gid))grouped.set(gid,[]);grouped.get(gid).push({ref,meta,lines:get('prep_recepcion_'+ref)||[]});}
+ return [...grouped.entries()].map(([gid,parts])=>{parts.sort((a,b)=>num(a.meta.composite_part_index)-num(b.meta.composite_part_index));const master=t(parts[0]?.meta.composite_master_reference||'');return{gid,master,parts,company:t(parts[0]?.meta.empresa||parts[0]?.meta.company),expected:Math.max(...parts.map(p=>num(p.meta.composite_part_count)||2))}}).filter(g=>g.parts.length>=2&&g.master);
+}
+// V13: identidad exclusiva de la OT madre; nunca tomar la aclaratoria de Partida A.
+function masterIdentity(g){
+ const m=g.parts.map(p=>p.meta||{});
+ const first=keys=>{for(const x of m)for(const k of keys){const value=t(x[k]);if(value)return value;}return '';};
+ const name=first(['composite_master_identification','compositeMasterIdentification','masterIdentification','composite_master_clarification','compositeMasterClarification','masterClarification']);
+ const concept=first(['composite_master_concept','composite_master_concepto','compositeMasterConcept','masterConcept','composite_concept','compositeConcept']);
+ // Source plan is a fallback ONLY if it contains explicit master fields.
+ const batch=get(BATCH+g.gid)||{};
+ const bn=t(batch.masterIdentification||batch.masterClarification||batch.masterConcept||'');
+ let agenda='';
+ if(!name&&!bn){
+  try{
+   const orders=[];
+   for(const store of [localStorage,sessionStorage])try{
+    const raw=JSON.parse(store.getItem('ldh_work_orders_v1')||'null');
+    orders.push(...(Array.isArray(raw)?raw:Array.isArray(raw?.orders)?raw.orders:[]));
+   }catch(_){}
+   const masterOrderId=t(m[0]?.composite_master_order_id||m[0]?.agenda_order_id||'');
+   const exact=orders.find(o=>t(o?.reference||o?.ref)===g.master || (masterOrderId && t(o?.id)===masterOrderId));
+   if(exact)agenda=t(exact.identification||exact.workIdentification||exact.workLabel||exact.referenceLabel||exact.shortDescription);
+  }catch(_){}
+ }
+ const clean=x=>t(x).replace(/\s*·?\s*partida\s+[a-z0-9]+\s*(?:\([^)]*\))?\s*$/i,'').trim();
+ return {name:clean(name||bn||agenda),concept:clean(concept)};
+}
+function motherIdentificationHTML(g){const data=masterIdentity(g);
+ return data.name||data.concept?`<div class="grp-main-identity">${data.name?`<strong>${esc(data.name)}</strong>`:''}${data.concept&&nn(data.concept)!==nn(data.name)?`<div>${esc(data.concept)}</div>`:''}</div>`:'';
+}
+// V14: la fraccion restante de una barra compartida NO es una existencia utilizable.
+// Mientras la OT siga activa permanece protegida en la reserva madre; la baja
+// fisica completa corresponde al flujo de consumo/cierre, nunca a una segunda recepcion.
+function wasteInfo(g,plan,s,m){
+ if(!isBar(m))return null;
+ const n=desired(m),used=ledgerAllocated(s,m),received=ledgerReceived(s,m);
+ const allCovered=plan.parts.every(p=>num(s.allocated[m.key]?.[p.reference])+1e-7>=portion(m,p.partId)/6000);
+ if(!allCovered||received+1e-7<n)return null;
+ const rem=Math.max(0,Math.round((received-used)*6000));
+ return {mm:rem,whole:Math.floor((rem+1e-7)/6000),scrap:rem%6000};
+}
+function storedPlan(g){const p=get(BATCH+g.gid);if(!p||!Array.isArray(p.materials)||!Array.isArray(p.parts)||p.masterReference!==g.master)return null;return p;}
+function estimatedPlan(g){
+ // Retrocompatibilidad: funciona con los milimetros ya calculados en las fichas individuales.
+ const group=new Map();for(const p of g.parts){for(const l of p.lines){const name=t(l.mat||l.material||l.name),u=nn(l.unit||l.unidad),bar=u.includes('barra'),plet=u==='mm',id=t(l.linked_matId||l.stockMatId||l.matId),iron=bar?t(p.meta.tipo_hierro||'Negro'):'';
+ const key=JSON.stringify([nn(name),id,bar?'barra':plet?'mm':'ud',nn(iron),nn(g.company)]);if(!group.has(key))group.set(key,{key,name,linked:id,ironType:iron,kind:bar?'bar':'unit',pletina:plet,mm:0,qty:0,bars:0,estimated:bar,perPart:{},cuts:[]});
+ const m=group.get(key),q=bar?num(l.total_mm||l.mm):num(l.qty_pedida);if(bar||plet)m.mm+=q;else m.qty+=q;m.perPart[p.meta.composite_part_id]=num(m.perPart[p.meta.composite_part_id])+q;
+ }}
+ const mats=[...group.values()];mats.forEach(m=>{if(isBar(m))m.bars=Math.ceil(m.mm/6000)});
+ return {groupId:g.gid,masterReference:g.master,company:g.company,parts:g.parts.map(p=>({partId:p.meta.composite_part_id,reference:p.ref,concept:p.meta.concepto,quantity:p.meta.unidades||1})),materials:mats,kerf:0,estimated:true};
+}
+function planFor(g){return storedPlan(g)||estimatedPlan(g)}
+function initLedger(g,plan){const prev=get(PRE+g.gid);if(prev){
+ if(!LOCAL&&window.LDH_GroupV16Remote)window.LDH_GroupV16Remote.hydrate(g,plan,prev,window.LDH_GroupV16API);
+ const pending=get(TX+g.gid),db=stock();
+ if(pending&&db?.movements?.some(x=>t(x.id)===pending.movId)){
+  prev.receipts[pending.key] ||= [];
+  if(!prev.receipts[pending.key].some(x=>x.id===pending.id)){
+   prev.receipts[pending.key].push({...pending,stockCommitted:true,recovered:true});
+   prev.events.push({at:new Date().toISOString(),type:'recepcion_recuperada',qty:pending.qty,key:pending.key});put(PRE+g.gid,prev);
+  }
+  localStorage.removeItem(TX+g.gid);sessionStorage.removeItem(TX+g.gid);
+ }
+ const pendingAlloc=get(TXA+g.gid);
+ if(pendingAlloc){
+  const plan=planFor(g),m=plan.materials.find(x=>x.key===pendingAlloc.key),p=g.parts.find(x=>x.ref===pendingAlloc.ref);
+  if(m&&p){
+   const stockDb=stock(),ctx=target(stockDb,g,m),ledgerOnly=!!m.pletina||(!ctx&&!isBar(m));
+   const a=ledgerOnly?null:(stockDb?.assignments||[]).find(x=>t(x.id)==='asg_comp_v10_'+g.gid.replace(/[^a-z0-9_-]/gi,'_')+'_'+ctx.mid+'_'+p.ref.replace(/[^a-z0-9_-]/gi,'_'));
+   const credited=ledgerOnly?num((get('prep_recepcion_'+p.ref)||[]).find(x=>x.shared_v10_group===g.gid&&nn(x.mat||x.material||x.name)===nn(m.name))?.qty_recibida):num(a?.qty);
+   if(credited>0){
+    prev.allocated[m.key] ||= {};prev.allocated[m.key][p.ref]=Math.max(num(prev.allocated[m.key][p.ref]),credited);
+    if(!ledgerOnly){const rows=get('prep_recepcion_'+p.ref)||[];const item=findLine({...p,lines:rows},m);
+     if(item){const line=item.l,targetNeed=isBar(m)?portion(m,plan.parts.find(x=>x.reference===p.ref)?.partId)/6000:portion(m,plan.parts.find(x=>x.reference===p.ref)?.partId);
+      if(!line.shared_v10){line.qty_pedida=targetNeed;line.pedida=targetNeed;line.shared_v10=true;line.shared_v10_group=g.gid;}
+      line.qty_recibida=credited;line.recibida=credited;line.aplicado_qty=credited;line.ok=credited+1e-8>=targetNeed;line.completo=line.ok;line.done=line.ok;put('prep_recepcion_'+p.ref,rows);
+     }}
+    put(PRE+g.gid,prev);
+   }
+  }
+  localStorage.removeItem(TXA+g.gid);sessionStorage.removeItem(TXA+g.gid);
+ }
+ return prev;}
+ const legacy=get(LEGACY+g.gid),s={version:10,groupId:g.gid,masterReference:g.master,receipts:{},allocated:{},notes:'',events:[],createdAt:new Date().toISOString(),fromV8:!!legacy};
+ if(legacy){for(const [key,rs] of Object.entries(legacy.physical||{})){s.receipts[key]=rs.map(r=>({...r,migratedV8:true}));}
+ s.notes=legacy.note||'';
+ // Los cortes y repartos del prototipo V8 no modificaban las fichas individuales;
+ // no los contamos otra vez como Stock adjudicado.
+ if(Object.values(legacy.allocated||{}).some(v=>Object.values(v||{}).some(q=>num(q)>0))||Object.values(legacy.cuts||{}).some(v=>Object.keys(v||{}).length)){
+ s.hasLegacyAllocations=true;s.legacyAllocations=cp(legacy.allocated||{});s.legacyCuts=cp(legacy.cuts||{});
+ }
+ }
+ put(PRE+g.gid,s);if(!LOCAL&&window.LDH_GroupV16Remote)window.LDH_GroupV16Remote.hydrate(g,plan,s,window.LDH_GroupV16API);return s;
+}
+function ledgerReceived(s,m){return (s.receipts[m.key]||[]).filter(r=>!r.revoked).reduce((a,r)=>a+num(r.qty),0)}
+function ledgerAllocated(s,m){return Object.values(s.allocated[m.key]||{}).reduce((a,v)=>a+num(v),0)}
+function allPartsClean(g){return g.parts.every(p=>!p.meta?.en_fabricacion&&!p.meta?.en_pintura&&!p.meta?.en_almacen&&!p.meta?.entregado&&p.lines.every(l=>num(l.qty_recibida)<=0&&num(l.aplicado_qty)<=0&&!l.shared_v10));}
+function normPletinaV16(l){return nn(l.unit||l.unidad)==='mm'||nn(l.mat||l.material||l.name).includes('pletina');}
+function legacyIssue(g,plan,s){
+ if(g.parts.length!==g.expected || new Set(g.parts.map(p=>t(p.meta?.composite_part_id))).size!==g.expected || new Set(g.parts.map(p=>num(p.meta?.composite_part_index))).size!==g.expected)return'El grupo está incompleto o tiene partidas repetidas: se esperaban '+g.expected+' y hay '+g.parts.length+'. Actualiza Agenda y Preparación antes de recibir material.';
+ if(s.hasLegacyAllocations&&!legacyReplaying)return'Hay adjudicaciones del banco V8 pendientes de migrar. No se ha podido conciliar automáticamente el registro V8; revisa el historial y utiliza el botón de conciliación.';
+ for(const p of g.parts){if(p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado||p.meta?.closed_from_preparation)return'Una partida ya está avanzada o cerrada. Se conserva la operativa anterior.';
+ for(const l of p.lines){if(!l.shared_v10&&normPletinaV16(l)===false&&(num(l.qty_recibida)>0||num(l.aplicado_qty)>0))return'Hay material ya recibido o reservado en fichas individuales. Requiere conciliación de saldos, sin alterar esos registros.';}}
+ if(!plan||!plan.materials.length)return'No se han identificado materiales del grupo.';
+ const db=stock();if(db){const refs=new Set(g.parts.map(x=>x.ref));
+  const active=x=>['activa','active'].includes(nn(x.status||x.estado||'activa'));
+  if((db.assignments||[]).some(x=>active(x)&&refs.has(t(x.ref||x.jobRef))&&!['adjudicacion_material_comun_v10','adjudicacion_material_comun_v16'].includes(x.source)&&num(x.qty)>0))return'Hay reservas individuales anteriores en Stock. Se bloquea la conversión hasta conciliarlas.';
+  if((db.reservations||[]).some(x=>active(x)&&refs.has(t(x.ref||x.jobRef))&&num(x.qty)>0))return'Hay reservas individuales anteriores que deben conciliarse.';
+  if((db.internalOtLoansV55||[]).some(x=>refs.has(t(x.fromRef))||refs.has(t(x.toRef))||refs.has(t(x.currentDebtorRef))))return'Hay préstamos existentes en una de las partidas. Se conserva su operativa original.';
+ }
+ return'';
+}
+function findLine(p,m){const name=nn(m.name),u=unit(m);const arr=p.lines.map((l,i)=>({l,i})).filter(x=>nn(x.l.mat||x.l.material||x.l.name)===name&&(u==='barra'?nn(x.l.unit).includes('barra'):u==='mm'?nn(x.l.unit)==='mm':!nn(x.l.unit).includes('barra')&&nn(x.l.unit)!=='mm'));
+ return arr.length===1?arr[0]:null;
+}
+function stock(){return get('ldh_v2_company_stock_v1')}
+function target(db,g,m){if(!db)return null;
+ const c=(db.companies||[]).find(x=>[x.id,x.name,x.code,x.nombre].some(v=>nn(v)===nn(g.company)));
+ const referenceIds=[...new Set(g.parts.flatMap(p=>p.lines.filter(l=>nn(l.mat||l.material||l.name)===nn(m.name)).map(l=>t(l.linked_matId||l.stockMatId||l.matId)).filter(Boolean)))];
+ const id=t(m.linked)||(referenceIds.length===1?referenceIds[0]:'');
+ // Para barras no permitir emparejamientos automáticos por nombre: el ID debe ser inequívoco.
+ if(isBar(m)&&!id)return null;
+ if(referenceIds.length>1 || (id&&referenceIds.some(x=>x!==id)))return null;
+ const exact=id?(db.materials||[]).filter(x=>t(x.id||x.materialId)===id):[];
+ const byName=(db.materials||[]).filter(x=>nn(x.name||x.nombre)===nn(m.name));
+ const mat=exact.length===1?exact[0]:!id&&byName.length===1?byName[0]:null;
+ if(!c||!mat)return null;
+ return {cid:t(c.id||c.companyId),mid:t(mat.id||mat.materialId),company:c,mat};
+}
+function physical(row){for(const f of ['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad','real']){if(row?.[f]!=null&&Number.isFinite(num(row[f])))return num(row[f]);}return 0;}
+const PHYSICAL_FIELDS=['physicalQty','qtyPhysical','fisico','realQty','stockFisico','stockReal','stockActual','existencias','actualQty','qty','cantidad','stock','real'];
+function getMasterRow(db,cid,mid){const rows=(db.stock||[]).filter(r=>t(r.companyId||r.empresaId)===cid&&t(r.materialId||r.matId)===mid);return rows.find(r=>r.physicalManualMaster)||rows[0]||null;}
+function owned(db,cid,mid,ref){return (db.assignments||[]).filter(a=>t(a.companyId||a.empresaId)===cid&&t(a.materialId||a.matId)===mid&&t(a.ref||a.jobRef)===ref&&['activa','active'].includes(nn(a.status||a.estado||'activa')));}
+function groupAssignment(db,g,m,ctx){return (db.assignments||[]).find(a=>t(a.source)==='ot_compuesta_recepcion_comun_v10'&&t(a.groupId)===g.gid&&t(a.materialId)===ctx.mid&&t(a.companyId)===ctx.cid)
+ ||(db.assignments||[]).find(a=>t(a.source)==='ot_compuesta_recepcion_comun_v8'&&t(a.groupId)===g.gid&&t(a.materialId)===ctx.mid&&t(a.companyId)===ctx.cid);
+}
+function addAssignment(db,g,m,ctx,ref,qty,tag){if(!(qty>0))return;db.assignments ||= [];
+ const id='asg_comp_v10_'+g.gid.replace(/[^a-z0-9_-]/gi,'_')+'_'+ctx.mid+'_'+ref.replace(/[^a-z0-9_-]/gi,'_');
+ let a=db.assignments.find(x=>t(x.id)===id);if(!a){a={id,assignmentId:id,companyId:ctx.cid,empresaId:ctx.cid,materialId:ctx.mid,matId:ctx.mid,ref,jobRef:ref,assignmentType:'libre',source:'adjudicacion_material_comun_v10',groupId:g.gid,phase:'preparacion',status:'activa',createdAt:new Date().toISOString(),qty:0,cantidad:0};db.assignments.push(a)}
+ a.qty=num(a.qty)+qty;a.cantidad=a.qty;a.status='activa';a.estado='activa';a.updatedAt=new Date().toISOString();return a;
+}
+function groupAvailable(db,g,m,ctx){const a=groupAssignment(db,g,m,ctx);return a?Math.max(0,num(a.qty)):0;}
+function receipt(g,plan,m,q){if(!LOCAL){if(!LIVE||!window.LDH_GroupV16Remote)return alert('La conexion remota V16 no esta disponible.');return window.LDH_GroupV16Remote.receipt(g,plan,m,q,window.LDH_GroupV16API);}if(working)return;
+ const state=initLedger(g,plan),reason=legacyIssue(g,plan,state);if(reason)return alert(reason);
+ q=num(q);if(!(q>0)||isBar(m)&&!Number.isInteger(q))return alert('Cantidad de recepción no válida.');
+ if(ledgerReceived(state,m)+q>desired(m)+0.000001)return alert('La entrada supera el total necesario del conjunto.');
+ const db=stock(),ctx=target(db,g,m),ledgerOnly=!!m.pletina||(!ctx&&!isBar(m));
+ if(!db)return alert('No se ha podido leer el Stock del banco.');
+ if(!ctx&&isBar(m))return alert('El perfil no está vinculado de forma inequívoca a Stock. Usa Vincular en su ficha original antes de recibir.');
+ working=true;
+ try{
+ const id=uid(),movId='mov_comp_v10_'+g.gid+'_'+id,stamp=new Date().toISOString(),journal={id,movId,qty:q,key:m.key,groupId:g.gid,at:stamp};put(TX+g.gid,journal);
+ const next=cp(db);next.movements ||= [];next.assignments ||= [];next.stock ||= [];
+ if(!ledgerOnly&&!next.movements.some(x=>t(x.id)===movId)){
+ const row=getMasterRow(next,ctx.cid,ctx.mid);if(!row)throw Error('No existe una ficha física verificable de este material en Stock.');
+ const before=physical(row);if(isBar(m)&&Math.abs(before-Math.round(before))>1e-8)throw Error('Stock físico fraccionario previo para '+m.name+'. Se requiere conciliación antes de recibir.');PHYSICAL_FIELDS.forEach(f=>row[f]=before+q);row.physicalManualMaster=true;row.physicalSource='ot_compuesta_v10';row.updatedAt=stamp;
+ next.movements.push({id:movId,companyId:ctx.cid,empresaId:ctx.cid,materialId:ctx.mid,matId:ctx.mid,qty:q,cantidad:q,type:'entrada',tipo:'entrada',date:stamp,ref:g.master,jobRef:g.master,source:'ot_compuesta_recepcion_comun_v10',groupId:g.gid,receiptId:id});
+ let a=groupAssignment(next,g,m,ctx);
+ if(!a){a={id:'asg_comp_v10_master_'+g.gid+'_'+ctx.mid,companyId:ctx.cid,empresaId:ctx.cid,materialId:ctx.mid,matId:ctx.mid,ref:g.master,jobRef:g.master,qty:0,cantidad:0,phase:'preparacion',status:'activa',assignmentType:'grupo_compuesto',source:'ot_compuesta_recepcion_comun_v10',groupId:g.gid};next.assignments.push(a)}
+ a.qty=num(a.qty)+q;a.cantidad=a.qty;a.status='activa';a.updatedAt=stamp;
+ }
+ if(!ledgerOnly){put('ldh_v2_company_stock_v1',next);window.__LDH_STOCK_MEMORY_DB=next;}
+ state.receipts[m.key] ||= [];state.receipts[m.key].push({id,qty:q,at:stamp,movId,stockCommitted:!ledgerOnly,special:ledgerOnly});state.events.push({at:stamp,type:'recepcion',material:m.name,qty:q});put(PRE+g.gid,state);
+ localStorage.removeItem(TX+g.gid);sessionStorage.removeItem(TX+g.gid);
+ // Each full part requirement that fits the received shared stock is transferred
+ // immediately; no independent physical receipt on A/B/C.
+ renderMother(g.gid);
+ // Deferred until working=false in finally, so the native allocation guard accepts it.
+ queueMicrotask(()=>{
+   const errors=[];
+   for(const p of g.parts){
+     const part=plan.parts.find(z=>z.reference===p.ref),need=part?portion(m,part.partId):0;
+     const equivalent=isBar(m)?need/6000:need;
+     const latest=initLedger(g,plan),already=num(latest.allocated[m.key]?.[p.ref]);
+     if(equivalent>already+1e-7&&ledgerReceived(latest,m)-ledgerAllocated(latest,m)+1e-7>=equivalent-already){
+       try{allocation(g,plan,m,p);}catch(err){errors.push(p.ref+': '+err.message);}
+     }
+   }
+   if(errors.length)console.warn('[V11] Adjudicación pendiente de revisión',errors);
+   renderMother(g.gid);
+ });
+ }catch(e){alert('No se pudo confirmar la recepción: '+e.message+'\nNo repitas la entrada sin verificar el historial de movimientos.');}
+ finally{working=false;}
+}
+function allocation(g,plan,m,p,amountOverride){if(!LOCAL){if(!LIVE||!window.LDH_GroupV16Remote)return alert('La conexion remota V16 no esta disponible.');return window.LDH_GroupV16Remote.allocation(g,plan,m,p,amountOverride,window.LDH_GroupV16API).catch(e=>{alert('No se ha confirmado la adjudicacion en la nube: '+e.message);});}if(working)return;const s=initLedger(g,plan),reason=legacyIssue(g,plan,s);if(reason)return alert(reason);
+ const part=plan.parts.find(x=>x.reference===p.ref);if(!part)return alert('La partida no pertenece al plan.');
+ const need=portion(m,part.partId),u=unit(m),maximum=isBar(m)?need/6000:need,
+ amount=amountOverride===undefined?maximum:num(amountOverride);
+ if(amount>maximum+1e-8||amount<0)return alert('La adjudicación solicitada supera la necesidad de la partida.');
+ if(!(amount>0))return;
+ if(isBar(m)&&!m.estimated&&(!m.cuts||!m.cuts.length))return alert('Falta despiece de cortes para esta barra.');
+ const used=num(s.allocated[m.key]?.[p.ref]);if(used+0.0000001>=amount)return;
+ const delta=amount-used;const received=ledgerReceived(s,m);
+ if(ledgerAllocated(s,m)+delta>received+0.0000001)return alert('No hay material común recibido suficiente para adjudicar a esta partida.');
+ const row=findLine(p,m);if(!row)return alert('La línea original de esta partida no es única. No se modifica.');
+ const line=row.l;
+ if(line.shared_v10&&t(line.shared_v10_group)!==g.gid)return alert('La línea ya pertenece a otro grupo.');
+ const db=stock(),ctx=target(db,g,m),ledgerOnly=!!m.pletina||(!ctx&&!isBar(m));
+ if(!db||!ctx&&!ledgerOnly)return alert('No se puede adjudicar un perfil sin vínculo exacto con Stock.');
+ const avail=ledgerOnly?received-ledgerAllocated(s,m):groupAvailable(db,g,m,ctx);
+ if(avail+0.0000001<delta)return alert('El conjunto ya no dispone de suficiente material para asignar a esta partida.');
+ working=true;
+ try{
+ const next=cp(db);
+ if(!ledgerOnly){
+  const master=groupAssignment(next,g,m,ctx);if(!master||num(master.qty)+1e-8<delta)throw Error('Falta la reserva madre en Stock.');
+  master.qty=Math.max(0,num(master.qty)-delta);master.cantidad=master.qty;master.updatedAt=new Date().toISOString();if(!master.qty){master.status='liberada';master.estado='liberada';}
+  // No registrar un retal como entrada ni liberar fracciones al stock disponible.
+  // Al adjudicar la ultima partida, el saldo inferior a una barra completa
+  // continua reservado en la madre, marcado para su consumo como merma.
+  if(isBar(m)){
+   const coveredAfter=plan.parts.every(partRow=>{
+    const required=portion(m,partRow.partId)/6000;
+    const before=num(s.allocated[m.key]?.[partRow.reference]);
+    const after=partRow.reference===p.ref?before+delta:before;
+    return after+1e-7>=required;
+   });
+   if(coveredAfter){
+    const remainder=Math.max(0,num(master.qty));
+    const whole=Math.floor(remainder+1e-7);
+    master.mermaNoRecuperableMmV13=Math.round(Math.max(0,remainder-whole)*6000);
+    master.mermaNoDisponibleV13=true;
+    master.remainingFullBarsV13=whole;
+    master.wastePolicyV13='sin_retales_solo_barras_enteras';
+   }
+  }
+  addAssignment(next,g,m,ctx,p.ref,delta,'shared');
+  // Los campos fisicos y los movimientos NO se tocan en una adjudicacion.
+  const stockBefore=physical(getMasterRow(db,ctx.cid,ctx.mid)),stockAfter=physical(getMasterRow(next,ctx.cid,ctx.mid));if(Math.abs(stockBefore-stockAfter)>1e-9)throw Error('Una adjudicación no puede modificar Stock físico.');
+ }
+ const rows=cp(get('prep_recepcion_'+p.ref)||[]),original=rows[row.i];if(!original||nn(original.mat||original.material||original.name)!==nn(m.name))throw Error('La ficha original ha cambiado desde el cálculo.');
+ const backupKey=BACK+p.ref;if(!get(backupKey))put(backupKey,{at:new Date().toISOString(),groupId:g.gid,lines:get('prep_recepcion_'+p.ref)});
+ // Las barras compartidas se expresan en fracciones equivalentes solo para el movimiento contable.
+ // Se mantiene total_mm, materialId, referencias, préstamo y tipo de hierro.
+ const requested=isBar(m)?need/6000:need;
+ original.qty_pedida=requested;original.pedida=requested;
+ original.qty_recibida=used+delta;original.recibida=original.qty_recibida;original.aplicado_qty=original.qty_recibida;
+ original.shared_v10=true;original.shared_v10_group=g.gid;original.shared_v10_mm=isBar(m)?need:null;
+ original.shared_v11_pending=false;
+ original.receipt_manual_v83=true;
+ original.ok=original.qty_recibida+1e-8>=requested;original.completo=original.ok;original.done=original.ok;original.isDone=original.ok;original.isCompleted=original.ok;
+ original.trace ||= [];original.trace.push({source:'stock_recibido_ok_material_comun_v12',at:new Date().toISOString(),qty:delta,groupId:g.gid,stockMovement:false});
+ // Diario de recuperacion para evitar aplicar una segunda vez si se cierra la pagina entre escrituras.
+ put(TXA+g.gid,{id:uid(),ref:p.ref,key:m.key,delta,at:new Date().toISOString()});
+ // Primero registrar Stock y posteriormente proyeccion local: si hubiera corte, el estado permanece recuperable.
+ if(!ledgerOnly){put('ldh_v2_company_stock_v1',next);window.__LDH_STOCK_MEMORY_DB=next;}
+ put('prep_recepcion_'+p.ref,rows);
+ s.allocated[m.key] ||= {};s.allocated[m.key][p.ref]=used+delta;s.events.push({at:new Date().toISOString(),type:'asignacion',ref:p.ref,material:m.name,qty:delta});put(PRE+g.gid,s);
+ localStorage.removeItem(TXA+g.gid);sessionStorage.removeItem(TXA+g.gid);
+ renderMother(g.gid);
+ }catch(e){alert('Adjudicación detenida: '+e.message+'\nComprueba los movimientos antes de repetir.');}
+ finally{working=false;}
+}
+// V12 · Conciliación de entradas V8 solo para banco local.
+// El libro V8 representa recepción física, pero no siempre se reflejaba en el
+// Stock real. Una marca determinista en Stock impide acreditarla dos veces.
+function recoverV8Physical(g,plan,s){
+ if(!LOCAL||!s.fromV8)return {ok:true,entries:0};
+ const db=stock();if(!db)return {ok:false,reason:'No se encuentra Stock local.'};
+ const next=cp(db),changes=[],pending=[];
+ for(const m of plan.materials){
+   const receipts=(s.receipts[m.key]||[]).filter(r=>r.migratedV8&&!r.revoked);
+   const qty=receipts.reduce((a,r)=>a+num(r.qty),0);
+   if(qty<=1e-8)continue;
+   if(!isBar(m)&&!receipts.some(r=>r.stockCommitted))continue; // especiales fuera de Stock
+   const marker='mov_comp_v12_migr_v8_'+g.gid.replace(/[^a-z0-9_-]/gi,'_')+'_'+hash(m.key);
+   const already=next.movements?.some(x=>t(x.id)===marker);
+   if(already)continue;
+   const ctx=target(next,g,m),ledgerOnly=!!m.pletina||(!ctx&&!isBar(m));
+   if(!ctx&&isBar(m))return {ok:false,reason:'Falta vincular '+m.name+' a Stock de forma inequívoca.'};
+   if(ledgerOnly)continue; // especial/pletina: no alterar su Stock original
+   const row=getMasterRow(next,ctx.cid,ctx.mid);
+   if(!row)return {ok:false,reason:'No hay fila física identificable para '+m.name};
+   const preexisting=groupAssignment(next,g,m,ctx);
+   const existingQty=num(preexisting?.qty);
+   // La entrada antigua V8 puede haber creado una reserva de grupo, pero no una entrada física.
+   // Si ya hay movimientos firmados del grupo, no inferir ni repetir entradas.
+   const oldSigned=(next.movements||[]).filter(x=>t(x.groupId)===g.gid&&t(x.materialId||x.matId)===ctx.mid&&/recepcion_comun_v8|recepcion_comun_v10/.test(t(x.source)));
+   const signedQty=oldSigned.reduce((a,x)=>a+num(x.qty||x.cantidad),0);
+   if(signedQty>qty+1e-8)return {ok:false,reason:'El historial físico de '+m.name+' supera la recepción V8. Revisión manual necesaria.'};
+   let addPhysical=Math.max(0,qty-signedQty);
+   // V8 wrote qty/real/fisico but did not synchronize the V140 canonical
+   // physicalQty family. Restore ONLY the part evidenced by signed V8 moves.
+   const legacyPhysical=Math.max(0,num(row.real),num(row.fisico),num(row.stock));
+   const canonicalPhysical=physical(row);
+   const canonicalRepair=signedQty>0?Math.min(signedQty,Math.max(0,legacyPhysical-canonicalPhysical)):0;
+   // Si una recepción V8 ya figura físicamente sin movimiento del conjunto, no deducir
+   // automáticamente su origen. Las fuentes antiguas deben revisarse antes de sumar.
+   const physicalQty=physical(row);
+   const unrelated=(next.assignments||[]).filter(x=>['activa','active'].includes(nn(x.status||x.estado||'activa'))&&t(x.companyId||x.empresaId)===ctx.cid&&t(x.materialId||x.matId)===ctx.mid&&t(x.groupId)!==g.gid).reduce((a,x)=>a+num(x.qty),0);
+   if(physicalQty>0&&signedQty===0&&physicalQty-unrelated>=qty-1e-8&&existingQty>=qty-1e-8){
+      // Credito V8 ya soportado por una existencia sin déficit; no repetir entrada física.
+      addPhysical=0;
+   }
+   if(physicalQty+addPhysical+canonicalRepair+1e-8<Math.max(existingQty,qty))return {ok:false,reason:'La recepción antigua no está respaldada físicamente: '+m.name};
+   const addMaster=Math.max(0,qty-existingQty);
+   pending.push({m,ctx,marker,rowId:t(row.id),addPhysical,canonicalRepair,addMaster,qty});
+ }
+ if(!pending.length)return {ok:true,entries:0};
+ const stamp=new Date().toISOString();next.movements ||= [];next.assignments ||= [];
+ for(const x of pending){
+   const row=next.stock.find(y=>t(y.id)===x.rowId);
+   const physicalDelta=x.addPhysical+x.canonicalRepair;
+   if(physicalDelta>1e-8){
+      const before=physical(row);
+      PHYSICAL_FIELDS.forEach(f=>row[f]=before+physicalDelta);
+      row.physicalManualMaster=true;row.physicalSource='ot_compuesta_conciliacion_v8_v12';row.updatedAt=stamp;
+   }
+   next.movements.push({id:x.marker,companyId:x.ctx.cid,empresaId:x.ctx.cid,materialId:x.ctx.mid,matId:x.ctx.mid,qty:x.addPhysical,cantidad:x.addPhysical,type:x.addPhysical>0?'entrada':'conciliacion',tipo:x.addPhysical>0?'entrada':'conciliacion',date:stamp,ref:g.master,jobRef:g.master,source:'ot_compuesta_migracion_v8_v12',groupId:g.gid,legacyQty:x.qty,canonicalRepair:x.canonicalRepair});
+   if(x.addMaster>1e-8){
+      let a=groupAssignment(next,g,x.m,x.ctx);
+      if(!a){a={id:'asg_comp_v12_migr_master_'+g.gid+'_'+x.ctx.mid,companyId:x.ctx.cid,empresaId:x.ctx.cid,materialId:x.ctx.mid,matId:x.ctx.mid,ref:g.master,jobRef:g.master,qty:0,cantidad:0,phase:'preparacion',status:'activa',assignmentType:'grupo_compuesto',source:'ot_compuesta_recepcion_comun_v10',groupId:g.gid};next.assignments.push(a)}
+      a.qty=num(a.qty)+x.addMaster;a.cantidad=a.qty;a.status='activa';a.estado='activa';a.updatedAt=stamp;
+   }
+   changes.push({material:x.m.name,physical:x.addPhysical,canonicalRepair:x.canonicalRepair,master:x.addMaster});
+ }
+ // A single local Stock commit, then the receipt book. Reopening finds the
+ // deterministic movement IDs; a second invocation cannot duplicate them.
+ put('ldh_v2_company_stock_v1',next);window.__LDH_STOCK_MEMORY_DB=next;
+ s.v8PhysicalReconciledAt=stamp;s.events.push({at:stamp,type:'conciliacion_fisica_v8_v12',changes});put(PRE+g.gid,s);
+ return {ok:true,entries:changes.length,changes};
+}
+function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return (h>>>0).toString(36)}
+function allocatePreviouslyReceived(g,plan){
+ const state=initLedger(g,plan);
+ if(state.hasLegacyAllocations||legacyIssue(g,plan,state))return 0;
+ let count=0;
+ for(const m of plan.materials){
+  if(ledgerReceived(initLedger(g,plan),m)<=1e-8)continue;
+  for(const p of g.parts){
+   const part=plan.parts.find(x=>x.reference===p.ref);
+   if(!part)continue;
+   const needed=isBar(m)?portion(m,part.partId)/6000:portion(m,part.partId);
+   if(needed<=1e-8)continue;
+   const current=initLedger(g,plan),already=num(current.allocated[m.key]?.[p.ref]);
+   if(already+1e-8>=needed)continue;
+   if(ledgerReceived(current,m)-ledgerAllocated(current,m)+1e-8<needed-already)continue;
+   const db=stock(),ctx=target(db,g,m),ledgerOnly=!!m.pletina||(!ctx&&!isBar(m));
+   if(!ledgerOnly&&(!ctx||groupAvailable(db,g,m,ctx)+1e-8<needed-already))continue;
+   try{
+    allocation(g,plan,m,p);
+    const next=initLedger(g,plan);
+    if(num(next.allocated[m.key]?.[p.ref])>=needed-1e-8)count++;
+   }catch(e){console.warn('[V12] No se pudo adjudicar '+m.name+' a '+p.ref,e)}
+  }
+ }
+ return count;
+}
+function autoReconcileV8(gid){
+ if(!LOCAL||working||legacyReplaying)return false;
+ const g=findGroups().find(x=>x.gid===gid);if(!g)return false;
+ const plan=planFor(g),s=initLedger(g,plan);
+ if(!s.fromV8&&!s.hasLegacyAllocations)return false;
+ if(Object.values(s.legacyCuts||{}).some(x=>Object.keys(x||{}).length))return false;
+ // No migration on work already started, with old loans, or with independent receipts.
+ if(g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado||p.meta?.closed_from_preparation||p.lines.some(l=>!l.shared_v10&&(num(l.qty_recibida)>0||num(l.aplicado_qty)>0))))return false;
+ const db=stock(),refs=new Set(g.parts.map(p=>p.ref));
+ if((db?.internalOtLoansV55||[]).some(x=>refs.has(t(x.fromRef))||refs.has(t(x.toRef))||refs.has(t(x.currentDebtorRef))))return false;
+ if(s.hasLegacyAllocations)importLegacyV8(gid,{auto:true});
+ else {const recovered=recoverV8Physical(g,plan,s);if(!recovered.ok)return false;}
+ const updated=initLedger(g,plan);
+ if(updated.hasLegacyAllocations)return false;
+ allocatePreviouslyReceived(g,plan);
+ return true;
+}
+function importLegacyV8(gid,options={}){
+ if(!LOCAL)return;const g=findGroups().find(x=>x.gid===gid);if(!g)return;
+ const plan=planFor(g),s=initLedger(g,plan);if(!s.hasLegacyAllocations)return;
+ const entries=[],cuts=s.legacyCuts||{};
+ if(Object.values(cuts).some(x=>Object.keys(x||{}).length))return alert('Las adjudicaciones V8 incluyen cortes por barra. No es seguro migrarlas sin una verificación manual del despiece.');
+ for(const m of plan.materials){const allocations=s.legacyAllocations?.[m.key]||{};
+  for(const [partId,v] of Object.entries(allocations)){
+   const p=g.parts.find(x=>x.meta.composite_part_id===partId);if(!p)return alert('Una adjudicación V8 tiene una partida desconocida.');
+   const amount=isBar(m)?num(v)/6000:num(v);if(!(amount>0))continue;
+   const max=isBar(m)?portion(m,partId)/6000:portion(m,partId);
+   if(amount>max+1e-7)return alert('Hay una adjudicación V8 superior a la necesidad de '+p.ref);
+   entries.push({m,p,amount});
+  }
+ }
+ for(const m of plan.materials){const total=entries.filter(x=>x.m.key===m.key).reduce((a,x)=>a+x.amount,0);
+  if(total>ledgerReceived(s,m)+1e-7)return alert('Las adjudicaciones V8 superan las recepciones registradas para '+m.name);
+  // Reserve availability is checked by allocation after the V8 physical ledger
+  // has been reconciled. The original V8 panel did not always post Stock.
+  const db=stock(),ctx=target(db,g,m);if(isBar(m)&&!ctx)return alert('El perfil '+m.name+' no está vinculado a Stock.');
+ }
+ if(!options.auto&&!confirm('Se conciliarán las recepciones V8 del banco y se adjudicará el material a las fichas originales. Se evitarán los movimientos ya registrados. ¿Continuar?'))return;
+ const recovered=recoverV8Physical(g,plan,s);if(!recovered.ok)return alert('Conciliación V8 bloqueada: '+recovered.reason);
+ legacyReplaying=true;let errors=0;
+ try{for(const {m,p,amount} of entries){if(working)break;
+   allocation(g,plan,m,p,amount);
+   const now=initLedger(g,plan),actual=num(now.allocated[m.key]?.[p.ref]);
+   if(actual+1e-7<amount){errors++;break;}
+  }}finally{legacyReplaying=false;}
+ if(errors){alert('Migración interrumpida. Comprueba la tabla y vuelve a intentar. Los movimientos confirmados no se duplicarán.');return;}
+ const next=initLedger(g,plan);next.hasLegacyAllocations=false;next.legacyMigratedAt=new Date().toISOString();next.events.push({at:next.legacyMigratedAt,type:'migracion_v8',count:entries.length});put(PRE+g.gid,next);
+ renderMother(g.gid);
+}
+function orderedGroups(){const g=findGroups(),o=get('LDH_GRP_V10_ORDER')||[];return g.sort((a,b)=>{const aa=o.indexOf(a.gid),bb=o.indexOf(b.gid);return (aa<0?9999:aa)-(bb<0?9999:bb)});}
+function motherCards(){const list=document.getElementById('lista');if(!list)return;const groups=orderedGroups();
+ groups.forEach(g=>{const cards=[...list.querySelectorAll('.item[data-ref]')].filter(c=>g.parts.some(p=>p.ref===c.dataset.ref));
+ if(!cards.length&&!list.querySelector(`[data-grp="${CSS.escape(g.gid)}"]`))return;
+ let mother=[...list.querySelectorAll('.ldh-grp-mother-v10')].find(c=>c.dataset.grp===g.gid);
+ if(!mother){mother=document.createElement('div');mother.className='item ldh-grp-mother-v10';mother.dataset.grp=g.gid;mother.draggable=true;list.insertBefore(mother,cards[0]||null);}
+ mother.innerHTML=`<div class="ldh-grp-name">▸ ${esc(g.master)}</div>${motherIdentificationHTML(g)}<div class="ldh-grp-info">${esc(g.company)} · ${g.parts.length} partidas</div><div class="ldh-grp-pills">${g.parts.map(p=>`<span>${esc(p.ref.slice(-1))} · ${esc(p.meta?.en_fabricacion?'Fabricación':p.lines.every(l=>num(l.qty_recibida)+1e-8>=num(l.qty_pedida))?'Completa':'Pendiente')}</span>`).join('')}</div>`;
+ mother.onclick=()=>openMother(g.gid);
+ cards.forEach(c=>c.remove());
+ });
+ // Orden persistido de tarjetas mixtas: compuestas e individuales.
+ const ordering=get('LDH_GRP_V10_CARD_ORDER');
+ if(Array.isArray(ordering)&&ordering.length){const map=new Map([...list.children].filter(x=>x.classList?.contains('item')).map(c=>[c.dataset.grp?'g:'+c.dataset.grp:'i:'+c.dataset.ref,c]));
+  for(const id of ordering){const c=map.get(id);if(c){list.appendChild(c);map.delete(id);}}
+  // Las OT nuevas conservan su posición relativa, después de las ya ordenadas.
+  for(const c of map.values())list.appendChild(c);
+ }
+}
+let dragging='';
+function enableDrag(){const list=document.getElementById('lista');if(!list||list.dataset.v10DnD)return;list.dataset.v10DnD='1';
+ list.addEventListener('dragstart',e=>{const card=e.target.closest('.ldh-grp-mother-v10');if(!card)return;e.stopImmediatePropagation();dragging=card.dataset.grp;e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','group:'+dragging);const ghost=card.cloneNode(true);ghost.style.cssText='position:fixed;top:-9999px;width:'+card.offsetWidth+'px;opacity:.94;';document.body.appendChild(ghost);e.dataTransfer.setDragImage(ghost,22,20);setTimeout(()=>{ghost.remove();card.classList.add('ldh-grp-dragging')},0);},true);
+ list.addEventListener('dragover',e=>{if(!dragging)return;const over=e.target.closest('#lista .item');if(!over)return;e.preventDefault();e.dataTransfer.dropEffect='move';over.classList.add('ldh-grp-drag-over');},true);
+ list.addEventListener('dragleave',e=>{e.target.closest?.('.ldh-grp-drag-over')?.classList.remove('ldh-grp-drag-over')},true);
+ list.addEventListener('drop',e=>{if(!dragging)return;e.stopImmediatePropagation();const target=e.target.closest('#lista .item'),src=[...list.querySelectorAll('.ldh-grp-mother-v10')].find(c=>c.dataset.grp===dragging);if(target&&src&&target!==src){e.preventDefault();list.insertBefore(src,target);put('LDH_GRP_V10_ORDER',[...list.querySelectorAll('.ldh-grp-mother-v10')].map(x=>x.dataset.grp));
+ put('LDH_GRP_V10_CARD_ORDER',[...list.children].filter(x=>x.classList?.contains('item')).map(x=>x.dataset.grp?'g:'+x.dataset.grp:'i:'+x.dataset.ref));}finishDrag();},true);
+ list.addEventListener('dragend',finishDrag,true);
+ function finishDrag(){dragging='';list.querySelectorAll('.ldh-grp-dragging,.ldh-grp-drag-over').forEach(c=>c.classList.remove('ldh-grp-dragging','ldh-grp-drag-over'));}
+}
+function host(){let e=document.getElementById('ldhGroupV10');if(!e){e=document.createElement('section');e.id='ldhGroupV10';e.hidden=true;document.getElementById('vistaLista')?.appendChild(e);}return e;}
+function preparePart(ref){
+ if(!LIVE)return false;
+ const g=findGroups().find(z=>z.parts.some(p=>p.ref===ref));if(!g)return false;
+ try{autoReconcileV8(g.gid)}catch(e){console.warn('[V12]',e)}
+ const p=g.parts.find(z=>z.ref===ref),plan=planFor(g),ledger=initLedger(g,plan);
+ const issue=legacyIssue(g,plan,ledger);if(issue)return false;
+ const part=plan.parts.find(x=>x.reference===ref);if(!part)return false;
+ const rows=cp(get('prep_recepcion_'+ref)||[]);let dirty=false;
+ for(const m of plan.materials){
+   if(!isBar(m)||!num(portion(m,part.partId)))continue;
+   const found=findLine({...p,lines:rows},m);if(!found)continue;
+   const line=found.l;
+   if(line.shared_v10&&t(line.shared_v10_group)===g.gid)continue;
+   if(num(line.qty_recibida)>0||num(line.aplicado_qty)>0||num(line.stock_consumed_qty)>0)continue;
+   const needMm=portion(m,part.partId),equivalent=needMm/6000;
+   if(!needMm||!Number.isFinite(equivalent))continue;
+   const old=num(line.qty_pedida);if(old<equivalent-1e-8)continue;
+   line.original_bar_need_v11=old;
+   line.qty_pedida=equivalent;line.pedida=equivalent;
+   line.shared_v10=true;line.shared_v10_group=g.gid;line.shared_v10_mm=needMm;
+   line.shared_v11_pending=true;line.compra_conjunta_recepcion_exclusiva_v11=true;
+   line.toBuy=false;line.compra_qty_pedida_v180=0;
+   dirty=true;
+ }
+ if(dirty){
+   const backupKey=BACK+ref;if(!get(backupKey))put(backupKey,{at:new Date().toISOString(),groupId:g.gid,lines:get('prep_recepcion_'+ref)});
+   put('prep_recepcion_'+ref,rows);
+ }
+ return dirty;
+}
+function openMother(gid){active=gid;try{autoReconcileV8(gid)}catch(e){console.warn('[V12] Migración V8 detenida',e)}renderMother(gid)}
+function closeMother(){active='';const h=host();h.hidden=true;h.innerHTML='';const list=document.getElementById('lista');if(list)list.style.display='';}
+function renderMother(gid){const g=findGroups().find(x=>x.gid===gid);if(!g)return;const plan=planFor(g),s=initLedger(g,plan),problem=legacyIssue(g,plan,s),h=host(),list=document.getElementById('lista');
+ if(list)list.style.display='none';h.hidden=false;
+ const matHtml=plan.materials.map(m=>{const rec=ledgerReceived(s,m),needed=desired(m),left=Math.max(0,needed-rec),cls=left<1e-8?'done':rec>0?'partial':'';
+ const waste=wasteInfo(g,plan,s,m);
+ const wasteText=waste?(waste.scrap?`<small class="grp-merma-v13">Merma incluida: ${fmt(waste.scrap)} mm · no se devuelve a Stock como retal</small>`:`<small class="grp-merma-v13">Sin retales recuperables</small>`):'';
+ return `<div class="grp-row ${cls}"><div><b>${esc(m.name)}</b><small style="display:block">${esc(unit(m))} · ${esc(m.ironType||'')} ${m.estimated?'· barras teóricas':''}</small>${wasteText}</div><span>${fmt(needed)}</span><span>${fmt(rec)}</span><span>${fmt(left)}</span><div class="grp-actions"><input type="number" min="0" step="${isBar(m)?1:0.001}" value="${fmt(Math.min(left,isBar(m)?1:left))}" data-qty="${esc(encodeURIComponent(m.key))}" ${problem?'disabled':''}><button data-receive-v10="${esc(encodeURIComponent(m.key))}" ${problem||left<=0||m.pletina?'disabled':''}>Recibir</button></div></div>`}).join('');
+ const groupRefs=g.parts.map(p=>{const part=plan.parts.find(x=>x.reference===p.ref),need=plan.materials.filter(m=>part&&portion(m,part.partId)>0);
+ const covered=need.filter(m=>{const a=num(s.allocated[m.key]?.[p.ref]);return a+1e-8>=(isBar(m)?portion(m,part.partId)/6000:portion(m,part.partId))});
+ return `<div class="grp-part"><b>${esc(p.ref)}</b><small>${esc(p.meta.identification||p.meta.workIdentification||p.meta.concepto||'')}</small><small style="display:block">${covered.length}/${need.length} materiales del grupo adjudicados</small><div style="margin-top:10px">${need.map(m=>{const q=isBar(m)?portion(m,part.partId)/6000:portion(m,part.partId),v=num(s.allocated[m.key]?.[p.ref]);return `<div class="grp-actions" style="margin:7px 0"><small>${esc(m.name)}: ${isBar(m)?fmt(v*6000)+' / '+fmt(q*6000)+' mm de barra común':fmt(v)+' / '+fmt(q)+' '+unit(m)}</small><button type="button" data-alloc-v10="${esc(encodeURIComponent(m.key))}" data-ref="${esc(p.ref)}" ${problem||v+1e-8>=q||m.pletina?'disabled':''}>Adjudicar</button></div>`}).join('')}</div><button type="button" data-native-v10="${esc(p.ref)}">Abrir ficha individual original</button></div>`;}).join('');
+ h.innerHTML=`<div class="grp-head"><div><h2>${esc(g.master)} · Compra y recepción conjunta</h2>${motherIdentificationHTML(g)}<small>${esc(g.company)} · ${g.parts.length} partidas · una única entrada física por recepción</small></div><button id="grpBackV10">← Volver a pedidos</button></div>
+ ${problem?`<div class="grp-warning"><b>Recepción conjunta protegida:</b> ${esc(problem)}<br>Las fichas originales siguen disponibles sin alterar las recepciones previas.${s.hasLegacyAllocations?'<br><button type="button" id="grpImportLegacyV10" style="margin-top:10px">Conciliar recepción V8 y adjudicaciones (sin duplicar)</button>':''}</div>`:''}
+ <div class="grp-section"><div class="grp-actions" style="justify-content:space-between;margin-bottom:12px"><h3 style="margin:0">Material común · Solicitar y recibir</h3><button id="grpBuyV10" type="button">📋 Copiar pedido de materiales para Compras</button></div><div class="grp-row" style="font-weight:800"><span>Material</span><span>Necesario</span><span>Recibido</span><span>Pendiente</span><span>Recepción física</span></div>${matHtml}</div>
+ <div class="grp-section"><h3>Partidas · fichas originales y adjudicación</h3><div class="grp-parts">${groupRefs}</div></div>
+ <div class="grp-section"><h3>Observaciones del conjunto</h3><textarea rows="2" id="grpNotesV10">${esc(s.notes)}</textarea><p class="grp-tiny">Cada recepción suma barras físicas enteras una sola vez; las partidas comparten sus milímetros sin nuevas entradas físicas. El sobrante menor de 6.000 mm queda protegido como merma, no como retal disponible. La salida física definitiva requiere confirmación de utilización; no se simula al enviar a Fabricación. Las recetas con solo mm totales no validan el plano de corte.</p></div>`;
+ h.querySelector('#grpBackV10').onclick=closeMother;
+ if(h.querySelector('#grpImportLegacyV10'))h.querySelector('#grpImportLegacyV10').onclick=()=>importLegacyV8(gid);
+ h.querySelector('#grpBuyV10').onclick=async()=>{
+  const lines=plan.materials.map(m=>({m,pending:Math.max(0,desired(m)-ledgerReceived(s,m))})).filter(x=>x.pending>0);
+  if(!lines.length)return alert('No hay material pendiente de solicitar.');
+  const text=['COMPRA CONJUNTA · '+g.master,'Empresa: '+g.company,'Partidas: '+g.parts.map(x=>x.ref).join(', '),'',...lines.map(x=>x.m.name+' · '+fmt(x.pending)+' '+unit(x.m))].join('\n');
+  try{await navigator.clipboard.writeText(text);alert('Solicitud conjunta copiada. Pégala en Compras; esto NO recibe material ni modifica Stock.');}
+  catch(_){const area=document.createElement('textarea');area.value=text;area.style='position:fixed;top:10px;left:10px;width:80%;height:250px;z-index:999999';document.body.appendChild(area);area.select();alert('Copia el texto seleccionado para utilizarlo en Compras.');}
+ };
+ h.querySelectorAll('[data-receive-v10]').forEach(b=>b.onclick=()=>{const key=decodeURIComponent(b.dataset.receiveV10),m=plan.materials.find(x=>x.key===key);if(m)receipt(g,plan,m,h.querySelector(`[data-qty="${b.dataset.receiveV10}"]`)?.value)});
+ h.querySelectorAll('[data-alloc-v10]').forEach(b=>b.onclick=()=>{const m=plan.materials.find(x=>x.key===decodeURIComponent(b.dataset.allocV10)),p=g.parts.find(x=>x.ref===b.dataset.ref);if(m&&p)allocation(g,plan,m,p)});
+ h.querySelectorAll('[data-native-v10]').forEach(b=>b.onclick=()=>{closeMother();if(typeof abrirPedido==='function')abrirPedido(b.dataset.nativeV10)});
+ h.querySelector('#grpNotesV10').onchange=e=>{s.notes=e.target.value;put(PRE+g.gid,s)};
+}
+let busy=false;
+function scan(){if(busy||active)return;busy=true;setTimeout(()=>{busy=false;try{motherCards();enableDrag()}catch(e){console.warn('[Grupo V10]',e)}},150)}
+function init(){if(!LIVE)return;
+ if(LOCAL&&!document.getElementById('ldhV10Badge')){const badge=document.createElement('div');badge.id='ldhV10Badge';badge.textContent='CANDIDATA V15 · BANCO LOCAL · SIN FIREBASE';badge.style.cssText='position:fixed;left:6px;bottom:4px;background:#0b1629;color:#ffe39c;border:1px solid #d59f23;padding:5px 9px;border-radius:7px;font-size:10px;font-weight:850;z-index:99999;pointer-events:none';document.body.appendChild(badge)}
+ const list=document.getElementById('lista');if(!list)return;
+ // En el banco la nube esta bloqueada por CSP: aceptar la vista local sin esperar 9s.
+ // Fuera de 127.0.0.1:8877 no se activa este cambio.
+ if(LOCAL)setTimeout(()=>{try{window.LDH_PREP_V195_SHOW_LOCAL?.();}catch(e){console.warn('[Grupo V10] Mostrar pedidos locales',e)}},1100);
+ scan();new MutationObserver(ms=>{if(ms.some(m=>[...m.addedNodes].some(n=>n.nodeType===1&&n.classList?.contains('item')&&!n.classList.contains('ldh-grp-mother-v10'))))scan()}).observe(list,{childList:true});}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+window.LDH_GroupV16API={findGroups,planFor,openMother,closeMother,renderMother,initLedger,legacyIssue,stock,target,preparePart,groupAssignment,getMasterRow,physical,isBar,desired,portion,unit};
+window.LDH_GroupV12={findGroups,planFor,openMother,closeMother,receipt,allocation,importLegacyV8,autoReconcileV8,recoverV8Physical,renderMother,initLedger,legacyIssue,stock,target,preparePart};
+window.LDH_GroupV11=window.LDH_GroupV12;window.LDH_GroupV10=window.LDH_GroupV12;
+})();
+</script>
 </body></html>
