@@ -25385,10 +25385,66 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
           line._cleaned_test_consumption_at = line._cleaned_test_consumption_at || new Date().toISOString();
           return changed;
         }
+        /* V30: conciliar SOLO pletina que Stock comun confirma para la OT
+           y cuya adjudicacion es posterior a Limpiar prueba. No crear Stock,
+           no tocar reservas y no rehabilitar adjudicaciones canceladas. */
+        function confirmPletinaCommonV30(line, ref){
+          if(!line || !ref || String(line.unit||line.unidad||'').trim().toLowerCase()!=='mm')return false;
+          const cloud=window.__LDH_PREP_STOCK_CLOUD_DB;
+          if(!cloud || !Array.isArray(cloud.assignments))return false;
+          const requested=n(line.qty_pedida);
+          if(!(requested>0))return false;
+          const id=String(line.linked_matId||line.stockMatId||line.matId||line.stockLinkId||'').trim();
+          if(!id)return false;
+          const registry=readRegistry(),refRegistry=registry[ref]||{};
+          const allStamps=[
+            line._ldh_cleanup_tombstone_v62_at,
+            line._ldh_test_cleanup_v60_at,
+            line._cleaned_test_consumption_v57_at,
+            line._cleaned_test_consumption_at,
+            ...keysFor(line).map(k=>refRegistry[k])
+          ];
+          const cleanupAt=Math.max(0,...allStamps.map(v=>Date.parse(String(v||''))||0));
+          const candidates=cloud.assignments.filter(a=>{
+            if(!a || !['activa','active'].includes(String(a.status||a.estado||'activa').toLowerCase()))return false;
+            if(String(a.consumerRef||a.ref||a.jobRef||'').trim()!==ref)return false;
+            if(String(a.materialId||a.matId||'').trim()!==id)return false;
+            if(String(a.source||'')!=='preparacion_pedidos_stock_comun' &&
+               String(a.assignmentType||'')!=='stock_comun_pletina_mm')return false;
+            const created=Date.parse(String(a.createdAt||a.date||''))||0;
+            return created>0 && (!cleanupAt || created>cleanupAt);
+          });
+          if(!candidates.length)return false;
+          const assigned=Math.min(requested,candidates.reduce((sum,a)=>sum+Math.max(0,n(a.mmAllocated??a.qty??a.cantidad)),0));
+          if(!(assigned>0))return false;
+          let changed=false;
+          if(isLocked(line,ref)){
+            clearLock(line,ref);
+            changed=true;
+          }
+          if(Math.abs(n(line.qty_recibida)-assigned)>0.000001){
+            line.qty_recibida=assigned;line.recibida=assigned;
+            line.aplicado_qty=assigned;line.stock_consumed_qty=assigned;
+            line.ok=assigned+0.000001>=requested;
+            line.completo=line.ok;line.done=line.ok;line.isDone=line.ok;line.isCompleted=line.ok;
+            changed=true;
+          }
+          const trace=Array.isArray(line.trace)?line.trace:(line.trace=[]);
+          const latest=candidates.find(a=>n(a.mmAllocated??a.qty??a.cantidad)>0);
+          if(latest && !trace.some(x=>x.source==='stock_comun' && String(x.assignmentId||'')===String(latest.id||''))){
+            trace.push({source:'stock_comun',assignmentId:String(latest.id||''),qty:assigned,
+              at:new Date().toISOString(),reconciledV30:true,stockMovement:false});
+            changed=true;
+          }
+          return changed;
+        }
         function enforceAll(){
           let changed = false;
           const ref = currentRef();
           linesNow().forEach(line => {
+            // La verificacion no crea nuevas adjudicaciones; usa el Stock nube
+            // que ya ha confirmado la operacion de esta referencia exacta.
+            changed=confirmPletinaCommonV30(line,ref)||changed;
             if(isLocked(line, ref)){
               if(!line._ldh_cleanup_tombstone_v62_at) setLock(line, ref);
               changed = forceZero(line) || changed;
