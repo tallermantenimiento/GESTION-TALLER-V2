@@ -36221,10 +36221,32 @@ async function stockComunMotherV22Worker(gid,encodedKey){
  const ledger=initLedger(g,plan),pending=Math.max(0,desired(m)-groupReceivedV19(g,plan,ledger,m));
  if(pending<=1e-7){alert('Esta pletina ya esta cubierta en el conjunto.');return;}
  const jobs=[],issues=[];
+ // V25: antes de descontar pletina, conciliar las asignaciones vigentes con la necesidad real.
+ // Una ficha individual puede indicar cero recibido aunque Stock tenga asignaciones activas.
+ // No se modifica ninguna asignacion previa: ante discrepancias, bloquear la operacion.
+ const cloudDb=window.__LDH_PREP_STOCK_CLOUD_DB;
+ const safeDb=cloudDb&&Array.isArray(cloudDb.assignments)?cloudDb:null;
+ if(!safeDb)throw Error('No se ha podido verificar el listado de adjudicaciones activas de Stock en nube. No se ha descontado Stock.');
+ const activeAssignments=safeDb.assignments.filter(a=>{
+  const status=nn(a?.status||a?.estado||'activa');
+  const materialId=t(a?.materialId||a?.matId);
+  const lineKey=nn(a?.consumerLineKey||'');
+  const materialName=nn(a?.consumerMaterialLabel||a?.materialName||'');
+  return ['activa','active'].includes(status)&&
+   (materialId&&materialId===t(m.linked)||lineKey===nn(m.name+'|mm')||materialName===nn(m.name))&&
+   t(a?.consumerRef||a?.ref||a?.jobRef).startsWith(g.master+'-')&&
+   (nn(a?.source)==='preparacion_pedidos_stock_comun'||nn(a?.assignmentType)==='stock_comun_pletina_mm');
+ });
  for(const part of plan.parts){
   const p=g.parts.find(x=>x.ref===part.reference);
   if(!p){issues.push(part.reference+': falta la ficha original.');continue;}
   const needed=portion(m,part.partId);if(needed<=1e-7)continue;
+  const already=activeAssignments.filter(a=>t(a.consumerRef||a.ref||a.jobRef)===p.ref);
+  const allocatedInStock=already.reduce((sum,a)=>sum+num(a.qty??a.cantidad),0);
+  if(allocatedInStock>needed+1e-7){
+   issues.push(p.ref+': Stock tiene '+fmt(allocatedInStock)+' mm activos para '+fmt(needed)+' mm necesarios ('+already.length+' adjudicaciones). Revisar duplicados antes de continuar.');
+   continue;
+  }
   const freshRows=get('prep_recepcion_'+p.ref);
   const current={...p,lines:Array.isArray(freshRows)?freshRows:p.lines};
   const hit=findLine(current,m);
