@@ -35796,14 +35796,36 @@ function partCommonStockMmV19(g,plan,s,m,p){
  if(!part)return 0;
  const requested=portion(m,part.partId),assigned=num(s.allocated?.[m.key]?.[p.ref]);
  if(requested<=assigned+1e-8)return 0;
+ // V26: preferir la recepción trazada y confirmada en nube, aunque
+ // localStorage conserve una copia anterior con cero recibido.
  const rows=get('prep_recepcion_'+p.ref)||p.lines||[];
  const hit=findLine({...p,lines:Array.isArray(rows)?rows:[]},m);
- if(!hit)return 0;
- const line=hit.l;
- const traced=(Array.isArray(line.trace)?line.trace:[])
+ const line=hit?.l;
+ const traced=line?(Array.isArray(line.trace)?line.trace:[])
    .filter(x=>nn(x?.source)==='stock_comun')
-   .reduce((v,x)=>v+num(x.qty),0);
- return Math.max(0,Math.min(traced,requested-assigned,num(line.qty_recibida)-assigned));
+   .reduce((v,x)=>v+num(x.qty),0):0;
+ let result=Math.max(0,Math.min(traced,requested-assigned,num(line?.qty_recibida)-assigned));
+ const cloud=window.__LDH_PREP_STOCK_CLOUD_DB;
+ if(cloud&&Array.isArray(cloud.assignments)){
+  const activeIds=new Set(cloud.assignments.filter(a=>
+   ['activa','active'].includes(nn(a?.status||a?.estado||'activa')) &&
+   t(a?.consumerRef||a?.ref||a?.jobRef)===p.ref &&
+   t(a?.materialId||a?.matId)===t(m.linked) &&
+   (nn(a?.source)==='preparacion_pedidos_stock_comun'||nn(a?.assignmentType)==='stock_comun_pletina_mm')
+  ).map(a=>t(a.id)));
+  for(const st of [sessionStorage,localStorage]){
+   let candidate=null;
+   try{candidate=JSON.parse(st.getItem('prep_recepcion_'+p.ref)||'null')}catch(_){}
+   if(!Array.isArray(candidate))continue;
+   const found=findLine({...p,lines:candidate},m);
+   if(!found)continue;
+   const l=found.l,matching=(Array.isArray(l.trace)?l.trace:[])
+    .filter(x=>nn(x?.source)==='stock_comun'&&activeIds.has(t(x?.assignmentId)));
+   const confirmed=matching.reduce((sum,x)=>sum+num(x.qty),0);
+   result=Math.max(result,Math.max(0,Math.min(confirmed,requested-assigned,num(l.qty_recibida)-assigned)));
+  }
+ }
+ return result;
 }
 function groupCommonStockMmV19(g,plan,s,m){return m?.pletina?g.parts.reduce((total,p)=>total+partCommonStockMmV19(g,plan,s,m,p),0):0}
 function groupReceivedV19(g,plan,s,m){return Math.min(desired(m),ledgerReceived(s,m)+groupCommonStockMmV19(g,plan,s,m))}
@@ -36219,7 +36241,6 @@ async function stockComunMotherV22Worker(gid,encodedKey){
  const m=plan.materials.find(x=>x.key===decodeURIComponent(encodedKey||''));
  if(!m||!m.pletina)throw Error('No se encuentra la pletina seleccionada en el plan del grupo. No se ha descontado Stock.');
  const ledger=initLedger(g,plan),pending=Math.max(0,desired(m)-groupReceivedV19(g,plan,ledger,m));
- if(pending<=1e-7){alert('Esta pletina ya esta cubierta en el conjunto.');return;}
  const jobs=[],issues=[];
  // V25: antes de descontar pletina, conciliar las asignaciones vigentes con la necesidad real.
  // Una ficha individual puede indicar cero recibido aunque Stock tenga asignaciones activas.
@@ -36258,6 +36279,7 @@ async function stockComunMotherV22Worker(gid,encodedKey){
   if(left>individual+1e-7){issues.push(p.ref+': el conjunto necesita '+fmt(left)+' mm y la ficha individual solo tiene '+fmt(individual)+' mm pendientes.');continue;}
   if(left>1e-7)jobs.push({ref:p.ref,qty:left});
  }
+ if(!issues.length&&pending<=1e-7){alert('Esta pletina ya esta cubierta en el conjunto.');return;}
  if(issues.length){
   alert('No se ha descontado Stock. Discrepancias detectadas:\n\n'+issues.join('\n')+'\n\nLas adjudicaciones anteriores siguen intactas.');
   return;
