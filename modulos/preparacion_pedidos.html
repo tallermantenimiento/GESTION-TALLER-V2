@@ -8334,19 +8334,19 @@ function LDH_stockComunCerrarModal(){
   const el = document.getElementById("ldhStockComunModal");
   if(el) el.remove();
 }
-async function LDH_stockComunAplicar(index, qty){
+async function LDH_stockComunAplicar(index, qty, options={}){
   const line = estadoMateriales[index];
-  if(!line) return;
+  if(!line) return false;
   const info = LDH_stockComunInfoParaLinea(line);
-  if(!info.ok){ alert(info.reason || "STOCK COMÚN no disponible."); return; }
+  if(!info.ok){ alert(info.reason || "STOCK COMÚN no disponible."); return false; }
 
   const pedida = toNum(line.qty_pedida);
   const recibida = toNum(line.qty_recibida);
   const falta = Math.max(0, pedida - recibida);
   qty = Math.max(0, toNum(qty));
-  if(falta <= 0){ alert("Esta línea ya está completa."); return; }
-  if(qty <= 0 || qty > falta){ alert("La cantidad debe estar entre 1 y " + falta + "."); return; }
-  if(qty > info.free){ alert("STOCK COMÚN solo tiene " + info.free + " disponible."); return; }
+  if(falta <= 0){ alert("Esta línea ya está completa."); return false; }
+  if(qty <= 0 || qty > falta){ alert("La cantidad debe estar entre 1 y " + falta + "."); return false; }
+  if(qty > info.free){ alert("STOCK COMÚN solo tiene " + info.free + " disponible."); return false; }
 
   const consumerName = _v2GetPedidoEmpresa();
   const consumerCompany = _v2FindCompany(info.pack, consumerName);
@@ -8380,7 +8380,7 @@ async function LDH_stockComunAplicar(index, qty){
       if(pos >= 0) arr.splice(pos,1);
     }
     alert("No se ha podido guardar la asignación de STOCK COMÚN.");
-    return;
+    return false;
   }
 
   /*
@@ -8405,7 +8405,7 @@ async function LDH_stockComunAplicar(index, qty){
       "No se ha descontado nada del pedido ni del Stock.\n\n" +
       String((e && (e.code || e.message)) || e || "Error de sincronización")
     );
-    return;
+    return false;
   }
 
   const nuevaRecibida = Math.min(pedida || (recibida + qty), recibida + qty);
@@ -8437,7 +8437,8 @@ async function LDH_stockComunAplicar(index, qty){
   try{ saveMetaActual(); }catch(e){}
   renderTabla();
   cargarLista();
-  alert("✅ Asignado desde STOCK COMÚN sin generar deuda ni devolución.");
+  if(!options.silent)alert("✅ Asignado desde STOCK COMÚN sin generar deuda ni devolución.");
+  return true;
 }
 function LDH_asignarStockComunSeguro(index){
   const line = estadoMateriales[index];
@@ -36201,12 +36202,65 @@ function showBackToMother(ref){
  }
 }
 function closeMother(){active='';const h=host();h.hidden=true;h.innerHTML='';const list=document.getElementById('lista');if(list)list.style.removeProperty('display');const groups=document.getElementById('ldhCompraGrupos');if(groups&&document.getElementById('ldhTabGroups')?.classList.contains('active'))groups.classList.remove('hidden');}
+
+/* V21: Adjudicacion desde Stock comun en ficha madre.
+ * Reutiliza el flujo individual ya publicado y su confirmacion Firebase.
+ * No crea movimientos fisicos ni duplica reservas; nunca recibe por ambas vias. */
+let stockComunMotherBusyV21=false;
+async function stockComunMotherV21(gid,encodedKey){
+ if(stockComunMotherBusyV21)return;
+ const g=findGroups().find(x=>x.gid===gid);if(!g)return;
+ const plan=planFor(g),m=plan.materials.find(x=>x.key===decodeURIComponent(encodedKey||''));
+ if(!m||!m.pletina)return;
+ const s=initLedger(g,plan);
+ const pending=Math.max(0,desired(m)-groupReceivedV19(g,plan,s,m));
+ if(pending<=1e-7){alert('Esta pletina ya esta cubierta en el conjunto.');return;}
+ const jobs=[];
+ for(const part of plan.parts){
+  const p=g.parts.find(x=>x.ref===part.reference);if(!p)continue;
+  const hit=findLine(p,m);if(!hit)continue;
+  const prior=num(s.allocated?.[m.key]?.[p.ref])+partCommonStockMmV19(g,plan,s,m,p);
+  const need=Math.max(0,portion(m,part.partId)-prior);
+  const individualPending=Math.max(0,num(hit.l.qty_pedida)-num(hit.l.qty_recibida));
+  const take=Math.min(need,individualPending);
+  if(take>1e-7)jobs.push({ref:p.ref,qty:take});
+ }
+ if(!jobs.length){alert('No hay pletina pendiente en las fichas individuales. Comprueba la sincronizacion de la ficha madre.');return;}
+ if(!confirm('STOCK COMUN - '+m.name+'\n\nSe adjudicaran automaticamente hasta '+fmt(jobs.reduce((x,y)=>x+y.qty,0))+' mm entre las partidas pendientes, siempre que existan libres.\n\nSe descontara del Stock comun mediante las asignaciones individuales existentes. No se registrara compra.\n\n¿Continuar?'))return;
+ stockComunMotherBusyV21=true;
+ let total=0,done=0,error='';
+ try{
+  for(const job of jobs){
+   // Preparar el contexto original de cada partida antes de llamar a la
+   // adjudicacion normal: misma empresa, ficha, linea y referencia real.
+   if(typeof abrirPedido!=='function')throw Error('La apertura de fichas individuales no esta disponible.');
+   abrirPedido(job.ref);
+   const idx=estadoMateriales.findIndex(l=>nn(l.mat||l.material||l.name)===nn(m.name)&&nn(l.unit||l.unidad)==='mm');
+   if(idx<0)throw Error('No se ha encontrado la pletina en '+job.ref);
+   const info=LDH_stockComunInfoParaLinea(estadoMateriales[idx]);
+   if(!info.ok)throw Error(info.reason||'Stock comun no disponible.');
+   const available=Math.min(job.qty,Math.max(0,num(info.free)));
+   if(available<=1e-7)break;
+   // El helper existente comprueba nuevamente el disponible y espera a Firebase.
+   const ok=await LDH_stockComunAplicar(idx,available,{silent:true});
+   if(ok!==true)throw Error('No se ha confirmado la adjudicacion de '+job.ref+'. Revisa la ficha antes de repetir.');
+   total+=available;done++;
+  }
+ }catch(e){error=String(e?.message||e);console.error('[Stock comun conjunto V21]',e);}
+ finally{
+  stockComunMotherBusyV21=false;
+  try{if(typeof volverLista==='function')volverLista();}catch(e){}
+  try{openMother(gid);}catch(e){console.warn('[Stock comun conjunto V21] Error al volver a la ficha',e);}
+ }
+ const text='STOCK COMUN: '+fmt(total)+' mm adjudicados en '+done+' partida(s).'+(error?'\n\nAviso: '+error+'\nComprueba lo ya adjudicado antes de repetir.':'');
+ alert(text);
+}
 function renderMother(gid){const g=findGroups().find(x=>x.gid===gid);if(!g)return;const plan=planFor(g),s=initLedger(g,plan),problem=legacyIssue(g,plan,s),h=host(),list=document.getElementById('lista');
  if(list)list.style.display='none';document.getElementById('ldhCompraGrupos')?.classList.add('hidden');h.hidden=false;
  const matHtml=plan.materials.map(m=>{const rec=groupReceivedV19(g,plan,s,m),needed=desired(m),left=Math.max(0,needed-rec),cls=left<1e-8?'done':rec>0?'partial':'';
  const waste=wasteInfo(g,plan,s,m);
  const wasteText=waste?(waste.scrap?`<small class="grp-merma-v13">Merma incluida: ${fmt(waste.scrap)} mm · no se devuelve a Stock como retal</small>`:`<small class="grp-merma-v13">Sin retales recuperables</small>`):'';
- return `<div class="grp-row ${cls}"><div><b>${esc(m.name)}</b><small style="display:block">${esc(unit(m))} · ${esc(m.ironType||'')} ${m.estimated?'· barras teóricas':''}${groupCommonStockMmV19(g,plan,s,m)>0?' · desde Stock común':''}</small>${wasteText}</div><span>${fmt(needed)}</span><span>${fmt(rec)}</span><span>${fmt(left)}</span><div class="grp-actions"><input type="number" min="0" step="${isBar(m)?1:0.001}" value="${fmt(left)}" data-qty="${esc(encodeURIComponent(m.key))}" ${problem?'disabled':''}><button data-receive-v10="${esc(encodeURIComponent(m.key))}" ${problem||left<=0||(!window.LDH_COMP_NO_STOCK_V17&&m.pletina)?'disabled':''}>Recibir</button></div></div>`}).join('');
+ return `<div class="grp-row ${cls}"><div><b>${esc(m.name)}</b><small style="display:block">${esc(unit(m))} · ${esc(m.ironType||'')} ${m.estimated?'· barras teóricas':''}${groupCommonStockMmV19(g,plan,s,m)>0?' · desde Stock común':''}</small>${wasteText}</div><span>${fmt(needed)}</span><span>${fmt(rec)}</span><span>${fmt(left)}</span><div class="grp-actions"><input type="number" min="0" step="${isBar(m)?1:0.001}" value="${fmt(left)}" data-qty="${esc(encodeURIComponent(m.key))}" ${problem?'disabled':''}><button data-receive-v10="${esc(encodeURIComponent(m.key))}" ${problem||left<=0||(!window.LDH_COMP_NO_STOCK_V17&&m.pletina)?'disabled':''}>${m.pletina?'Recibir compra':'Recibir'}</button>${m.pletina?`<button type="button" data-common-v21="${esc(encodeURIComponent(m.key))}" ${problem||left<=0?'disabled':''}>Stock común</button>`:''}</div></div>`}).join('');
  const groupRefs=g.parts.map(p=>{const part=plan.parts.find(x=>x.reference===p.ref),need=plan.materials.filter(m=>part&&portion(m,part.partId)>0);
  const covered=need.filter(m=>{const a=num(s.allocated[m.key]?.[p.ref])+partCommonStockMmV19(g,plan,s,m,p);return a+1e-8>=(isBar(m)?portion(m,part.partId)/6000:portion(m,part.partId))});
  return `<div class="grp-part"><b>${esc(p.ref)}</b><small>${esc(p.meta.identification||p.meta.workIdentification||p.meta.concepto||'')}</small><small style="display:block">${covered.length}/${need.length} materiales del grupo adjudicados</small><div style="margin-top:10px">${need.map(m=>{const q=isBar(m)?portion(m,part.partId)/6000:portion(m,part.partId),v=num(s.allocated[m.key]?.[p.ref])+partCommonStockMmV19(g,plan,s,m,p);return `<div class="grp-actions" style="margin:7px 0"><small>${esc(m.name)}: ${isBar(m)?fmt(v*6000)+' / '+fmt(q*6000)+' mm de barra común':fmt(v)+' / '+fmt(q)+' '+unit(m)}</small><button type="button" data-alloc-v10="${esc(encodeURIComponent(m.key))}" data-ref="${esc(p.ref)}" ${problem||v+1e-8>=q||(!window.LDH_COMP_NO_STOCK_V17&&m.pletina)?'disabled':''}>Adjudicar</button></div>`}).join('')}</div><button type="button" data-native-v10="${esc(p.ref)}">Abrir ficha individual original</button></div>`;}).join('');
@@ -36224,6 +36278,7 @@ function renderMother(gid){const g=findGroups().find(x=>x.gid===gid);if(!g)retur
   try{await navigator.clipboard.writeText(text);alert('Solicitud conjunta copiada. Pégala en Compras; esto NO recibe material ni modifica Stock.');}
   catch(_){const area=document.createElement('textarea');area.value=text;area.style='position:fixed;top:10px;left:10px;width:80%;height:250px;z-index:999999';document.body.appendChild(area);area.select();alert('Copia el texto seleccionado para utilizarlo en Compras.');}
  };
+ h.querySelectorAll('[data-common-v21]').forEach(b=>b.onclick=()=>stockComunMotherV21(gid,b.dataset.commonV21));
  h.querySelectorAll('[data-receive-v10]').forEach(b=>b.onclick=()=>{const key=decodeURIComponent(b.dataset.receiveV10),m=plan.materials.find(x=>x.key===key);if(m)receipt(g,plan,m,h.querySelector(`[data-qty="${b.dataset.receiveV10}"]`)?.value)});
  h.querySelectorAll('[data-alloc-v10]').forEach(b=>b.onclick=()=>{const m=plan.materials.find(x=>x.key===decodeURIComponent(b.dataset.allocV10)),p=g.parts.find(x=>x.ref===b.dataset.ref);if(m&&p)allocation(g,plan,m,p)});
  h.querySelectorAll('[data-native-v10]').forEach(b=>b.onclick=()=>{closeMother();if(typeof abrirPedido==='function')abrirPedido(b.dataset.nativeV10)});
