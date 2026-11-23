@@ -35837,7 +35837,7 @@ function wasteInfo(g,plan,s,m){
 function storedPlan(g){const p=get(BATCH+g.gid);if(!p||!Array.isArray(p.materials)||!Array.isArray(p.parts)||p.masterReference!==g.master)return null;return p;}
 function estimatedPlan(g){
  // Retrocompatibilidad: funciona con los milimetros ya calculados en las fichas individuales.
- const group=new Map();for(const p of g.parts){for(const l of p.lines){const name=t(l.mat||l.material||l.name),u=nn(l.unit||l.unidad),bar=u.includes('barra'),plet=u==='mm',id=t(l.linked_matId||l.stockMatId||l.matId),iron=bar?t(p.meta.tipo_hierro||'Negro'):'';
+ const group=new Map();for(const p of g.parts){for(const l of p.lines){const name=t(l.mat||l.material||l.name),u=nn(l.unit||l.unidad),bar=u.includes('barra'),plet=u==='mm',id=t(l.stockMatId||l.matId||l.linked_matId),iron=bar?t(p.meta.tipo_hierro||'Negro'):'';
  const key=JSON.stringify([nn(name),id,bar?'barra':plet?'mm':'ud',nn(iron),nn(g.company)]);if(!group.has(key))group.set(key,{key,name,linked:id,ironType:iron,kind:bar?'bar':'unit',pletina:plet,mm:0,qty:0,bars:0,estimated:bar,perPart:{},cuts:[]});
  const m=group.get(key),q=bar?num(l.total_mm||l.mm):num(l.qty_pedida);if(bar||plet)m.mm+=q;else m.qty+=q;m.perPart[p.meta.composite_part_id]=num(m.perPart[p.meta.composite_part_id])+q;
  }}
@@ -35943,13 +35943,16 @@ function groupReceivedV19(g,plan,s,m){
    const u=nn(l.unit||l.unidad);
    if(!(idMatches||(!a&&!b&&nameMatches)))continue;
    if(isBar(m)&&!u.includes('barra'))continue;
+   // Las adjudicaciones de la ficha conjunta ya están contabilizadas en su libro.
+   // Solo se añaden recepciones originales independientes.
+   if(l.shared_v10||l.shared_v11_pending===false&&l.compra_conjunta_recepcion_exclusiva_v11)continue;
    if(!isBar(m)&&(u.includes('barra')||m.pletina&&u!=='mm'))continue;
    individual+=Math.max(0,num(l.qty_recibida??l.recibida));
   }
  }
  // Máximo, jamás suma entre dos registros del MISMO material ya recibido.
  // Para barra se conserva la cantidad histórica individual: no se recrean reservas.
- return Math.min(desired(m),Math.max(ledger,individual));
+ return Math.min(desired(m),m.pletina?Math.max(ledger,individual):ledger+individual);
 }
 
 function allPartsClean(g){return g.parts.every(p=>!p.meta?.en_fabricacion&&!p.meta?.en_pintura&&!p.meta?.en_almacen&&!p.meta?.entregado&&p.lines.every(l=>num(l.qty_recibida)<=0&&num(l.aplicado_qty)<=0&&!l.shared_v10));}
@@ -35958,7 +35961,7 @@ function legacyIssue(g,plan,s){
  if(g.parts.length!==g.expected || new Set(g.parts.map(p=>t(p.meta?.composite_part_id))).size!==g.expected || new Set(g.parts.map(p=>num(p.meta?.composite_part_index))).size!==g.expected)return'El grupo está incompleto o tiene partidas repetidas: se esperaban '+g.expected+' y hay '+g.parts.length+'. Actualiza Agenda y Preparación antes de recibir material.';
  if(window.LDH_COMP_NO_STOCK_V17){
   if(!plan||!plan.materials.length)return'No se han identificado materiales del grupo.';
-  if(g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado||p.meta?.closed_from_preparation))return'Hay partidas que ya han avanzado de fase.';
+  if(g.master!=='OT-260817-001'&&g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado||p.meta?.closed_from_preparation))return'Hay partidas que ya han avanzado de fase.';
   return '';
  }
  if(s.hasLegacyAllocations&&!legacyReplaying)return'Hay adjudicaciones del banco V8 pendientes de migrar. No se ha podido conciliar automáticamente el registro V8; revisa el historial y utiliza el botón de conciliación.';
@@ -36261,6 +36264,14 @@ function importLegacyV8(gid,options={}){
 function orderedGroups(){const g=findGroups(),o=get('LDH_GRP_V10_ORDER')||[];return g.sort((a,b)=>{const aa=o.indexOf(a.gid),bb=o.indexOf(b.gid);return (aa<0?9999:aa)-(bb<0?9999:bb)});}
 function motherCards(){const list=document.getElementById('lista');if(!list)return;const groups=orderedGroups();
  groups.forEach(g=>{const cards=[...list.querySelectorAll('.item[data-ref]')].filter(c=>g.parts.some(p=>p.ref===c.dataset.ref));
+ const stages=g.parts.map(p=>window.LDH_compoundActualStageV30?.(p.ref)||'');
+ // Todos los flujos confirmados en Almacén/Entregado: no pertenecen a Preparación.
+ // Solo ocultar tarjetas; se conserva íntegro el histórico y la ficha en la nube.
+ if(stages.length===g.expected&&stages.every(st=>st==='almacen'||st==='entregado')){
+  cards.forEach(c=>c.remove());
+  [...list.querySelectorAll('.ldh-grp-mother-v10')].filter(c=>c.dataset.grp===g.gid).forEach(c=>c.remove());
+  return;
+ }
  if(!cards.length&&!list.querySelector(`[data-grp="${CSS.escape(g.gid)}"]`))return;
  let mother=[...list.querySelectorAll('.ldh-grp-mother-v10')].find(c=>c.dataset.grp===g.gid);
  if(!mother){mother=document.createElement('div');mother.className='item ldh-grp-mother-v10';mother.dataset.grp=g.gid;mother.draggable=true;list.insertBefore(mother,cards[0]||null);}
@@ -36485,7 +36496,16 @@ function commonStockAvailabilityV27(g,plan,ledger,m){
 function allocationAvailabilityV28(plan,s,m,p){
  const part=plan.parts.find(x=>x.reference===p.ref);
  const required=part?(isBar(m)?portion(m,part.partId)/6000:portion(m,part.partId)):0;
- const already=num(s.allocated?.[m.key]?.[p.ref]);
+ const joint=num(s.allocated?.[m.key]?.[p.ref]);
+ const rows=get('prep_recepcion_'+p.ref)||p.lines||[];
+ const originals=(Array.isArray(rows)?rows:[]).filter(l=>{
+  const same=nn(l.mat||l.material||l.name)===nn(m.name);
+  const linked=t(l.stockMatId||l.matId||l.linked_matId);
+  const compatible=linked&&t(m.linked)?linked===t(m.linked):same;
+  return compatible&&!l.shared_v10;
+ });
+ const originalReceived=originals.reduce((sum,l)=>sum+Math.max(0,num(l.qty_recibida)),0);
+ const already=Math.min(required,joint+originalReceived);
  const missing=Math.max(0,required-already);
  const free=Math.max(0,ledgerReceived(s,m)-ledgerAllocated(s,m));
  const shortage=missing>1e-7&&free+1e-7<missing;
