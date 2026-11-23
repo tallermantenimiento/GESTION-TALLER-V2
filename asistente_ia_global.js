@@ -532,7 +532,7 @@
     const phaseEntries=new Map();
     const normalizeWorkRef=value=>{
       const raw=text(value).toUpperCase();
-      const m=raw.match(/\\bOT[\\s_-]*(\\d{6})[\\s_-]*(\\d{3})(?:[-_]([A-Z]{1,3}))?/);
+      const m=raw.match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[-_]([A-Z]{1,3}))?/);
       return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):norm(raw);
     };
     Object.values(pkg.phaseFlowV19||{}).forEach(entry=>{
