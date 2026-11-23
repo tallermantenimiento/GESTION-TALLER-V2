@@ -539,19 +539,35 @@
       const meta=parseJson(pkg.prepMeta?.[ref],{})||{};
       if(meta.deleted||meta.eliminado||meta.eliminado_modulos||meta.archived)return;
       const flow=(it.flow&&typeof it.flow==='object')?it.flow:((meta.flow&&typeof meta.flow==='object')?meta.flow:{});
-      const FAB=firstNumber(flow,['fab','fabricacion'])||firstNumber(it,['fab','enFabricacion','fabricacion'])||firstNumber(meta,['fab','enFabricacion','fabricacion']);
-      const PINT=firstNumber(flow,['pintura','pint'])||firstNumber(it,['pintura','enPintura'])||firstNumber(meta,['pintura','enPintura']);
-      const ALM=firstNumber(flow,['almacen','alm'])||firstNumber(it,['almacen','enAlmacen'])||firstNumber(meta,['almacen','enAlmacen']);
-      const ENT=firstNumber(flow,['entregado','ent'])||firstNumber(it,['entregado','enEntregado'])||firstNumber(meta,['entregado','enEntregado']);
-      let fase=text(firstValue(meta,['fase','estado','status'],firstValue(it,['fase','estado','status'],'')));
+      // R28: las cantidades del flujo tienen prioridad INCLUIDOS LOS CEROS.
+      // Los flags/fechas de Preparación son históricos, no ubicación actual.
+      const hasQty=(o,keys)=>o&&typeof o==='object'&&keys.some(k=>o[k]!==undefined&&o[k]!==null&&o[k]!=='');
+      const qty=(o,keys)=>{const key=keys.find(k=>o?.[k]!==undefined&&o[k]!==null&&o[k]!=='');return key===undefined?0:Math.max(0,Number(o[key])||0);};
+      const hasFlow=hasQty(flow,['fab','fabricacion','pintura','pint','almacen','alm','entregado','ent']);
+      const hasItemQty=hasQty(it,['fab','enFabricacion','fabricacion','pintura','enPintura','almacen','enAlmacen','entregado','enEntregado']);
+      const src=hasFlow?flow:hasItemQty?it:meta;
+      const FAB=qty(src,hasFlow?['fab','fabricacion']:['fab','enFabricacion','fabricacion']);
+      const PINT=qty(src,['pintura','pint','enPintura']);
+      const ALM=qty(src,['almacen','alm','enAlmacen']);
+      const ENT=qty(src,['entregado','ent','enEntregado']);
+      const flowKnown=hasFlow||hasItemQty;
+      let fase=text(firstValue(it,['fase','estado','status'],firstValue(meta,['fase','estado','status'],'')));
       const nf=norm(fase);
       const flags=[];
-      if(FAB>0||meta.en_fabricacion||meta.fabricacion_ts||nf.includes('fabric'))flags.push('FAB');
-      if(PINT>0||meta.en_pintura||meta.pintura_ts||nf.includes('pint'))flags.push('PINT');
-      if(ALM>0||meta.en_almacen||meta.almacen_ts||nf.includes('almacen'))flags.push('ALM');
-      if(ENT>0||meta.entregado||meta.en_entregado||meta.entregado_ts||nf.includes('entreg'))flags.push('ENT');
-      if(!flags.length&&/esperando.*material|waiting.*material/.test(nf))flags.push('ESPERANDO MATERIAL');
-      if(!flags.length)flags.push('PREP');
+      if(flowKnown){
+        if(FAB>0)flags.push('FAB');
+        if(PINT>0)flags.push('PINT');
+        if(ALM>0)flags.push('ALM');
+        if(ENT>0)flags.push('ENT');
+        fase=flags.length?flags.map(x=>({FAB:'Fabricación',PINT:'Pintura',ALM:'Almacén',ENT:'Entregado'}[x])).join(' + '):'Sin unidades en fases activas';
+      }else{
+        if(meta.en_fabricacion||meta.fabricacion_ts||nf.includes('fabric'))flags.push('FAB');
+        if(meta.en_pintura||meta.pintura_ts||nf.includes('pint'))flags.push('PINT');
+        if(meta.en_almacen||meta.almacen_ts||nf.includes('almacen'))flags.push('ALM');
+        if(meta.entregado||meta.en_entregado||meta.entregado_ts||nf.includes('entreg'))flags.push('ENT');
+        if(!flags.length&&/esperando.*material|waiting.*material/.test(nf))flags.push('ESPERANDO MATERIAL');
+        if(!flags.length)flags.push('PREP');
+      }
       const recep=parseJson(pkg.prepRecepcion?.[ref],[]);
       let lineas=0,materialPendiente=0;
       if(Array.isArray(recep)){
@@ -669,6 +685,15 @@
     const flow=compactFlowRows(userText);
     const orders=compactOrderRows(userText);
     const agenda=compactAgendaRows(userText);
+    // R28: no ofrecer a la IA estados antiguos de Agenda si el flujo tiene
+    // cantidades actuales para la misma referencia.
+    const byRef=new Map(flow.rows.map(r=>[norm(r.ref),r]));
+    orders.rows.forEach(o=>{
+      const f=byRef.get(norm(o.ref));
+      if(f&&Array.isArray(f.pills)&&f.pills.some(x=>['FAB','PINT','ALM','ENT'].includes(x))){
+        o.estado=f.fase;o.FAB=f.FAB;o.PINT=f.PINT;o.ALM=f.ALM;o.ENT=f.ENT;
+      }
+    });
     return {
       timestamp:new Date().toISOString(),
       modo:'SOLO LECTURA',
@@ -742,6 +767,7 @@
       'La pantalla visible actual está incluida en DATOS_REALES_AHORA.visible. Usa sus botones, títulos, enlaces y etiquetas para guiar al usuario sin inventar controles.',
       'DATOS_REALES_AHORA contiene una instantánea de solo lectura. No inventes filas, cantidades, fechas, stock ni fases.',
       'Para una OT concreta combina ordenes_reales y flujo_real por referencia cuando existan. FAB/PINT/ALM/ENT son cantidades/fases y pueden coexistir en la misma OT.',
+      'IMPORTANTE: si flujo_real contiene cantidades de esa OT, la ubicación actual la determinan EXCLUSIVAMENTE FAB/PINT/ALM/ENT; una OT con FAB=0, PINT=0, ALM=4 y ENT=0 está en ALMACÉN, nunca en Fabricación. No uses fase/estado antiguos de Preparación ni una reserva de Stock para asignarle ubicación.',
       'Para preguntas globales de cantidades por fase (por ejemplo cuántos pedidos hay en Almacén o cuántas unidades están entregadas), usa primero DATOS_REALES_AHORA.resumen_flujo_real: son totales calculados determinísticamente por la aplicación, no estimaciones del modelo.',
       'Si una fuente figura como no cargada o los candidatos no contienen la respuesta, dilo claramente en vez de suponer.',
       'Economía de cuota: resuelve todo lo posible con esta única instantánea y esta única llamada. No solicites una segunda consulta al modelo.',
