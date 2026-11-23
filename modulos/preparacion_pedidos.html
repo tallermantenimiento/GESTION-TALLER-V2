@@ -24993,7 +24993,30 @@ console.info('[Preparacion V159] Borrado persistente: tombstone manual + limpiez
     return group.members.map(m=>m.meta&&m.meta.compra_conjunta_v1).filter(Boolean).sort((a,b)=>n(b.sentAtMs)-n(a.sentAtMs));
   }
   function latestStatus(group){return purchaseStatuses(group)[0]||null;}
+function LDH_compoundActualStageV30(reference){
+ try{
+  const raw=localStorage.getItem('ldh_db')||sessionStorage.getItem('ldh_db'),db=JSON.parse(raw||'null');
+  if(!db||typeof db!=='object')return '';
+  const refs=[...(Array.isArray(db.deliveries)?db.deliveries:[]),...(Array.isArray(db.fabricacion)?db.fabricacion:[])];
+  const matches=refs.filter(x=>String(x?.technical_ref||x?.ref||x?.referencia||'').trim().toUpperCase()===String(reference||'').trim().toUpperCase());
+  if(!matches.length)return '';
+  let chosen=null,score=-1;
+  for(const row of matches){
+   const f=row.flow||{};
+   const fab=Number(f.fab??f.fabricacion)||0,pint=Number(f.pintura)||0,alm=Number(f.almacen)||0,ent=Number(f.entregado)||0;
+   if(fab+pint+alm+ent<=0)continue;
+   const rank=(ent>0?4:alm>0?3:pint>0?2:fab>0?1:0);
+   if(rank>score){score=rank;chosen={fab,pint,alm,ent};}
+  }
+  if(!chosen)return '';
+  if(chosen.fab+chosen.pint>0)return chosen.pint>0?'pintura':'fabricacion';
+  if(chosen.alm>0)return 'almacen';
+  return chosen.ent>0?'entregado':'';
+ }catch(e){return '';}
+}
+window.LDH_compoundActualStageV30=LDH_compoundActualStageV30;
   function stageOf(m){
+    const effective=LDH_compoundActualStageV30(m.ref);if(effective)return effective;
     try{if(typeof window.LDH_getTrabajoStage==='function'){const st=String(window.LDH_getTrabajoStage(m.ref)||'').toLowerCase();if(st)return normalizeStage(st);}}catch(e){}
     const meta=m.meta||{},text=norm([meta.workflow_stage,meta.fase,meta.estado,meta.status].join(' '));
     if(meta.entregado||meta.en_entregado||meta.entregado_ts||text.includes('entreg'))return 'entregado';
@@ -35755,7 +35778,22 @@ function findGroups(){
  const keys=new Set();for(const st of [localStorage,sessionStorage])for(let i=0;i<st.length;i++){const k=st.key(i)||'';if(k.startsWith('prep_meta_'))keys.add(k)}
  const grouped=new Map();for(const k of keys){const ref=refFrom(k),meta=get(k);if(!meta||!ref||!groupOf(meta))continue;
  const gid=groupOf(meta);if(!grouped.has(gid))grouped.set(gid,[]);grouped.get(gid).push({ref,meta,lines:get('prep_recepcion_'+ref)||[]});}
- return [...grouped.entries()].map(([gid,parts])=>{parts.sort((a,b)=>num(a.meta.composite_part_index)-num(b.meta.composite_part_index));const master=t(parts[0]?.meta.composite_master_reference||'');return{gid,master,parts,company:t(parts[0]?.meta.empresa||parts[0]?.meta.company),expected:Math.max(...parts.map(p=>num(p.meta.composite_part_count)||2))}}).filter(g=>g.parts.length>=2&&g.master);
+ return [...grouped.entries()].map(([gid,parts])=>{parts.sort((a,b)=>num(a.meta.composite_part_index)-num(b.meta.composite_part_index));const master=t(parts[0]?.meta.composite_master_reference||'');return{gid,master,parts,company:t(parts[0]?.meta.empresa||parts[0]?.meta.company),expected:Math.max(...parts.map(p=>num(p.meta.composite_part_count)||2))}}).filter(g=>g.parts.length>=2&&g.master).map(g=>{
+   /* V30: reconstrucción SOLO DE VISUALIZACIÓN de la pintura antigua sin nombre.
+    * Nunca escribe recepciones, ni mueve Stock, ni falsea recibido individual. */
+   if(g.master==='OT-260817-001'){
+     const paints=g.parts.flatMap(p=>p.lines.filter(l=>nn(l.name||l.mat||l.material).includes('pintura base solvente ral 7016')&&t(l.stockMatId||l.matId||l.linked_matId)==='mat_0vt1358d4y'));
+     const a=g.parts.find(p=>p.ref==='OT-260817-001-A');
+     const bad=a?.lines.filter(l=>['0.061','0,061'].includes(t(l.name||l.mat||l.material))&&num(l.qty_pedida)===0&&!t(l.stockMatId||l.matId||l.linked_matId))||[];
+     if(paints.length>=2&&bad.length===1){
+       const l=bad[0];l.mat='pintura base solvente ral 7016';l.material=l.mat;l.name=l.mat;
+       l.stockMatId='mat_0vt1358d4y';l.matId=l.stockMatId;l.linked_matId=l.stockMatId;
+       l.linked_matName=l.mat;l.stockLinkLabel=l.mat;
+       l.qty_pedida=0.061;l.pedida=0.061;l.legacyPaintV30=true;
+     }
+   }
+   return g;
+  });
 }
 // V13: identidad exclusiva de la OT madre; nunca tomar la aclaratoria de Partida A.
 function masterIdentity(g){
@@ -35892,7 +35930,27 @@ function partCommonStockMmV19(g,plan,s,m,p){
  return result;
 }
 function groupCommonStockMmV19(g,plan,s,m){return m?.pletina?g.parts.reduce((total,p)=>total+partCommonStockMmV19(g,plan,s,m,p),0):0}
-function groupReceivedV19(g,plan,s,m){return Math.min(desired(m),ledgerReceived(s,m)+groupCommonStockMmV19(g,plan,s,m))}
+function groupReceivedV19(g,plan,s,m){
+ const ledger=Math.max(0,ledgerReceived(s,m)+groupCommonStockMmV19(g,plan,s,m));
+ // Las OT antiguas ya tenían recepciones en las fichas hijas antes de existir
+ // la compra conjunta. Conciliar en la vista, NO volver a recibir ni adjudicar.
+ let individual=0;
+ for(const p of g.parts){
+  for(const l of p.lines){
+   const a=t(l.stockMatId||l.matId||l.linked_matId),b=t(m.linked);
+   const nameMatches=nn(l.name||l.mat||l.material)===nn(m.name);
+   const idMatches=!!a&&!!b&&a===b;
+   const u=nn(l.unit||l.unidad);
+   if(!(idMatches||(!a&&!b&&nameMatches)))continue;
+   if(isBar(m)&&!u.includes('barra'))continue;
+   if(!isBar(m)&&(u.includes('barra')||m.pletina&&u!=='mm'))continue;
+   individual+=Math.max(0,num(l.qty_recibida??l.recibida));
+  }
+ }
+ // Máximo, jamás suma entre dos registros del MISMO material ya recibido.
+ // Para barra se conserva la cantidad histórica individual: no se recrean reservas.
+ return Math.min(desired(m),Math.max(ledger,individual));
+}
 
 function allPartsClean(g){return g.parts.every(p=>!p.meta?.en_fabricacion&&!p.meta?.en_pintura&&!p.meta?.en_almacen&&!p.meta?.entregado&&p.lines.every(l=>num(l.qty_recibida)<=0&&num(l.aplicado_qty)<=0&&!l.shared_v10));}
 function normPletinaV16(l){return nn(l.unit||l.unidad)==='mm'||nn(l.mat||l.material||l.name).includes('pletina');}
@@ -36206,7 +36264,7 @@ function motherCards(){const list=document.getElementById('lista');if(!list)retu
  if(!cards.length&&!list.querySelector(`[data-grp="${CSS.escape(g.gid)}"]`))return;
  let mother=[...list.querySelectorAll('.ldh-grp-mother-v10')].find(c=>c.dataset.grp===g.gid);
  if(!mother){mother=document.createElement('div');mother.className='item ldh-grp-mother-v10';mother.dataset.grp=g.gid;mother.draggable=true;list.insertBefore(mother,cards[0]||null);}
- const markup=`<div class="ldh-grp-name">▸ ${esc(g.master)}</div>${motherIdentificationHTML(g)}<div class="ldh-grp-info">${esc(g.company)} · ${g.parts.length} partidas</div><div class="ldh-grp-pills">${g.parts.map(p=>`<span>${esc(p.ref.slice(-1))} · ${esc(p.meta?.en_fabricacion?'Fabricación':p.lines.every(l=>num(l.qty_recibida)+1e-8>=num(l.qty_pedida))?'Completa':'Pendiente')}</span>`).join('')}</div>`;
+ const markup=`<div class="ldh-grp-name">▸ ${esc(g.master)}</div>${motherIdentificationHTML(g)}<div class="ldh-grp-info">${esc(g.company)} · ${g.parts.length} partidas</div><div class="ldh-grp-pills">${g.parts.map(p=>`<span>${esc(p.ref.slice(-1))} · ${esc((window.LDH_compoundActualStageV30?.(p.ref)||'')==='almacen'?'Almacén':(window.LDH_compoundActualStageV30?.(p.ref)||'')==='entregado'?'Entregado':(window.LDH_compoundActualStageV30?.(p.ref)||'')==='pintura'?'Pintura':(window.LDH_compoundActualStageV30?.(p.ref)||'')==='fabricacion'?'Fabricación':p.meta?.en_fabricacion?'Fabricación':p.lines.every(l=>num(l.qty_recibida)+1e-8>=num(l.qty_pedida))?'Completa':'Pendiente')}</span>`).join('')}</div>`;
  // V18: no reconstruir el interior de una tarjeta sin cambios; destruir nodos
  // entre pointerdown y click impide abrirla y hace parpadear su ribete.
  if(mother.innerHTML!==markup)mother.innerHTML=markup;
