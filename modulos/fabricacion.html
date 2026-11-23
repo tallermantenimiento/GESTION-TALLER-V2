@@ -1032,7 +1032,7 @@ tr:hover td{background:rgba(30,112,167,.12)!important}
             <div class="actions">
               <button class="btn small violet" onclick="App.move('${refEnc}', 'fab', 'pintura')">🎨 A pintura</button>
               <button class="btn small" onclick="App.move('${refEnc}', 'pintura', 'fab')">↩ Fab</button>
-              <button class="btn small green" title="Mover directamente desde Fabricación a Almacén · no consume pintura" onclick="App.move('${refEnc}', 'fab', 'almacen')">🏬 A almacén</button>
+              <button class="btn small green" title="Desde Pintura consume la pintura adjudicada y pasa a Almacén; desde Fabricación conserva el funcionamiento habitual" onclick="LDH_FAB_PINTURA_ADJUDICADA.mover('${refEnc}')">🏬 A almacén</button>
               <button class="btn small" onclick="App.openPrep('${refEnc}')">Preparación</button>
               <button class="btn small orange" onclick="App.ver('${refEnc}')">Ver</button>
               <button class="btn small red" onclick="App.eliminarPedidoRef('${refEnc}')">🗑 Eliminar</button>
@@ -1058,7 +1058,7 @@ tr:hover td{background:rgba(30,112,167,.12)!important}
       return qty;
     },
 
-    move(refEnc, from, to){
+    move(refEnc, from, to, fixedQty){
       const item = this.itemByRef(refEnc);
       if(!item){
         alert("No encuentro el trabajo para mover.");
@@ -1074,7 +1074,7 @@ tr:hover td{background:rgba(30,112,167,.12)!important}
       };
       const max = n(from === "fab" ? (f.fab ?? f.fabricacion) : f[from]);
       const labels = {fab:"Fabricación", pintura:"Pintura", almacen:"Almacén", entregado:"Entregado"};
-      const qty = this.askQty(`${labels[from] || from} → ${labels[to] || to}`, max);
+      const qty = fixedQty === undefined ? this.askQty(`${labels[from] || from} → ${labels[to] || to}`, max) : n(fixedQty);
       if(qty === null) return;
 
       if(from === "fab"){
@@ -3347,5 +3347,142 @@ console.info('[Fabricacion V20] phaseFlowV19 se aplica al final de la reconcilia
  }
 })();
 </script>
+
+<script type="module" id="LDH_FAB_PINTURA_ADJUDICADA_CANDIDATO_20261123">
+(function(){
+'use strict';
+const STOCK_KEY='ldh_v2_company_stock_v1', CHUNK_SIZE=160000, EPS=0.0000001;
+const CFG={apiKey:'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',authDomain:'gestion-taller-stock.firebaseapp.com',projectId:'gestion-taller-stock',storageBucket:'gestion-taller-stock.firebasestorage.app',messagingSenderId:'164944519480',appId:'1:164944519480:web:bfa9173d22f88a3b56e1cd'};
+let sdkPromise=null,active=false;
+const n=v=>{const x=Number(String(v??0).replace(',','.'));return Number.isFinite(x)?x:0};
+const t=v=>String(v??'').trim();
+const norm=v=>t(v).toUpperCase();
+const normId=v=>t(v).replace(/[^a-z0-9_-]/gi,'_').slice(0,110);
+const cid=v=>t(v&&(v.companyId||v.empresaId));
+const mid=v=>t(v&&(v.materialId||v.matId));
+const ref=v=>t(v&&(v.ref||v.jobRef||v.referencia||v.technical_ref));
+const pending=v=>Math.max(0,n(v.pendingQty??v.qtyPending??v.qty??v.cantidad));
+const activeRow=v=>!['consumida','consumido','liberada','liberado','cancelada','cancelado','anulada','anulado','devuelta','devuelto','cerrada','cerrado'].includes(t(v.status||v.estado).toLowerCase());
+async function sdk(){
+ if(sdkPromise)return sdkPromise;
+ sdkPromise=(async()=>{
+  const [a,b,f]=await Promise.all([
+   import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+   import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),
+   import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')]);
+  const app=a.getApps().find(x=>x.name==='fab-pintura-adjudicada-candidato')||a.initializeApp(CFG,'fab-pintura-adjudicada-candidato');
+  const auth=b.getAuth(app);
+  if(!auth.currentUser)await b.signInAnonymously(auth);
+  return {db:f.getFirestore(app),f};
+ })().catch(e=>{sdkPromise=null;throw e});
+ return sdkPromise;
+}
+function calculate(stock,jobRef,flow,qty){
+ if(!Array.isArray(stock.assignments)||!Array.isArray(stock.stock)||!Array.isArray(stock.materials))throw Error('Datos de Stock incompletos');
+ const materials=new Map(stock.materials.map(m=>[t(m.id||m.materialId||m.matId),m]));
+ const painting=(stock.assignments||[]).filter(a=>norm(ref(a))===norm(jobRef)&&activeRow(a)&&pending(a)>EPS&&!a.paintLoanV70&&!a.loanAssignmentId)
+  .filter(a=>{const m=materials.get(mid(a))||{};return t(m.type||m.tipo||m.family||m.familia).toLowerCase().includes('pintura')});
+ if(!painting.length)throw Error('No hay pintura adjudicada y pendiente para esta OT. No se ha movido.');
+ const remaining=n(flow.fab)+n(flow.pintura);
+ if(remaining<=EPS||qty>n(flow.pintura)+EPS)throw Error('Las cantidades en Pintura han cambiado.');
+ const ratio=Math.min(1,qty/remaining), lines=[];
+ for(const a of painting){
+  const amount=Math.round(pending(a)*ratio*1000000)/1000000;
+  if(amount>EPS){if(!cid(a)||!mid(a))throw Error('Adjudicación de pintura sin empresa o material');lines.push({a,amount,companyId:cid(a),materialId:mid(a),material:materials.get(mid(a))||{}});}
+ }
+ if(!lines.length)throw Error('Cantidad de pintura adjudicada insuficiente para registrar un consumo');
+ const sums=new Map();
+ for(const x of lines){const key=x.companyId+'|'+x.materialId;sums.set(key,(sums.get(key)||0)+x.amount);}
+ for(const [key,amount] of sums){
+  const [companyId,materialId]=key.split('|');
+  const available=stock.stock.filter(r=>cid(r)===companyId&&mid(r)===materialId).reduce((v,r)=>v+Math.max(0,n(r.qty??r.cantidad??r.physicalQty)),0);
+  if(available+EPS<amount)throw Error('Stock físico insuficiente de '+t(materials.get(materialId)?.name||materialId)+'; falta '+(amount-available).toFixed(3));
+ }
+ return lines;
+}
+function process(stock,jobRef,flow,qty,op){
+ stock.movements=Array.isArray(stock.movements)?stock.movements:[];
+ const existed=stock.movements.some(m=>t(m.operationId)===op&&t(m.source)==='fabricacion_pintura_adjudicada_v26');
+ if(existed)return {already:true,mirrors:[],details:[]};
+ const lines=calculate(stock,jobRef,flow,qty), now=new Date().toISOString();
+ const mirrors=new Map(),details=[];
+ for(const x of lines){
+  let remaining=x.amount;
+  const rows=stock.stock.filter(r=>cid(r)===x.companyId&&mid(r)===x.materialId&&n(r.qty??r.cantidad)>EPS);
+  for(const r of rows){
+   if(remaining<=EPS)break;
+   const before=n(r.qty??r.cantidad),taken=Math.min(before,remaining),after=Math.max(0,before-taken);
+   for(const k of ['qty','cantidad','stock','real','fisico','physicalQty','qtyPhysical','realQty','stockFisico','stockReal','stockActual','existencias','actualQty'])if(k in r)r[k]=after;
+   r.qty=after;r.cantidad=after;r.physicalQty=after;r.updatedAt=now;
+   r.physicalCountMode='equivalente_4l';r.physicalLiters=after*4;r.equivalent4LBotes=after;
+   r.physicalPackageBreakdown=[];r.packageBreakdown=[];r.packageBreakdownText='';
+   const id=t(r.id||x.companyId+'_'+x.materialId).replace(/[\/#?\[\]]/g,'_');
+   mirrors.set(id,{id,stockId:t(r.id||id),companyId:x.companyId,materialId:x.materialId,name:t(x.material.name||x.a.materialName),family:t(x.material.family||'Sin familia'),type:'pintura',unit:t(x.material.unit||'ud'),location:t(r.location||r.ubicacion),min:n(r.min||x.material.min),qty:after,physicalCountMode:'equivalente_4l',physicalLiters:after*4,equivalent4LBotes:after,physicalPackageBreakdown:[],packageBreakdown:[],packageBreakdownText:'',source:'fabricacion_pintura_adjudicada_v26'});
+   remaining-=taken;
+  }
+  if(remaining>EPS)throw Error('Stock de pintura insuficiente tras reparto.');
+  const left=Math.max(0,pending(x.a)-x.amount);
+  x.a.pendingQty=left;x.a.qtyPending=left;x.a.consumedQty=n(x.a.consumedQty)+x.amount;x.a.updatedAt=now;x.a.lastFabricacionPaintConsumptionOperationId=op;
+  if(left<=EPS){x.a.status='consumida';x.a.estado='consumida';x.a.consumedAt=now;}
+  const id='mov_fab_pintura_'+normId(op)+'_'+normId(x.a.id||x.a.assignmentId||x.materialId);
+  stock.movements.push({id,movementId:id,companyId:x.companyId,empresaId:x.companyId,materialId:x.materialId,matId:x.materialId,material:t(x.material.name||x.a.materialName),materialName:t(x.material.name||x.a.materialName),type:'consumo',tipo:'consumo',qty:x.amount,cantidad:x.amount,date:now,fecha:now,ref:jobRef,jobRef,operationId:op,source:'fabricacion_pintura_adjudicada_v26',note:'Pintura adjudicada consumida al pasar de Pintura a Almacén'});
+  details.push(t(x.material.name||x.a.materialName)+' '+x.amount.toFixed(3));
+ }
+ return {already:false,mirrors:[...mirrors.values()],details};
+}
+async function consume(jobRef,flow,qty,op){
+ const {db,f}=await sdk(),metaRef=f.doc(db,'taller_data','stock');
+ const result=await f.runTransaction(db,async tx=>{
+  const metaSnapshot=await tx.get(metaRef);
+  if(!metaSnapshot.exists())throw Error('Stock de nube no disponible');
+  const meta=metaSnapshot.data()||{},count=n(meta.totalChunks);
+  if(!Number.isInteger(count)||count<1||count>100)throw Error('Paquete de Stock no reconocido');
+  let serialized='';
+  for(let i=0;i<count;i++){
+   const snap=await tx.get(f.doc(db,'taller_data','stock','chunks',String(i)));
+   if(!snap.exists())throw Error('Falta un bloque de Stock');
+   serialized+=String(snap.data().part??snap.data().data??snap.data().payload??'');
+  }
+  const data=JSON.parse(serialized),raw=data[STOCK_KEY]??data.payload??data.stock??data;
+  const stock=typeof raw==='string'?JSON.parse(raw):raw;
+  if(!stock||!Array.isArray(stock.assignments))throw Error('Formato de Stock no válido');
+  const result=process(stock,jobRef,flow,qty,op);
+  if(result.already)return {...result,stock};
+  const now=new Date().toISOString();stock.updatedAt=now;
+  const payload=JSON.stringify({[STOCK_KEY]:JSON.stringify(stock),updatedAt:now,schema:'ldh_stock_chunked_v2_full'});
+  const parts=[];for(let i=0;i<payload.length;i+=CHUNK_SIZE)parts.push(payload.slice(i,i+CHUNK_SIZE));
+  for(let i=0;i<parts.length;i++)tx.set(f.doc(db,'taller_data','stock','chunks',String(i)),{part:parts[i],index:i,updatedAt:f.serverTimestamp()});
+  tx.set(metaRef,{totalChunks:parts.length,chunkSize:CHUNK_SIZE,updatedAt:f.serverTimestamp(),updatedAtISO:now,key:STOCK_KEY,rawCompanies:(stock.companies||[]).length,rawMaterials:stock.materials.length,rawStock:stock.stock.length,rawMovements:stock.movements.length,rawReservations:(stock.reservations||[]).length,rawAssignments:stock.assignments.length,source:'fabricacion_pintura_adjudicada_v26'},{merge:true});
+  for(const mirror of result.mirrors)tx.set(f.doc(db,'stock_materials',mirror.id),{...mirror,updatedAt:f.serverTimestamp()},{merge:true});
+  return {...result,stock};
+ });
+ try{localStorage.setItem(STOCK_KEY,JSON.stringify(result.stock));}catch(_){}
+ return result;
+}
+async function mover(refEnc){
+ if(active){alert('Hay un consumo en curso');return;}
+ const item=window.App?.itemByRef?.(refEnc);
+ if(!item){alert('OT no encontrada. Actualiza Fabricación.');return;}
+ const flow=window.App.ensureFlow(item),fab=n(flow.fab??flow.fabricacion),paint=n(flow.pintura),alm=n(flow.almacen),ent=n(flow.entregado);
+ if(paint<=EPS){window.App.move(refEnc,'fab','almacen');return;}
+ const qty=window.App.askQty('Pintura → Almacén · consumir pintura adjudicada',paint);
+ if(qty===null)return;
+ if(!confirm('Consumir la pintura ya adjudicada correspondiente a '+qty+' unidad(es) y mover a Almacén. ¿Continuar?'))return;
+ const jobRef=ref(item),op='fab_paint_v26_'+normId(jobRef)+'_'+normId([fab,paint,alm,ent,qty].join('_'));
+ active=true;
+ try{
+  const result=await consume(jobRef,{fab,pintura:paint,almacen:alm,entregado:ent},qty,op);
+  const updated=window.App?.itemByRef?.(refEnc);
+  if(!updated||n(window.App.ensureFlow(updated).pintura)+EPS<qty)throw Error('El consumo quedó registrado, pero la fase ha cambiado. Revisa esta OT.');
+  window.App.move(refEnc,'pintura','almacen',qty);
+  window.App.toast?.('Pintura consumida y unidades enviadas a Almacén');
+  console.info('[Fabricación pintura adjudicada]',jobRef,result.details);
+ }catch(e){console.error('[Fabricación pintura adjudicada]',e);alert('No se ha movido a Almacén: '+(e?.message||e));}
+ finally{active=false;}
+}
+window.LDH_FAB_PINTURA_ADJUDICADA={mover};
+})();
+</script>
+
 </body>
 </html>
