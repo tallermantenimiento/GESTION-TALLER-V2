@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Conciliar reserva WOODS · OT-261027-001</title>
+<style>body{font:16px system-ui;background:#0b172b;color:#eaf6ff;max-width:820px;margin:30px auto;padding:18px}.card{background:#14243e;border:1px solid #3d607a;border-radius:14px;padding:20px;margin:15px 0}button{padding:12px 16px;border-radius:10px;background:#07618b;color:#fff;border:1px solid #4581ac;font-weight:bold;cursor:pointer}button:disabled{opacity:.35;cursor:default}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:#7bd3fc}.muted{color:#afc7d9}</style></head>
+<body><h1>Conciliación sin consumo de pintura</h1>
+<p>WOODS · <strong>OT-261027-001</strong> · Pintura base solvente RAL 7016</p>
+<div class="card"><p>Se liberarán <strong>0,548 botes de 4 litros</strong> que siguen adjudicados a esta OT, ya trasladada manualmente a Almacén cuando Cabina no estaba en uso.</p>
+<p><strong>No descontará pintura física, no creará entradas ni salidas y no moverá unidades entre fases.</strong> Solo cerrará la adjudicación pendiente, conservando una traza contable.</p>
+<button id="read">1. Comprobar Stock en nube</button> <button id="run" disabled>2. Conciliar sin consumir</button></div>
+<div class="card"><strong>Resultado</strong><pre id="out">Sin cambios realizados.</pre></div>
+<a href="stock.html">← Volver a Stock</a>
+<script type="module">
+const CFG={apiKey:'AIzaSyBxTFd-DpvcohDVNOx2UqIOY-4BjJ212RA',authDomain:'gestion-taller-stock.firebaseapp.com',projectId:'gestion-taller-stock',storageBucket:'gestion-taller-stock.firebasestorage.app',messagingSenderId:'164944519480',appId:'1:164944519480:web:bfa9173d22f88a3b56e1cd'};
+const REF='OT-261027-001',CID='emp_g3pgbthcsq',MID='mat_0vt1358d4y',AID='asg_prep_received_v74_OT-261027-001_emp_g3pgbthcsq_mat_0vt1358d4y_14_base',KEY='ldh_v2_company_stock_v1',OP='conciliacion_261027_pintura_sin_consumo_v1',Q=.548;
+const $=id=>document.getElementById(id), n=x=>Number(x)||0;
+let sdk,working=false,verified=false;
+const say=msg=>{$('out').textContent=msg};
+async function connect(){
+ if(sdk)return sdk;
+ const [apps,auth,fs]=await Promise.all([
+ import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
+ import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),
+ import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')]);
+ const a=apps.getApps().find(x=>x.name==='conciliar-261027-no-consumo')||apps.initializeApp(CFG,'conciliar-261027-no-consumo');
+ const login=auth.getAuth(a);
+ if(!login.currentUser)await auth.signInAnonymously(login);
+ return sdk={fs,db:fs.getFirestore(a)};
+}
+async function packageFrom(reader){
+ const {fs,db}=await connect(),metaRef=fs.doc(db,'taller_data','stock'),ms=await reader(metaRef);
+ if(!ms.exists())throw Error('No se encuentra el documento de Stock');
+ const meta=ms.data(),total=Number(meta.totalChunks);
+ if(!Number.isInteger(total)||total<1||total>100)throw Error('Número de bloques de Stock no reconocido');
+ let payload='';
+ for(let i=0;i<total;i++){
+  const part=await reader(fs.doc(db,'taller_data','stock','chunks',String(i)));
+  if(!part.exists())throw Error('Falta bloque '+i);
+  payload+=String(part.data().part??'');
+ }
+ const wrapper=JSON.parse(payload);
+ if(typeof wrapper[KEY]!=='string')throw Error('Formato de Stock incompatible');
+ return {fs,db,metaRef,meta,wrapper,stock:JSON.parse(wrapper[KEY])};
+}
+function inspect(stock){
+ if(!Array.isArray(stock.assignments)||!Array.isArray(stock.stock)||!Array.isArray(stock.movements))throw Error('Paquete incompleto');
+ const assignments=stock.assignments.filter(a=>String(a.id||a.assignmentId)===AID&&String(a.ref||a.jobRef)===REF&&String(a.companyId||a.empresaId)===CID&&String(a.materialId||a.matId)===MID);
+ if(assignments.length!==1)throw Error('No existe una adjudicación única para esta OT');
+ const a=assignments[0],status=String(a.status||a.estado||'').toLowerCase();
+ const rows=stock.stock.filter(x=>String(x.companyId||x.empresaId)===CID&&String(x.materialId||x.matId)===MID);
+ if(rows.length!==1)throw Error('La ficha física no es única');
+ const physical=n(rows[0].qty??rows[0].cantidad);
+ const done=(stock.reservationReconciliationsV1||[]).some(x=>x.id===OP);
+ if(done&&status==='liberada'&&n(a.pendingQty??a.qtyPending)===0)return {a,physical,done:true};
+ if(done||status!=='activa'||a.source!=='preparacion_pedidos_recepcion_fisica_v66'||Math.abs(n(a.qty)-Q)>1e-7||Math.abs(n(a.pendingQty??a.qtyPending)-Q)>1e-7)
+  throw Error('La adjudicación cambió. No se puede conciliar automáticamente.');
+ if(stock.movements.some(m=>String(m.ref||m.jobRef)===REF&&String(m.materialId||m.matId)===MID&&['consumo','salida'].includes(String(m.type||m.tipo).toLowerCase())))
+  throw Error('Ya hay una salida o consumo registrado para esta pintura. No modificar.');
+ return {a,physical,done:false};
+}
+async function preview(){
+ if(working)return;working=true;verified=false;$('run').disabled=true;$('read').disabled=true;say('Consultando nube...');
+ try{
+  const {fs}=await connect(),p=await packageFrom(ref=>fs.getDocFromServer(ref)),v=inspect(p.stock);
+  say(v.done?'Ya estaba conciliada. Ningún cambio pendiente.':
+   'Adjudicación verificada: '+Q+' botes RAL 7016.\nStock físico: '+v.physical+' botes.\nSe liberará la adjudicación SIN consumir ni modificar la cantidad física.');
+  verified=!v.done;$('run').disabled=!verified;
+ }catch(e){say('Sin cambios. Error de comprobación: '+(e.message||e));}
+ finally{working=false;$('read').disabled=false;}
+}
+async function reconcile(){
+ if(working||!verified)return;
+ if(!confirm('¿Liberar solo los 0,548 botes adjudicados a OT-261027-001, SIN descontar pintura física?'))return;
+ working=true;verified=false;$('run').disabled=true;$('read').disabled=true;say('Validando y conciliando...');
+ try{
+  const {fs,db}=await connect();
+  const result=await fs.runTransaction(db,async tx=>{
+   const pkg=await packageFrom(ref=>tx.get(ref)),{stock,wrapper,meta,metaRef}=pkg,v=inspect(stock);
+   if(v.done)return {already:true,physical:v.physical};
+   const at=new Date().toISOString(),a=v.a;
+   a.status='liberada';a.estado='liberada';a.pendingQty=0;a.qtyPending=0;
+   a.releasedQty=n(a.releasedQty)+Q;a.releasedAt=at;a.updatedAt=at;
+   a.releaseReason='Conciliación por traslado manual a Almacén, Cabina fuera de uso; sin consumo físico';
+   a.lastReconciliationId=OP;
+   stock.reservationReconciliationsV1=Array.isArray(stock.reservationReconciliationsV1)?stock.reservationReconciliationsV1:[];
+   stock.reservationReconciliationsV1.push({id:OP,at,ref:REF,companyId:CID,materialId:MID,assignmentId:AID,releasedQty:Q,physicalBefore:v.physical,physicalAfter:v.physical,noPaintConsumption:true,noStockMovement:true,noPhaseMovement:true});
+   const after=inspect(stock);
+   if(!after.done||Math.abs(after.physical-v.physical)>1e-7)throw Error('No se verificó la conservación del Stock físico');
+   wrapper[KEY]=JSON.stringify(stock);wrapper.updatedAt=at;
+   const raw=JSON.stringify(wrapper),chunkSize=Number(meta.chunkSize||350000);
+   if(!Number.isInteger(chunkSize)||chunkSize<10000||chunkSize>600000)throw Error('Tamaño de bloques inesperado');
+   const chunks=[];for(let i=0;i<raw.length;i+=chunkSize)chunks.push(raw.slice(i,i+chunkSize));
+   if(chunks.length>Number(meta.totalChunks))throw Error('Necesita más bloques; operación cancelada por seguridad');
+   for(let i=0;i<chunks.length;i++)tx.set(fs.doc(db,'taller_data','stock','chunks',String(i)),{part:chunks[i],index:i,updatedAt:fs.serverTimestamp()});
+   tx.set(metaRef,{totalChunks:chunks.length,chunkSize,updatedAt:fs.serverTimestamp(),updatedAtISO:at,key:KEY,rawAssignments:stock.assignments.length,rawMovements:stock.movements.length,rawReservations:(stock.reservations||[]).length,revision:OP,source:OP},{merge:true});
+   return {already:false,physical:v.physical};
+  });
+  say(result.already?'La reserva ya estaba conciliada. No se han hecho cambios.':
+    'CONCILIACIÓN CONFIRMADA EN FIRESTORE.\nReserva liberada: '+Q+' botes.\nStock físico conservado: '+result.physical+' botes.\nConsumo: 0.\nMovimientos de fase: 0.\nResto de OT: intactas.');
+ }catch(e){say('No se confirmó la conciliación: '+(e.message||e)+'. Revisa Stock antes de reintentar.');console.error(e);}
+ finally{working=false;$('read').disabled=false;}
+}
+$('read').onclick=preview;$('run').onclick=reconcile;
+</script></body></html>
