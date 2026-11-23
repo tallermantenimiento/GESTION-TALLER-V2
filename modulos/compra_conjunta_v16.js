@@ -187,7 +187,7 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
  try{
   if(g.parts.length!==g.expected || new Set(g.parts.map(p=>txt(p.meta?.composite_part_id))).size!==g.expected)throw Error('Las partidas del grupo no estan completas.');
   if(!plan?.parts?.length || !plan.materials?.some(x=>x.key===m.key))throw Error('Falta el plan de materiales.');
-  if(g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado))throw Error('No se reciben materiales conjuntos en partidas que ya han avanzado de fase.');
+  if(txt(g.master)!=='OT-260817-001'&&g.parts.some(p=>p.meta?.en_fabricacion||p.meta?.en_pintura||p.meta?.en_almacen||p.meta?.entregado))throw Error('No se reciben materiales conjuntos en partidas que ya han avanzado de fase.');
   if(amount!==null){
    if(!(amount>0))throw Error('Introduce una cantidad valida mayor que cero para '+m.name+'.');
    if(api.isBar(m)&&!Number.isInteger(amount))throw Error('El perfil '+m.name+' se recibe en barras enteras. Introduce 1, 2, 3...');
@@ -204,6 +204,14 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
    if(s.groupId!==gid)throw Error('El registro de compra conjunta pertenece a otro grupo.');
    s.receipts ||= {};s.allocated ||= {};s.events ||= [];
    const rec=physicalReceived(s,m),max=api.desired(m);
+   // En la OT anterior a compras conjuntas las recepciones individuales son válidas.
+   // Comprobarlas dentro de la transacción ANTES de admitir nuevas cantidades.
+   const historical=txt(g.master)==='OT-260817-001'?plan.parts.reduce((sum,part)=>{
+    const raw=data['prep_recepcion_'+part.reference],lines=raw?JSON.parse(raw):[];
+    if(!Array.isArray(lines))throw Error('No se puede comprobar '+part.reference+' en la nube.');
+    return sum+lines.filter(l=>materialLine(l,m)&&!l.shared_v10)
+      .reduce((a,l)=>a+Math.max(0,val(l.qty_recibida)),0);
+   },0):0;
    const external=m.pletina?plan.parts.reduce((sum,part)=>{
      const required=api.portion(m,part.partId),prior=val(s.allocated?.[m.key]?.[part.reference]);
      const raw=data['prep_recepcion_'+part.reference];
@@ -211,7 +219,7 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
      return sum+commonQtyForPart(lines,m,prior,required);
    },0):0;
    if(amount!==null){
-    if(rec+amount+external>max+1e-7)throw Error('La cantidad pendiente ya esta recibida desde Stock comun o en la ficha conjunta.');
+    if(rec+amount+external+historical>max+1e-7)throw Error('La cantidad excede lo pendiente al contar las recepciones individuales y las conjuntas. No se ha registrado otra entrada.');
     s.receipts[m.key] ||= [];
     s.receipts[m.key].push({id:operationId,qty:amount,at:now,manualV17:true,stockCommitted:false,sinStockReal:true});
     s.events.push({id:operationId,at:now,type:'recepcion_sin_stock',material:m.name,qty:amount});
@@ -234,7 +242,8 @@ async function manualTransaction(g,plan,m,amount,onlyPart,api){
     if(line.shared_v10 && txt(line.shared_v10_group)!==gid)throw Error('Material vinculado a otro conjunto.');
     const prior=val(s.allocated[m.key]?.[p.ref]);
     const fromCommon=commonQtyForPart(lines,m,prior,required);
-    const take=Math.min(available,Math.max(0,required-prior-fromCommon));
+    const alreadyReceived=Math.max(0,val(line.qty_recibida));
+    const take=Math.min(available,Math.max(0,required-prior-fromCommon-alreadyReceived));
     if(take<=1e-8)continue;
     const next=val(line.qty_recibida),assigned=prior+take;
     // No se reduce ni reemplaza una recepcion antigua que el usuario conciliara manualmente.
