@@ -527,18 +527,57 @@
     const q=norm(userText),tokens=tokensFor(userText);
     const ldh=parseJson(pkg.ldh_db,{})||{};
     const items=new Map();
+    // R29: Fabricación V20 utiliza phaseFlowV19 como flujo autoritativo.
+    // La IA debe usar exactamente esa fuente, incluso en el Menú principal.
+    const phaseEntries=new Map();
+    const normalizeWorkRef=value=>{
+      const raw=text(value).toUpperCase();
+      const m=raw.match(/\\bOT[\\s_-]*(\\d{6})[\\s_-]*(\\d{3})(?:[-_]([A-Z]{1,3}))?/);
+      return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):norm(raw);
+    };
+    Object.values(pkg.phaseFlowV19||{}).forEach(entry=>{
+      if(!entry||typeof entry!=='object'||!entry.flow||typeof entry.flow!=='object')return;
+      const ref=text(firstValue(entry,['workRef','ref','reference','displayRef'],''));
+      if(ref)phaseEntries.set(normalizeWorkRef(ref),entry);
+    });
+    const overrides=parseJson(pkg.overrides,{})||{};
+    const overrideByRef=new Map();
+    Object.entries(overrides).forEach(([ref,value])=>{
+      if(value&&typeof value==='object'&&value.flow&&typeof value.flow==='object'){
+        overrideByRef.set(normalizeWorkRef(ref),value);
+      }
+    });
     ['deliveries','fabricacion','fab','trabajos'].forEach(k=>{
       (Array.isArray(ldh[k])?ldh[k]:[]).forEach(it=>{
         const ref=text(firstValue(it,['ref','referencia','jobRef','reference'],'')).trim();
-        if(ref&&!items.has(ref))items.set(ref,it||{});
+        if(!ref)return;
+        const key=normalizeWorkRef(ref);
+        const current=items.get(key);
+        const value=it||{};
+        const rank=x=>{
+          const f=x?.flow||{};
+          return Math.max(0,Number(f.fab??f.fabricacion)||0)+Math.max(0,Number(f.pintura)||0)+Math.max(0,Number(f.almacen)||0)+Math.max(0,Number(f.entregado)||0);
+        };
+        if(!current||rank(value)>rank(current))items.set(key,value);
       });
     });
-    Object.keys(pkg.prepMeta||{}).forEach(ref=>{if(ref&&!items.has(ref))items.set(ref,{});});
+    // Una OT puede existir solo en el mapa de fases o en los overrides.
+    phaseEntries.forEach((entry,key)=>{if(!items.has(key))items.set(key,{ref:entry.workRef||entry.ref||entry.reference,company:entry.company,concept:entry.concept});});
+    overrideByRef.forEach((entry,key)=>{if(!items.has(key))items.set(key,{ref:key});});
+    const prepMetaByRef=new Map();
+    Object.entries(pkg.prepMeta||{}).forEach(([ref,raw])=>{
+      const key=normalizeWorkRef(ref);
+      prepMetaByRef.set(key,raw);
+      if(!items.has(key))items.set(key,{ref});
+    });
     const rows=[];
-    items.forEach((it,ref)=>{
-      const meta=parseJson(pkg.prepMeta?.[ref],{})||{};
+    items.forEach((it,key)=>{
+      const phase=phaseEntries.get(key);
+      const override=overrideByRef.get(key);
+      const ref=text(firstValue(it,['ref','referencia','jobRef','reference'],'')||phase?.workRef||key);
+      const meta=parseJson(prepMetaByRef.get(key),{})||{};
       if(meta.deleted||meta.eliminado||meta.eliminado_modulos||meta.archived)return;
-      const flow=(it.flow&&typeof it.flow==='object')?it.flow:((meta.flow&&typeof meta.flow==='object')?meta.flow:{});
+      const flow=phase?.flow||override?.flow||((it.flow&&typeof it.flow==='object')?it.flow:((meta.flow&&typeof meta.flow==='object')?meta.flow:{}));
       // R28: las cantidades del flujo tienen prioridad INCLUIDOS LOS CEROS.
       // Los flags/fechas de Preparación son históricos, no ubicación actual.
       const hasQty=(o,keys)=>o&&typeof o==='object'&&keys.some(k=>o[k]!==undefined&&o[k]!==null&&o[k]!=='');
@@ -581,7 +620,7 @@
       const row={
         ref,empresa:text(firstValue(it,['company','empresa','empresaReceptora'],firstValue(meta,['empresa','company','emp','empresaReceptora'],''))),
         concepto:text(firstValue(it,['concepto','concept','descripcion','description','name'],firstValue(meta,['concepto','concept','descripcion','description'],''))),
-        fase:fase||flags.join('+'),pills:flags,FAB,PINT,ALM,ENT,lineas_material:lineas,lineas_pendientes_recepcion:materialPendiente
+        fase:fase||flags.join('+'),pills:flags,FAB,PINT,ALM,ENT,flujo_verificado:flowKnown,fuente_flujo:phase?'phaseFlowV19':override?'overrides':hasFlow?'flujo_OT':hasItemQty?'cantidades_OT':'histórico_preparación',lineas_material:lineas,lineas_pendientes_recepcion:materialPendiente
       };
       const hay=Object.values(row).flat().join(' ');
       let score=scoreText(hay,tokens);
@@ -770,6 +809,7 @@
       'IMPORTANTE: si flujo_real contiene cantidades de esa OT, la ubicación actual la determinan EXCLUSIVAMENTE FAB/PINT/ALM/ENT; una OT con FAB=0, PINT=0, ALM=4 y ENT=0 está en ALMACÉN, nunca en Fabricación. No uses fase/estado antiguos de Preparación ni una reserva de Stock para asignarle ubicación.',
       'Para preguntas globales de cantidades por fase (por ejemplo cuántos pedidos hay en Almacén o cuántas unidades están entregadas), usa primero DATOS_REALES_AHORA.resumen_flujo_real: son totales calculados determinísticamente por la aplicación, no estimaciones del modelo.',
       'Si una fuente figura como no cargada o los candidatos no contienen la respuesta, dilo claramente en vez de suponer.',
+      'Si una OT tiene flujo_verificado=false, sus FAB/PINT/ALM/ENT no son ceros confirmados: NO afirmes que está en ninguna fase ni que todas sus unidades son cero; di que falta el flujo actualizado.',
       'Economía de cuota: resuelve todo lo posible con esta única instantánea y esta única llamada. No solicites una segunda consulta al modelo.',
       '',
       'REGISTRO_MODULOS='+modules,
