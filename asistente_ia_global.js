@@ -600,12 +600,10 @@
         if(ENT>0)flags.push('ENT');
         fase=flags.length?flags.map(x=>({FAB:'Fabricación',PINT:'Pintura',ALM:'Almacén',ENT:'Entregado'}[x])).join(' + '):'Sin unidades en fases activas';
       }else{
-        if(meta.en_fabricacion||meta.fabricacion_ts||nf.includes('fabric'))flags.push('FAB');
-        if(meta.en_pintura||meta.pintura_ts||nf.includes('pint'))flags.push('PINT');
-        if(meta.en_almacen||meta.almacen_ts||nf.includes('almacen'))flags.push('ALM');
-        if(meta.entregado||meta.en_entregado||meta.entregado_ts||nf.includes('entreg'))flags.push('ENT');
-        if(!flags.length&&/esperando.*material|waiting.*material/.test(nf))flags.push('ESPERANDO MATERIAL');
-        if(!flags.length)flags.push('PREP');
+        // Un dato antiguo de Preparación no acredita dónde está la OT HOY.
+        // Sin desglose FAB/PINT/ALM/ENT, no ofrecer ninguna fase como verificada.
+        fase='Ubicación sin confirmar';
+        flags.push('SIN FLUJO');
       }
       const recep=parseJson(pkg.prepRecepcion?.[ref],[]);
       let lineas=0,materialPendiente=0;
