@@ -1019,7 +1019,7 @@
   });
 
   // R41: manifiesto del mismo origen. Solo describe capacidades; jamás ejecuta acciones.
-  const AI_R41_URL=new URL('ia_capacidades_r41.json',appRootUrl());
+  const AI_R41_URL=new URL('ia_capacidades_r43.json',appRootUrl());
   let aiR41State={status:'sin_cargar',version:'',changed:false,error:''};
   const AI_R41_REGISTERED=new Set();
   async function refreshAiCapabilitiesR41(){
@@ -1081,9 +1081,9 @@
     const note=aiR41State.status==='cargado'?
       'Catálogo '+aiR41State.version+(aiR41State.changed?' · **se ha detectado un cambio que requiere revisión**':'')+'.':
       'Catálogo remoto '+aiR41State.status+'. No se puede garantizar información actualizada.';
-    return '**Funcionalidades registradas · R41**\n\n'+note+'\n\n'+
+    return '**Funcionalidades registradas · R43**\n\n'+note+'\n\n'+
       (details||'No hay funcionalidades registradas para esta consulta.')+
-      '\n\n«Declarada» no significa verificada. Las nuevas funciones deben publicarse en ia_capacidades_r41.json. No hay inspección automática del código ni ejecución de modificaciones.';
+      '\n\n«Declarada» no significa verificada. Las nuevas funciones deben publicarse en ia_capacidades_r43.json. No hay inspección automática del código ni ejecución de modificaciones.';
   }
   window.LDH_AI_CATALOGO_R41=Object.freeze({version:'R41',readOnly:true,
     status:()=>({...aiR41State}),list:aiCapabilitySnapshot,refresh:refreshAiCapabilitiesR41});
@@ -2308,7 +2308,7 @@
       state.history.push({role:'user',content:value},{role:'assistant',content:r41Answer});
       if(state.history.length>16)state.history=state.history.slice(-16);
       window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
-      setStatus('IA central · catálogo R41 · solo lectura','ok');
+      setStatus('IA central · catálogo R43 · solo lectura','ok');
       return;
     }
     const capabilityAnswer=exactCapabilityStatusAnswer(value);
