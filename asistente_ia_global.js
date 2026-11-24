@@ -4,7 +4,7 @@
   if(window.__LDH_AI_GLOBAL_R6_20261007__) return;
   window.__LDH_AI_GLOBAL_R6_20261007__=true;
 
-  const GLOBAL_VERSION='IA-GLOBAL-R49-LECTURA-SERVIDOR';
+  const GLOBAL_VERSION='IA-GLOBAL-R50-ASISTENTE-DE-TALLER';
   const HISTORY_KEY='ldh_ai_global_history_v1';
   const MODULES=[{"id": "menu", "label": "Menú principal", "path": "index.html", "aliases": ["menu", "menú", "inicio", "principal", "menu principal", "menú principal"]}, {"id": "calculo", "label": "Cálculo", "path": "modulos/calculo.html", "aliases": ["calculo", "cálculo", "calcular"]}, {"id": "pedido_material", "label": "Pedido material", "path": "modulos/pedido_material.html", "aliases": ["pedido material", "pedido de material"]}, {"id": "preparacion", "label": "Preparación de pedidos", "path": "modulos/preparacion_pedidos.html", "aliases": ["preparacion", "preparación", "preparacion de pedidos", "preparación de pedidos"]}, {"id": "agenda", "label": "Agenda diaria", "path": "modulos/agenda_diaria.html", "aliases": ["agenda", "agenda diaria", "ordenes de trabajo", "órdenes de trabajo", "ot agenda"]}, {"id": "fabricacion", "label": "Fabricación", "path": "modulos/fabricacion.html", "aliases": ["fabricacion", "fabricación", "fabrica", "fábrica"]}, {"id": "ferreteria", "label": "Ferretería", "path": "modulos/ferreteria.html", "aliases": ["ferreteria", "ferretería"]}, {"id": "tableros", "label": "Tableros", "path": "modulos/tableros.html", "aliases": ["tableros", "tablero"]}, {"id": "almacen", "label": "Almacén", "path": "modulos/almacen.html", "aliases": ["almacen", "almacén"]}, {"id": "ubicaciones", "label": "Ubicaciones / Empresas", "path": "modulos/ubicaciones_empresas.html", "aliases": ["ubicaciones", "empresas", "ubicaciones empresas", "ubicaciones / empresas"]}, {"id": "stock", "label": "Stock", "path": "modulos/stock.html", "aliases": ["stock", "existencias"]}, {"id": "pintura", "label": "Cálculo de pintura", "path": "modulos/calculo_pintura.html", "aliases": ["pintura", "calculo pintura", "cálculo pintura", "calculo de pintura", "cálculo de pintura"]}, {"id": "herramientas", "label": "Gestión herramientas", "path": "modulos/gestion_herramientas.html", "aliases": ["herramientas", "gestion herramientas", "gestión herramientas", "maquinaria"]}, {"id": "nesting", "label": "Nesting de Chapas", "path": "modulos/nesting_chapas.html", "aliases": ["nesting", "nesting de chapas", "optimizador de chapas", "corte de chapas", "despiece de chapas"]}, {"id": "configuracion", "label": "Configuración", "path": "modulos/configuracion.html", "aliases": ["configuracion", "configuración", "configurar", "conceptos", "configuracion de conceptos", "configuración de conceptos"]}];
   const APPROVED_LOGO="data:image/png;base64,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";
@@ -1097,7 +1097,7 @@
       const orderRow=order.rows.find(r=>otRefFromText(r.ref)===route.ref)||null;
       const flowRow=flow.rows.find(r=>otRefFromText(r.ref)===route.ref)||null;
       return [
-        'Eres la IA central de Gestión Taller. Responde en español conciso.',
+        'Eres el asistente y formador global de Gestión Taller para operarios sin experiencia. Responde en español natural y sencillo, explica los pasos con claridad, no muestres estructuras técnicas salvo que te las pidan.',
         'MODO SOLO LECTURA. Nunca afirmes ejecutar cambios.',
         'INTENCION='+JSON.stringify(route),
         'FUENTES='+JSON.stringify({ordenes_cargadas:order.cloudReady,flujo_cargado:flow.loaded}),
@@ -1119,7 +1119,7 @@
     // Describir el circuito del taller NO requiere consultar ninguna OT ni Stock.
     if(explanatory&&!needsLive){
       return [
-        'Eres la IA central de Gestión Taller. Responde en español de España, de forma práctica.',
+        'Eres el asistente global y formador de Gestión Taller. Habla de manera natural, sencilla y práctica. Enseña también a personal sin formación en el programa, paso a paso.',
         'MODO SOLO LECTURA: no ejecutes acciones ni afirmes que has cambiado datos.',
         'La consulta solicita una explicación o planificación, NO datos actuales.',
         'MÓDULO ACTUAL: '+mod.label+'.',
@@ -1161,7 +1161,7 @@
     }:null;
     const shortData=JSON.stringify(data);
     return [
-      'Eres la IA central de Gestión Taller. Responde en español de España.',
+      'Eres el asistente global de Gestión Taller y ayudas a trabajadores nuevos. Responde de forma natural y clara, sin jerga de programación.',
       'Solo lectura: jamás afirmes que has escrito o modificado datos.',
       'No inventes información; los datos son instantáneas que pueden no estar sincronizadas.',
       'REGLAS_OPERATIVAS_CONFIRMADAS='+operationCatalogForQuery(userText),
@@ -2538,32 +2538,65 @@
     if(!Array.isArray(data.materials)||!Array.isArray(data.stock))throw Error('Stock no contiene materiales y existencias verificables');
     return {data,meta,updatedAt:obj.updatedAt||'',size:joined.length};
   }
-  function r49StockResponse(query,published){
-    const q=norm(query),db=published.data;
-    const tokens=tokensFor(query).filter(x=>!/(stock|cantidad|cuanto|cuantos|cuantas|barras|barra|fisico|reservado|reservadas|reservados|libre|libres|disponible|disponibles|tenemos|quedan|hay|material|perfil|pletina|tubo|actualmente)/.test(x));
-    const materials=new Map(db.materials.map(m=>[String(m.id),m]));
+
+  // R50: búsqueda por medidas, con respuestas legibles para operarios.
+  function r50Dim(textValue){
+    const m=norm(textValue).match(/(?:^|[^0-9])(\d{1,4})\s*(?:x|×|\*)\s*(\d{1,4})(?:\s*(?:x|×|\*)\s*(\d{1,4}))?(?!\d)/i);
+    return m?[m[1],m[2],m[3]].filter(Boolean):null;
+  }
+  function r50MaterialCandidates(query,db){
+    const needle=norm(query),dims=r50Dim(query);
+    const companyTokens=(db.companies||[]).map(c=>({id:String(c.id),name:String(c.name||c.nombre||'')}))
+      .filter(c=>c.name&&needle.includes(norm(c.name)));
+    const materials=new Map((db.materials||[]).map(m=>[String(m.id),m]));
     const companies=new Map((db.companies||[]).map(c=>[String(c.id),String(c.name||c.nombre||c.id)]));
+    const generic=new Set(['cuantas','cuantos','cuanto','hay','tenemos','quedan','disponibles','libres','libre','reservadas','reservados','reservado','stock','material','materiales','barras','barra','perfiles','perfil','tubo','tubos','pletina','pletinas','cantidad','cuenta','fisicas','fisico','reservado','cual','para','empresa','quiero','saber','actualmente','falta','cuanto','del','los','las','una','unas','unos','que','de','en','y','por','sin','con']);
+    const words=needle.replace(/\d+\s*[x×*]\s*\d+(?:\s*[x×*]\s*\d+)?/g,' ')
+      .split(/[^a-z0-9]+/).filter(x=>x.length>=3&&!generic.has(x)&&!companyTokens.some(c=>norm(c.name).includes(x)));
     const matches=(db.stock||[]).map(row=>{
-      const m=materials.get(String(row.materialId))||{};
-      const mat=String(m.name||m.nombre||row.name||'');
+      const mat=materials.get(String(row.materialId))||{};
+      const name=String(mat.name||mat.nombre||row.name||'');
       const company=companies.get(String(row.companyId))||String(row.companyId||'');
-      const hay=norm(mat+' '+company);
-      return {row,mat,company,score:tokens.filter(t=>hay.includes(t)).length};
-    }).filter(x=>tokens.length&&x.score>=Math.min(2,tokens.length)).sort((a,b)=>b.score-a.score).slice(0,8);
-    const heading='**Stock · lectura actual desde servidor**\n\n'+r49SourceLine(published.meta)+
-      '\n\nPublicación completa cargada: '+db.materials.length+' materiales; '+db.stock.length+' filas de existencias.\n\n';
-    if(!matches.length)return heading+'No he identificado inequívocamente el material solicitado. Indica su nombre o medida exacta y la empresa. No voy a dar una cantidad aproximada.';
-    let body=matches.map(({row,mat,company})=>{
-      const name=mdSafe(mat),unit=mdSafe(String(materials.get(String(row.materialId))?.unit||'unidad no especificada'));
+      const normName=norm(name);
+      const numberParts=normName.match(/\d+/g)||[];
+      const dimensionOk=!!dims&&dims.every((part,i)=>numberParts[i]===part)||
+        !!dims&&new RegExp('(^|\\D)'+dims.join('\\s*[^\\d]{0,4}\\s*')+'(\\D|$)').test(normName);
+      // Una coincidencia dimensional por sí sola ya permite mostrar candidatos, no elegir uno arbitrariamente.
+      const wordHits=words.filter(w=>normName.includes(w)).length;
+      const companyOk=!companyTokens.length||companyTokens.some(c=>c.id===String(row.companyId));
+      return {row,mat,name,company,score:(dimensionOk?20:0)+wordHits*3,match:(dims?dimensionOk:wordHits>0)&&companyOk};
+    }).filter(x=>x.match);
+    matches.sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name));
+    return matches.slice(0,24);
+  }
+  function r49StockResponse(query,published){
+    const db=published.data,matches=r50MaterialCandidates(query,db);
+    const date=published.meta?.data?.updatedAtISO||published.updatedAt||'';
+    const when=date?'Última publicación de Stock: '+mdSafe(String(date).slice(0,25))+'. ':'';
+    const note='\n\n'+when+'He consultado Firestore para esta pregunta. Si un equipo tiene movimientos sin sincronizar, las cifras pueden cambiar.';
+    if(!matches.length)return 'No encuentro un material que coincida claramente con esa descripción en el Stock publicado. ¿Me dices el tipo de perfil o su medida exacta?'+note;
+    const fmt=(item)=>{
+      const {row,mat,name,company}=item;
+      const unit=String(mat.unit||mat.unidad||row.unit||'unidades');
       const phys=r43SafeQuantity(row,['physical','qty','cantidad','stock','actual']);
-      const reserved=r43SafeQuantity(row,['reserved']),assigned=r43SafeQuantity(row,['assigned']),free=r43SafeQuantity(row,['free']);
-      return '- **'+name+' · '+mdSafe(company)+'** ('+unit+') · físico: '+
-        (phys===null?'no declarado':fmtLocal(phys))+'; reservado: '+(reserved===null?'no declarado':fmtLocal(reserved))+
-        '; asignado: '+(assigned===null?'no declarado':fmtLocal(assigned))+
-        '; libre: '+(free===null?'no declarado':fmtLocal(free))+
-        (free===null?' · no se calcula libre porque faltan saldos explícitos':'');
-    }).join('\n');
-    return heading+body+'\n\nEstas cifras son las publicadas en Firestore, no la caché del navegador. No garantizan que haya cambios locales pendientes de subir ni que Stock y Preparación estén conciliados. No se ha modificado nada.';
+      const reserved=r43SafeQuantity(row,['reserved']);
+      const assigned=r43SafeQuantity(row,['assigned']);
+      const free=r43SafeQuantity(row,['free']);
+      return '**'+mdSafe(name)+'** ('+mdSafe(company)+'):\n'+
+        '- Físico: '+(phys===null?'sin cantidad confirmada':fmtLocal(phys)+' '+mdSafe(unit))+'\n'+
+        '- Reservado: '+(reserved===null?'sin saldo confirmado':fmtLocal(reserved)+' '+mdSafe(unit))+'\n'+
+        '- Libre: '+(free===null?'sin saldo confirmado':fmtLocal(free)+' '+mdSafe(unit));
+    };
+    if(matches.length===1)return 'He encontrado este material:\n\n'+fmt(matches[0])+
+      (r43SafeQuantity(matches[0].row,['free'])===null?'\n\nNo calculo las barras libres porque el saldo no está declarado expresamente.':'')+note;
+    if(matches.length<=5){
+      return 'He encontrado '+matches.length+' existencias que encajan con lo que pides. Te las separo para no mezclar tipos de hierro ni empresas:\n\n'+
+        matches.map(fmt).join('\n\n')+note;
+    }
+    const short=matches.slice(0,8).map(x=>'- '+mdSafe(x.name)+' · '+mdSafe(x.company)).join('\n');
+    return 'Hay varios materiales que coinciden y no quiero darte una cantidad equivocada:\n\n'+short+
+      (matches.length>8?'\n- Y otras coincidencias.':'')+
+      '\n\n¿Te refieres a hierro negro o galvanizado, y de qué empresa?'+note;
   }
   async function r49PreparationResponse(query){
     const ref=otRefFromText(query);
@@ -2593,14 +2626,14 @@
     const q=norm(question);
     const ref=otRefFromText(question);
     if(/(?:que|cuales|como).{0,50}(?:funciones|capacidades|hace|funciona|sirve)|catalogo|version|observador|controles nuevos|botones nuevos/.test(q))return false;
-    if(/(?:comprobar|verificar|diagnosticar|probar|estado).{0,35}(?:conexion|firestore|nube|servidor)|datos en tiempo real/.test(q))return true;
+    if(/(?:comprueba|comprobar|verifica|verificar|diagnostica|diagnosticar|prueba|probar|estado|conexion|conexiones).{0,48}(?:conexion|firestore|nube|servidor)|datos en tiempo real/.test(q))return true;
     if(ref&&/(material|falt|pendient|recib|reserv|adjudic|stock|fabric|fase|almacen|entreg|pint|prestam|deud|estado)/.test(q))return true;
     return /(?:cuanto|cuantos|cuantas|cuantos|cuantas|cantidad|existencias|fisico|reservad|libre|stock real|actualmente|ahora mismo|en este momento|que trabajos|que ot|pendientes de|deudas|prestamos|horas de fabricacion|herramientas prestadas)/.test(q)
       &&/(stock|material|barra|perfil|pletina|chapa|pintura|ferreteria|ot\b|orden|trabaj|agenda|fabric|almacen|entrega|herramienta|empresa|prestam|reserv|recib)/.test(q);
   }
   async function r49LiveAnswer(question){
     const q=norm(question),ref=otRefFromText(question);
-    const diag=/(?:comprobar|verificar|diagnosticar|probar|estado).{0,35}(?:conexion|firestore|nube|servidor)|datos en tiempo real/.test(q);
+    const diag=/(?:comprueba|comprobar|verifica|verificar|diagnostica|diagnosticar|prueba|probar|estado|conexion|conexiones).{0,48}(?:conexion|firestore|nube|servidor)|datos en tiempo real/.test(q);
     try{
       if(diag){
         const ids=[['flujo','preparacion'],['flujo','fabricacion'],['stock','stock']];
@@ -2608,7 +2641,7 @@
           try{const d=await r49ServerDoc(kind,id);return '- '+r49SourceLine(d)+' · **accesible**';}
           catch(e){return '- '+kind+'/'+id+': **no verificable** ('+mdSafe(String(e.code||e.message||e).slice(0,120))+')';}
         }));
-        return '**Conexión real · IA R49**\n\n'+rows.join('\n')+
+        return '**He comprobado las conexiones con Firestore.**\n\n'+rows.join('\n')+
           '\n\nSe ha solicitado lectura desde servidor, nunca desde caché. No garantiza que otros equipos hayan publicado sus cambios ni que las reservas estén conciliadas.';
       }
       if(ref&&/(pendient|falt|sin recibir|recib|material|prepar)/.test(q))
@@ -2629,9 +2662,52 @@
   }
   window.LDH_AI_R49=Object.freeze({version:'R49',readOnly:true,isOperational:r49IsOperational,live:r49LiveAnswer});
 
+
+  // R50: guía común de uso, incluso para una persona nueva y desde otro módulo.
+  const R50_GUIDES={
+    preparacion:{purpose:'En Preparación se comprueba lo pedido, se reciben materiales y se organizan las partidas antes de fabricar.',
+      steps:['Busca la OT o la compra conjunta correspondiente.','Comprueba lo pedido y lo que realmente se ha recibido.','Si utilizas Stock común, verifica primero que existe material libre suficiente.','Revisa las partidas y sus reservas antes de enviar el trabajo a Fabricación.'],
+      caution:'No marques como recibido material que aún no ha llegado. Recibir, adjudicar y reservar no son lo mismo.'},
+    stock:{purpose:'Stock controla las existencias físicas, las reservas, las asignaciones y los materiales disponibles.',
+      steps:['Identifica la empresa, el material y su tipo (por ejemplo, hierro negro o galvanizado).','Comprueba físico, reservado y libre antes de utilizarlo.','Para una salida, préstamo o adjudicación, identifica siempre la OT de destino.','Confirma después que el movimiento aparece correctamente reflejado.'],
+      caution:'No confundas una recepción con una reserva ni sumes barras y milímetros como si fueran la misma unidad.'},
+    fabricacion:{purpose:'Fabricación muestra los trabajos en curso, sus partidas y su avance hacia Pintura, Almacén o Entregas.',
+      steps:['Localiza la OT y comprueba la empresa y sus partidas.','Revisa qué material está recibido y qué queda pendiente.','Consulta sus parciales y el estado del trabajo.','Cuando corresponda, sigue el circuito establecido hacia Cabina o Almacén.'],
+      caution:'No des por terminada o entregada una OT solo porque una de sus partidas haya avanzado.'},
+    agenda:{purpose:'Agenda diaria organiza las órdenes de trabajo, responsables, fechas y prioridades.',
+      steps:['Busca la OT por referencia o descripción.','Comprueba fecha, responsable y estado.','Consulta los avisos de trabajos próximos o retrasados.','Antes de finalizar, revisa los materiales utilizados y el destino del trabajo.'],
+      caution:'Cambiar una fecha o dar una OT por terminada afecta al seguimiento del taller.'},
+    almacen:{purpose:'Almacén controla los trabajos listos para salida y el historial de entregas.',
+      steps:['Busca la OT y verifica la empresa destinataria.','Comprueba qué unidades y partidas están preparadas.','Revisa si hay entregas parciales.','Registra la entrega únicamente cuando se haya realizado.'],
+      caution:'Una OT puede tener entregas parciales; no confundas pendiente con entregado.'},
+    herramientas:{purpose:'Gestión de Herramientas lleva las dotaciones, depósitos, préstamos, reparaciones y reposiciones.',
+      steps:['Busca el departamento y el operario correspondiente.','Revisa la herramienta y su estado.','Distingue entre dotación, préstamo y envío a reparación.','Registra la devolución o reposición según el proceso que corresponda.'],
+      caution:'No marques una herramienta como disponible si continúa prestada o en reparación.'},
+    pintura:{purpose:'Cálculo de pintura ayuda a preparar materiales, superficies y colores para los trabajos de Cabina.',
+      steps:['Identifica la OT y sus piezas.','Comprueba medidas, material y color RAL cuando corresponda.','Revisa la estimación y disponibilidad de pintura.','Confirma el circuito de envío a Cabina antes de darlo por terminado.'],
+      caution:'Una estimación de pintura no sustituye al consumo real registrado.'},
+    nesting_chapas:{purpose:'Nesting de Chapas prepara las piezas y estudia cómo distribuirlas sobre los formatos de chapa disponibles.',
+      steps:['Define material, espesor y formatos disponibles.','Dibuja o introduce las piezas con sus medidas.','Revisa las alternativas y el número de chapas requerido.','Comprueba el plano antes de imprimirlo o enviarlo a cortar.'],
+      caution:'Revisa las cotas y el método de corte; una distribución calculada necesita comprobación antes de fabricar.'}
+  };
+  function r50GuideAnswer(question){
+    const q=norm(question);
+    if(!/(?:explica|explicame|ensena|guiame|guia|ayuda|como hago|como se hace|como puedo|paso a paso|soy nuevo|no se utilizar|no conozco|para que sirve|como funciona)/.test(q))return null;
+    const module=r48CatalogModule(q)||(
+      /(?:este modulo|esta pantalla|aqui)/.test(q)?
+      {moduleId:currentModule().id}:null);
+    const key=module?.moduleId==='nesting'?'nesting_chapas':module?.moduleId;
+    const guide=R50_GUIDES[key];
+    if(!guide)return null;
+    return guide.purpose+'\n\n**Para empezar:**\n'+guide.steps.map((x,i)=>(i+1)+'. '+x).join('\n')+
+      '\n\n**Importante:** '+guide.caution+
+      '\n\nPuedo acompañarte paso a paso. Dime qué quieres hacer exactamente y en qué parte te has quedado. No realizaré ningún cambio sin la operación y los permisos necesarios.';
+  }
+  window.LDH_AI_GUIA_R50=Object.freeze({version:'R50',readOnly:true,query:r50GuideAnswer});
+
   function r45Answer(question){
     const q=norm(question);
-    const v=GLOBAL_VERSION.match(/R\d+/)?.[0]||'R49';
+    const v=GLOBAL_VERSION.match(/R\d+/)?.[0]||'R50';
     if(/(?:que|cual|dime|indica|mostrar|consultar).{0,40}version.{0,60}(?:asistente|ia|ejecutando|actual)|version del asistente|que version/.test(q)){
       return '**Versión del Asistente IA: '+v+'**.\n\nMotor: '+mdSafe(GLOBAL_VERSION)+'. Catálogo de capacidades: '+mdSafe(aiR41State.version||'no cargado')+' ('+mdSafe(aiR41State.status)+'). El inventario de módulos R40 y el catálogo R43 son componentes distintos, no la versión del asistente.';
     }
@@ -2777,6 +2853,14 @@
       if(state.history.length>16)state.history=state.history.slice(-16);
       window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
       if(localNav.url&&!localNav.same&&!localNav.blocked)setTimeout(()=>window.__LDH_AI_GLOBAL_NAVIGATE__?.(localNav.id),220);
+      return;
+    }
+    // R50: las guías de trabajo se atienden antes de consultar datos o devolver un catálogo técnico.
+    const guideR50=r50GuideAnswer(value);
+    if(guideR50){
+      addMessage('assistant',guideR50);
+      rememberLocalExchange(value,guideR50);
+      setStatus('IA global · guía de trabajo · solo lectura','ok');
       return;
     }
     // R49: toda consulta operativa va al servidor o falla sin usar caché.
