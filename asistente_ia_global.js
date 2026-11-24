@@ -2213,7 +2213,7 @@
     const q=norm(question);
     if(!/(botones|controles|nueva funcion|funciones nuevas|cambios del modulo|cambios de este modulo|detectar cambios|observador)/.test(q))return null;
     const mod=currentModule(),snap=visibleSnapshot();
-    const controls=(snap.botones_visibles||[]).map(x=>text(x).trim()).filter(Boolean).slice(0,60);
+    const controls=[...new Set((snap.botones_visibles||[]).map(x=>text(x).trim()).filter(Boolean))].slice(0,60);
     const meta=Array.from(document.querySelectorAll('meta[name^="ldh-"]'))
       .map(x=>text(x.name)+'='+text(x.content)).sort().slice(0,45);
     const seed=mod.id+'|'+meta.join('|')+'|'+controls.join('|');
@@ -2222,17 +2222,24 @@
     const key='ldh_ai_ui_observer_r43_'+mod.id;
     let old=null;
     try{old=JSON.parse(localStorage.getItem(key)||'null')}catch(_){}
+    const previous=Array.isArray(old?.controls)?old.controls:[];
+    const added=controls.filter(x=>!previous.includes(x));
+    const removed=previous.filter(x=>!controls.includes(x));
     const changed=!!old&&old.hash!==hash;
-    try{localStorage.setItem(key,JSON.stringify({hash,at:new Date().toISOString()}))}catch(_){}
-    const unique=[...new Set(controls)].slice(0,24);
-    const body=unique.length?unique.map(x=>'- '+mdSafe(x.slice(0,90))).join('\n'):'No se observan controles accesibles en este momento.';
-    const assessment=changed?
-      'La huella de metadatos o controles cambió desde la última observación de este navegador. Revisar antes de afirmar que hay nuevas funciones.':
-      old?'No ha cambiado la huella observada en este navegador; esto no acredita que el código siga igual.':
-        'Primera observación de este módulo en este navegador; no hay comparación anterior.';
-    return {handled:true,text:'**Controles observados · '+mdSafe(mod.label)+' · R43**\n\n'+
-      body+'\n\n**Detección:** '+assessment+
-      '\n\nEl observador solo inspecciona el módulo abierto y los controles actualmente visibles. No ejecuta botones, no lee código remoto y no añade automáticamente operaciones al catálogo verificado.'};
+    const first=!old||!Array.isArray(old.controls);
+    try{localStorage.setItem(key,JSON.stringify({hash,controls,at:new Date().toISOString()}))}catch(_){}
+    const names=controls.slice(0,24).map(x=>'- '+mdSafe(x.slice(0,90))).join('\n');
+    let assessment='';
+    if(first)assessment='Primera lectura con lista comparativa; no puedo identificar novedades anteriores. Esta observación sirve como referencia para la siguiente.';
+    else if(added.length||removed.length){
+      assessment=(added.length?'**Controles que ahora aparecen:**\n'+added.slice(0,15).map(x=>'- '+mdSafe(x.slice(0,90))).join('\n')+'\n':'')+
+        (removed.length?'**Controles que ya no están visibles:**\n'+removed.slice(0,15).map(x=>'- '+mdSafe(x.slice(0,90))).join('\n')+'\n':'');
+    }else if(changed)assessment='Han cambiado metadatos o el orden de controles, pero no aparecen etiquetas añadidas ni retiradas.';
+    else assessment='No hay diferencias entre los controles visibles de esta lectura y la anterior.';
+    return {handled:true,text:'**Controles observados · '+mdSafe(mod.label)+' · R44**\n\n'+
+      (names||'No se observan controles accesibles en este momento.')+
+      '\n\n**Comparación:** '+assessment+
+      '\n\nLos botones pueden cambiar por filtros, permisos o estado de la pantalla; una diferencia no certifica una nueva funcionalidad. No se ha ejecutado ninguna acción.'};
   }
   window.LDH_AI_OBSERVADOR_R43=Object.freeze({version:'R43',readOnly:true,consultar:r43UiObserver});
 
