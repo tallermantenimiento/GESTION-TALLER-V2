@@ -1808,6 +1808,7 @@
       return;
     }
     setBusy(true,'IA central · consultando datos concretos…');
+    let providerAttempt='';
     try{
       const payload={
         scope:'gestion',
@@ -1822,11 +1823,13 @@
       let response,usedProvider='';
       if(selected==='groq'){
         state.groqCalls++;
+        providerAttempt='groq';
         response=await bridge('/chat',{...payload,reasoning_effort:'medium'});
         state.groqCooldownUntil=0;
         usedProvider='Groq';
       }else{
         try{
+          providerAttempt='cloudflare';
           response=await bridge('/chat-workers-ai',payload);
           usedProvider='Cloudflare';
         }catch(cloudError){
@@ -1838,6 +1841,7 @@
           }
           setStatus('Cloudflare no disponible · comprobando respaldo Groq…','busy');
           state.groqCalls++;
+          providerAttempt='groq';
           response=await bridge('/chat',{...payload,reasoning_effort:'medium'});
           state.groqCooldownUntil=0;
           usedProvider='Groq (respaldo)';
@@ -1856,7 +1860,10 @@
       if(parsedReply.navigate)setTimeout(()=>window.__LDH_AI_GLOBAL_NAVIGATE__?.(parsedReply.navigate),320);
     }catch(e){
       const msg=text(e?.message||e||'Error desconocido');
-      if(e?.status===429||/429|rate.?limit|too many|cuota|resource exhausted|tokens per/i.test(msg)){
+      if(providerAttempt==='cloudflare'&&(e?.status===429||/429|rate.?limit|cuota/i.test(msg))){
+        addMessage('error','Cloudflare ha alcanzado un límite temporal o de cuota. Prueba Automático o Groq.');
+        setStatus('Cloudflare · límite de cuota','busy');
+      }else if(e?.status===429||/429|rate.?limit|too many|cuota|resource exhausted|tokens per/i.test(msg)){
         const details=e?.details||{};
         const retryRaw=text(details?.rateLimit?.retryAfter);
         const retryNumeric=Number(retryRaw);
