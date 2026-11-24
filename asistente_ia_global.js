@@ -2498,7 +2498,7 @@
     const sdk=await r49Deadline(r49SdkLoad()),cfg=R49_PROJECTS[kind];
     if(!cfg)throw Error('Fuente desconocida');
     const name='ldh-ai-r49-read-'+kind;
-    const app=sdk.app.getApps().find(x=>x.name===name)||sdk.app.initializeApp(cfg,name);
+    const app=sdk.app.getApps().find(x=>x.options?.projectId===cfg.projectId)||sdk.app.initializeApp(cfg,name);
     const auth=sdk.auth.getAuth(app);
     // La autorización real depende de las reglas existentes; no se modifican.
     if(!auth.currentUser){
