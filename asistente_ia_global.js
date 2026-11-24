@@ -126,7 +126,7 @@
   function dockHtml(){
     const moduleButtons=MODULES.map(m=>`<button type="button" data-ia-open-module="${m.id}" data-ia-local-label="Abrir ${m.label}"><span>↗</span><span>${m.label}</span><span class="arr">›</span></button>`).join('');
     return `<aside class="ldh-ai-dock" id="ldhFutureAiDock" aria-label="Asistente IA global de Gestión Taller">
-    <div class="ldh-ai-head"><img class="ldh-ai-approved-head" alt="Asistente IA · En línea" src="${APPROVED_LOGO}"><span class="ldh-ai-version-label" title="${GLOBAL_VERSION}" style="margin-left:auto;font-size:10px;line-height:1;padding:4px 6px;border:1px solid rgba(125,180,205,.40);border-radius:5px;color:#c3d5e6;background:rgba(4,20,36,.35);font-weight:700;white-space:nowrap">R39</span><button class="ldh-ai-expand-btn" type="button" title="Ampliar / reducir panel IA">↗</button></div>
+    <div class="ldh-ai-head"><img class="ldh-ai-approved-head" alt="Asistente IA · En línea" src="${APPROVED_LOGO}"><span class="ldh-ai-version-label" title="${GLOBAL_VERSION}" style="margin-left:auto;font-size:10px;line-height:1;padding:4px 6px;border:1px solid rgba(125,180,205,.40);border-radius:5px;color:#c3d5e6;background:rgba(4,20,36,.35);font-weight:700;white-space:nowrap">${GLOBAL_VERSION.match(/R[0-9]+/)?.[0]||GLOBAL_VERSION}</span><button class="ldh-ai-expand-btn" type="button" title="Ampliar / reducir panel IA">↗</button></div>
     <div class="ldh-ai-scroll" id="ldhFutureAiScroll">
       <div class="ldh-ai-welcome"><b>Hola, soy tu asistente de Los del Hierro's</b><p id="ldhAiModuleWelcome">Puedo ayudarte a moverte e interactuar con Gestión Taller.</p></div>
       <div class="ldh-ai-suggestions"><h4>¿En qué puedo ayudarte hoy?</h4>
