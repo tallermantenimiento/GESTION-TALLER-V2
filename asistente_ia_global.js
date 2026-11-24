@@ -2804,21 +2804,14 @@
     if(state.history.length>16)state.history=state.history.slice(-16);
     window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
   }
+
   function sendLocalHelp(action,userLabel){
     if(state.busy)return;
-    const shown=text(userLabel||action).trim()||'Ayuda rápida';
-    addMessage('user',shown);
-    let result=null;
-    if(action==='summary')result=localQuickSummaryAnswer();
-    else{
-      const prompt=localHelpPrompt(action);
-      if(prompt)result=tryLocalDeterministicAnswer(prompt);
-    }
-    const reply=text(result?.handled?result.text:'Esta ayuda todavía no tiene una función local programada. No se ha enviado ninguna consulta a Groq.').trim();
-    addMessage('assistant',reply);
-    rememberLocalExchange(shown,reply);
-    setStatus('Asistente local · sin Groq · '+(window.__LDH_AI_GLOBAL_MODULE__?.().label||'Gestión Taller'),'ok');
+    const prompt=action==='summary'?'Ayúdame a entender este módulo y qué datos puedo consultar.':
+      localHelpPrompt(action)||String(userLabel||'Necesito ayuda con este módulo');
+    send(prompt);
   }
+
   function openModuleLocal(id,userLabel){
     if(state.busy)return;
     const target=MODULES.find(m=>m.id===id);
@@ -2947,196 +2940,37 @@
   }
   window.LDH_AI_R51=Object.freeze({version:'R51',readOnly:true,ask:r51Reason});
 
+
   async function send(textValue){
     const value=text(textValue).trim();
     if(!value||state.busy)return;
     input.value='';
     addMessage('user',value);
-    const localNav=window.__LDH_AI_GLOBAL_TRY_NAV__?.(value);
-    if(localNav){
-      const msg=localNav.message||(localNav.blocked?'Ese destino es independiente y queda fuera de la IA global.':('Abriendo '+localNav.label+'…'));
-      addMessage(localNav.blocked?'system':'assistant',msg);
-      state.history.push({role:'user',content:value},{role:'assistant',content:msg});
-      if(state.history.length>16)state.history=state.history.slice(-16);
-      window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
-      if(localNav.url&&!localNav.same&&!localNav.blocked)setTimeout(()=>window.__LDH_AI_GLOBAL_NAVIGATE__?.(localNav.id),220);
+    // Conservar navegación explícita sin sustituir la interpretación de consultas libres.
+    const nav=window.__LDH_AI_GLOBAL_TRY_NAV__?.(value);
+    if(nav){
+      const msg=nav.message||(nav.blocked?'Ese destino es independiente del taller.':'Abriendo '+nav.label+'…');
+      addMessage('assistant',msg);
+      rememberLocalExchange(value,msg);
+      if(nav.url&&!nav.same&&!nav.blocked)setTimeout(()=>window.__LDH_AI_GLOBAL_NAVIGATE__?.(nav.id),220);
       return;
     }
-    // R50: las guías de trabajo se atienden antes de consultar datos o devolver un catálogo técnico.
-    const guideR50=r50GuideAnswer(value);
-    if(guideR50){
-      addMessage('assistant',guideR50);
-      rememberLocalExchange(value,guideR50);
-      setStatus('IA global · guía de trabajo · solo lectura','ok');
-      return;
+    if(/(?:version del asistente|que version (?:del asistente|de ia|estas ejecutando))/.test(norm(value))){
+      const msg='Estás utilizando **R51**, el asistente global de Gestión Taller.';
+      addMessage('assistant',msg);rememberLocalExchange(value,msg);return;
     }
-    // R49: toda consulta operativa va al servidor o falla sin usar caché.
-    if(r49IsOperational(value)){
-      setBusy(true,'IA global R49 · lectura de servidor…');
-      try{
-        const answer=await r49LiveAnswer(value);
-        addMessage('assistant',answer);
-        rememberLocalExchange(value,answer);
-        setStatus('IA global · R49 · lectura servidor · solo lectura','ok');
-      }finally{setBusy(false);}
-      return;
-    }
-    // R48: rutas globales antes del observador y del catálogo genérico.
-    if(/(?:funciones|catalogo|capacidades|modulos|fuentes|conectad|sincronizacion|que hace|para que sirve)/.test(norm(value)))await refreshAiCapabilitiesR41();
-    const globalR48=r48GlobalSourcesAnswer(value)||r48GlobalCapabilityAnswer(value);
-    if(globalR48){
-      addMessage('assistant',globalR48);
-      rememberLocalExchange(value,globalR48);
-      setStatus('IA global · R48 · catálogo central · solo lectura','ok');
-      return;
-    }
-    // R45: priorizar respuestas exactas antes de catálogos y proveedor externo.
-    const r45=r45Answer(value);
-    if(r45){
-      addMessage('assistant',r45);
-      rememberLocalExchange(value,r45);
-      setStatus('IA global · R48 · consulta local · solo lectura','ok');
-      return;
-    }
-    // Consultas de cambios visuales: inspeccionar el módulo actual antes del catálogo declarativo.
-    if(/nueva funcion|funciones nuevas|cambios del modulo|cambios de este modulo|detectar cambios|observador/.test(norm(value))){
-      const observed=r43UiObserver(value);
-      if(observed?.handled){
-        addMessage('assistant',observed.text);
-        rememberLocalExchange(value,observed.text);
-        setStatus('IA central · observador R43 · solo lectura','ok');
-        return;
-      }
-    }
-    if(/funcionalidad|funciones|capacidades|catalogo|actualiz|novedad/.test(norm(value)))await refreshAiCapabilitiesR41();
-    const r41Answer=exactCatalogAnswerR41(value);
-    if(r41Answer){
-      addMessage('assistant',r41Answer);
-      state.history.push({role:'user',content:value},{role:'assistant',content:r41Answer});
-      if(state.history.length>16)state.history=state.history.slice(-16);
-      window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
-      setStatus('IA central · catálogo R43 · solo lectura','ok');
-      return;
-    }
-    const capabilityAnswer=exactCapabilityStatusAnswer(value);
-    if(capabilityAnswer){
-      addMessage('assistant',capabilityAnswer);
-      state.history.push({role:'user',content:value},{role:'assistant',content:capabilityAnswer});
-      if(state.history.length>16)state.history=state.history.slice(-16);
-      window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
-      setStatus('IA central · catálogo de capacidades · consulta local','ok');
-      return;
-    }
-    const localExact=tryLocalDeterministicAnswer(value);
-    if(localExact?.handled){
-      const reply=text(localExact.text).trim();
-      addMessage('assistant',reply);
-      state.history.push({role:'user',content:value},{role:'assistant',content:reply});
-      if(state.history.length>16)state.history=state.history.slice(-16);
-      window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
-      setStatus('Asistente local · sin Groq · '+(window.__LDH_AI_GLOBAL_MODULE__?.().label||'Gestión Taller'),'ok');
-      return;
-    }
-    const selected=providerSelect?.value||storedProvider();
-    const groqLimited=()=>Date.now()<Number(state.groqCooldownUntil||0);
-    if(selected==='groq'&&groqLimited()){
-      const secs=Math.max(1,Math.ceil((state.groqCooldownUntil-Date.now())/1000));
-      addMessage('system','Groq está temporalmente limitado; quedan unos '+secs+'s. Cambia a Cloudflare o Automático para continuar.');
-      return;
-    }
-    setBusy(true,'IA central · consultando datos concretos…');
-    let providerAttempt='';
-    let promptChars=0;
+    setBusy(true,'IA global · comprendiendo tu consulta…');
     try{
-      // Limite preventivo: Worker R5 rechaza mensajes individuales > 24.000 caracteres.
-      const contextText=systemPrompt(value);
-      const compactSystem=contextText.length<=9500?contextText:
-        contextText.slice(0,9250)+'\n[CONTEXTO LIMITADO: consulta mas especifica; no inventes resultados]';
-      promptChars=compactSystem.length;
-      const commonMessages=[
-        {role:'system',content:compactSystem},
-        {role:'user',content:value.slice(0,1800)}
-      ];
-      const payload={
-        scope:'gestion',
-        messages:commonMessages,
-        temperature:0.05,
-        max_completion_tokens:520
-      };
-      const groqPayload={...payload,messages:[
-        commonMessages[0],
-        ...compactHistory().slice(-2).map(m=>({
-          role:m.role==='assistant'?'assistant':'user',
-          content:text(m.content).slice(0,1200)
-        })),
-        commonMessages[1]
-      ]};
-      let response,usedProvider='';
-      if(selected==='groq'){
-        state.groqCalls++;
-        providerAttempt='groq';
-        response=await bridge('/chat',{...groqPayload,reasoning_effort:'medium'});
-        state.groqCooldownUntil=0;
-        usedProvider='Groq';
-      }else{
-        try{
-          providerAttempt='cloudflare';
-          response=await bridge('/chat-workers-ai',payload);
-          usedProvider='Cloudflare';
-        }catch(cloudError){
-          // Nunca repetir escrituras: el asistente se mantiene en modo solo lectura.
-          // Errores de permisos no activan respaldo automático.
-          if(selected!=='auto'||[400,401,403,413,422].includes(Number(cloudError?.status))||/demasiado largo|too long|invalid request/i.test(text(cloudError?.message)))throw cloudError;
-          if(groqLimited()){
-            throw new Error('Cloudflare no ha respondido y Groq está temporalmente limitado: '+text(cloudError?.message||'error'));
-          }
-          setStatus('Cloudflare no disponible · comprobando respaldo Groq…','busy');
-          state.groqCalls++;
-          providerAttempt='groq';
-          response=await bridge('/chat',{...groqPayload,reasoning_effort:'medium'});
-          state.groqCooldownUntil=0;
-          usedProvider='Groq (respaldo)';
-        }
-      }
-      const rawReply=text(response?.choices?.[0]?.message?.content).trim();
-      if(!rawReply)throw new Error('La IA no devolvió una respuesta válida.');
-      const parsedReply=window.__LDH_AI_GLOBAL_PARSE_REPLY__?.(rawReply)||{text:rawReply,navigate:''};
-      const reply=text(parsedReply.text||rawReply).trim();
-      addMessage('assistant',reply);
-      state.history.push({role:'user',content:value},{role:'assistant',content:reply});
-      if(state.history.length>16)state.history=state.history.slice(-16);
-      window.__LDH_AI_GLOBAL_SAVE_HISTORY__?.(state.history);
-      const model=text(response?.model||state.health?.model||EXPECTED_MODEL).replace('openai/','');
-      setStatus('IA central · '+usedProvider+' · '+model+' · '+promptChars+' caracteres de contexto · en línea','ok');
-      if(parsedReply.navigate)setTimeout(()=>window.__LDH_AI_GLOBAL_NAVIGATE__?.(parsedReply.navigate),320);
+      const answer=await r51Reason(value);
+      addMessage('assistant',answer);
+      rememberLocalExchange(value,answer);
+      setStatus('IA global · R51 · conversación y consulta de servidor','ok');
     }catch(e){
-      const msg=text(e?.message||e||'Error desconocido');
-      if(providerAttempt==='cloudflare'&&(e?.status===429||/429|rate.?limit|cuota/i.test(msg))){
-        addMessage('error','Cloudflare ha alcanzado un límite temporal o de cuota. Prueba Automático o Groq.');
-        setStatus('Cloudflare · límite de cuota','busy');
-      }else if(e?.status===429||/429|rate.?limit|too many|cuota|resource exhausted|tokens per/i.test(msg)){
-        const details=e?.details||{};
-        const retryRaw=text(details?.rateLimit?.retryAfter);
-        const retryNumeric=Number(retryRaw);
-        const retryMs=Number.isFinite(retryNumeric)&&retryNumeric>0?Math.max(500,retryNumeric*1000):groqRetryDelayMs((details?.providerMessage||'')+' '+retryRaw+' '+msg);
-        state.groqCooldownUntil=Date.now()+retryMs;
-        const secs=Math.max(1,Math.ceil(retryMs/1000));
-        const diag=groqRateSummary(details,msg);
-        const limits=diag.parts.length?' · '+diag.parts.join(' · '):'';
-        addMessage('error','Groq está temporalmente limitado. Reintenta en ~'+secs+'s'+limits+'. Las consultas locales y la guía básica del módulo siguen disponibles.');
-        setStatus('Asistente local disponible · Groq limitado','busy');
-      }else if(providerAttempt==='cloudflare' && (e?.status===413||/mensaje demasiado largo|too long/i.test(msg))){
-        addMessage('error','Cloudflare rechazó el tamaño del mensaje (413). Contexto enviado: '+promptChars+' caracteres. No se ha repetido en Groq.');
-        setStatus('Cloudflare · mensaje excesivo · '+promptChars+' caracteres','bad');
-      }else if(e?.status===403&&location.hostname!=='tallermantenimiento.github.io'){
-        addMessage('error','El Worker está operativo, pero este origen local no está autorizado para consultas IA.');
-        setStatus('IA central · prueba local no autorizada','bad');
-      }else{
-        addMessage('error','Error '+(providerAttempt==='cloudflare'?'Cloudflare':providerAttempt==='groq'?'Groq':'IA')+' (HTTP '+(e?.status||'?')+'): '+msg.slice(0,400));
-        setStatus('IA central · sin conexión','bad');
-      }
+      addMessage('error','No he podido completar la consulta con seguridad: '+String(e?.message||e).slice(0,260)+'. No he realizado ningún cambio.');
+      setStatus('IA global · consulta pendiente','bad');
     }finally{setBusy(false);}
   }
+
   async function refreshHealth(){
     try{
       const h=await bridge('/health',null,'GET');
