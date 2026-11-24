@@ -2185,6 +2185,36 @@
   window.LDH_AI_CONSULTAS_R43=Object.freeze({version:'R43',readOnly:true,
     queryOt:r43OtAnswer,diagnostico:r43SourceDiagnostic,moduloActual:r43CurrentModuleAnswer});
 
+  // R43: descubrimiento de CONTROLES VISIBLES del módulo abierto, no de su código.
+  // La huella guarda solo un número (sin texto de controles) en el navegador.
+  function r43UiObserver(question){
+    const q=norm(question);
+    if(!/(botones|controles|nueva funcion|funciones nuevas|cambios del modulo|cambios de este modulo|detectar cambios|observador)/.test(q))return null;
+    const mod=currentModule(),snap=visibleSnapshot();
+    const controls=(snap.botones_visibles||[]).map(x=>text(x).trim()).filter(Boolean).slice(0,60);
+    const meta=Array.from(document.querySelectorAll('meta[name^="ldh-"]'))
+      .map(x=>text(x.name)+'='+text(x.content)).sort().slice(0,45);
+    const seed=mod.id+'|'+meta.join('|')+'|'+controls.join('|');
+    let hash=2166136261;
+    for(let i=0;i<seed.length;i++)hash=Math.imul(hash^seed.charCodeAt(i),16777619)>>>0;
+    const key='ldh_ai_ui_observer_r43_'+mod.id;
+    let old=null;
+    try{old=JSON.parse(localStorage.getItem(key)||'null')}catch(_){}
+    const changed=!!old&&old.hash!==hash;
+    try{localStorage.setItem(key,JSON.stringify({hash,at:new Date().toISOString()}))}catch(_){}
+    const unique=[...new Set(controls)].slice(0,24);
+    const body=unique.length?unique.map(x=>'- '+mdSafe(x.slice(0,90))).join('\n'):'No se observan controles accesibles en este momento.';
+    const assessment=changed?
+      'La huella de metadatos o controles cambió desde la última observación de este navegador. Revisar antes de afirmar que hay nuevas funciones.':
+      old?'No ha cambiado la huella observada en este navegador; esto no acredita que el código siga igual.':
+        'Primera observación de este módulo en este navegador; no hay comparación anterior.';
+    return {handled:true,text:'**Controles observados · '+mdSafe(mod.label)+' · R43**\n\n'+
+      body+'\n\n**Detección:** '+assessment+
+      '\n\nEl observador solo inspecciona el módulo abierto y los controles actualmente visibles. No ejecuta botones, no lee código remoto y no añade automáticamente operaciones al catálogo verificado.'};
+  }
+  window.LDH_AI_OBSERVADOR_R43=Object.freeze({version:'R43',readOnly:true,consultar:r43UiObserver});
+
+
   function tryLocalDeterministicAnswer(userText){
     if(!LOCAL_FACTS_FIRST)return null;
     const mod=window.__LDH_AI_GLOBAL_MODULE__?.()||{id:'desconocido'};
@@ -2194,7 +2224,7 @@
     // de decidir si la frase contiene "explica", "paso a paso", etc. Así los
     // botones Explicar / Guíame / Revisar / Módulos disponibles siguen funcionando
     // aunque Groq esté sin cuota o desconectado.
-    const r43=r43SourceDiagnostic(userText)||r43OtAnswer(userText)||r43CurrentModuleAnswer(userText);
+    const r43=r43SourceDiagnostic(userText)||r43OtAnswer(userText)||r43CurrentModuleAnswer(userText)||r43UiObserver(userText);
     if(r43)return r43;
     const prepR42=preparationReadOnlyR42(userText);
     if(prepR42)return prepR42;
