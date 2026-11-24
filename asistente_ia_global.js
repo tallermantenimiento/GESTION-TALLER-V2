@@ -932,23 +932,23 @@
   // R38: respuesta determinista a consultas sobre capacidades futuras, sin llamadas ni cambios.
   function exactCapabilityStatusAnswer(userText){
     const q=norm(userText);
-    const factory=/\\b(fabric|operari|personal|horas|tiempo|fichaj|asignacion|asignar|reasignar)/.test(q);
-    const status=/\\b(puedes|puede|capacidades|funciones|disponibles|pendientes|integrad|registrar|asignar|consultar|control de horas|historial)/.test(q);
+    const factory=/\b(fabric|operari|personal|horas|tiempo|fichaj|asignacion|asignar|reasignar)/.test(q);
+    const status=/\b(puedes|puede|capacidades|funciones|disponibles|pendientes|integrad|registrar|asignar|consultar|control de horas|historial)/.test(q);
     if(!factory||!status)return null;
     // No interceptar peticiones reales de consulta de datos u órdenes de escritura.
-    if(/\\b(ot[- ]?\\d|ot-\\d|cuantas horas llevo|horas de la ot|asigna a|cambia a|registra \\d)/.test(q))return null;
+    if(/\b(ot[- ]?\d|ot-\d|cuantas horas llevo|horas de la ot|asigna a|cambia a|registra \d)/.test(q))return null;
     const m=AI_CAPABILITY_MODULES.get('fabricacion_personal');
     if(!m)return null;
     const read=m.operations.filter(o=>o.mode==='consulta');
     const write=m.operations.filter(o=>o.mode==='escritura');
-    const fmt=arr=>arr.map(o=>'- '+o.label+' — **'+o.status+'**').join('\\n');
+    const fmt=arr=>arr.map(o=>'- '+o.label+' — **'+o.status+'**').join('\n');
     return [
       '**Control de operarios y horas de Fabricación**',
       'Estas funciones están **registradas como pendientes de integración**. No puedo consultar registros horarios reales ni modificar asignaciones todavía.',
       '**Consultas previstas:**',fmt(read),
       '**Operaciones de modificación previstas:**',fmt(write),
       'El catálogo R38 solo describe las funciones. Para activarlas hay que integrar el módulo real, comprobar sus datos y validar permisos e historial. **No se ha ejecutado ninguna operación.**'
-    ].join('\\n\\n');
+    ].join('\n\n');
   }
   function systemPrompt(userText){
     const route=intentOf(userText);
