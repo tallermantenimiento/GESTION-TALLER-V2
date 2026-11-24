@@ -209,6 +209,17 @@
 
   const state={busy:false,history:(window.__LDH_AI_GLOBAL_LOAD_HISTORY__?.()||[]),health:null,recorder:null,stream:null,chunks:[],micHold:false,micReleaseRequested:false,micTimer:null,groqCooldownUntil:0,groqCalls:0};
   const text=v=>String(v==null?'':v);
+  /* IA ROUTER R30 - OT exacta y contexto minimo */
+  function otRefFromText(value){
+    const m=text(value).toUpperCase().match(/\bOT[\s_-]*(\d{6})[\s_-]*(\d{3})(?:[\s_-]*([A-Z]{1,3}))?\b/);
+    return m?'OT-'+m[1]+'-'+m[2]+(m[3]?'-'+m[3]:''):'';
+  }
+  function intentOf(value){
+    const ref=otRefFromText(value),q=norm(value);
+    if(ref)return {accion:/\b(donde|ubicacion|localizacion|fase|estado|esta|encuentra)\b/.test(q)?'consultar_ubicacion_ot':'consultar_ot',ref,soloLectura:true};
+    return {accion:/\b(stock|material|barra|pletina)\b/.test(q)?'consultar_stock':/\b(fabric|pintura|almacen|entrega)\b/.test(q)?'consultar_flujo':'consulta_general',soloLectura:true};
+  }
+  window.LDH_AI_INTENT_ROUTER_R30={route:intentOf,version:'R30',readOnly:true};
   function esc(s){return text(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function setStatus(label,kind=''){
     if(!status)return;
@@ -438,7 +449,7 @@
     const snap=homeSnapshot();
     const tokens=tokensFor(userText);
     const q=norm(userText);
-    const exactRef=(text(userText).match(/\bOT[-\s]?\d[\w-]*/i)||[])[0]||'';
+    const exactRef=otRefFromText(userText);
     const rows=(snap.orders||[]).map((o,index)=>{
       const flow=o?.flow&&typeof o.flow==='object'?o.flow:{};
       const row={
@@ -470,8 +481,8 @@
     });
     const broad=/\b(orden|ordenes|trabajo|trabajos|ot|pendiente|prioridad|retras|hoy|manana|mañana|estado|fase|empresa|fabric|pint|almacen|almacén|entreg|material)\b/.test(q);
     if(!broad&&!exactRef)return {cloudReady:!!snap.cloudReady,total:(snap.orders||[]).length,rows:[]};
-    let chosen=rows.filter(x=>x.score>0);
-    if(!chosen.length&&broad)chosen=rows.filter(x=>x.pending);
+    let chosen=exactRef?rows.filter(x=>otRefFromText(x.row.ref)===exactRef):rows.filter(x=>x.score>0);
+    if(!chosen.length&&broad&&!exactRef)chosen=rows.filter(x=>x.pending);
     chosen.sort((a,b)=>b.score-a.score||Number(a.row.prioridad||999)-Number(b.row.prioridad||999)||a.index-b.index);
     return {cloudReady:!!snap.cloudReady,total:(snap.orders||[]).length,rows:chosen.slice(0,28).map(x=>x.row)};
   }
@@ -644,9 +655,9 @@
     };
     const signal=/\b(prepar|fabric|pint|almacen|almacén|entreg|fase|estado|esperando|material|orden|trabajo|ot)\b/.test(q)||/\bOT[-\s]?\d/i.test(text(userText));
     if(!signal)return {loaded:true,total:rows.length,rows:[],summary};
-    let chosen=rows.filter(x=>x.score>0);
-    if(!chosen.length&&/\b(fabric|pint|almacen|almacén|entreg|prepar|esperando)\b/.test(q))chosen=rows.filter(x=>x.score>0||scoreText(x.row.pills.join(' '),tokens)>0);
-    if(!chosen.length&&/\b(orden|trabajo|estado|fase)\b/.test(q))chosen=rows;
+    let chosen=otRefFromText(userText)?rows.filter(x=>otRefFromText(x.row.ref)===otRefFromText(userText)):rows.filter(x=>x.score>0);
+    if(!otRefFromText(userText)&&!chosen.length&&/\b(fabric|pint|almacen|almacén|entreg|prepar|esperando)\b/.test(q))chosen=rows.filter(x=>x.score>0||scoreText(x.row.pills.join(' '),tokens)>0);
+    if(!otRefFromText(userText)&&!chosen.length&&/\b(orden|trabajo|estado|fase)\b/.test(q))chosen=rows;
     chosen.sort((a,b)=>b.score-a.score||String(a.row.ref).localeCompare(String(b.row.ref),'es'));
     return {loaded:true,total:rows.length,rows:chosen.slice(0,28).map(x=>x.row),summary};
   }
@@ -774,6 +785,22 @@
     return {provider:text(details?.providerMessage||msg),parts};
   }
   function systemPrompt(userText){
+    const route=intentOf(userText);
+    if(route.ref){
+      const order=compactOrderRows(route.ref),flow=compactFlowRows(route.ref);
+      const orderRow=order.rows.find(r=>otRefFromText(r.ref)===route.ref)||null;
+      const flowRow=flow.rows.find(r=>otRefFromText(r.ref)===route.ref)||null;
+      return [
+        'Eres la IA central de Gestión Taller. Responde en español conciso.',
+        'MODO SOLO LECTURA. Nunca afirmes ejecutar cambios.',
+        'INTENCION='+JSON.stringify(route),
+        'FUENTES='+JSON.stringify({ordenes_cargadas:order.cloudReady,flujo_cargado:flow.loaded}),
+        'OT_CONSULTADA='+JSON.stringify({orden:orderRow,flujo:flowRow}),
+        'No atribuyas una ubicación a una OT cuando no haya una fase verificada con unidades positivas.',
+        'Si el flujo está a cero o no está verificado, di que la ubicación no se puede confirmar con estos datos. No deduzcas Preparación ni otra fase por histórico.',
+        'Si no hay datos de esa OT, no afirmes que no existe en la nube.'
+      ].join('\n');
+    }
     const live=realDataForQuery(userText);
     const mod=window.__LDH_AI_GLOBAL_MODULE__?.()||{id:'desconocido',label:document.title||'módulo'};
     const extra=window.__LDH_AI_GLOBAL_CONTEXT__?.(userText)||null;
@@ -1614,6 +1641,23 @@
     }
     return null;
   }
+  function exactOtReadOnlyAnswer(userText){
+    const route=intentOf(userText);
+    if(!route.ref||route.accion!=='consultar_ubicacion_ot'||needsCentralReasoning(userText))return null;
+    const order=compactOrderRows(route.ref),flow=compactFlowRows(route.ref);
+    const row=flow.rows.find(r=>otRefFromText(r.ref)===route.ref);
+    const orderRow=order.rows.find(r=>otRefFromText(r.ref)===route.ref);
+    if(!row&&!orderRow){
+      return {handled:true,text:'No encuentro **'+route.ref+'** en los datos cargados aquí. Esto no confirma que no exista en Firestore. Hay que comprobar la sincronización del módulo correspondiente.'};
+    }
+    if(row&&row.flujo_verificado){
+      const phases=[['Fabricación',row.FAB],['Pintura',row.PINT],['Almacén',row.ALM],['Entregado',row.ENT]].filter(p=>Number(p[1])>0);
+      if(phases.length){
+        return {handled:true,text:'**'+route.ref+'** · ubicación según el flujo disponible:\n\n'+phases.map(p=>'- **'+p[0]+'**: '+fmtLocal(p[1])+' unidades').join('\n')+'\n\nFuente: '+mdSafe(row.fuente_flujo)+'. Datos de lectura: comprueba la sincronización si acabas de mover la OT.'};
+      }
+    }
+    return {handled:true,text:'**'+route.ref+'** aparece en los datos cargados, pero **su ubicación actual no está confirmada**. No hay cantidades positivas verificadas en Fabricación, Pintura, Almacén o Entregas. Esto no demuestra que esté fuera de Preparación. Comprueba su ficha y la sincronización del flujo.'};
+  }
   function tryLocalDeterministicAnswer(userText){
     if(!LOCAL_FACTS_FIRST)return null;
     const mod=window.__LDH_AI_GLOBAL_MODULE__?.()||{id:'desconocido'};
@@ -1623,6 +1667,8 @@
     // de decidir si la frase contiene "explica", "paso a paso", etc. Así los
     // botones Explicar / Guíame / Revisar / Módulos disponibles siguen funcionando
     // aunque Groq esté sin cuota o desconectado.
+    const exactOt=exactOtReadOnlyAnswer(userText);
+    if(exactOt)return exactOt;
     const moduleBasic=localModuleBasicAnswer(userText,mod,extra);
     if(moduleBasic)return moduleBasic;
 
