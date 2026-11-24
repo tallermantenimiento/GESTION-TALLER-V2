@@ -1038,7 +1038,9 @@
         'No inventes información de órdenes ni stock.',
         'REGLAS_OPERATIVAS_CONFIRMADAS='+operationCatalogForQuery(userText),
       'CAPACIDADES_MODULARES='+aiCapabilitiesForQuery(userText),
+      'REVISION_MODULO='+moduleChangeStatusForQuery(userText),
         'CAPACIDADES_MODULARES='+aiCapabilitiesForQuery(userText),
+        'REVISION_MODULO='+moduleChangeStatusForQuery(userText),
         'No inventes botones o casillas. NO existe una opción confirmada «Usa Nesting de Chapas» en Cálculo.',
         'Para usar Nesting de Chapas, abre el módulo independiente desde el menú. La integración Cálculo-Nesting-Preparación es FUTURA.'
       ].join('\n');
