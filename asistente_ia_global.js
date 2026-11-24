@@ -2331,6 +2331,16 @@
       if(localNav.url&&!localNav.same&&!localNav.blocked)setTimeout(()=>window.__LDH_AI_GLOBAL_NAVIGATE__?.(localNav.id),220);
       return;
     }
+    // Consultas de cambios visuales: inspeccionar el módulo actual antes del catálogo declarativo.
+    if(/nueva funcion|funciones nuevas|cambios del modulo|cambios de este modulo|detectar cambios|observador/.test(norm(value))){
+      const observed=r43UiObserver(value);
+      if(observed?.handled){
+        addMessage('assistant',observed.text);
+        rememberLocalExchange(value,observed.text);
+        setStatus('IA central · observador R43 · solo lectura','ok');
+        return;
+      }
+    }
     if(/funcionalidad|funciones|capacidades|catalogo|actualiz|novedad/.test(norm(value)))await refreshAiCapabilitiesR41();
     const r41Answer=exactCatalogAnswerR41(value);
     if(r41Answer){
