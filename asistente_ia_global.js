@@ -810,36 +810,36 @@
   // Preparación operativa NO verificada en el repositorio (archivo devuelto vacío):
   // sus detalles quedan como pendientes de confirmación; nunca afirmar botones concretos.
   const OPERATION_CATALOG_R36=[
-    {id:'ot_agenda',match:/\\b(agenda|crear ot|nueva ot|planific|trabajo|orden de trabajo)\\b/,data:[
+    {id:'ot_agenda',match:/\b(agenda|crear ot|nueva ot|planific|trabajo|orden de trabajo)\b/,data:[
       'Agenda diaria: gestionar órdenes y planificación; la Agenda no es simplemente un listado pasivo.',
       'La ubicación de una OT no se determina por un estado antiguo de Agenda: consultar las fuentes actuales del flujo.',
       'FUENTE: módulo Agenda y flujo IA; detalles de controles de Agenda no auditados en esta revisión.'
     ]},
-    {id:'calculo',match:/\\b(calcul|configur|concepto|receta|despiece|partida|barra|milimetr)\\b/,data:[
+    {id:'calculo',match:/\b(calcul|configur|concepto|receta|despiece|partida|barra|milimetr)\b/,data:[
       'Cálculo utiliza conceptos y partidas. Las recetas de Configuración pueden aportar milímetros totales por unidad; para algunos cálculos de corte hace falta despiece individual por línea y partida (ejemplo 2500x2, 1800x3).',
       'Cálculo contempla partidas compuestas y crea fichas reales de Preparación sin adjudicar ni recibir por segunda vez material; recepciones y cortes se gobiernan por el libro físico común.',
       'En partidas con pintura se exige RAL antes de enviar a Preparación; el RAL no depende de la existencia de pintura en Stock.',
       'FUENTE: modulos/calculo.html: lógica despiece, RAL y partidas compuestas.'
     ]},
-    {id:'stock',match:/\\b(stock|material|pletina|fisico|reservad|libre|adjudic|disponib|existencia)\\b/,data:[
+    {id:'stock',match:/\b(stock|material|pletina|fisico|reservad|libre|adjudic|disponib|existencia)\b/,data:[
       'Distinguir físico, reservado, asignado y libre. No imponer siempre Libre=Físico-Reservado: el cómputo puede incluir asignaciones; usar los campos calculados por Stock y evitar dobles descuentos.',
       'Existen materiales de stock común con tratamientos especiales (por ejemplo pletinas); no tratar todas las líneas como barras ni todas las cantidades como milímetros.',
       'El dato de stock histórico o no sincronizado no acredita disponibilidad actual. Antes de informar, comprobar fuente y actualización.',
       'FUENTE: modulos/stock.html y cálculos compactos actuales de la IA.'
     ]},
-    {id:'prestamos',match:/\\b(prestam|donante|deudor|devoluc|otra empresa|regulariz)\\b/,data:[
+    {id:'prestamos',match:/\b(prestam|donante|deudor|devoluc|otra empresa|regulariz)\b/,data:[
       'Los préstamos entre empresas se registran como asignación/deuda y no necesariamente como salida física del prestamista.',
       'En una devolución, cerrar asignación puede restaurar libre; solo incorporar entrada al prestamista si hubo salida física previa del mismo préstamo. Evitar duplicaciones.',
       'Préstamos entre OT y señalización de donante/deudor: capacidad del flujo operativo, pero validar su estado real antes de atribuir movimientos.',
       'FUENTE: modulos/stock.html: devolución de préstamos y conciliación.'
     ]},
-    {id:'fabricacion',match:/\\b(fabric|cabina|pintura|almacen|entreg|fase|fab|pint|alm|ent)\\b/,data:[
+    {id:'fabricacion',match:/\b(fabric|cabina|pintura|almacen|entreg|fase|fab|pint|alm|ent)\b/,data:[
       'Las fases FAB, PINT, ALM y ENT expresan cantidades; una OT puede tener unidades en varias fases al mismo tiempo.',
       'No asignar fase a una OT cuando las cantidades sean cero o el flujo no esté verificado; cero no prueba que esté en ninguna fase concreta.',
       'Fabricación contempla partidas compuestas independientes; no confundir referencias visibles con la referencia técnica.',
       'FUENTE: modulos/fabricacion.html y lector de fases vigente.'
     ]},
-    {id:'nesting',match:/\\b(nesting|chapa|cizalla|laser|laser cnc|retal|formato|optimiza|aprovechamiento)\\b/,data:[
+    {id:'nesting',match:/\b(nesting|chapa|cizalla|laser|laser cnc|retal|formato|optimiza|aprovechamiento)\b/,data:[
       'Nesting de Chapas es módulo independiente desde el Index; NO existe una casilla «Usa Nesting de Chapas» confirmada en Cálculo.',
       'Nesting ofrece formatos de chapa y procesos Cizalla/guillotina o Láser; calcula distribución geométrica, chapas utilizadas y prepara documentación de corte.',
       'El nesting de cizalla NO garantiza una secuencia real guillotinada; verificar factibilidad, topes, pisadores y seguridad antes de fabricar.',
@@ -847,7 +847,7 @@
       'La integración bidireccional Cálculo-Nesting-Preparación es una MEJORA FUTURA, no una función actual.',
       'FUENTE: modulos/nesting_chapas.html e index.html.'
     ]},
-    {id:'preparacion',match:/\\b(preparaci|recepcion|recibid|compra conjunta|adjudic|pendiente|partida)\\b/,data:[
+    {id:'preparacion',match:/\b(preparaci|recepcion|recibid|compra conjunta|adjudic|pendiente|partida)\b/,data:[
       'Preparación agrupa las necesidades de material y coordina recepciones y adjudicaciones; distinguir recepcionar un material de asignarlo desde Stock común.',
       'No inventar nombres de botones ni garantizar comportamiento actual: modulos/preparacion_pedidos.html no devolvió código al consultarlo; se requiere comprobar la operativa real.',
       'Evitar reservas, consumos o recepciones duplicadas entre partidas.',
@@ -856,10 +856,10 @@
   ];
   function operationCatalogForQuery(userText){
     const q=norm(userText);
-    const explanatory=/\\b(explica|explicame|recorrido|flujo completo|proceso completo|como funciona|organiza|todo el programa)\\b/.test(q);
+    const explanatory=/\b(explica|explicame|recorrido|flujo completo|proceso completo|como funciona|organiza|todo el programa)\b/.test(q);
     const selected=OPERATION_CATALOG_R36.filter(e=>e.match.test(q));
     // Una visión completa necesita el conjunto de reglas, no solo un nombre de módulo.
-    const records=explanatory&&/\\b(ot|orden de trabajo|gestion taller|recorrido|todo el programa)\\b/.test(q)?OPERATION_CATALOG_R36:selected;
+    const records=explanatory&&/\b(ot|orden de trabajo|gestion taller|recorrido|todo el programa)\b/.test(q)?OPERATION_CATALOG_R36:selected;
     return records.slice(0,7).map(e=>e.id+': '+e.data.join(' ')).join('\\n').slice(0,5800);
   }
   window.LDH_AI_CATALOGO_R36={version:'R36',readOnly:true,list:()=>OPERATION_CATALOG_R36.map(x=>x.id),query:operationCatalogForQuery};
