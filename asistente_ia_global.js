@@ -900,7 +900,7 @@
     const q=norm(userText),out=[];
     for(const m of AI_CAPABILITY_MODULES.values()){
       const candidates=m.operations.filter(o=>{
-        const words=(o.label+' '+o.id+' '+o.detail).toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').split(/[^a-z0-9]+/).filter(w=>w.length>=5);
+        const words=norm(o.label+' '+o.id+' '+o.detail).split(/[^a-z0-9]+/).filter(w=>w.length>=5);
         return q.includes(m.moduleId.replace(/_/g,' '))||words.some(w=>q.includes(w));
       });
       for(const o of candidates.slice(0,6)){
