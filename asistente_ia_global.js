@@ -3386,7 +3386,10 @@
     let tries=0;
     const go=async()=>{
       const controls=r60Controls();
-      if(controls.length<3&&tries++<24){setTimeout(go,500);return;}
+      const hasSelectableOptions=controls.some(c=>c.tag==='select'&&(c.options||[]).length>0);
+      const needsSelection=/\\b(abre|abrir|abreme|selecciona|carga|elige|muestra|busca)\\b/.test(norm(task.text));
+      const hasSelect=controls.some(c=>c.tag==='select');
+      if((controls.length<3||(needsSelection&&hasSelect&&!hasSelectableOptions))&&tries++<24){setTimeout(go,500);return;}
       setBusy(true,'IA R60 · continuando la orden en '+currentModule().label);
       try{
         const handled=await r60Act(task.text,{resume:true});
