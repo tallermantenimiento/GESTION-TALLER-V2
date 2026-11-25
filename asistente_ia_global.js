@@ -4120,6 +4120,39 @@
     candidates.sort((a,b)=>b.score-a.score);
     return candidates.slice(0,12).map(x=>x.name);
   }
+
+  // Fallback local: cuando hay UN concepto real inequívoco, reconstruir
+  // la secuencia de palabras mal oídas sin alterar números ni demás condiciones.
+  // El usuario sigue siendo quien confirma la corrección.
+  function r69LocalCorrection(heard,concept){
+    if(!concept||norm(heard).includes(norm(concept)))return '';
+    const words=[...String(heard).matchAll(/\S+/g)].map(m=>({
+      word:norm(m[0]),start:m.index,end:m.index+m[0].length,raw:m[0]
+    }));
+    const terms=norm(concept).split(/\s+/).filter(x=>x.length>2);
+    const matches=[];
+    for(let i=0;i<words.length;i++){
+      const word=words[i].word;
+      if(word.length<4)continue;
+      const exact=terms.includes(word);
+      const similar=terms.some(t=>!exact&&Math.min(t.length,word.length)>=4&&
+        r69VoiceDistance(word,t)<=Math.min(2,Math.floor(t.length/3)));
+      if(exact||similar)matches.push({i,exact});
+    }
+    if(matches.length<2||!matches.some(x=>x.exact))return '';
+    // Los conceptos deben coincidir en un segmento concentrado de la frase.
+    let best=[];
+    for(let i=0;i<matches.length;i++){
+      const group=matches.filter(m=>m.i>=matches[i].i&&m.i<=matches[i].i+terms.length+1);
+      if(group.length>best.length)best=group;
+    }
+    if(best.length<2)return '';
+    const first=words[best[0].i],last=words[best[best.length-1].i];
+    if(/\d/.test(String(heard).slice(first.start,last.end)))return '';
+    const punctuation=(last.raw.match(/[?!.;,]+$/)||[])[0]||'';
+    const updated=String(heard).slice(0,first.start)+concept+punctuation+String(heard).slice(last.end);
+    return norm(updated)===norm(heard)?'':updated.trim();
+  }
   let voiceRevision=0;
   let voiceProposal='';
   function r69CancelVoice(){
@@ -4135,6 +4168,15 @@
     voiceDraft.value=String(heard||'');
     voiceReview.hidden=false;
     if(voiceSuggest)voiceSuggest.hidden=true;
+    const concepts=r69VoiceCandidates(heard);
+    if(concepts.length===1){
+      const local=r69LocalCorrection(heard,concepts[0]);
+      if(local){
+        voiceProposal=local;
+        if(voiceSuggestedText)voiceSuggestedText.textContent='¿Querías decir «'+local+'»?';
+        if(voiceSuggest)voiceSuggest.hidden=false;
+      }
+    }
     if(micNote)micNote.textContent='Revisa, corrige o pulsa × para cancelar';
     voiceDraft.focus();
     r69SuggestVoice(heard,voiceRevision).catch(e=>console.warn('[IA R69] Sugerencia no disponible',String(e).slice(0,100)));
