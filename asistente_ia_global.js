@@ -3387,7 +3387,7 @@
     const go=async()=>{
       const controls=r60Controls();
       const hasSelectableOptions=controls.some(c=>c.tag==='select'&&(c.options||[]).length>0);
-      const needsSelection=/\\b(abre|abrir|abreme|selecciona|carga|elige|muestra|busca)\\b/.test(norm(task.text));
+      const needsSelection=/\b(abre|abrir|abreme|selecciona|carga|elige|muestra|busca)\b/.test(norm(task.text));
       const hasSelect=controls.some(c=>c.tag==='select');
       if((controls.length<3||(needsSelection&&hasSelect&&!hasSelectableOptions))&&tries++<24){setTimeout(go,500);return;}
       setBusy(true,'IA R60 · continuando la orden en '+currentModule().label);
