@@ -2944,11 +2944,32 @@
       fecha:result.readAt,trabajos:result.rows.map(x=>({ref:x.ref||'',nombre:x.name||'',empresa:x.company||'',modificado:x.updatedAt||'',archivado:!!x.archived})).slice(0,40),
       total:result.rows.length,truncado:result.limited,nota:'Inventario de trabajos Nesting; no afirma cálculos de cortes sin leer y validar el payload de cada estudio.'};
   }
+
+  async function r53VerifyConnections(){
+    const tests=[
+      ['Agenda y órdenes',()=>r53Collection('ordenes',['taller_data','work_orders','orders'],1)],
+      ['Preparación',()=>r49ServerDoc('flujo','preparacion')],
+      ['Fabricación',()=>r49ServerDoc('flujo','fabricacion')],
+      ['Stock',()=>r49StockPublished()],
+      ['Herramientas',()=>r53ToolsEvidence()],
+      ['Nesting de Chapas',()=>r53NestingEvidence()]
+    ];
+    const results=await Promise.all(tests.map(async ([module,read])=>{
+      try{const d=await read();return {modulo:module,verificado:d.verificado!==false,
+        alcance:module==='Herramientas'?'Copia íntegra y firma comprobadas':module==='Stock'?'Publicación fragmentada completa':'Lectura de servidor',
+        observacion:d.verificado===false?d.nota||'sin validar':undefined};}
+      catch(e){return {modulo:module,verificado:false,observacion:String(e?.code||e?.message||e).slice(0,130)};}
+    }));
+    return {verificado:results.every(x=>x.verificado),fuente:'Verificación independiente de Firestore',
+      resultados:results,pendientes:r53CoverageSummary().filter(x=>x.estado?.startsWith('pendiente')).map(x=>x.modulo),
+      nota:'Lectura de servidor no certifica sincronización entre módulos ni datos locales aún sin publicar.'};
+  }
+
   function r53CoverageSummary(){
     return Object.entries(R53_COVERAGE).map(([id,path])=>({modulo:id,origen:path||null,
       estado:path?'conector definido; verificar con una lectura':'pendiente de adaptador autoritativo'}));
   }
-  window.LDH_AI_R53_COVERAGE=Object.freeze({readOnly:true,list:r53CoverageSummary});
+  window.LDH_AI_R53_COVERAGE=Object.freeze({readOnly:true,list:r53CoverageSummary,verify:r53VerifyConnections});
 
   async function r51Lookup(call){
     const source=String(call?.source||'none');
@@ -2956,7 +2977,7 @@
     if(source==='agenda')return await r53AgendaEvidence(query);
     if(source==='herramientas')return await r53ToolsEvidence();
     if(source==='nesting')return await r53NestingEvidence();
-    if(source==='cobertura')return {verificado:true,modulos:r53CoverageSummary(),nota:'Conectores definidos no prueban acceso hasta lectura del servidor.'};
+    if(source==='cobertura')return await r53VerifyConnections();
     if(source==='stock'){
       const p=await r49StockPublished(),db=p.data;
       const rows=r50MaterialCandidates(query,db).slice(0,18).map(c=>({
