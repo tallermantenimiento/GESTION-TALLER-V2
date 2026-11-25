@@ -3283,7 +3283,7 @@
   function r60DirectSelect(instruction,controls){
     // Resolve a unique *existing* option across any module, not a hard-coded concept.
     const q=norm(instruction);
-    if(!/\\b(abre|abrir|abreme|selecciona|carga|elige|muestra|busca)\\b/.test(q))return false;
+    if(!/\b(abre|abrir|abreme|selecciona|carga|elige|muestra|busca)\b/.test(q))return false;
     const candidates=[];
     for(const control of controls){
       if(control.tag!=='select')continue;
