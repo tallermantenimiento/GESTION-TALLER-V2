@@ -81,7 +81,7 @@
   function explicitNavigation(textValue){
     const q=normGlobal(textValue);
     if(!/(^|\b)(abre|abrir|abreme|ábreme|ve|vete|ir|vamos|entra|entrar|llevame|llévame|cambia|cambiar|navega|navegar)(\b|$)/.test(q))return null;
-    if(/\bterminal\b/.test(q)||/\bdireccion\b/.test(q)||/\bvehiculos?\b/.test(q)&&/\bapp|terminal\b/.test(q))return {blocked:true,message:'Los terminales, las apps operativas y los programas de Dirección son independientes y quedan fuera del Asistente IA global.'};
+    // R67: los terminales incluidos en el catálogo ya no se excluyen de la navegación global.
     const candidates=[];
     for(const m of MODULES){for(const a of [m.label,...m.aliases]){const n=normGlobal(a);if(n&&q.includes(n))candidates.push({m,len:n.length});}}
     candidates.sort((a,b)=>b.len-a.len); if(!candidates.length)return null;
