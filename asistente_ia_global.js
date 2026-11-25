@@ -3315,9 +3315,12 @@
     rows.push(...(line.length?line.map(([name,mm])=>'- '+mdSafe(name)+': '+fmtN(mm)+' mm'):['- Ninguno']));
     rows.push('**Accesorios / unidades:**');
     rows.push(...(units.length?units.map(([name,count])=>'- '+mdSafe(name)+': '+fmtN(count)):['- Ninguno']));
-    const bars=(last.barras||[]).filter(x=>x&&!x.pletina_mm&&x.name);
-    if(bars.length)rows.push('**Estimación de barras de 6.000 mm por perfil:**',
-      ...bars.map(x=>'- '+mdSafe(String(x.name))+': '+fmtN(Math.ceil(Number(x.qty||x.mm||0)/6000))+' barras (sin optimización conjunta de cortes)'));
+    const bars=line.filter(([name])=>!(last.barras||[]).some(x=>x&&x.pletina_mm&&norm(x.name)===norm(name)));
+    if(bars.length)rows.push('**Barras comerciales de 6.000 mm (estimación por perfil):**',
+      ...bars.map(([name,mm])=>'- '+mdSafe(String(name))+': '+fmtN(Math.ceil(Number(mm)/6000))+' barras'));
+    const pletinas=(last.barras||[]).filter(x=>x&&x.pletina_mm);
+    if(pletinas.length)rows.push('**Pletinas (mm reales; compra a decidir en Preparación):**',
+      ...pletinas.map(x=>'- '+mdSafe(String(x.name))+': '+fmtN(Number(x.total_mm||x.mm||0))+' mm'));
     rows.push('Resultado leído del cálculo actual del módulo. No he creado pedidos, recibido materiales ni modificado Stock.');
     addMessage('assistant',rows.join('\n'));
     return true;
