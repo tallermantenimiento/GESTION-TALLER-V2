@@ -2908,14 +2908,35 @@
       fecha:data.readAt,fechaLocal:today,ordenes:orders.slice(0,45),totalCoincidencias:orders.length,
       truncado:data.limited||orders.length>45,nota:'Órdenes pendientes según fecha de entrega y estado publicado. Si hay más de 500 registros o cambios locales pendientes, el conjunto puede ser incompleto.'};
   }
+
   async function r53ToolsEvidence(){
     const {fs,db}=await r49Db('flujo');
-    const snap=await r49Deadline(fs.getDocFromServer(fs.doc(db,'backups','gestion_herramientas_v6')));
-    if(!snap.exists())return {verificado:false,fuente:'Herramientas',nota:'Documento maestro no publicado.'};
-    const meta=snap.data()||{};
-    return {verificado:true,fuente:'Firestore gestion-taller-v2/backups/gestion_herramientas_v6',
-      revision:meta.revision||null,fragmentos:meta.totalChunks||0,fecha:new Date().toISOString(),
-      nota:'Metadatos de publicación comprobados; aún no se han validado ni interpretado las dotaciones y préstamos del documento fragmentado.'};
+    const metaSnap=await r49Deadline(fs.getDocFromServer(fs.doc(db,'backups','gestion_herramientas_v6')));
+    if(!metaSnap.exists())return {verificado:false,fuente:'Herramientas',nota:'No existe publicación de Herramientas.'};
+    const meta=metaSnap.data()||{},n=Number(meta.totalChunks);
+    if(!meta.revision||!Number.isSafeInteger(n)||n<1||n>120)
+      return {verificado:false,fuente:'Herramientas',nota:'La publicación no tiene un índice de fragmentos válido.'};
+    const docs=await r49Deadline(Promise.all(Array.from({length:n},(_,i)=>
+      fs.getDocFromServer(fs.doc(db,'backups','gestion_herramientas_v6','chunks',meta.revision+'_'+i)))),24000);
+    if(docs.some(x=>!x.exists()||x.data()?.revision!==meta.revision||typeof x.data()?.part!=='string'))
+      return {verificado:false,fuente:'Herramientas',nota:'Faltan fragmentos o no coinciden con la revisión publicada.'};
+    const raw=docs.map(x=>x.data().part).join('');
+    if(Number(meta.totalChars)!==raw.length)
+      return {verificado:false,fuente:'Herramientas',nota:'Error de longitud de la copia publicada.'};
+    if(meta.digest&&String(meta.digest).startsWith('sha256:')){
+      const bytes=new TextEncoder().encode(raw);
+      const hash=await crypto.subtle.digest('SHA-256',bytes);
+      const digest='sha256:'+Array.from(new Uint8Array(hash),x=>x.toString(16).padStart(2,'0')).join('');
+      if(digest!==meta.digest)return {verificado:false,fuente:'Herramientas',nota:'La firma de integridad no coincide.'};
+    }else return {verificado:false,fuente:'Herramientas',nota:'No se puede confirmar la integridad de la copia remota.'};
+    const data=JSON.parse(raw);
+    if(!Array.isArray(data.tools)||!Array.isArray(data.operators)||!Array.isArray(data.personalAssignments))
+      return {verificado:false,fuente:'Herramientas',nota:'Estructura del documento incompatible.'};
+    return {verificado:true,fuente:'Firestore Herramientas revisión '+String(meta.revision).slice(0,45),
+      fecha:new Date().toISOString(),herramientas:data.tools.length,operarios:data.operators.length,
+      dotaciones:data.personalAssignments.length,departamentos:Array.isArray(data.departments)?data.departments.length:null,
+      prestamos:Array.isArray(data.loans)?data.loans.length:null,
+      nota:'Revisión y firma SHA-256 comprobadas. Los recuentos reflejan el JSON publicado; las situaciones individuales deben cruzarse con sus estados antes de afirmarlas.'};
   }
   async function r53NestingEvidence(){
     const result=await r53Collection('flujo',['chapas_trabajos'],120);
