@@ -122,7 +122,17 @@
 .ldh-ai-help-modules button{margin-left:4px!important;width:calc(100% - 4px)!important;border-color:rgba(52,211,153,.18)!important;background:rgba(2,20,30,.84)!important;color:#b7cbd6!important}.ldh-ai-help-modules button>span:first-child{color:#62c7a1!important}.ldh-ai-help-modules button:hover{border-color:rgba(52,211,153,.64)!important;background:rgba(5,63,57,.33)!important;color:#effff8!important}
 .ldh-ai-help-note{margin:2px 4px 0!important;padding-top:3px!important;color:#6f879b!important;font-size:7.9px!important;line-height:1.35!important}
 `;
-  function mountStyles(){if(document.getElementById('LDH_AI_GLOBAL_STYLE'))return;const st=document.createElement('style');st.id='LDH_AI_GLOBAL_STYLE';st.textContent=GLOBAL_CSS+LOCAL_HELP_CSS;(document.head||document.documentElement).appendChild(st);}
+  const R69_VOICE_CSS=`.ldh-ai-voice-review{display:grid!important;gap:7px!important;padding:8px!important;margin:0 0 8px!important;background:linear-gradient(140deg,#093f7b,#061e45)!important;border:1px solid #38bdf8!important;border-radius:10px!important;color:#fff!important}
+.ldh-ai-voice-review[hidden],.ldh-ai-voice-suggest[hidden]{display:none!important}
+.ldh-ai-voice-heading{display:flex!important;justify-content:space-between!important;gap:8px!important;align-items:center!important;font-size:10.5px!important;font-weight:850!important}
+.ldh-ai-voice-review .ldh-ai-voice-cancel{width:24px!important;height:24px!important;min-width:24px!important;padding:0!important;border-radius:6px!important;border:1px solid #94caff!important;background:rgba(3,18,41,.75)!important;color:#fff!important;font-size:17px!important;cursor:pointer!important}
+#ldhAiVoiceDraft{width:100%!important;min-height:43px!important;max-height:94px!important;resize:vertical!important;border:1px solid rgba(125,211,252,.5)!important;background:#082349!important;border-radius:7px!important;color:#fff!important;padding:7px!important;font-size:11px!important}
+.ldh-ai-voice-actions{display:flex!important;justify-content:flex-end!important;gap:7px!important;align-items:center!important}
+.ldh-ai-voice-review .ldh-ai-voice-confirm,.ldh-ai-voice-review .ldh-ai-voice-use{background:#0ea5e9!important;border:1px solid #7dd3fc!important;border-radius:7px!important;color:#04203a!important;font-weight:850!important;padding:6px 8px!important;font-size:10.5px!important;cursor:pointer!important}
+.ldh-ai-voice-suggest{border:1px solid #0ea5e9!important;border-radius:7px!important;padding:7px!important;background:#061b3c!important;font-size:10.5px!important;line-height:1.45!important}
+.ldh-ai-voice-review button:focus-visible,.ldh-ai-voice-review textarea:focus-visible{outline:2px solid #fde68a!important;outline-offset:2px!important}
+`;
+  function mountStyles(){if(document.getElementById('LDH_AI_GLOBAL_STYLE'))return;const st=document.createElement('style');st.id='LDH_AI_GLOBAL_STYLE';st.textContent=GLOBAL_CSS+LOCAL_HELP_CSS+R69_VOICE_CSS;(document.head||document.documentElement).appendChild(st);}
   function dockHtml(){
     const moduleButtons=MODULES.map(m=>`<button type="button" data-ia-open-module="${m.id}" data-ia-local-label="Abrir ${m.label}"><span>↗</span><span>${m.label}</span><span class="arr">›</span></button>`).join('');
     return `<aside class="ldh-ai-dock" id="ldhFutureAiDock" aria-label="Asistente IA global de Gestión Taller">
@@ -166,7 +176,13 @@
       </div>
       <div class="ldh-ai-chat" id="ldhFutureAiMessages"></div>
     </div>
-    <div class="ldh-ai-composer"><div class="ldh-ai-inputbar"><button class="ldh-ai-attach" type="button" title="Adjuntar (preparado para futura IA)">⌕</button><textarea id="ldhFutureAiInput" rows="1" placeholder="Escribe tu consulta aquí..."></textarea><button class="ldh-ai-send" id="ldhFutureAiSend" type="button" title="Enviar a la IA">➤</button></div><div class="ldh-ai-walkie-row"><button class="ldh-ai-walkie" id="ldhFutureAiMic" type="button" title="Mantén pulsado para hablar y suelta para enviar">🎙 Mantén pulsado</button><span class="ldh-ai-walkie-note" id="ldhFutureAiMicNote">Whisper Large V3 · español ES · mantén pulsado para hablar</span></div><div class="ldh-ai-clear-row"><button class="ldh-ai-clear" id="ldhFutureAiClear" type="button" title="Borra solo esta conversación de IA">🗑 Limpiar diálogo</button></div><div class="ldh-ai-future-note" id="ldhFutureAiStatus">IA central · comprobando conexión…</div></div>
+    <div class="ldh-ai-composer">
+      <div class="ldh-ai-voice-review" id="ldhAiVoiceReview" hidden>
+        <div class="ldh-ai-voice-heading"><span>🎙 Comprueba lo que he entendido</span><button class="ldh-ai-voice-cancel" id="ldhAiVoiceCancel" type="button" title="Cancelar este dictado">×</button></div>
+        <textarea id="ldhAiVoiceDraft" rows="2" aria-label="Texto transcrito, puedes corregirlo"></textarea>
+        <div class="ldh-ai-voice-suggest" id="ldhAiVoiceSuggest" hidden><div id="ldhAiVoiceSuggestedText"></div><div class="ldh-ai-voice-actions"><button class="ldh-ai-voice-use" id="ldhAiVoiceUse" type="button">✓ Sí, usar corrección</button></div></div>
+        <div class="ldh-ai-voice-actions"><button class="ldh-ai-voice-confirm" id="ldhAiVoiceConfirm" type="button">Enviar consulta</button></div>
+      </div><div class="ldh-ai-inputbar"><button class="ldh-ai-attach" type="button" title="Adjuntar (preparado para futura IA)">⌕</button><textarea id="ldhFutureAiInput" rows="1" placeholder="Escribe tu consulta aquí..."></textarea><button class="ldh-ai-send" id="ldhFutureAiSend" type="button" title="Enviar a la IA">➤</button></div><div class="ldh-ai-walkie-row"><button class="ldh-ai-walkie" id="ldhFutureAiMic" type="button" title="Mantén pulsado para hablar y suelta para enviar">🎙 Mantén pulsado</button><span class="ldh-ai-walkie-note" id="ldhFutureAiMicNote">Whisper Large V3 · español ES · mantén pulsado para hablar</span></div><div class="ldh-ai-clear-row"><button class="ldh-ai-clear" id="ldhFutureAiClear" type="button" title="Borra solo esta conversación de IA">🗑 Limpiar diálogo</button></div><div class="ldh-ai-future-note" id="ldhFutureAiStatus">IA central · comprobando conexión…</div></div>
   </aside>`;}
   function mountDock(){
     if(document.getElementById('ldhFutureAiDock'))return document.getElementById('ldhFutureAiDock');
@@ -210,6 +226,13 @@
   const status=document.getElementById('ldhFutureAiStatus');
   const mic=document.getElementById('ldhFutureAiMic');
   const micNote=document.getElementById('ldhFutureAiMicNote');
+  const voiceReview=document.getElementById('ldhAiVoiceReview');
+  const voiceDraft=document.getElementById('ldhAiVoiceDraft');
+  const voiceCancel=document.getElementById('ldhAiVoiceCancel');
+  const voiceConfirm=document.getElementById('ldhAiVoiceConfirm');
+  const voiceSuggest=document.getElementById('ldhAiVoiceSuggest');
+  const voiceSuggestedText=document.getElementById('ldhAiVoiceSuggestedText');
+  const voiceUse=document.getElementById('ldhAiVoiceUse');
   const clearBtn=document.getElementById('ldhFutureAiClear');
   if(!input||!messages||!sendBtn)return;
 
@@ -4028,11 +4051,11 @@
         setStatus('IA central · '+model+' · '+(window.__LDH_AI_GLOBAL_MODULE__?.().label||'Gestión Taller')+' · en línea','ok');
         if(micNote)micNote.textContent='Whisper Large V3 · español ES · mantén pulsado para hablar';
       }else{
-        if(!restoreConversation())resetMessages('');
+        if(!state.history.length)resetMessages('');
         setStatus('Asistente local · Groq sin clave','ok');
       }
     }catch(e){
-      if(!restoreConversation())resetMessages('');
+      if(!state.history.length)resetMessages('');
       setStatus('Asistente local · Groq no disponible','ok');
     }
   }
@@ -4044,6 +4067,125 @@
   if(clearBtn)clearBtn.addEventListener('click',clearConversation);
   input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(input.value);}});
 
+
+  // Se recopilan nombres de conceptos verificados; NO hay correcciones
+  // programadas para productos concretos.
+  function r69VoiceConcepts(){
+    const names=[];
+    const add=value=>{const n=String(value||'').trim();if(n.length>=5&&n.length<160&&!names.includes(n))names.push(n);};
+    try{(window.App?.dbInfo?.db?.concepts||[]).forEach(c=>add(c?.name));}catch(_){}
+    try{[...document.querySelectorAll('#conceptSelect option')].forEach(o=>o.value&&add(o.textContent));}catch(_){}
+    for(const key of ['ldh_db','TallerFlowDB']){
+      try{
+        const item=JSON.parse(localStorage.getItem(key)||'null');
+        const db=item?.db?.concepts?item.db:item;
+        if(Array.isArray(db?.concepts))db.concepts.slice(0,700).forEach(c=>add(c?.name));
+      }catch(_){}
+    }
+    const calc=r69RecentCalculation();
+    if(calc)add(calc.last.concept);
+    return names.slice(0,700);
+  }
+  function r69VoiceDistance(a,b){
+    if(a===b)return 0;
+    if(!a||!b)return Math.max(a.length,b.length);
+    const v=Array.from({length:b.length+1},(_,i)=>i);
+    for(let i=1;i<=a.length;i++){
+      let prev=v[0];v[0]=i;
+      for(let j=1;j<=b.length;j++){
+        const old=v[j];
+        v[j]=Math.min(v[j]+1,v[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));
+        prev=old;
+      }
+    }
+    return v[b.length];
+  }
+  function r69VoiceCandidates(heard){
+    const words=norm(heard).split(/\s+/).filter(w=>w.length>2);
+    if(!words.length)return [];
+    const candidates=r69VoiceConcepts().map(name=>{
+      const tokens=norm(name).split(/\s+/).filter(w=>w.length>2);
+      let exact=0,near=0;
+      for(const token of tokens){
+        if(words.includes(token)){exact++;continue;}
+        if(words.some(w=>Math.min(w.length,token.length)>=4&&r69VoiceDistance(w,token)<=Math.min(2,Math.floor(token.length/3))))near++;
+      }
+      const score=exact*4+near*1.5-(tokens.length-exact-near)*0.25;
+      return {name,score,exact,near};
+    }).filter(v=>v.exact>=1&&v.score>=4);
+    candidates.sort((a,b)=>b.score-a.score);
+    return candidates.slice(0,12).map(x=>x.name);
+  }
+  let voiceRevision=0;
+  let voiceProposal='';
+  function r69CancelVoice(){
+    voiceRevision++;voiceProposal='';
+    if(voiceReview)voiceReview.hidden=true;
+    if(voiceSuggest)voiceSuggest.hidden=true;
+    if(voiceDraft)voiceDraft.value='';
+    if(micNote)micNote.textContent='Dictado cancelado · puedes volver a hablar';
+  }
+  function r69ShowVoice(heard){
+    if(!voiceReview||!voiceDraft)return;
+    voiceRevision++;voiceProposal='';
+    voiceDraft.value=String(heard||'');
+    voiceReview.hidden=false;
+    if(voiceSuggest)voiceSuggest.hidden=true;
+    if(micNote)micNote.textContent='Revisa, corrige o pulsa × para cancelar';
+    voiceDraft.focus();
+    r69SuggestVoice(heard,voiceRevision).catch(e=>console.warn('[IA R69] Sugerencia no disponible',String(e).slice(0,100)));
+  }
+  async function r69SuggestVoice(heard,revision){
+    const candidates=r69VoiceCandidates(heard);
+    if(!candidates.length)return;
+    const system=[
+      'Comprueba si Whisper ha deformado el nombre de un concepto real de Gestión Taller.',
+      'Puedes sugerir una correccion, pero NO puedes decidir ni ejecutar ninguna consulta.',
+      'No adivines si no hay indicios claros. Mantén el significado y la estructura de la frase.',
+      'Selecciona un concepto de CANDIDATOS solo si es claramente lo que intentaba decir.',
+      'Reemplaza en la frase la secuencia mal transcrita por el nombre real del concepto.',
+      'Conserva todas las cifras, medidas, referencias OT y el resto de condiciones.',
+      'Devuelve SOLO JSON: {"concept":"nombre exacto candidato"|"",',
+      '"suggestion":"frase completa corregida"|""}.',
+      'Si no hay correccion suficientemente fiable, ambos campos seran vacios.',
+      'CANDIDATOS='+JSON.stringify(candidates).slice(0,2500),
+      'ULTIMO_CALCULO='+String(r69RecentCalculation()?.last?.concept||'').slice(0,120)
+    ].join('\n');
+    let parsed=null;
+    try{parsed=r51Parse(await r51Model([{role:'system',content:system},
+      {role:'user',content:String(heard).slice(0,550)}],440));}catch(_){return;}
+    if(revision!==voiceRevision||!voiceReview||voiceReview.hidden||
+      voiceDraft?.value!==String(heard))return;
+    const concept=String(parsed?.concept||'').trim();
+    const suggestion=String(parsed?.suggestion||'').trim();
+    if(!candidates.includes(concept)||!suggestion||suggestion===String(heard).trim()||suggestion.length>650)return;
+    const numbers=v=>[...String(v).matchAll(/\d+(?:[.,]\d+)*/g)].map(x=>x[0]).join('|');
+    if(numbers(suggestion)!==numbers(heard))return;
+    const expected=norm(concept).split(/\s+/).filter(x=>x.length>2);
+    const actual=new Set(norm(suggestion).split(/\s+/));
+    if(expected.filter(x=>actual.has(x)).length<Math.max(1,Math.ceil(expected.length*0.65)))return;
+    voiceProposal=suggestion;
+    if(voiceSuggestedText)voiceSuggestedText.textContent='¿Querías decir «'+suggestion+'»?';
+    if(voiceSuggest)voiceSuggest.hidden=false;
+  }
+  if(voiceDraft)voiceDraft.addEventListener('input',()=>{
+    voiceRevision++;voiceProposal='';
+    if(voiceSuggest)voiceSuggest.hidden=true;
+  });
+  if(voiceCancel)voiceCancel.addEventListener('click',r69CancelVoice);
+  if(voiceUse)voiceUse.addEventListener('click',()=>{
+    if(voiceDraft&&voiceProposal){voiceDraft.value=voiceProposal;voiceRevision++;}
+    voiceProposal='';
+    if(voiceSuggest)voiceSuggest.hidden=true;
+    voiceDraft?.focus();
+  });
+  if(voiceConfirm)voiceConfirm.addEventListener('click',()=>{
+    if(state.busy||!voiceDraft)return;
+    const value=String(voiceDraft.value||'').trim();
+    if(!value)return;
+    r69CancelVoice();
+    send(value);
+  });
   async function blobToBase64(blob){
     return await new Promise((resolve,reject)=>{
       const r=new FileReader();
@@ -4192,10 +4334,10 @@
             restoreOnlineStatus();
             return;
           }
-          input.value=spoken;
-          if(micNote)micNote.textContent='Entendido: «'+spoken+'» · enviando…';
-          await send(spoken);
-          if(micNote)micNote.textContent='Whisper Large V3 · español ES · mantén pulsado para hablar';
+          // No se envia hasta que el usuario confirme o edite el dictado.
+          input.value='';
+          r69ShowVoice(spoken);
+          restoreOnlineStatus();
         }catch(e){
           setBusy(false);
           const vmsg=text(e?.message||e);
