@@ -3550,8 +3550,8 @@
   const R64_PENDING_KEY='ldh_ai_r64_active_task';
   // R65: módulo operativo como fuente de verdad. Este adaptador es una de las
   // capacidades verificadas del agente transversal, no una respuesta fija.
-  async function r65VerifiedCalculation(order){
-    if(currentModule().id!=='calculo'||!r62CalculationIntent(order))return false;
+  async function r65VerifiedCalculation(order,force=false){
+    if(currentModule().id!=='calculo'||(!force&&!r62CalculationIntent(order)&&!r68OperationalBillOfMaterials(order)))return false;
     const app=window.App,select=document.getElementById('conceptSelect');
     if(!app||typeof app.calculate!=='function'||!select||!select.options.length){
       addMessage('assistant','Cálculo aún no ha cargado sus conceptos y motor. No puedo informar cantidades fiables.');
@@ -3777,7 +3777,7 @@
         setTimeout(()=>navigate('calculo'),180);
         return true;
       }
-      return r64Agent(order);
+      return r64Agent(order,[{step:'enrutamiento',result:'cálculo operativo'}]);
     }
     if(plan.intent==='navigate'&&MODULES.some(x=>x.id===plan.module)&&plan.module!==currentModule().id){
       addMessage('assistant','Abriendo **'+mdSafe(MODULES.find(x=>x.id===plan.module).label)+'**.');
@@ -3801,7 +3801,9 @@
     const original=String(order||'').slice(0,800);
     for(let step=0;step<6;step++){
       const module=currentModule(),controls=r60Controls();
-      if(module.id==='calculo'&&r62CalculationIntent(original))return r65VerifiedCalculation(original);
+      const routedToCalculation=completed.some(x=>x.step==='enrutamiento'&&x.result==='cálculo operativo');
+      if(module.id==='calculo'&&(routedToCalculation||r62CalculationIntent(original)||r68OperationalBillOfMaterials(original)))
+        return r65VerifiedCalculation(original,true);
       const visible=controls.map(x=>({
         index:x.index,tag:x.tag,label:x.label,type:x.type,
         value:String(x.value||'').slice(0,100),
