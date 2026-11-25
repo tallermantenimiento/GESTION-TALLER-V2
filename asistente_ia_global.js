@@ -2846,7 +2846,7 @@
     const older=dialog.slice(0,Math.max(0,dialog.length-5));
     const summary=older.slice(-6).map(m=>(m.role==='user'?'Usuario: ':'Asistente: ')+
       text(m.content).slice(0,160)).join('\n');
-    const prompt=text(system?.content||'').slice(0,5900)+
+    const prompt=text(system?.content||'').slice(0,6900)+
       (summary?'\nConversación previa resumida (solo contexto):\n'+summary.slice(0,1000):'');
     const safeMessages=[{role:'system',content:prompt},...recent];
     const request={scope:'gestion',messages:safeMessages,temperature:0.15,
@@ -3209,11 +3209,12 @@
       'Para cifras, retrasos o estados actuales utiliza EXCLUSIVAMENTE EVIDENCIA verificada. Si no existe, dilo claramente y explica qué falta; nunca recurras a cachés.',
       'Un documento leído del servidor puede no contener movimientos locales no sincronizados.',
       'La pregunta puede referirse a cualquier módulo aunque el usuario esté en '+current.label+'.',
-      'CATALOGO='+r51Knowledge().slice(0,3100),
-      'REGLAS_DOCUMENTADAS='+operationCatalogForQuery(question).slice(0,950),
       'FUENTE_SELECCIONADA='+source,
       'CONSULTA_CONTEXTUAL='+fullQuery,
-      'EVIDENCIA='+JSON.stringify(evidence).slice(0,4700)
+      'EVIDENCIA='+JSON.stringify(evidence).slice(0,3700),
+      'TODOS_LOS_MODULOS='+MODULES.map(m=>m.label).join(', '),
+      'CAPACIDADES_RELACIONADAS='+aiCapabilitiesForQuery(fullQuery).slice(0,900),
+      'REGLAS_DOCUMENTADAS='+operationCatalogForQuery(question).slice(0,700)
     ].join('\n');
     return await r51Model([{role:'system',content:base},...history,{role:'user',content:question.slice(0,1400)}],900);
   }
