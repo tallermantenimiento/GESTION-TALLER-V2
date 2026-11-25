@@ -3380,6 +3380,10 @@
   async function r69RefinesCalculation(order,evidence){
     const q=norm(order);
     if(/\b(?:stock|recibid[oa]s?|reservad[oa]s?|ot[-\s]?\d|compras|fabricacion actual|almacen)\b/.test(q))return false;
+    // Una restricción breve, sin pedir otro trabajo, conserva el cálculo anterior.
+    // Regla gramatical transversal, no depende de nombres de productos.
+    if(q.length<100&&/^(?:solo|solamente|unicamente|sin|excluye|quita|elimina|de esos|de estas|aparte de)\b/.test(q)&&
+       !r68OperationalBillOfMaterials(order))return true;
     const context=r51History().slice(-7);
     const system=[
       'Distingue si la nueva frase RESTRINGE O ACLARA los materiales del ultimo calculo',
@@ -4336,6 +4340,23 @@
           }
           // No se envia hasta que el usuario confirme o edite el dictado.
           input.value='';
+          const answer=norm(spoken);
+          if(voiceReview&&!voiceReview.hidden&&voiceProposal&&voiceSuggest&&!voiceSuggest.hidden){
+            if(/^(?:si|claro|correcto|exacto|afirmativo|eso es)(?:\b|$)/.test(answer)){
+              const approved=voiceProposal;
+              r69CancelVoice();
+              await send(approved);
+              restoreOnlineStatus();
+              return;
+            }
+            if(/^(?:no|negativo|incorrecto)(?:\b|$)/.test(answer)){
+              voiceProposal='';voiceRevision++;
+              voiceSuggest.hidden=true;
+              if(micNote)micNote.textContent='Corrección descartada; puedes repetir la frase o editarla';
+              restoreOnlineStatus();
+              return;
+            }
+          }
           r69ShowVoice(spoken);
           restoreOnlineStatus();
         }catch(e){
