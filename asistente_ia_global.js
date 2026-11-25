@@ -4130,13 +4130,14 @@
       word:norm(m[0]),start:m.index,end:m.index+m[0].length,raw:m[0]
     }));
     const terms=norm(concept).split(/\s+/).filter(x=>x.length>2);
+    const strongMatches=words.filter(w=>terms.includes(w.word)).length;
     const matches=[];
     for(let i=0;i<words.length;i++){
       const word=words[i].word;
       if(word.length<4)continue;
       const exact=terms.includes(word);
       const similar=terms.some(t=>!exact&&Math.min(t.length,word.length)>=4&&
-        r69VoiceDistance(word,t)<=Math.min(2,Math.floor(t.length/3)));
+        r69VoiceDistance(word,t)<=(strongMatches>=2&&t.length>=6?3:Math.min(2,Math.floor(t.length/3))));
       if(exact||similar)matches.push({i,exact});
     }
     if(matches.length<2||!matches.some(x=>x.exact))return '';
