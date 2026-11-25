@@ -4289,7 +4289,15 @@
       'hierro negro','galvanizado','pintura','imprimación','RAL 7016','RAL 9005','RAL 9010','RAL 9016',
       '40x40x1.5','40x20x1.5','80x80x2','80x40x1.5','60x40x1.5','pletina','barra','barras','milímetros'
     ];
-    return ('IDIOMA OBLIGATORIO: español de España. Transcribe literalmente lo que se oye. No traduzcas y no inventes palabras extranjeras. Si oyes «voz conectada», escribe exactamente «voz conectada». Vocabulario del taller: '+vocab.join(', ')+'. Conserva números, referencias OT, medidas, códigos RAL, nombres de empresas y cantidades exactamente como se oyen.').slice(0,900);
+    // El diccionario de reconocimiento procede de conceptos reales del programa,
+    // no de ejemplos o frases prediseñadas; se prioriza el último cálculo.
+    const recent=r69RecentCalculation()?.last?.concept||'';
+    const names=[recent,...r69VoiceConcepts()].filter((x,i,a)=>x&&a.indexOf(x)===i);
+    const catalog=names.join(', ').slice(0,540);
+    return ('IDIOMA: español de España. Transcribe literalmente. No inventes palabras. '+
+      'Nombres reales de conceptos del taller: '+catalog+'. '+
+      'Vocabulario adicional: '+vocab.join(', ')+'. '+
+      'Conserva siempre referencias OT, medidas, cifras, empresas y RAL como se oigan.').slice(0,1000);
   }
   function restoreOnlineStatus(){
     const model=text(state.health?.model||EXPECTED_MODEL).replace('openai/','');
