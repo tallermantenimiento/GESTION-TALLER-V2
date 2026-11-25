@@ -3274,15 +3274,40 @@
       return isModuleVisible(el);
     }).slice(0,220).map((el,index)=>{
       const tag=el.tagName.toLowerCase();
-      const label=String(el.labels?.[0]?.textContent||el.getAttribute('aria-label')||el.getAttribute('title')||el.placeholder||el.textContent||el.id||'').replace(/\\s+/g,' ').trim().slice(0,110);
+      const label=String(el.labels?.[0]?.textContent||el.getAttribute('aria-label')||el.getAttribute('title')||el.placeholder||el.textContent||el.id||'').replace(/\s+/g,' ').trim().slice(0,110);
       const item={index,element:el,tag,label,type:el.type||'',value:el.value||''};
       if(tag==='select')item.options=[...el.options].filter(o=>o.value&&!o.disabled).slice(0,200).map(o=>({value:String(o.value).slice(0,160),label:String(o.textContent||'').trim().slice(0,160)}));
       return item;
     });
   }
+  function r60DirectSelect(instruction,controls){
+    // Resolve a unique *existing* option across any module, not a hard-coded concept.
+    const q=norm(instruction);
+    if(!/\\b(abre|abrir|abreme|selecciona|carga|elige|muestra|busca)\\b/.test(q))return false;
+    const candidates=[];
+    for(const control of controls){
+      if(control.tag!=='select')continue;
+      for(const option of control.options||[]){
+        const name=norm(option.label);
+        if(name.length>=5&&q.includes(name))candidates.push({control,option,length:name.length});
+      }
+    }
+    candidates.sort((a,b)=>b.length-a.length);
+    if(!candidates.length)return false;
+    const best=candidates.filter(c=>c.length===candidates[0].length);
+    if(best.length!==1)return false;
+    const {control,option}=best[0],el=control.element;
+    el.value=option.value;
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+    if(el.value!==option.value)return false;
+    addMessage('assistant','He seleccionado **'+mdSafe(option.label)+'** en **'+mdSafe(currentModule().label)+'**. No se ha pulsado Guardar ni se ha realizado ningún movimiento de Stock.');
+    return true;
+  }
   async function r60Act(instruction,{resume=false}={}){
     const module=currentModule();
     const controls=r60Controls();
+    if(r60DirectSelect(instruction,controls))return true;
     if(!controls.length){addMessage('assistant','No encuentro controles operativos verificables en '+mdSafe(module.label)+'. No he realizado ninguna operación.');return true;}
     const safe=controls.map(({index,tag,label,type,value,options})=>({index,tag,label,type,value:String(value).slice(0,75),options}));
     const system='Eres un planificador de UNA acción de interfaz para el módulo actual de Gestión Taller. '+
@@ -3300,6 +3325,7 @@
         {role:'user',content:String(instruction).slice(0,650)}],480);
       plan=r51Parse(raw);
     }catch(e){
+      if(!resume)return false;
       addMessage('assistant','No he podido interpretar los controles de '+mdSafe(module.label)+': '+mdSafe(String(e?.message||e).slice(0,170))+'. No he realizado cambios.');
       return true;
     }
