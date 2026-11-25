@@ -3266,7 +3266,7 @@
   function r58ExtractTarget(userText,moduleId){
     const module=MODULES.find(m=>m.id===moduleId);if(!module)return '';
     const str=String(userText||'').trim();
-    const m=str.match(/^\\s*(?:abre|abrir|ábreme|abreme|busca|selecciona|muestra|carga)\\s+(.+?)\\s+(?:en|dentro de)\\s+(?:el|la|los|las)?\\s*(.+?)\\s*[.!]?$/i);
+    const m=str.match(/^\s*(?:abre|abrir|ábreme|abreme|busca|selecciona|muestra|carga)\s+(.+?)\s+(?:en|dentro de)\s+(?:el|la|los|las)?\s*(.+?)\s*[.!]?$/i);
     if(!m)return '';
     const place=normGlobal(m[2]),options=[module.label,...module.aliases].map(normGlobal);
     if(!options.some(x=>x&&place.includes(x)))return '';
