@@ -3522,6 +3522,7 @@
         'navigate SOLO para uno de los módulos del listado; select/fill/click SOLO para índices de controles actuales.',
         'Para consultas informativas, usa read cuando la información esté visible o disponible en el módulo y done cuando falten permisos/datos.',
         'Para peticiones de varios pasos, continúa hasta completar todos los pasos, verificando cada resultado.',
+        'Si el usuario especifica concepto y cantidad, seleccionar concepto y asignar cantidad ANTES de leer resultados.',
         'No asumas que navegar o seleccionar equivale a haber terminado una orden compuesta.',
         'No inventes valores de materiales, estados de OT, recepciones ni registros de servidor.',
         'No fuerces operaciones no disponibles ni esquives los permisos propios de cada módulo.',
@@ -3531,8 +3532,8 @@
         'MÓDULO_ACTUAL='+module.id,
         'MÓDULOS_DISPONIBLES='+JSON.stringify(MODULES.map(({id,label})=>({id,label}))),
         'PASOS_VERIFICADOS='+JSON.stringify(completed),
-        'CONTROLES_VISIBLES='+JSON.stringify(visible).slice(0,13500),
-        'DATOS_DE_PANTALLA='+JSON.stringify(visibleSnapshot()).slice(0,1800)
+        'CONTROLES_VISIBLES='+JSON.stringify(visible).slice(0,3900),
+        'DATOS_DE_PANTALLA='+JSON.stringify(visibleSnapshot()).slice(0,500)
       ].join('\n');
       let plan;
       try{plan=r51Parse(await r51Model([{role:'system',content:system},
@@ -3626,7 +3627,10 @@
     if(!task||task.module!==currentModule().id||Date.now()-Number(task.ts)>120000)return;
     let attempts=0;
     const go=async()=>{
-      if(r60Controls().length<3&&attempts++<28){setTimeout(go,400);return;}
+      const live=r60Controls();
+      const selectCount=live.filter(c=>c.tag==='select').length;
+      const hasOptions=live.some(c=>c.tag==='select'&&(c.options||[]).length>0);
+      if((live.length<3||(selectCount>0&&!hasOptions))&&attempts++<28){setTimeout(go,400);return;}
       if(state.busy&&attempts++<28){setTimeout(go,400);return;}
       setBusy(true,'IA · continuando la orden…');
       try{await r64Agent(task.order,task.previous);}finally{setBusy(false);}
