@@ -3018,7 +3018,7 @@
     agenda:'ordenes/taller_data/work_orders/orders',preparacion:'flujo/taller_data/preparacion',
     fabricacion:'flujo/taller_data/fabricacion',stock:'stock/taller_data/stock',
     herramientas:'flujo/backups/gestion_herramientas_v6',nesting:'flujo/chapas_trabajos',
-    calculo:null,configuracion:null,almacen:null,pintura:null,ferreteria:null,tableros:null,compras:null
+    calculo:'flujo/concept_planos + respaldo compartido (solo diseño)',configuracion:'flujo/backups/backup_main (no autoritativo)',almacen:'flujo/taller_data/fabricacion (fase sin conciliar)',pintura:'flujo/backups/backup_main (ajustes, no consumo)',ferreteria:'ordenes/taller_ferreteria_v2/main',tableros:'stock/taller_data/stock (existencias compartidas)',ubicaciones:'flujo/backups/backup_main (copia no autoritativa)',compras:null
   };
   async function r53Collection(project,path,limit=500){
     const {fs,db}=await r49Db(project);
@@ -3092,7 +3092,12 @@
       ['Fabricación',()=>r49ServerDoc('flujo','fabricacion')],
       ['Stock',()=>r49StockPublished()],
       ['Herramientas',()=>r53ToolsEvidence()],
-      ['Nesting de Chapas',()=>r53NestingEvidence()]
+      ['Nesting de Chapas',()=>r53NestingEvidence()],
+      ['Ferretería',()=>r56FerreteriaEvidence('')],
+      ['Tableros',()=>r56SharedStockEvidence('tableros','')],
+      ['Cálculo de planos',()=>r56PlansEvidence('')],
+      ['Configuración (respaldo)',()=>r56BackupEvidence('configuracion')],
+      ['Almacén (fases)',()=>r56AlmacenEvidence('')]
     ];
     const results=await Promise.all(tests.map(async ([module,read])=>{
       try{const d=await read();return {modulo:module,verificado:d.verificado!==false,
@@ -3101,13 +3106,13 @@
       catch(e){return {modulo:module,verificado:false,observacion:String(e?.code||e?.message||e).slice(0,130)};}
     }));
     return {verificado:results.every(x=>x.verificado),fuente:'Verificación independiente de Firestore',
-      resultados:results,pendientes:r53CoverageSummary().filter(x=>x.estado?.startsWith('pendiente')).map(x=>x.modulo),
+      resultados:results,pendientes:r53CoverageSummary().filter(x=>x.estado!=='conector de servidor: requiere prueba de lectura').map(x=>({modulo:x.modulo,estado:x.estado})),
       nota:'Lectura de servidor no certifica sincronización entre módulos ni datos locales aún sin publicar.'};
   }
 
   function r53CoverageSummary(){
     return Object.entries(R53_COVERAGE).map(([id,path])=>({modulo:id,origen:path||null,
-      estado:path?'conector definido; verificar con una lectura':'pendiente de adaptador autoritativo'}));
+      estado:!path?'pendiente de adaptador autoritativo':/respaldo|sin conciliar|no autoritativo/.test(path)?'acceso parcial: no certifica estado actual':'conector de servidor: requiere prueba de lectura'}));
   }
   window.LDH_AI_R53_COVERAGE=Object.freeze({readOnly:true,list:r53CoverageSummary,verify:r53VerifyConnections});
 
