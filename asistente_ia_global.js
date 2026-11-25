@@ -2992,12 +2992,34 @@
     return {verificado:!x.limited,fuente:'Firestore gestion-taller-v2/concept_planos',fecha:x.readAt,
       planos:rows,limite:x.limited,nota:'Enlaces y metadatos de planos, no cálculo actualizado de materiales de una OT.'};
   }
-  async function r56AlmacenEvidence(query){
+
+  // Flujo V19: lectura de fases por referencia, sin deducir estados a partir de etiquetas legacy.
+  async function r56PhaseEvidence(query,area='fabricacion'){
     const d=await r49ServerDoc('flujo','fabricacion');
-    const keys=Object.keys(d.data||{}).slice(0,60);
-    return {verificado:false,fuente:'Firestore Fabricación (Almacén comparte circuito)',
-      fecha:d.readAt,clavesEsquema:keys.slice(0,18),
-      nota:'Documento operativo leído, pero sin conciliación fiable de unidades por OT y fase ALM/ENT. No atribuir ubicaciones ni entregas todavía.'};
+    const map=d.data?.phaseFlowV19;
+    if(!map||typeof map!=='object')return {verificado:false,fuente:d.source,fecha:d.readAt,
+      nota:'El servidor no contiene un mapa de fases V19 interpretable; no atribuir fases.'};
+    const ref=otRefFromText(query),all=Object.values(map).filter(x=>x&&typeof x==='object'&&x.flow);
+    const rows=all.map(e=>({
+      referencia:String(e.workRef||e.displayRef||''),
+      empresa:String(e.company||'').slice(0,70),
+      concepto:String(e.concept||'').slice(0,100),
+      fabricacion:r43SafeQuantity(e.flow,['fab','fabricacion']),
+      pintura:r43SafeQuantity(e.flow,['pintura']),
+      almacen:r43SafeQuantity(e.flow,['almacen']),
+      entregado:r43SafeQuantity(e.flow,['entregado']),
+      actualizacion:e.updatedAtISO||null,
+      origen:e.source||null
+    })).filter(x=>!ref||otRefFromText(x.referencia)===ref);
+    const target=area==='almacen'?'almacen':null;
+    const selected=target&&!ref?rows.filter(x=>(x.almacen||0)>0):rows;
+    return {verificado:true,fuente:'Firestore gestion-taller-v2/taller_data/fabricacion/phaseFlowV19',
+      fecha:d.readAt,consultada:ref||null,totalFilas:rows.length,
+      fases:selected.slice(0,40),limitado:selected.length>40,
+      nota:'Unidades por fase según mapa autoritativo V19 publicado. Una OT puede tener unidades en varias fases. Un mapa no acredita la conciliación con todas las reservas, consumos o entregas externas; podrían existir cambios todavía no sincronizados.'};
+  }
+  async function r56AlmacenEvidence(query){
+    return r56PhaseEvidence(query,'almacen');
   }
   async function r56SharedStockEvidence(domain,query){
     const p=await r49StockPublished(),db=p.data;
@@ -3018,7 +3040,7 @@
     agenda:'ordenes/taller_data/work_orders/orders',preparacion:'flujo/taller_data/preparacion',
     fabricacion:'flujo/taller_data/fabricacion',stock:'stock/taller_data/stock',
     herramientas:'flujo/backups/gestion_herramientas_v6',nesting:'flujo/chapas_trabajos',
-    calculo:'flujo/concept_planos + respaldo compartido (solo diseño)',configuracion:'flujo/backups/backup_main (no autoritativo)',almacen:'flujo/taller_data/fabricacion (fase sin conciliar)',pintura:'flujo/backups/backup_main (ajustes, no consumo)',ferreteria:'ordenes/taller_ferreteria_v2/main',tableros:'stock/taller_data/stock (existencias compartidas)',ubicaciones:'flujo/backups/backup_main (copia no autoritativa)',compras:null
+    calculo:'flujo/concept_planos + respaldo compartido (solo diseño)',configuracion:'flujo/backups/backup_main (no autoritativo)',almacen:'flujo/taller_data/fabricacion/phaseFlowV19 (por unidades)',pintura:'flujo/backups/backup_main (ajustes, no consumo)',ferreteria:'ordenes/taller_ferreteria_v2/main',tableros:'stock/taller_data/stock (existencias compartidas)',ubicaciones:'flujo/backups/backup_main (copia no autoritativa)',compras:null
   };
   async function r53Collection(project,path,limit=500){
     const {fs,db}=await r49Db(project);
@@ -3157,11 +3179,7 @@
         unidad:String(firstValue(x,['unit','unidad','unitBasis'],'')).slice(0,25)
       })),nota:'Recepción no implica reserva, consumo ni deuda. Puede haber cambios locales sin publicar.'};
     }
-    if(source==='fabricacion'){
-      const d=await r49ServerDoc('flujo','fabricacion');
-      return {verificado:true,fuente:d.source,fecha:d.readAt,
-        nota:'Lectura de servidor correcta; el adaptador de fases y parciales no está validado. No atribuir ubicaciones.'};
-    }
+    if(source==='fabricacion')return await r56PhaseEvidence(query,'fabricacion');
     return {verificado:false,nota:'No existe lector de servidor verificado para esta consulta.'};
   }
 
